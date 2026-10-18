@@ -124,7 +124,7 @@ def test_collection_click_preserves_selected_member_position(live_server, page):
     # The "all" sentinel collection opens as an empty expression (show
     # everything); the selected member must survive the switch.
     page.wait_for_function(
-        f"window.selectedPhotoId === {target_id}",
+        f"browseState.selectedPhotoId === {target_id}",
         timeout=3000,
     )
     page.locator(f'.grid-card[data-id="{target_id}"]').wait_for(state="visible")

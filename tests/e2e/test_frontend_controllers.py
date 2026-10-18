@@ -253,7 +253,7 @@ def test_lightbox_reopen_rejects_old_metadata_and_image_callbacks(live_server, p
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate('''() => {
-        const photo = photos[0];
+        const photo = browseState.photos[0];
         const realFetch = window.fetch;
         window.metadataRequests = [];
         window.fetch = (url, ...args) => {

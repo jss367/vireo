@@ -40,7 +40,7 @@ def _open_filtered_browse(page, live_server, field, op, value):
         [field, op, value],
     )
     page.wait_for_function(
-        "() => photos.length > 0 && !loading && browseDatasetReady", timeout=15000
+        "() => browseState.photos.length > 0 && !browseState.loading && browseState.browseDatasetReady", timeout=15000
     )
 
 
@@ -50,7 +50,7 @@ def _scroll_and_select(page, target=1800):
         "top => { document.getElementById('gridContainer').scrollTop = top; }", target
     )
     page.wait_for_timeout(1200)
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
     card = page.locator("#grid .grid-card").nth(30)
     card.scroll_into_view_if_needed()
@@ -72,7 +72,7 @@ def _add_keyword_to_selection(page, name):
         timeout=15000,
     )
     page.wait_for_timeout(800)
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
 
 def test_keyword_add_keeps_scroll_position_under_keyword_filter(live_server, page):
@@ -103,7 +103,7 @@ def test_keyword_add_does_not_reload_an_unrelated_filter(live_server, page):
     assert not queries, f"unrelated filter was re-queried: {queries}"
     after = page.evaluate("document.getElementById('gridContainer').scrollTop")
     assert abs(after - before) < 80, f"scrolled from {before} to {after}"
-    assert page.evaluate("selectedPhotoId") is not None, "selection was dropped"
+    assert page.evaluate("browseState.selectedPhotoId") is not None, "selection was dropped"
 
 
 def test_untagging_the_filtered_keyword_holds_the_position(live_server, page):
@@ -117,7 +117,7 @@ def test_untagging_the_filtered_keyword_holds_the_position(live_server, page):
         ".remove-kw"
     ).click()
     page.wait_for_timeout(1000)
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
     after = page.evaluate("document.getElementById('gridContainer').scrollTop")
     assert abs(after - before) < 200, f"scrolled from {before} to {after}"
@@ -129,7 +129,7 @@ def _watch_grid_frames(page):
       window.watchGridFrames = true;
       window.retainedThumbnail = document.querySelectorAll('#grid .grid-card img')[35];
       function sample() {
-        gridFrames.push({top: gridContainer.scrollTop,
+        gridFrames.push({top: pageModules.scroll.gridContainer.scrollTop,
           count: document.querySelectorAll('#grid .grid-card').length});
         if (watchGridFrames) requestAnimationFrame(sample);
       }
@@ -170,30 +170,30 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     else:
         page.add_init_script("localStorage.clear()")
         page.goto(live_server["url"] + "/browse")
-        page.wait_for_function("!loading && browseDatasetReady && VireoFilter.isReady()")
+        page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && VireoFilter.isReady()")
     page.locator("#sortSelect").select_option(sort)
-    page.wait_for_function("!loading && browseDatasetReady")
+    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
     if scope == "folder":
         folder_id = live_server["data"]["folders"][0]
         page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]').click()
         page.wait_for_function(
-            "id => !loading && browseDatasetReady && activeFolderId === id", arg=folder_id,
+            "id => !browseState.loading && browseState.browseDatasetReady && browseState.activeFolderId === id", arg=folder_id,
         )
         # Clicking a folder keeps the previous sort, including confidence.
         expect(page.locator("#sortSelect")).to_have_value(sort)
         assert page.evaluate("VireoFilter.hasFilters()") is False
     _scroll_and_select(page)
     if selection_mode == "all_matching":
-        page.evaluate("selectAllMatchingPhotos()")
+        page.evaluate("pageModules.selection.selectAllMatchingPhotos()")
     else:
         page.locator("#grid .grid-card").nth(31).click(modifiers=["ControlOrMeta"])
-    selected = page.evaluate("getActiveSelection()")
+    selected = page.evaluate("pageModules.selection.getActiveSelection()")
     if selection_mode == "all_matching":
-        assert len(selected) == page.evaluate("totalPhotos")
-        assert len(selected) > page.evaluate("photos.length"), "must select unloaded photos"
+        assert len(selected) == page.evaluate("browseState.totalPhotos")
+        assert len(selected) > page.evaluate("browseState.photos.length"), "must select unloaded photos"
     else:
         assert len(selected) == 2
-    before = page.evaluate("gridContainer.scrollTop")
+    before = page.evaluate("pageModules.scroll.gridContainer.scrollTop")
     row = page.locator("#selectionPredictions .prediction-row").filter(has_text="Red-tailed Hawk")
     accept_all = row.get_by_role("button", name=f"Accept on all {len(selected)}", exact=True)
     expect(accept_all).to_be_visible()
@@ -203,13 +203,13 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
         accept_all.click()
     assert accepted.value.ok
     page.wait_for_function(
-        "ids => ids.every(id => { const p = findBrowsePhoto(id);"
+        "ids => ids.every(id => { const p = pageModules.selectionPanel.findBrowsePhoto(id);"
         " return !p || p.species.includes('Red-tailed Hawk'); })",
         arg=selected,
     )
     page.wait_for_timeout(400)
-    page.wait_for_function("!loading")
-    assert page.evaluate("getActiveSelection()") == selected
+    page.wait_for_function("!browseState.loading")
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == selected
     _assert_grid_never_jumped(page, before)
 
     # The follow-up action must remain available on the same selection.
@@ -222,11 +222,11 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     assert removed.value.ok
     expect(keyword_row).to_have_count(0)
     page.wait_for_timeout(400)
-    page.wait_for_function("!loading")
-    assert page.evaluate("getActiveSelection()") == selected
-    assert abs(page.evaluate("gridContainer.scrollTop") - before) < 2
+    page.wait_for_function("!browseState.loading")
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == selected
+    assert abs(page.evaluate("pageModules.scroll.gridContainer.scrollTop") - before) < 2
     if scope == "folder":
-        assert page.evaluate("activeFolderId") == folder_id
+        assert page.evaluate("browseState.activeFolderId") == folder_id
     for photo_id in selected:
         names = {row[0] for row in db.conn.execute(
             "SELECT k.name FROM keywords k JOIN photo_keywords pk ON pk.keyword_id = k.id "
@@ -243,9 +243,9 @@ def test_adding_species_removes_missing_photos_without_any_jump(live_server, pag
     _scroll_and_select(page)
     if batch:
         page.locator('#grid .grid-card').nth(31).click(modifiers=["ControlOrMeta"])
-    removed_ids = page.evaluate("getActiveSelection()")
-    before = page.evaluate("gridContainer.scrollTop")
-    initial_total = page.evaluate("totalPhotos")
+    removed_ids = page.evaluate("pageModules.selection.getActiveSelection()")
+    before = page.evaluate("pageModules.scroll.gridContainer.scrollTop")
+    initial_total = page.evaluate("browseState.totalPhotos")
     _watch_grid_frames(page)
 
     # Hold the server response so the old reset-and-restore implementation
@@ -257,21 +257,21 @@ def test_adding_species_removes_missing_photos_without_any_jump(live_server, pag
         page.locator("#addKeywordInput").press("Enter")
     page.wait_for_timeout(200)
     assert pending
-    assert page.evaluate("gridContainer.scrollTop") == before
+    assert page.evaluate("pageModules.scroll.gridContainer.scrollTop") == before
     for photo_id in removed_ids:
         expect(page.locator(f'#grid .grid-card[data-id="{photo_id}"]')).to_have_count(1)
 
     for route in pending:
         route.continue_()
     page.wait_for_function(
-        "ids => !loading && ids.every(id => !photos.some(p => p.id === id))",
+        "ids => !browseState.loading && ids.every(id => !browseState.photos.some(p => p.id === id))",
         arg=removed_ids,
     )
     page.wait_for_timeout(200)
     _assert_grid_never_jumped(page, before)
-    assert page.evaluate("totalPhotos") == initial_total - len(removed_ids)
-    assert page.evaluate("getActiveSelection()") == []
-    assert page.evaluate("photos.map(p => p.id)") == page.locator("#grid .grid-card").evaluate_all(
+    assert page.evaluate("browseState.totalPhotos") == initial_total - len(removed_ids)
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == []
+    assert page.evaluate("browseState.photos.map(p => p.id)") == page.locator("#grid .grid-card").evaluate_all(
         "cards => cards.map(card => Number(card.dataset.id))"
     )
 
@@ -280,16 +280,16 @@ def test_membership_refresh_keeps_scrolling_done_while_waiting(live_server, page
     _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0])
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     _scroll_and_select(page)
-    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
+    page.evaluate("async () => { while (!browseState.allLoaded) await pageModules.loading.loadPhotos(); }")
     pending = []
     page.route("**/api/photos/query", lambda route: pending.append(route), times=1)
-    page.evaluate("() => { window.refreshDone = resetAndLoad({preserveScroll: true}); }")
+    page.evaluate("() => { window.refreshDone = pageModules.loading.resetAndLoad({preserveScroll: true}); }")
     page.wait_for_timeout(200)
     assert pending
     # Move beyond the pages needed when the request started. The staged
     # refresh must extend to this new viewport before committing.
     page.locator("#grid .grid-card").nth(125).scroll_into_view_if_needed()
-    before = page.evaluate("gridContainer.scrollTop")
+    before = page.evaluate("pageModules.scroll.gridContainer.scrollTop")
     _watch_grid_frames(page)
     page.wait_for_timeout(100)
     for route in pending:
@@ -303,18 +303,18 @@ def test_failed_membership_refresh_keeps_the_existing_grid(live_server, page):
     _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0])
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     before = _scroll_and_select(page)
-    original_ids = page.evaluate("photos.map(p => p.id)")
-    original_selection = page.evaluate("selectedPhotoId")
+    original_ids = page.evaluate("browseState.photos.map(p => p.id)")
+    original_selection = page.evaluate("browseState.selectedPhotoId")
     _watch_grid_frames(page)
     page.route("**/api/photos/query", lambda route: route.fulfill(
         status=503, content_type="application/json", body='{"error":"Unavailable"}'
     ))
-    assert page.evaluate("resetAndLoad({preserveScroll: true})") is False
+    assert page.evaluate("pageModules.loading.resetAndLoad({preserveScroll: true})") is False
     page.wait_for_timeout(150)
     _assert_grid_never_jumped(page, before)
-    assert page.evaluate("photos.map(p => p.id)") == original_ids
-    assert page.evaluate("selectedPhotoId") == original_selection
-    assert page.evaluate("loading") is False
+    assert page.evaluate("browseState.photos.map(p => p.id)") == original_ids
+    assert page.evaluate("browseState.selectedPhotoId") == original_selection
+    assert page.evaluate("browseState.loading") is False
 
 
 def test_membership_refresh_cannot_replace_a_new_filter(live_server, page):
@@ -323,17 +323,17 @@ def test_membership_refresh_cannot_replace_a_new_filter(live_server, page):
     _scroll_and_select(page)
     pending = []
     page.route("**/api/photos/query", lambda route: pending.append(route), times=1)
-    page.evaluate("() => { window.refreshDone = resetAndLoad({preserveScroll: true}); }")
+    page.evaluate("() => { window.refreshDone = pageModules.loading.resetAndLoad({preserveScroll: true}); }")
     page.wait_for_timeout(200)
     assert pending
     response = pending[0].fetch()
     page.evaluate("() => { VireoFilter.clearAll(true); VireoFilter.addRule('rating', '>=', 4); }")
-    page.wait_for_function("!loading && photos.length === 1 && photos[0].rating === 4")
-    expected = page.evaluate("photos.map(p => p.id)")
+    page.wait_for_function("!browseState.loading && browseState.photos.length === 1 && browseState.photos[0].rating === 4")
+    expected = page.evaluate("browseState.photos.map(p => p.id)")
     pending[0].fulfill(response=response)
     assert page.evaluate("refreshDone") is None
-    assert page.evaluate("photos.map(p => p.id)") == expected
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("browseState.photos.map(p => p.id)") == expected
+    assert page.evaluate("browseState.selectedPhotoId") is None
 
 
 @pytest.mark.parametrize("during_request", ["unchanged", "select_photo", "change_filter", "failure"])
@@ -343,14 +343,14 @@ def test_off_page_selection_reconciliation(live_server, page, during_request):
     keyword_id = _seed_filtered_library(db, live_server["data"]["folders"][0])
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     _scroll_and_select(page)
-    page.evaluate("selectAllMatchingPhotos()")
-    selected = page.evaluate("getActiveSelection()")
-    loaded = page.evaluate("photos.map(p => p.id)")
+    page.evaluate("pageModules.selection.selectAllMatchingPhotos()")
+    selected = page.evaluate("pageModules.selection.getActiveSelection()")
+    loaded = page.evaluate("browseState.photos.map(p => p.id)")
     removed_id = next(photo_id for photo_id in selected if photo_id not in loaded)
     with db.conn:
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
                         (removed_id, keyword_id))
-    before = page.evaluate("gridContainer.scrollTop")
+    before = page.evaluate("pageModules.scroll.gridContainer.scrollTop")
     pending = []
 
     def hold_ids(route):
@@ -360,36 +360,36 @@ def test_off_page_selection_reconciliation(live_server, page, during_request):
             route.continue_()
 
     page.route("**/api/photos/query", hold_ids)
-    page.evaluate("() => { window.refreshDone = resetAndLoad({preserveScroll: true}); }")
+    page.evaluate("() => { window.refreshDone = pageModules.loading.resetAndLoad({preserveScroll: true}); }")
     page.wait_for_timeout(300)
     assert pending
-    assert page.evaluate("getActiveSelection()") == selected
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == selected
     if during_request == "select_photo":
         card = page.locator("#grid .grid-card").nth(30)
         new_id = int(card.get_attribute("data-id"))
         card.click()
     elif during_request == "change_filter":
         page.evaluate("() => { VireoFilter.clearAll(true); VireoFilter.addRule('rating', '>=', 4); }")
-        page.wait_for_function("!loading && photos.length === 1 && photos[0].rating === 4")
+        page.wait_for_function("!browseState.loading && browseState.photos.length === 1 && browseState.photos[0].rating === 4")
     if during_request == "failure":
         pending[0].fulfill(status=503, content_type="application/json", body='{"error":"Unavailable"}')
         assert page.evaluate("refreshDone") is False
-        assert page.evaluate("getActiveSelection()") == selected
-        assert page.evaluate("photos.map(p => p.id)") == loaded
+        assert page.evaluate("pageModules.selection.getActiveSelection()") == selected
+        assert page.evaluate("browseState.photos.map(p => p.id)") == loaded
     else:
         pending[0].continue_()
         result = page.evaluate("refreshDone")
         if during_request == "change_filter":
             assert result is None
-            assert page.evaluate("getActiveSelection()") == []
-            assert page.evaluate("photos.length === 1 && photos[0].rating === 4")
+            assert page.evaluate("pageModules.selection.getActiveSelection()") == []
+            assert page.evaluate("browseState.photos.length === 1 && browseState.photos[0].rating === 4")
         else:
             assert result is True
             expected = [new_id] if during_request == "select_photo" else [i for i in selected if i != removed_id]
-            assert page.evaluate("getActiveSelection()") == expected
-            assert page.evaluate("photos.length") < len(selected) - 1
+            assert page.evaluate("pageModules.selection.getActiveSelection()") == expected
+            assert page.evaluate("browseState.photos.length") < len(selected) - 1
     if during_request in ("unchanged", "failure"):
-        assert abs(page.evaluate("gridContainer.scrollTop") - before) < 2
+        assert abs(page.evaluate("pageModules.scroll.gridContainer.scrollTop") - before) < 2
 
 
 def test_membership_refresh_preserves_expanded_stack_and_member_selection(live_server, page):
@@ -401,26 +401,26 @@ def test_membership_refresh_preserves_expanded_stack_and_member_selection(live_s
     seed_browse_stack(db, ids)
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     page.locator("#browseStacksToggle").check()
-    page.wait_for_function("!loading && browseDatasetReady")
+    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
     page.evaluate("""async () => {
-      while (!photos.some(p => p.browse_stack) && !allLoaded) await loadPhotos();
+      while (!browseState.photos.some(p => p.browse_stack) && !browseState.allLoaded) await pageModules.loading.loadPhotos();
     }""")
     cover = page.locator("#grid .has-browse-stack").first
     cover.scroll_into_view_if_needed()
     cover_id = int(cover.get_attribute("data-id"))
-    page.evaluate("id => toggleBrowseStack(null, id)", cover_id)
+    page.evaluate("id => pageModules.stacks.toggleBrowseStack(null, id)", cover_id)
     member_id = next(photo_id for photo_id in ids if photo_id != cover_id)
     member = page.locator(f'.browse-stack-member[data-id="{member_id}"]')
     member.click()
     page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
-    before = page.evaluate("gridContainer.scrollTop")
+    before = page.evaluate("pageModules.scroll.gridContainer.scrollTop")
     _watch_grid_frames(page)
     _add_keyword_to_selection(page, "Golden Hour")
     _assert_grid_never_jumped(page, before)
     expect(member).to_have_class("browse-stack-member selected")
-    assert page.evaluate("selectedPhotoId") == member_id
-    assert page.evaluate("id => expandedBrowseStacks.has(id)", cover_id)
-    assert sorted(page.evaluate("id => browseStackMembers[id].map(p => p.id)", cover_id)) == sorted(ids)
+    assert page.evaluate("browseState.selectedPhotoId") == member_id
+    assert page.evaluate("id => browseState.expandedBrowseStacks.has(id)", cover_id)
+    assert sorted(page.evaluate("id => browseState.browseStackMembers[id].map(p => p.id)", cover_id)) == sorted(ids)
 
 
 def test_membership_refresh_keeps_a_focused_window(live_server, page):
@@ -428,17 +428,17 @@ def test_membership_refresh_keeps_a_focused_window(live_server, page):
     _seed_filtered_library(db, live_server["data"]["folders"][0], count=300)
     target = db.conn.execute("SELECT id FROM photos WHERE filename = 'marsh150.jpg'").fetchone()[0]
     page.goto(live_server["url"] + f"/browse?photo_id={target}")
-    page.wait_for_function("!loading && browseDatasetReady && earliestPage > 1")
+    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.earliestPage > 1")
     page.locator(f'#grid .grid-card[data-id="{target}"]').click()
     page.wait_for_timeout(400)
-    before = page.evaluate("({first: earliestPage, end: currentPage, ids: photos.map(p => p.id)})")
+    before = page.evaluate("({first: browseState.earliestPage, end: browseState.currentPage, ids: browseState.photos.map(p => p.id)})")
     requests = []
     page.on("request", lambda r: requests.append(r.post_data_json) if "/api/photos/query" in r.url else None)
-    assert page.evaluate("resetAndLoad({preserveScroll: true})") is True
-    after = page.evaluate("({first: earliestPage, end: currentPage, ids: photos.map(p => p.id)})")
+    assert page.evaluate("pageModules.loading.resetAndLoad({preserveScroll: true})") is True
+    after = page.evaluate("({first: browseState.earliestPage, end: browseState.currentPage, ids: browseState.photos.map(p => p.id)})")
     assert after == before
     assert requests and all(request["page"] >= before["first"] for request in requests)
-    assert page.evaluate("selectedPhotoId") == target
+    assert page.evaluate("browseState.selectedPhotoId") == target
 
 
 def test_membership_refresh_handles_removing_all_matches(live_server, page):
@@ -448,12 +448,12 @@ def test_membership_refresh_handles_removing_all_matches(live_server, page):
     _scroll_and_select(page)
     with db.conn:
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
-    assert page.evaluate("resetAndLoad({preserveScroll: true})") is True
+    assert page.evaluate("pageModules.loading.resetAndLoad({preserveScroll: true})") is True
     expect(page.locator("#emptyState")).to_be_visible()
     expect(page.locator("#grid .grid-card")).to_have_count(0)
-    assert page.evaluate("getActiveSelection()") == []
-    assert page.evaluate("totalPhotos") == 0
-    assert page.evaluate("gridContainer.scrollTop") == 0
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == []
+    assert page.evaluate("browseState.totalPhotos") == 0
+    assert page.evaluate("pageModules.scroll.gridContainer.scrollTop") == 0
 
 
 def test_stack_loading_above_viewport_keeps_browser_scroll_anchoring(live_server, page, browser_name):
@@ -467,14 +467,14 @@ def test_stack_loading_above_viewport_keeps_browser_scroll_anchoring(live_server
     seed_browse_stack(db, ids)
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
     page.locator("#browseStacksToggle").check()
-    page.wait_for_function("!loading && browseDatasetReady")
-    assert page.evaluate("resetAndLoad({preserveScroll: true})") is True
-    assert page.evaluate("getComputedStyle(gridContainer).overflowAnchor") == "auto"
+    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
+    assert page.evaluate("pageModules.loading.resetAndLoad({preserveScroll: true})") is True
+    assert page.evaluate("getComputedStyle(pageModules.scroll.gridContainer).overflowAnchor") == "auto"
     cover = page.locator("#grid .has-browse-stack").first
     cover_id = int(cover.get_attribute("data-id"))
     pending = []
     page.route("**/api/photos/by-ids", lambda route: pending.append(route), times=1)
-    page.evaluate("id => { window.stackDone = toggleBrowseStack(null, id); }", cover_id)
+    page.evaluate("id => { window.stackDone = pageModules.stacks.toggleBrowseStack(null, id); }", cover_id)
     page.wait_for_timeout(100)
     assert pending
     below = page.locator("#grid .grid-card").nth(35)
@@ -490,8 +490,8 @@ def test_stack_loading_above_viewport_keeps_browser_scroll_anchoring(live_server
 def test_membership_refresh_does_not_refetch_the_historical_tail(live_server, page):
     _seed_filtered_library(live_server["db"], live_server["data"]["folders"][0], count=600)
     _open_filtered_browse(page, live_server, "keyword", "is", "Marsh")
-    page.evaluate("async () => { while (!allLoaded) await loadPhotos(); }")
-    assert page.evaluate("photos.length") == 600
+    page.evaluate("async () => { while (!browseState.allLoaded) await pageModules.loading.loadPhotos(); }")
+    assert page.evaluate("browseState.photos.length") == 600
     before = _scroll_and_select(page)
     _watch_grid_frames(page)
     requests = []
@@ -500,6 +500,6 @@ def test_membership_refresh_does_not_refetch_the_historical_tail(live_server, pa
     _assert_grid_never_jumped(page, before)
     assert requests
     assert sum(request["per_page"] for request in requests) <= 150
-    assert page.evaluate("photos.length") < 600
-    assert page.evaluate("totalPhotos") == 600
-    assert page.evaluate("allLoaded") is False
+    assert page.evaluate("browseState.photos.length") < 600
+    assert page.evaluate("browseState.totalPhotos") == 600
+    assert page.evaluate("browseState.allLoaded") is False

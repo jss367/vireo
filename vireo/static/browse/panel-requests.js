@@ -1,54 +1,48 @@
 /* Browse panel request ownership. Each lane keeps its cache and active request
    private; an older response must never render or clear a newer request's key.
-   Load before the panel controllers. This does not cancel server-side work. */
-(function(/** @type {Window} */ global) {
-  'use strict';
+   This does not cancel server-side work. */
+/** @returns {PanelRequestLane} */
+function createLane() {
+  var owner = {};
+  /** @type {string | undefined} */
+  var cachedKey;
 
-  /** @returns {PanelRequestLane} */
-  function createLane() {
-    var owner = {};
-    /** @type {string | undefined} */
-    var cachedKey;
-
-    function observe() {
-      var observedOwner = owner;
-      return function() { return owner === observedOwner; };
-    }
-
-    function invalidate() {
-      owner = {};
-      cachedKey = undefined;
-    }
-
-    return {
-      // A keyed request is reused until invalidation or failure. Unkeyed
-      // requests always supersede their predecessor (e.g. another Show click).
-      begin: function(key) {
-        if (key !== undefined && key === cachedKey) return null;
-        invalidate();
-        cachedKey = key;
-        var isCurrent = observe();
-        return {
-          isCurrent: isCurrent,
-          fail: function() {
-            if (!isCurrent()) return false;
-            invalidate();
-            return true;
-          },
-        };
-      },
-      observe: observe,
-      invalidate: invalidate,
-    };
+  function observe() {
+    var observedOwner = owner;
+    return function() { return owner === observedOwner; };
   }
 
-  var Vireo = global.Vireo = global.Vireo || /** @type {VireoNamespace} */ ({});
-  Vireo.browse = Vireo.browse || {};
-  Vireo.browse.panelRequests = {
-    keywords: createLane(),
-    predictions: createLane(),
-    detailPredictions: createLane(),
-    predictionPhotos: createLane(),
-    wildlife: createLane(),
+  function invalidate() {
+    owner = {};
+    cachedKey = undefined;
+  }
+
+  return {
+    // A keyed request is reused until invalidation or failure. Unkeyed
+    // requests always supersede their predecessor (e.g. another Show click).
+    begin: function(key) {
+      if (key !== undefined && key === cachedKey) return null;
+      invalidate();
+      cachedKey = key;
+      var isCurrent = observe();
+      return {
+        isCurrent: isCurrent,
+        fail: function() {
+          if (!isCurrent()) return false;
+          invalidate();
+          return true;
+        },
+      };
+    },
+    observe: observe,
+    invalidate: invalidate,
   };
-})(window);
+}
+
+export var panelRequests = {
+  keywords: createLane(),
+  predictions: createLane(),
+  detailPredictions: createLane(),
+  predictionPhotos: createLane(),
+  wildlife: createLane(),
+};

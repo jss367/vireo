@@ -108,10 +108,10 @@ def test_offline_cards_keep_their_tint_across_a_full_rerender(live_server, page)
 
     page.evaluate(
         """(pid) => {
-            const p = photos.find(x => x.id === pid);
+            const p = browseState.photos.find(x => x.id === pid);
             if (!p) throw new Error('seed photo missing from page state');
             p.folder_status = 'missing';
-            renderGrid();
+            pageModules.grid.renderGrid();
         }""",
         photo_id,
     )
@@ -173,10 +173,10 @@ def test_a_label_edited_mid_fetch_is_not_restored_by_the_stale_response(
 
     # Start the stalled fetch, then clear one label while it is in flight.
     page.evaluate(
-        "(ids) => { window.__pending = fetchColorLabels(ids); }",
+        "(ids) => { window.__pending = pageModules.editActions.fetchColorLabels(ids); }",
         [photo_id, other_id],
     )
-    page.evaluate("(pid) => setColorLabelFor(pid, null)", photo_id)
+    page.evaluate("(pid) => pageModules.contextMenus.setColorLabelFor(pid, null)", photo_id)
     expect(page.locator(f'.grid-card[data-id="{photo_id}"]')).not_to_have_attribute(
         "data-color-label", "red"
     )
@@ -184,7 +184,7 @@ def test_a_label_edited_mid_fetch_is_not_restored_by_the_stale_response(
     # Release the now-stale response and let it merge.
     page.evaluate("() => window.__releaseColorLabels()")
     page.evaluate("() => window.__pending")
-    page.evaluate("() => refreshGridCards(photos.map(p => p.id))")
+    page.evaluate("() => pageModules.grid.refreshGridCards(browseState.photos.map(p => p.id))")
 
     # The edited photo keeps the user's clear; the untouched one still hydrates.
     assert (
@@ -242,19 +242,19 @@ def test_a_fetch_started_during_a_pending_write_cannot_undo_it(live_server, page
 
     # Write, then start a fetch while that write is still in flight.
     page.evaluate(
-        "(pid) => { window.__write = setColorLabelFor(pid, null); }", photo_id
+        "(pid) => { window.__write = pageModules.contextMenus.setColorLabelFor(pid, null); }", photo_id
     )
-    page.evaluate("(pid) => { window.__pending = fetchColorLabels([pid]); }", photo_id)
+    page.evaluate("(pid) => { window.__pending = pageModules.editActions.fetchColorLabels([pid]); }", photo_id)
     page.evaluate("() => window.__write")
     expect(card).not_to_have_attribute("data-color-label", "red")
 
     # Let the stale response land on the completed write.
     page.evaluate("() => window.__releaseColorLabels()")
     page.evaluate("() => window.__pending")
-    page.evaluate("(pid) => refreshGridCards([pid])", photo_id)
+    page.evaluate("(pid) => pageModules.grid.refreshGridCards([pid])", photo_id)
 
     assert card.get_attribute("data-color-label") is None
-    assert page.evaluate("(pid) => colorLabels[pid] || null", photo_id) is None
+    assert page.evaluate("(pid) => browseState.colorLabels[pid] || null", photo_id) is None
 
 
 def test_the_photo_deep_link_hydrates_its_page_labels(live_server, page):
@@ -313,8 +313,8 @@ def test_a_failed_write_restores_the_saved_label(live_server, page):
     # finished yet", then fail the write.
     page.evaluate(
         """(pid) => {
-            delete colorLabels[pid];
-            colorLabelsFetched.delete(pid);
+            delete browseState.colorLabels[pid];
+            browseState.colorLabelsFetched.delete(pid);
             const orig = window.Vireo.api.json;
             window.Vireo.api.json = function (u, o) {
                 if (String(u).includes('/color_label')
@@ -327,14 +327,14 @@ def test_a_failed_write_restores_the_saved_label(live_server, page):
         }""",
         photo_id,
     )
-    page.evaluate("(pid) => window.__w = setColorLabelFor(pid, 'green')", photo_id)
+    page.evaluate("(pid) => window.__w = pageModules.contextMenus.setColorLabelFor(pid, 'green')", photo_id)
     page.evaluate("() => window.__w")
 
     # The write failed, so the server's label is still the truth — and the
     # recovery refetch has to put it back rather than leaving a blank card
     # that claims to be definitively unlabelled.
     expect(card).to_have_attribute("data-color-label", "purple")
-    assert page.evaluate("(pid) => colorLabelsFetched.has(pid)", photo_id) is True
+    assert page.evaluate("(pid) => browseState.colorLabelsFetched.has(pid)", photo_id) is True
 
 
 def test_recovery_keeps_a_concurrent_writes_stamp(live_server, page):
@@ -388,9 +388,9 @@ def test_recovery_keeps_a_concurrent_writes_stamp(live_server, page):
 
     # GET first (so it captures a generation older than both writes), then the
     # write that will fail, then the write that succeeds.
-    page.evaluate("(pid) => { window.__get = fetchColorLabels([pid]); }", photo_id)
-    page.evaluate("(pid) => { window.__a = setColorLabelFor(pid, 'blue'); }", photo_id)
-    page.evaluate("(pid) => { window.__b = setColorLabelFor(pid, 'green'); }", photo_id)
+    page.evaluate("(pid) => { window.__get = pageModules.editActions.fetchColorLabels([pid]); }", photo_id)
+    page.evaluate("(pid) => { window.__a = pageModules.contextMenus.setColorLabelFor(pid, 'blue'); }", photo_id)
+    page.evaluate("(pid) => { window.__b = pageModules.contextMenus.setColorLabelFor(pid, 'green'); }", photo_id)
     page.evaluate("() => window.__b")
     expect(card).to_have_attribute("data-color-label", "green")
 
@@ -399,7 +399,7 @@ def test_recovery_keeps_a_concurrent_writes_stamp(live_server, page):
     page.evaluate("() => window.__a")
     page.evaluate("() => window.__releaseGet()")
     page.evaluate("() => window.__get")
-    page.evaluate("(pid) => refreshGridCards([pid])", photo_id)
+    page.evaluate("(pid) => pageModules.grid.refreshGridCards([pid])", photo_id)
 
     expect(card).to_have_attribute("data-color-label", "green")
-    assert page.evaluate("(pid) => colorLabels[pid]", photo_id) == "green"
+    assert page.evaluate("(pid) => browseState.colorLabels[pid]", photo_id) == "green"

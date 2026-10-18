@@ -74,13 +74,13 @@ def test_lazily_rendered_color_badges_include_workspace_description(live_server,
     # inserted badge kept its build-time aria-label of "Red label".
     page.evaluate(
         """(pid) => {
-            const original = photos.find(p => p.id === pid);
+            const original = browseState.photos.find(p => p.id === pid);
             if (!original) throw new Error('seed photo missing from page state');
-            if (!cardFields.includes('color_label')) cardFields.push('color_label');
+            if (!browseState.cardFields.includes('color_label')) browseState.cardFields.push('color_label');
             const clone = Object.assign({}, original, { id: pid + 90000 });
-            colorLabels[clone.id] = 'red';
-            colorLabelsFetched.add(clone.id);
-            appendGridPhotos([clone], 1000);
+            browseState.colorLabels[clone.id] = 'red';
+            browseState.colorLabelsFetched.add(clone.id);
+            pageModules.grid.appendGridPhotos([clone], 1000);
         }""",
         photos[0],
     )

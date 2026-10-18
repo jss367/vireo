@@ -5,6 +5,7 @@ import sys
 import pytest
 from PIL import Image
 
+from e2e.module_pages import install_page_module_exposure
 from e2e.navbar_modules import install_navbar_exposure
 from e2e.threaded_server import start_server, stop_server
 
@@ -110,12 +111,14 @@ def seed_e2e_data(db, thumb_dir):
 @pytest.fixture()
 def page(browser, page):
     """pytest-playwright's page, with the navbar's module internals exposed
-    to the test after every goto and reload (see navbar_modules.py).
+    to the test after every goto and reload (see navbar_modules.py), and on
+    Browse its modules as ``pageModules.<file>`` and its state as
+    ``browseState`` (see module_pages.py).
 
     Requests ``browser`` first so the session's browser launches before a
     fixture like ``live_server`` points HOME at a temporary directory (the
     browser binaries are found under HOME)."""
-    return install_navbar_exposure(page)
+    return install_page_module_exposure(install_navbar_exposure(page), "browse", "browseState")
 
 
 @pytest.fixture()

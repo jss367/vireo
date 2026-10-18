@@ -31,7 +31,12 @@ async function main() {
     showToast() {}, renderGrid() {}, updateBatchBar() {},
     browseSelectionIdsForClick: id => [id], loadDetail() {},
     refreshCardSelectionVisuals() {}, noteFocusedCardVisibility() {},
+    // shared.js's reader of the navbar's native-menu override.
+    nativeMenuPhotoIdsOverride: () => ctx.window._vireoNativeMenuPhotoIdsOverride,
   });
+  // Browse's functions are ES module code that reads page state as
+  // `state.<field>`; the context stands in for that object.
+  ctx.state = ctx;
   for (const name of ['observeBrowseWindow', 'selectAllMatchingPhotos', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
     vm.runInContext(fn(browse, name), ctx);
   }
@@ -544,6 +549,7 @@ async function testDeepLinkFailureReleasesLoading() {
         throw new Error('offline');
       },
     });
+    context.state = context;
     vm.runInContext(source, context);
     await context._runPhotoDeepLink(1);
     // An early failure releases the grid; a newer health refresh retains

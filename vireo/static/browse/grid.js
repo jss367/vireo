@@ -1,18 +1,29 @@
-/* Browse: grid DOM: rendering, appending/prepending pages, card refreshes.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: grid DOM: rendering, appending/prepending pages, card refreshes. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { VireoColorLabels } from './shared.js';
+import {
+  applyCardColorLabel, renderCardInfo, renderPhotoCard, renderSpeciesBadges,
+} from './cards.js';
+import { loadedWindowOffset } from './loading.js';
+import { findBrowsePhoto } from './selection-panel.js';
+import {
+  loadedBrowsePhotoIds, refreshExpandedBrowseStackMembers, restoreExpandedBrowseStacks,
+} from './stacks.js';
+import { hasActiveBrowseFilter } from './view-controls.js';
+import { bindBrowseMarkup } from './markup.js';
 
 // Fold any already-loaded workspace descriptions into freshly rendered
 // color-label badges so lazily inserted cards get the same title and
 // accessible name as cards rendered after descriptions finished loading.
-function refreshColorLabelControlsIn(/** @type {HTMLElement | null} */ scope) {
+export function refreshColorLabelControlsIn(/** @type {HTMLElement | null} */ scope) {
   if (!scope) return;
-  if (window.VireoColorLabels && typeof window.VireoColorLabels.refreshControls === 'function') {
-    window.VireoColorLabels.refreshControls(scope);
+  if (VireoColorLabels && typeof VireoColorLabels.refreshControls === 'function') {
+    VireoColorLabels.refreshControls(scope);
   }
 }
 
-function appendGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos, /** @type {number} */ startIdx) {
+export function appendGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos, /** @type {number} */ startIdx) {
   if (!newPhotos.length) return;
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var html = '';
@@ -22,11 +33,12 @@ function appendGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos, /** @type {num
   var tail = document.getElementById('gridTail');
   if (tail) tail.insertAdjacentHTML('beforebegin', html);
   else grid.insertAdjacentHTML('beforeend', html);
+  bindBrowseMarkup(grid);
   updateGridTail();
   refreshColorLabelControlsIn(grid);
 }
 
-function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
+export function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
   if (!newPhotos.length) return;
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var html = '';
@@ -36,17 +48,13 @@ function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
 
   // Existing cards keep their DOM nodes (and therefore their already-decoded
   // thumbnails), but their array indices move when a preceding page arrives.
-  // Keep the inline selection handlers in lockstep with the new indices.
+  // The selection handler reads the index from data-idx, so shift it.
   Array.from(/** @type {HTMLCollectionOf<HTMLElement>} */ (grid.getElementsByClassName('grid-card'))).forEach(function(card) {
-    var idx = parseInt(card.dataset.idx || '', 10) + newPhotos.length;
-    var id = parseInt(card.dataset.id || '', 10);
-    card.dataset.idx = String(idx);
-    if (!card.classList.contains('offline')) {
-      card.setAttribute('onclick', 'selectPhoto(event,' + id + ',' + idx + ')');
-    }
+    card.dataset.idx = String(parseInt(card.dataset.idx || '', 10) + newPhotos.length);
   });
   grid.insertAdjacentHTML('afterbegin', html);
-  if (selectedIndex >= 0) selectedIndex += newPhotos.length;
+  bindBrowseMarkup(grid);
+  if (state.selectedIndex >= 0) state.selectedIndex += newPhotos.length;
   updateGridTail();
   refreshColorLabelControlsIn(grid);
 }
@@ -60,12 +68,12 @@ function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
    but real cards can be inserted before it as a unit. */
 var SKEL_POOL = 300;
 
-function updateGridTail() {
+export function updateGridTail() {
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var tail = document.getElementById('gridTail');
   // Photos before the loaded window are reached with "Browse from beginning",
   // not by scrolling down — they must not inflate the downward runway.
-  var remaining = allLoaded ? 0 : totalPhotos - loadedWindowOffset() - photos.length;
+  var remaining = state.allLoaded ? 0 : state.totalPhotos - loadedWindowOffset() - state.photos.length;
   var cards = /** @type {HTMLCollectionOf<HTMLElement>} */ (grid.getElementsByClassName('grid-card'));
   var lastCard = cards.length ? cards[cards.length - 1] : null;
   if (remaining <= 0 || !lastCard) {
@@ -110,7 +118,7 @@ function refreshCardBadgesAndInfo(/** @type {HTMLElement} */ card, /** @type {Br
   var wrap = /** @type {HTMLElement | null} */ (card.querySelector('.grid-card-img-wrap'));
   if (!wrap) return;
   var speciesBadges = /** @type {HTMLElement | null} */ (wrap.querySelector('.species-badges'));
-  var speciesBadgeHtml = cardFields.indexOf('species') === -1
+  var speciesBadgeHtml = state.cardFields.indexOf('species') === -1
     ? renderSpeciesBadges(p.species, false)
     : '';
   if (speciesBadges && speciesBadgeHtml) {
@@ -122,7 +130,7 @@ function refreshCardBadgesAndInfo(/** @type {HTMLElement} */ card, /** @type {Br
     bottomOverlay.insertAdjacentHTML('afterbegin', speciesBadgeHtml);
   }
   var existing = /** @type {HTMLElement | null} */ (wrap.querySelector('.inat-badge'));
-  var shouldShow = !!inatSubmitted[String(p.id)];
+  var shouldShow = !!state.inatSubmitted[String(p.id)];
   if (shouldShow && !existing) {
     wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
   } else if (!shouldShow && existing) {
@@ -136,9 +144,9 @@ function refreshCardBadgesAndInfo(/** @type {HTMLElement} */ card, /** @type {Br
   }
 }
 
-function refreshGridCards(/** @type {number[]} */ photoIds) {
+export function refreshGridCards(/** @type {number[]} */ photoIds) {
   photoIds.forEach(function(id) {
-    var p = photos.find(function(x) { return x.id === id; });
+    var p = state.photos.find(function(x) { return x.id === id; });
     if (!p) return;
     var card = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + id + '"]'));
     if (!card) return;
@@ -152,7 +160,7 @@ function refreshGridCards(/** @type {number[]} */ photoIds) {
 // order. Rebuilding the tray for that would give every member a fresh <img>
 // (blanking thumbnails that were already decoded) and swap the DOM out from
 // under a click the user has started.
-function refreshStackMemberCards(/** @type {number[]} */ photoIds) {
+export function refreshStackMemberCards(/** @type {number[]} */ photoIds) {
   photoIds.forEach(function(id) {
     const p = findBrowsePhoto(id);
     if (!p) return;
@@ -204,18 +212,18 @@ document.addEventListener('lifelist:changed', function(e) {
   }
 });
 
-function getGridCard(/** @type {number | null} */ photoId) {
+export function getGridCard(/** @type {number | null} */ photoId) {
   return /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + photoId + '"]'));
 }
 
-function getBrowsePhotoElement(/** @type {number | null} */ photoId) {
+export function getBrowsePhotoElement(/** @type {number | null} */ photoId) {
   return getGridCard(photoId) ||
     /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-member[data-id="' + photoId + '"]'));
 }
 
-function loadedBrowseStackCoverForPhoto(/** @type {number | null} */ photoId) {
+export function loadedBrowseStackCoverForPhoto(/** @type {number | null} */ photoId) {
   var wantedId = Number(photoId);
-  return photos.find(function(photo) {
+  return state.photos.find(function(photo) {
     return photo.browse_stack && (photo.browse_stack.photo_ids || []).some(function(id) {
       return Number(id) === wantedId;
     });
@@ -223,7 +231,7 @@ function loadedBrowseStackCoverForPhoto(/** @type {number | null} */ photoId) {
 }
 
 /* ---------- Grid Rendering ---------- */
-function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options = {}) {
+export function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options = {}) {
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
   var welcome = /** @type {HTMLElement} */ (document.getElementById('welcomeState'));
@@ -243,10 +251,10 @@ function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options = {}) 
     });
   }
 
-  if (photos.length === 0) {
+  if (state.photos.length === 0) {
     grid.innerHTML = '';
     // Show welcome if DB is completely empty, otherwise show filter-empty message
-    if (totalPhotos === 0 && !hasActiveBrowseFilter()) {
+    if (state.totalPhotos === 0 && !hasActiveBrowseFilter()) {
       welcome.style.display = 'block';
       empty.style.display = 'none';
     } else {
@@ -259,10 +267,11 @@ function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options = {}) 
   empty.style.display = 'none';
 
   var html = '';
-  photos.forEach(function(p, idx) {
+  state.photos.forEach(function(p, idx) {
     html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
+  bindBrowseMarkup(grid);
   updateGridTail();
   refreshColorLabelControlsIn(grid);
   restoreExpandedBrowseStacks();

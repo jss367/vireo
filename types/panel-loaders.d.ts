@@ -43,15 +43,11 @@ interface BrowsePanelLoaders {
 }
 
 interface Window {
-  _detailPhotoId?: number | null;
   VireoPanelLoader: {
     create<T, R>(options: BrowsePanelLoaderOptions<T, R>): BrowsePanelLoader<T>;
   };
 }
 
-declare function getBrowseSelection(): number[];
-declare function selectionIdsKey(ids: readonly number[]): string;
+// The navbar's fetch wrapper (navbar-globals.js), which the shared panel
+// loaders and the scripts checked alongside them call.
 declare function safeFetch<T>(url: string, options?: RequestInit, errorOptions?: {toast: boolean}): Promise<T>;
-declare function renderSelectionKeywordSuggestions(rows: SelectionKeywordSuggestion[], selectedCount: number): void;
-declare function renderSelectionPredictions(rows: SelectionPredictionSuggestion[], selectedCount: number, meta: SelectionPredictionMeta): void;
-declare function renderDetailPredictions(data: DetailPredictionsResponse, photoId: number): void;

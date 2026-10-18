@@ -1,6 +1,11 @@
-/* Browse: the floating batch action bar.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: the floating batch action bar. ES module (see
+   browse/README.md). */
+import { showToast } from './shared.js';
+import { updateSelectionPanel } from './selection-panel.js';
+import {
+  getActiveSelection, updateBestBatchButton, updateBurstReviewButton, updateCompareButton,
+} from './selection.js';
+import { browseSelectionStackNote } from './stacks.js';
 
 // Wrapping and inspector/sidebar resizing change the space the bar overlays.
 new ResizeObserver(function(entries) {
@@ -29,7 +34,8 @@ new ResizeObserver(function(entries) {
 // that timer, without anyone having to guess the interval. Every fresh
 // card mousedown re-inerts the bar and restarts the timer. Hiding stays
 // immediate.
-var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
+// A field, not a constant, so a browser test can shorten or lengthen it.
+export const batchBarTiming = {activateQuietMs: 1500};
 // Distance the pointer has to travel before we treat the movement as a
 // deliberate reach for a batch button. Well within the noise of a
 // stationary hand, well below the distance from any card centre to the
@@ -47,7 +53,7 @@ var batchBarPointerMovedSinceCardDown = true;
 
 function scheduleBatchBarActivation() {
   if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
-  batchBarActivateTimer = setTimeout(activateBatchBar, BATCH_BAR_ACTIVATE_QUIET_MS);
+  batchBarActivateTimer = setTimeout(activateBatchBar, batchBarTiming.activateQuietMs);
 }
 
 function activateBatchBar() {
@@ -154,7 +160,7 @@ document.addEventListener('click', function(event) {
   }));
 }, true);
 
-function updateBatchBar() {
+export function updateBatchBar() {
   var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (!bar) return;
   var ids = getActiveSelection();
@@ -194,7 +200,7 @@ function updateBatchBar() {
   updateSelectionPanel(ids);
 }
 
-function openSelectedInBurstReview() {
+export function openSelectedInBurstReview() {
   var ids = getActiveSelection();
   if (ids.length < 2) {
     showToast('Select at least two photos to review as a burst.', 'error');

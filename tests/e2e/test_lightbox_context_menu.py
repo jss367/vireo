@@ -89,8 +89,8 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     current_id = page.evaluate("vireoLightboxSession.requestedPhotoId()")
     page.evaluate(
         """() => {
-            selectedPhotos.clear();
-            selectedPhotoId = vireoLightboxSession.requestedPhotoId();
+            browseState.selectedPhotos.clear();
+            browseState.selectedPhotoId = vireoLightboxSession.requestedPhotoId();
             window.__exportRequest = null;
             window.__resolveExport = null;
             window.__rejectPreflight = true;
@@ -123,13 +123,13 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     _fire_contextmenu_on_lightbox(page)
     export_photo = page.evaluate(
         """() => {
-            const next = photos.find(photo => photo.id !== vireoLightboxSession.requestedPhotoId());
+            const next = browseState.photos.find(photo => photo.id !== vireoLightboxSession.requestedPhotoId());
             vireoLightboxSession.begin(next.id);
             vireoLightboxSession.commit(vireoLightboxSession.capture());
             // Simulate opening a Find Similar result that is not present in
             // Browse's currently loaded page. The lightbox retains its own
             // photo list for metadata-backed export previews.
-            photos = photos.filter(photo => photo.id !== next.id);
+            browseState.photos = browseState.photos.filter(photo => photo.id !== next.id);
             return {id: next.id, filename: next.filename};
         }"""
     )
@@ -144,7 +144,7 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
         export_photo["filename"].rsplit(".", 1)[0]
     )
     assert export_photo["id"] != current_id
-    assert page.evaluate("_exportPhotoIds") == [export_photo["id"]]
+    assert page.evaluate("pageModules.export._exportPhotoIds") == [export_photo["id"]]
 
     dialog_messages = []
 
@@ -603,7 +603,7 @@ def test_lightbox_rating_chip_applies(live_server, page):
     # setRatingFor is defined on browse.html; it updates the server and the
     # local photos[] list. Poll for the rating change.
     page.wait_for_function(
-        f"(photos.find(p => p.id === {pid}) || {{}}).rating === 2",
+        f"(browseState.photos.find(p => p.id === {pid}) || {{}}).rating === 2",
         timeout=3000,
     )
 

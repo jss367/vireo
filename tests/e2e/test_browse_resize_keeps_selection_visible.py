@@ -26,7 +26,7 @@ SETTLE = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFra
 # scroll handler has sampled it. The event is dispatched asynchronously, so
 # without this wait the sample can land after the next interaction and record
 # that interaction's card instead.
-SCROLL_SAMPLED = "() => focusedCardWasOnScreen === false"
+SCROLL_SAMPLED = "() => pageModules.scroll.focusedCardWasOnScreen === false"
 
 
 def _seed_extra_photos(live_server, count):
@@ -58,13 +58,13 @@ def test_browse_keeps_clicked_photo_visible_when_window_resizes(live_server, pag
     cards = page.locator(".grid-card")
     cards.first.wait_for(state="visible")
     cards.last.click()
-    assert page.evaluate("selectedPhotoId") is not None
+    assert page.evaluate("browseState.selectedPhotoId") is not None
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is True
 
-    wide_columns = page.evaluate("() => gridContainer.clientWidth")
+    wide_columns = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 780, "height": 900})
     page.wait_for_function(
-        "width => gridContainer.clientWidth < width", arg=wide_columns
+        "width => pageModules.scroll.gridContainer.clientWidth < width", arg=wide_columns
     )
     page.evaluate(SETTLE)
 
@@ -85,12 +85,12 @@ def test_browse_resize_keeps_the_most_recently_clicked_card_visible(live_server,
     cards.first.wait_for(state="visible")
     cards.first.click()
     cards.last.click(modifiers=["ControlOrMeta"])
-    last_id = page.evaluate("lastClickedPhotoId")
-    assert page.evaluate("selectedPhotoId") != last_id
+    last_id = page.evaluate("browseState.lastClickedPhotoId")
+    assert page.evaluate("browseState.selectedPhotoId") != last_id
 
-    wide = page.evaluate("() => gridContainer.clientWidth")
+    wide = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 780, "height": 900})
-    page.wait_for_function("width => gridContainer.clientWidth < width", arg=wide)
+    page.wait_for_function("width => pageModules.scroll.gridContainer.clientWidth < width", arg=wide)
     page.evaluate(SETTLE)
 
     visibility = page.evaluate(
@@ -121,18 +121,18 @@ def test_browse_resize_leaves_a_deliberately_scrolled_away_selection_alone(live_
     cards.first.click()
 
     page.evaluate(SETTLE)
-    page.evaluate("() => { gridContainer.scrollTop = gridContainer.scrollHeight; }")
+    page.evaluate("() => { pageModules.scroll.gridContainer.scrollTop = pageModules.scroll.gridContainer.scrollHeight; }")
     page.wait_for_function(SCROLL_SAMPLED)
-    scrolled_away = page.evaluate("() => gridContainer.scrollTop")
+    scrolled_away = page.evaluate("() => pageModules.scroll.gridContainer.scrollTop")
     assert scrolled_away > 0
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is False
 
-    tall = page.evaluate("() => gridContainer.clientHeight")
+    tall = page.evaluate("() => pageModules.scroll.gridContainer.clientHeight")
     page.set_viewport_size({"width": 780, "height": 700})
-    page.wait_for_function("h => gridContainer.clientHeight < h", arg=tall)
+    page.wait_for_function("h => pageModules.scroll.gridContainer.clientHeight < h", arg=tall)
     page.evaluate(SETTLE)
 
-    after = page.evaluate("() => gridContainer.scrollTop")
+    after = page.evaluate("() => pageModules.scroll.gridContainer.scrollTop")
     assert after == scrolled_away, (
         f"the resize scrolled back to the selection ({scrolled_away} → {after})"
     )
@@ -149,21 +149,21 @@ def test_browse_resize_falls_back_when_the_last_clicked_card_is_not_rendered(liv
     cards = page.locator(".grid-card")
     cards.first.wait_for(state="visible")
     cards.last.click()
-    visible_id = page.evaluate("selectedPhotoId")
+    visible_id = page.evaluate("browseState.selectedPhotoId")
 
     # Stand in for the collapsed stack member: selected, last clicked, no card.
     page.evaluate(
         """() => {
-          lastClickedPhotoId = 999999;
-          selectedPhotos.add(999999);
-          noteFocusedCardVisibility();
+          browseState.lastClickedPhotoId = 999999;
+          browseState.selectedPhotos.add(999999);
+          pageModules.scroll.noteFocusedCardVisibility();
         }"""
     )
-    assert page.evaluate("focusedBrowsePhotoId()") == visible_id
+    assert page.evaluate("pageModules.scroll.focusedBrowsePhotoId()") == visible_id
 
-    wide = page.evaluate("() => gridContainer.clientWidth")
+    wide = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 780, "height": 900})
-    page.wait_for_function("width => gridContainer.clientWidth < width", arg=wide)
+    page.wait_for_function("width => pageModules.scroll.gridContainer.clientWidth < width", arg=wide)
     page.evaluate(SETTLE)
 
     visibility = page.evaluate(CARD_VISIBILITY)
@@ -191,12 +191,12 @@ def test_browse_resize_keeps_a_right_clicked_photo_visible(live_server, page):
     # screen down here. Not the last card: a reflow that shortens the grid
     # pins the scroll to the bottom, which would keep the final card visible
     # for reasons that have nothing to do with the correction under test.
-    page.evaluate("() => { gridContainer.scrollTop = Math.round(gridContainer.scrollHeight * 0.6); }")
+    page.evaluate("() => { pageModules.scroll.gridContainer.scrollTop = Math.round(pageModules.scroll.gridContainer.scrollHeight * 0.6); }")
     page.wait_for_function(SCROLL_SAMPLED)
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is False
     on_screen_id = page.evaluate(
         """() => {
-          const view = gridContainer.getBoundingClientRect();
+          const view = pageModules.scroll.gridContainer.getBoundingClientRect();
           const card = Array.from(document.querySelectorAll('.grid-card')).find(c => {
             const r = c.getBoundingClientRect();
             return r.top >= view.top && r.bottom <= view.bottom;
@@ -207,17 +207,17 @@ def test_browse_resize_keeps_a_right_clicked_photo_visible(live_server, page):
     assert on_screen_id is not None
     page.locator(f'.grid-card[data-id="{on_screen_id}"]').click(button="right")
     page.keyboard.press("Escape")
-    assert page.evaluate("selectedPhotoId") == on_screen_id
+    assert page.evaluate("browseState.selectedPhotoId") == on_screen_id
     # The coercion has to register as a click on a visible card, or the resize
     # is judged against where the *previous* selection was scrolled to.
-    assert page.evaluate("lastClickedPhotoId") == on_screen_id
-    assert page.evaluate("focusedCardWasOnScreen") is True
+    assert page.evaluate("browseState.lastClickedPhotoId") == on_screen_id
+    assert page.evaluate("pageModules.scroll.focusedCardWasOnScreen") is True
 
-    narrow = page.evaluate("() => gridContainer.clientWidth")
+    narrow = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 1400, "height": 900})
-    page.wait_for_function("width => gridContainer.clientWidth > width", arg=narrow)
+    page.wait_for_function("width => pageModules.scroll.gridContainer.clientWidth > width", arg=narrow)
     page.evaluate(SETTLE)
-    assert page.evaluate("() => gridContainer.scrollTop") > 0, (
+    assert page.evaluate("() => pageModules.scroll.gridContainer.scrollTop") > 0, (
         "the reflow clamped the scroll to the top, so this asserts nothing"
     )
 
@@ -263,14 +263,14 @@ def test_browse_resize_keeps_a_collapsed_stack_cover_visible(live_server, page):
     page.locator(f'.grid-card[data-id="{cover_id}"] .browse-stack-badge').click()
 
     # Both the focus and the last click are now on unrendered members.
-    assert page.evaluate("selectedPhotoId") in hidden
-    assert page.evaluate("lastClickedPhotoId") in hidden
-    assert page.evaluate("() => !!renderedCardForFocus(focusedBrowsePhotoId())") is True
+    assert page.evaluate("browseState.selectedPhotoId") in hidden
+    assert page.evaluate("browseState.lastClickedPhotoId") in hidden
+    assert page.evaluate("() => !!pageModules.scroll.renderedCardForFocus(pageModules.scroll.focusedBrowsePhotoId())") is True
 
-    page.evaluate("() => noteFocusedCardVisibility()")
-    wide = page.evaluate("() => gridContainer.clientWidth")
+    page.evaluate("() => pageModules.scroll.noteFocusedCardVisibility()")
+    wide = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 780, "height": 900})
-    page.wait_for_function("width => gridContainer.clientWidth < width", arg=wide)
+    page.wait_for_function("width => pageModules.scroll.gridContainer.clientWidth < width", arg=wide)
     page.evaluate(SETTLE)
 
     visibility = page.evaluate(
@@ -306,14 +306,14 @@ def test_browse_thumbnail_size_change_resamples_focus_visibility(live_server, pa
     cards = page.locator(".grid-card")
     cards.last.click()
     page.evaluate(SETTLE)
-    page.evaluate("() => { gridContainer.scrollTop = 0; }")
+    page.evaluate("() => { pageModules.scroll.gridContainer.scrollTop = 0; }")
     page.wait_for_function(SCROLL_SAMPLED)
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is False
 
     slider.fill("120")  # six columns: every card fits in the first rows
     page.evaluate(SETTLE)
-    assert page.evaluate("() => gridContainer.scrollTop") == 0
+    assert page.evaluate("() => pageModules.scroll.gridContainer.scrollTop") == 0
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is True
-    assert page.evaluate("focusedCardWasOnScreen") is True, (
+    assert page.evaluate("pageModules.scroll.focusedCardWasOnScreen") is True, (
         "a grid-only reflow left the sampled visibility stale"
     )

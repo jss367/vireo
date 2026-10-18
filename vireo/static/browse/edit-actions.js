@@ -1,15 +1,37 @@
-/* Browse: detail-panel edits (rating, flag, color, wildlife, keywords) and the batch inspector.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: detail-panel edits (rating, flag, color, wildlife, keywords) and the batch inspector. ES module (see
+   browse/README.md). */
+import { _noteColorLabelEdits, state } from './state.js';
+import { checkPendingSync, safeFetch } from './shared.js';
+import {
+  _clearRepresentativeStateAfterKeywordRemoval, _clearRepresentativeStateIfIneligible,
+  _keywordNameFromCache, _refreshBatchInspectorIfActive, _refreshBrowseKeywordState,
+  batchSetColorLabel, batchSetFlag, batchSetRating,
+} from './batch-actions.js';
+import { loadDetail, showUndoToast, updateDetailFlagButtons } from './detail.js';
+import { refreshGridCards, renderGrid } from './grid.js';
+import {
+  getKeywordAutocompleteState, hideKeywordSuggestions, invalidateKeywordAutocompleteCache,
+} from './keyword-autocomplete.js';
+import { renderLocationEmpty } from './location.js';
+import { panelRequests } from './panel-requests.js';
+import { findBrowsePhoto, loadSelectionKeywordSuggestions } from './selection-panel.js';
+import { getActiveSelection, selectionIdsKey } from './selection.js';
+import {
+  MUTATION_KEYWORD, refreshActiveCollectionAfterMembershipChange,
+  scheduleCollectionCountsRefresh,
+} from './sidebar-collections.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import {
+  loadedBrowsePhotoIds, reconcileBrowseStackCovers, refreshExpandedBrowseStackMembers,
+} from './stacks.js';
+import { bindBrowseMarkup } from './markup.js';
 
-function refreshPendingSyncBanner() {
-  if (typeof checkPendingSync === 'function') {
-    checkPendingSync();
-  }
+export function refreshPendingSyncBanner() {
+  checkPendingSync();
 }
 
 /* ---------- Edit Actions ---------- */
-async function setRating(/** @type {number} */ photoId, /** @type {number} */ rating) {
+export async function setRating(/** @type {number} */ photoId, /** @type {number} */ rating) {
   try {
     await safeFetch('/api/photos/' + photoId + '/rating', {
       method: 'POST',
@@ -26,14 +48,14 @@ async function setRating(/** @type {number} */ photoId, /** @type {number} */ ra
     refreshExpandedBrowseStackMembers([photoId]);
     scheduleCollectionCountsRefresh();
     // The user may have moved on during the POST. loadDetail(A) while B is
-    // open would hide B's panel and null _detailPhotoId, then refuse to render
+    // open would hide B's panel and null detailPhotoId, then refuse to render
     // A, leaving the panel blank.
-    if (selectedPhotoId === photoId) loadDetail(photoId);
+    if (state.selectedPhotoId === photoId) loadDetail(photoId);
     refreshPendingSyncBanner();
   } catch(e) {}
 }
 
-async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
+export async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
   var sel = getActiveSelection();
   if (sel.length > 1) {
     var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false, value: null };
@@ -45,8 +67,8 @@ async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
     await batchSetFlag(target);
     return;
   }
-  if (!selectedPhotoId) return;
-  var photoId = selectedPhotoId;
+  if (!state.selectedPhotoId) return;
+  var photoId = state.selectedPhotoId;
   try {
     await safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST',
@@ -59,12 +81,12 @@ async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
     await reconcileBrowseStackCovers([photoId]);
     refreshGridCards([photoId]);
     refreshExpandedBrowseStackMembers([photoId]);
-    if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    if (state.selectedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
   } catch(e) {}
 }
 
-function updateDetailWildlifeExcluded(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+export function updateDetailWildlifeExcluded(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('detailWildlifeExcluded'));
   if (!btn) return;
   var excluded = !!(photo && photo.wildlife_excluded);
@@ -75,7 +97,7 @@ function updateDetailWildlifeExcluded(/** @type {BrowsePhoto | null | undefined}
     : 'Exclude this photo from wildlife detection and classification';
 }
 
-async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** @type {boolean} */ excluded) {
+export async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** @type {boolean} */ excluded) {
   await safeFetch('/api/photos/' + photoId + '/wildlife_excluded', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -85,28 +107,59 @@ async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** @type {
   if (p) p.wildlife_excluded = excluded ? 1 : 0;
   renderGrid();
   refreshExpandedBrowseStackMembers([photoId]);
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  if (state.selectedPhotoId === photoId) loadDetail(photoId);
   showUndoToast();
 }
 
-async function toggleDetailWildlifeExcluded() {
-  if (!selectedPhotoId) return;
+export async function toggleDetailWildlifeExcluded() {
+  if (!state.selectedPhotoId) return;
   // Read the current value via findBrowsePhoto so a stack member that lives
   // only in browseStackMembers (not the top-level photos array) still yields
   // its true wildlife_excluded state. photos.find() would return undefined for
   // hidden members and always send excluded=true — clicking "Include Wildlife
   // Classification" on an already-excluded member would silently re-exclude
   // it instead of including it.
-  var p = findBrowsePhoto(selectedPhotoId);
+  var p = findBrowsePhoto(state.selectedPhotoId);
   var current = p ? !!p.wildlife_excluded : false;
   try {
-    await setWildlifeExcludedFor(selectedPhotoId, !current);
+    await setWildlifeExcludedFor(state.selectedPhotoId, !current);
   } catch(e) {}
 }
 
-async function fetchColorLabels(/** @type {number[]} */ photoIds) {
+// Re-ask the server when a write fails. Without this the failed write leaves
+// the worst of both: its stamp makes any fetch that started before it skip
+// these ids, while that fetch still adds them to colorLabelsFetched — so a
+// labelled photo the user edited before initial hydration finished reads as a
+// definite "no color" until reload (Codex P2 on PR #1668).
+//
+// The refetch alone is the whole repair; the stamp must NOT be cleared. Stamps
+// only ever advance through _noteColorLabelEdits, so a stamp is never greater
+// than the generation this refetch captures and can never block its own
+// response. Clearing it would instead un-guard a *concurrent* write: with
+// overlapping writes on one photo, an earlier request failing after a later one
+// succeeded would drop the successful write's completion stamp, letting a GET
+// issued before either of them overwrite the label the user actually chose
+// (Codex P2, second pass). Dropping the fetched marker is kept — until the
+// refetch lands we genuinely do not know this photo's color, and the batch
+// inspector should say so rather than assert "no color".
+export function _recoverColorLabelsAfterFailedWrite(/** @type {number[]} */ ids) {
+  ids.forEach(function(id) { state.colorLabelsFetched.delete(id); });
+  return fetchColorLabels(ids).then(function() {
+    refreshGridCards(ids);
+    refreshExpandedBrowseStackMembers(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
+    if (state.selectedPhotoId != null && ids.indexOf(state.selectedPhotoId) !== -1
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
+
+export async function fetchColorLabels(/** @type {number[]} */ photoIds) {
   if (!photoIds.length) return;
-  var gen = colorLabelGen;
+  var gen = state.colorLabelGen;
   // Chunk the GET URL so oversized stacks (or any large id set) don't
   // exceed the browser/proxy/server request-target limit and drop the
   // whole page's color labels when a stack expansion hydrates a large
@@ -128,24 +181,24 @@ async function fetchColorLabels(/** @type {number[]} */ photoIds) {
   // delete would drop the fresh value, and the merge would overwrite it with
   // the older server truth. Ids the user never touched are still applied.
   photoIds.forEach(function(id) {
-    if ((colorLabelEditGen[id] || 0) > gen) return;
-    delete colorLabels[id];
+    if ((state.colorLabelEditGen[id] || 0) > gen) return;
+    delete state.colorLabels[id];
   });
   for (var pid in combined) {
-    if ((colorLabelEditGen[pid] || 0) > gen) continue;
-    var color = combined[pid]; if (color != null) colorLabels[pid] = color;
+    if ((state.colorLabelEditGen[pid] || 0) > gen) continue;
+    var color = combined[pid]; if (color != null) state.colorLabels[pid] = color;
   }
   // Mark every requested id as fetched — an absent id in `combined` means
   // "no color set" now that we've asked, so the batch inspector can trust
   // colorLabels[id] === undefined for these ids as a definite value.
-  photoIds.forEach(function(id) { colorLabelsFetched.add(id); });
+  photoIds.forEach(function(id) { state.colorLabelsFetched.add(id); });
   // A batch selection that included any of these ids may have rendered as
   // unanimous no-colour with no Mixed marker; refresh it now that we can
   // trust the state.
   _refreshBatchInspectorIfActive();
 }
 
-async function setColorLabel(/** @type {string | null} */ color) {
+export async function setColorLabel(/** @type {string | null} */ color) {
   var sel = getActiveSelection();
   if (sel.length > 1) {
     var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false, value: null };
@@ -156,10 +209,10 @@ async function setColorLabel(/** @type {string | null} */ color) {
     await batchSetColorLabel(target);
     return;
   }
-  if (!selectedPhotoId) return;
-  var photoId = selectedPhotoId;
+  if (!state.selectedPhotoId) return;
+  var photoId = state.selectedPhotoId;
   _noteColorLabelEdits([photoId]);
-  var current = colorLabels[photoId] || null;
+  var current = state.colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
   try {
     await safeFetch('/api/photos/' + photoId + '/color_label', {
@@ -170,12 +223,12 @@ async function setColorLabel(/** @type {string | null} */ color) {
   } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
   _noteColorLabelEdits([photoId]);
   if (newColor) {
-    colorLabels[photoId] = newColor;
+    state.colorLabels[photoId] = newColor;
   } else {
-    delete colorLabels[photoId];
+    delete state.colorLabels[photoId];
   }
-  colorLabelsFetched.add(photoId);
-  if (selectedPhotoId === photoId) updateDetailColors();
+  state.colorLabelsFetched.add(photoId);
+  if (state.selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
   refreshExpandedBrowseStackMembers([photoId]);
   scheduleCollectionCountsRefresh();
@@ -187,8 +240,8 @@ function updateDetailColorsValue(/** @type {string | null} */ current) {
   });
 }
 
-function updateDetailColors() {
-  updateDetailColorsValue((selectedPhotoId == null ? null : colorLabels[selectedPhotoId]) || null);
+export function updateDetailColors() {
+  updateDetailColorsValue((state.selectedPhotoId == null ? null : state.colorLabels[state.selectedPhotoId]) || null);
 }
 
 // --- Multi-select (batch) inspector ---------------------------------------
@@ -197,7 +250,7 @@ function updateDetailColors() {
 // value when unanimous, or a "Mixed" marker when the selected photos differ,
 // and edits apply to the whole selection.
 
-function _batchToggleMixed(/** @type {string} */ id, /** @type {boolean} */ show) {
+export function _batchToggleMixed(/** @type {string} */ id, /** @type {boolean} */ show) {
   var el = document.getElementById(id);
   if (el) el.hidden = !show;
 }
@@ -227,7 +280,7 @@ function _batchFlagState(/** @type {number[]} */ ids) {
   });
 }
 function _batchColorState(/** @type {number[]} */ ids) {
-  return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
+  return _batchUnanimous(ids, function(id) { return state.colorLabels[id] || null; });
 }
 
 // Only trust unanimity when every selected photo is loaded in the current grid
@@ -245,10 +298,10 @@ function _batchAllLoaded(/** @type {number[]} */ ids) {
 // colour column: a selection made before that fetch returns would otherwise
 // render as unanimous no-colour without a Mixed marker.
 function _batchColorLoaded(/** @type {number[]} */ ids) {
-  return ids.every(function(id) { return colorLabelsFetched.has(id); });
+  return ids.every(function(id) { return state.colorLabelsFetched.has(id); });
 }
 
-function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{preserveExifSuggestion?: boolean, preserveLocation?: boolean}} */ opts = {}) {
+export function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{preserveExifSuggestion?: boolean, preserveLocation?: boolean}} */ opts = {}) {
   opts = opts || {};
   var known = _batchAllLoaded(ids);
 
@@ -278,9 +331,11 @@ function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{preserveE
   var ratingHtml = '';
   for (var i = 1; i <= 5; i++) {
     ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
-      '" onclick="batchRate(' + i + ')">&#9733;</span>';
+      '" data-rating="' + i + '" data-browse-on="click:batchRate">&#9733;</span>';
   }
-  /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
+  var ratingEl = /** @type {HTMLElement} */ (document.getElementById('detailRating'));
+  ratingEl.innerHTML = ratingHtml;
+  bindBrowseMarkup(ratingEl);
   // Show Mixed whenever we can't confirm unanimity — including partially-loaded
   // selections where `known` is false. Hiding Mixed there made "0 stars / None /
   // no color" render identically to a truly unanimous no-value selection.
@@ -309,7 +364,7 @@ function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{preserveE
   }
 }
 
-async function batchRate(/** @type {number} */ rating) {
+export async function batchRate(/** @type {number} */ rating) {
   var ids = getActiveSelection();
   if (ids.length < 1) return;
   var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false, value: null };
@@ -320,18 +375,18 @@ async function batchRate(/** @type {number} */ rating) {
   await batchSetRating(target);
 }
 
-async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = null) {
+export async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = null) {
   var ids = getActiveSelection();
   var useBatch = ids.length > 1;
   var batchSelectionKey = selectionIdsKey(ids);
-  if (!selectedPhotoId && !useBatch) return;
+  if (!state.selectedPhotoId && !useBatch) return;
   var input = /** @type {HTMLInputElement} */ (document.getElementById('addKeywordInput'));
   var name = input.value.trim();
   if (!name) return;
-  var state = getKeywordAutocompleteState('addKeywordInput');
+  var acState = getKeywordAutocompleteState('addKeywordInput');
   var selectedKeyword = keyword || (
-    state.selectedKeyword && state.selectedKeyword.name === name
-      ? state.selectedKeyword
+    acState.selectedKeyword && acState.selectedKeyword.name === name
+      ? acState.selectedKeyword
       : null
   );
   /** @type {{keyword_id?: number, name?: string, photo_ids?: number[]}} */ var payload = selectedKeyword && selectedKeyword.id
@@ -341,7 +396,7 @@ async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = nu
   try {
     var endpoint = useBatch
       ? '/api/batch/keyword'
-      : '/api/photos/' + selectedPhotoId + '/keywords';
+      : '/api/photos/' + state.selectedPhotoId + '/keywords';
     await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -350,10 +405,10 @@ async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = nu
     // skipDetail when the single-photo branch below runs a full loadDetail,
     // which re-fetches this photo's predictions anyway.
     await _refreshBrowseKeywordState(ids, {
-      skipDetail: !useBatch && !!selectedPhotoId,
+      skipDetail: !useBatch && !!state.selectedPhotoId,
     });
     input.value = '';
-    state.selectedKeyword = null;
+    acState.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
     // Same reason as _afterLocationMutation: if a multi-selection is still
@@ -364,11 +419,11 @@ async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = nu
       // Selection is unchanged after a batch keyword save; keep any in-progress
       // location input the user may have typed.
       renderBatchInspector(currentSel, { preserveLocation: true });
-    } else if (selectedPhotoId) {
-      loadDetail(selectedPhotoId);
+    } else if (state.selectedPhotoId) {
+      loadDetail(state.selectedPhotoId);
     }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
-      /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+      panelRequests.keywords.invalidate();
       loadSelectionKeywordSuggestions(ids);
     }
     loadKeywords();
@@ -378,7 +433,7 @@ async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = nu
   } catch(e) {}
 }
 
-async function removeKeyword(/** @type {number} */ photoId, /** @type {number} */ keywordId) {
+export async function removeKeyword(/** @type {number} */ photoId, /** @type {number} */ keywordId) {
   try {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
@@ -390,7 +445,7 @@ async function removeKeyword(/** @type {number} */ photoId, /** @type {number} *
       _keywordNameFromCache(keywordId) || null,
     );
     // Same guard as setRating: don't blank the panel of a photo opened since.
-    if (selectedPhotoId === photoId) loadDetail(photoId);
+    if (state.selectedPhotoId === photoId) loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
@@ -399,7 +454,7 @@ async function removeKeyword(/** @type {number} */ photoId, /** @type {number} *
 }
 
 /* ---------- Keyword Type Dropdown ---------- */
-function toggleTypeDropdown(/** @type {HTMLElement} */ indicator, /** @type {number} */ kwId) {
+export function toggleTypeDropdown(/** @type {HTMLElement} */ indicator, /** @type {number} */ kwId) {
   // Close all other open dropdowns first
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.keyword-type-dropdown.open')).forEach(function(dd) {
     if (dd.dataset.kwId !== String(kwId)) dd.classList.remove('open');
@@ -408,7 +463,7 @@ function toggleTypeDropdown(/** @type {HTMLElement} */ indicator, /** @type {num
   if (dropdown) dropdown.classList.toggle('open');
 }
 
-async function setKeywordType(/** @type {number} */ kwId, /** @type {string} */ newType, /** @type {HTMLElement} */ el) {
+export async function setKeywordType(/** @type {number} */ kwId, /** @type {string} */ newType, /** @type {HTMLElement} */ el) {
   try {
     await safeFetch('/api/keywords/' + kwId, {
       method: 'PUT',
@@ -424,9 +479,9 @@ async function setKeywordType(/** @type {number} */ kwId, /** @type {string} */ 
     // State repaints them, except where loadDetail below already will.
     await _refreshBrowseKeywordState(
       loadedBrowsePhotoIds(),
-      { skipDetail: !!selectedPhotoId },
+      { skipDetail: !!state.selectedPhotoId },
     );
-    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    if (state.selectedPhotoId) loadDetail(state.selectedPhotoId);
     loadKeywords();
   } catch(e) {}
 }

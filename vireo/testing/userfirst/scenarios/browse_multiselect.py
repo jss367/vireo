@@ -13,8 +13,12 @@ rejected badge — not just the last-clicked one.
 def run(session):
     session.goto("/browse")
     session.page.wait_for_selector(".grid-card[data-id]", state="visible", timeout=5000)
-    # Keyboard handler bails out when _shortcuts hasn't been fetched yet.
-    session.page.wait_for_function("() => window._shortcuts !== null", timeout=5000)
+    # Keyboard handler bails out when _shortcuts hasn't been fetched yet. Browse
+    # is ES modules: import the page's own config module to read it.
+    session.page.wait_for_function(
+        "async () => (await import('/static/browse/config.js'))._shortcuts !== null",
+        timeout=5000,
+    )
 
     ids = session.eval(
         """(() => Array.from(document.querySelectorAll('.grid-card[data-id]'))
@@ -43,7 +47,7 @@ def run(session):
     )
     session.screenshot("after-multiselect")
 
-    sel_size = session.eval("selectedPhotos.size")
+    sel_size = session.eval("(async () => (await import('/static/browse/state.js')).state.selectedPhotos.size)()")
     session.assert_that(
         sel_size == 3,
         f"selectedPhotos should contain all three clicked photos; got size={sel_size}",

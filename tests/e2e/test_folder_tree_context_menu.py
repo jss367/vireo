@@ -641,7 +641,7 @@ def test_folder_tree_synthesized_row_shows_workspace_photo_count(
                 "state": "recovery",
                 "recovery_kind": "stage",
                 "visible_ancestor_folder_id": None,
-                "folder_name": "photos-nas",
+                "folder_name": "browseState.photos-nas",
                 "workspace_photo_count": 137,
             }],
             "jobs": [],
@@ -804,7 +804,7 @@ def test_folder_tree_synthesizes_recovery_when_initial_tree_is_empty(
 
     page.evaluate(
         """([data]) => {
-          window.browseFolderRows = [];
+          browseState.browseFolderRows = [];
           document.getElementById('folderTree').innerHTML = '';
           window.vireoLocalFolderData = data;
           window.dispatchEvent(new CustomEvent(
@@ -929,7 +929,7 @@ def test_folder_tree_filter_by_folder_fires_filter(live_server, page):
 
     # filterByFolder toggles activeFolderId; the first click should set it.
     page.wait_for_function(
-        f"window.activeFolderId === {fid}", timeout=3000
+        f"browseState.activeFolderId === {fid}", timeout=3000
     )
 
 
@@ -1050,7 +1050,7 @@ def test_folder_workspace_modal_ignores_stale_response(live_server, page):
     page.route(f"**/api/folders/{first_id}/workspaces", hold_first)
     page.goto(f"{live_server['url']}/browse")
 
-    page.evaluate("fid => { showFolderWorkspaces(fid); }", first_id)
+    page.evaluate("fid => { pageModules.contextMenus.showFolderWorkspaces(fid); }", first_id)
     page.wait_for_function("() => document.querySelector('#folderWorkspacesModal').classList.contains('open')")
 
     with page.expect_response(
@@ -1058,7 +1058,7 @@ def test_folder_workspace_modal_ignores_stale_response(live_server, page):
             f"/api/folders/{second_id}/workspaces"
         ) and response.status == 200
     ):
-        page.evaluate("fid => { showFolderWorkspaces(fid); }", second_id)
+        page.evaluate("fid => { pageModules.contextMenus.showFolderWorkspaces(fid); }", second_id)
 
     expected_path = db.folders.get(second_id)["path"]
     expect(page.locator("#folderWorkspacesPath")).to_have_text(expected_path)
@@ -1091,10 +1091,10 @@ def test_folder_tree_right_click_does_not_trigger_filter(live_server, page):
 
     item = page.locator(".tree-item[data-folder-id]").first
     item.wait_for(state="visible")
-    assert page.evaluate("window.activeFolderId") in (None, 0)
+    assert page.evaluate("browseState.activeFolderId") in (None, 0)
 
     item.click(button="right")
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
 
     # activeFolderId should not have been mutated by the right-click itself.
-    assert page.evaluate("window.activeFolderId") in (None, 0)
+    assert page.evaluate("browseState.activeFolderId") in (None, 0)

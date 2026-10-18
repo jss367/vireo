@@ -1,6 +1,62 @@
-/* Browse: page startup (bootstrap and photo deep link). Loads last:
-   it starts the work every other browse script defines, so nothing it
-   reaches can be undefined when it runs. */
+/* Browse: page startup, the entry module browse.html loads. Importing it
+   loads the rest of the page's modules; this file then composes the filter
+   bar row, binds the markup's handlers, registers the page hooks and starts
+   the page (bootstrap, folder-health subscription, infinite scroll, photo deep
+   link). Every module it imports has been evaluated by the time its body
+   runs. ES module (see browse/README.md). */
+import { setBrowseTotals, state } from './state.js';
+import {
+  VireoBrowseCompare, VireoFilter, VireoViewPreferences, _reconcileMissingFoldersInitSnapshot,
+  missingFoldersSnapshotVersion, preferredScrollBehavior, registerPageHooks, safeFetch,
+  showToast,
+} from './shared.js';
+import { loadUntilPhotoRendered } from './anchors.js';
+import {
+  addToCollection, batchAddKeyword, batchDelete, batchSetFlag, batchSetRating,
+  openCaptureTimeModal,
+} from './batch-actions.js';
+import { hydrateColorLabelsForRenderedPage } from './cards.js';
+import { _cfgPromise, applyBrowseConfig } from './config.js';
+import {
+  copyPhotoPaths, revealPhoto, setColorLabelFor, setFlagFor, setRatingFor,
+} from './context-menus.js';
+import { closeDetail, loadSummary } from './detail.js';
+import { refreshPendingSyncBanner, setWildlifeExcludedFor } from './edit-actions.js';
+import {
+  applyExportPreset, buildExportPreflightRequest, markExportCustom, openExportModal,
+  openPhotoExportModal, selectedExportMetadataFields, updateExportFormatControls,
+  updateExportPreview,
+} from './export.js';
+import {
+  refreshBrowseAfterFolderHealthChange, waitForFolderHealthRefreshesToSettle,
+} from './folder-health.js';
+import { getGridCard, renderGrid } from './grid.js';
+import { moveBrowseSelection } from './keyboard.js';
+import { openBrowseShortcutPhoto, removeDeletedLightboxPhoto } from './lightbox.js';
+import {
+  claimBrowseWindow, loadedWindowOffset, onBrowseFilterChange, resetAndLoad,
+  updatePreviousPhotosButton,
+} from './loading.js';
+import { afterHistoryChange } from './prediction-panels.js';
+import { ensureViewportHydrated, observer, rearmInfiniteScrollObserver } from './scroll.js';
+import { bindBrowseMarkup } from './markup.js';
+import { bindSelectionPanelActions } from './selection-panel-events.js';
+import { browseCompare, openBrowseCompare } from './selection-panel.js';
+import { getActiveSelection } from './selection.js';
+import {
+  filterByCollection, loadCollectionCounts, loadCollections, renderCollectionList,
+  syncSidebarHighlights,
+} from './sidebar-collections.js';
+import { renderFolderTree } from './sidebar-folders.js';
+import { renderKeywordTree } from './sidebar-keywords.js';
+import { browseStacksEnabled } from './stacks.js';
+import { updateFilterSummary, updateThumbSize } from './view-controls.js';
+
+// The desktop build resolves template includes only, so compose the filter
+// bar's shared row (sort, size, stacks, boxes, calendar) in the browser.
+/** @type {HTMLElement} */ (document.querySelector('#vireoFilterBar .vf-secondary')).appendChild(
+  /** @type {HTMLElement} */ (document.querySelector('.browse-view-controls'))
+);
 
 /* ---------- Page hooks ---------- */
 // The shared navbar and lightbox call these through Vireo.pageHook (see
@@ -8,11 +64,11 @@
 // rating/flag/label/export menu and Delete, and undo/redo. Register them
 // before the page starts, as they were globals from the moment the browse
 // scripts parsed.
-Vireo.registerPageHooks({
+registerPageHooks({
   getActiveSelection: getActiveSelection,
-  getSelectedPhotoId: function() { return selectedPhotoId; },
-  getPhotos: function() { return photos; },
-  getDetailPhotoId: function() { return window._detailPhotoId ?? null; },
+  getSelectedPhotoId: function() { return state.selectedPhotoId; },
+  getPhotos: function() { return state.photos; },
+  getDetailPhotoId: function() { return state.detailPhotoId; },
   openBrowseShortcutPhoto: openBrowseShortcutPhoto,
   moveBrowseSelection: moveBrowseSelection,
   batchSetRating: batchSetRating,
@@ -32,24 +88,24 @@ Vireo.registerPageHooks({
   batchDelete: batchDelete,
   removeDeletedLightboxPhoto: removeDeletedLightboxPhoto,
   afterHistoryChange: afterHistoryChange,
+  // The export modal's shared controllers (vireo-export-presets.js,
+  // vireo-export-collisions.js).
+  applyExportPreset: applyExportPreset,
+  markExportCustom: markExportCustom,
+  updateExportFormatControls: updateExportFormatControls,
+  updateExportPreview: updateExportPreview,
+  selectedExportMetadataFields: selectedExportMetadataFields,
+  buildExportPreflightRequest: buildExportPreflightRequest,
 });
 
+/* ---------- Markup ---------- */
+// The controls that used to carry inline on*= handlers (data-browse-on, see
+// markup.js) and the comparison overlay's (_photo_compare.html).
+bindBrowseMarkup();
+VireoBrowseCompare.bindControls(document, function() { return browseCompare; });
+
 /* ---------- Bootstrap ---------- */
-// ``folderHealthRefreshSeq`` must be *initialized* before ``bootstrapBrowse()``
-// is invoked, not merely declared. ``var`` hoists the declaration to the top
-// of the script but leaves the value ``undefined`` until this line executes;
-// the paired assignment lives further down at the health-refresh helpers.
-// Bootstrap synchronously reads ``folderHealthRefreshSeq`` into
-// ``bootstrapHealthSeq`` before its first await, so with the initialization
-// happening later, the snapshot was ``undefined``, the outer script then
-// ran the ``= 0`` assignment while bootstrap was awaiting ``/api/browse/init``,
-// and the post-await comparison ``0 !== undefined`` was always true. That
-// made ``healthChangedDuringInit`` fire on every normal load, skipping the
-// render block and leaving Browse empty until VireoFilter.init happened to
-// re-fetch. Initialize here so the pre-await snapshot reads the same ``0``
-// the rest of the script sees (Codex review r3686317674).
-var folderHealthRefreshSeq = 0;
-/** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.bindActions();
+bindSelectionPanelActions();
 VireoViewPreferences.restoreAll(/** @type {HTMLElement | null} */ (document.querySelector('.browse-view-controls')));
 updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
 bootstrapBrowse();
@@ -59,7 +115,7 @@ bootstrapBrowse();
 // folder-health.js: the refresh reaches most of the page, so the listener
 // must not be live before every browse script has loaded.
 document.addEventListener('vireo:folder-health-changed', function(event) {
-  _activeFolderHealthRefresh = refreshBrowseAfterFolderHealthChange(
+  state._activeFolderHealthRefresh = refreshBrowseAfterFolderHealthChange(
     event && event.detail);
 });
 
@@ -73,7 +129,7 @@ async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
-  loading = true;
+  state.loading = true;
   var bootstrapSucceeded = false;
   // Declared out here so the finally-region guard below can read it even
   // if /api/browse/init throws before the assignment inside the try.
@@ -92,14 +148,14 @@ async function bootstrapBrowse() {
   // in-try assignment used to be skipped by the throw, leaving the
   // finally-region guard to release the load lock the concurrent health
   // refresh's ``loadPhotos`` still owned (Codex review r3686191138).
-  var bootstrapHealthSeq = folderHealthRefreshSeq;
+  var bootstrapHealthSeq = state.folderHealthRefreshSeq;
   // The sort <select> is in the DOM before init resolves, so the user can
   // change it (or edit a restored filter) while /api/browse/init is pending.
-  // applyFilters() → resetAndLoad() then claims the window and starts its own
-  // loadPhotos(); this bootstrap must not paint its now-abandoned dataset over
-  // that, nor release the ``loading`` mutex the newer load holds — the same
-  // stale-window hazard the deep-link loader guards against (Codex review
-  // r3792769108).
+  // onSortChanged() / onBrowseFilterChange() → resetAndLoad() then claims the
+  // window and starts its own loadPhotos(); this bootstrap must not paint its
+  // now-abandoned dataset over that, nor release the ``loading`` mutex the
+  // newer load holds — the same stale-window hazard the deep-link loader
+  // guards against (Codex review r3792769108).
   var bootstrapWindowIsCurrent = claimBrowseWindow();
   // Parse URL scope params BEFORE the first await. A folder-health event that
   // fires while ``_cfgPromise`` is still pending runs
@@ -114,11 +170,11 @@ async function bootstrapBrowse() {
   // means any concurrent refresh sees the right scope.
   var pageParams = new URLSearchParams(window.location.search);
   var initialFolderId = parseInt(pageParams.get('folder_id') || '', 10);
-  if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+  if (!isNaN(initialFolderId)) state.activeFolderId = initialFolderId;
   var initialCollectionId = parseInt(pageParams.get('collection_id') || '', 10);
   if (!isNaN(initialCollectionId)) {
-    activeCollectionId = initialCollectionId;
-    dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+    state.activeCollectionId = initialCollectionId;
+    state.dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
   }
   try {
     applyBrowseConfig(await _cfgPromise);
@@ -129,19 +185,19 @@ async function bootstrapBrowse() {
     var initParams = new URLSearchParams();
     initParams.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
     if (browseStacksEnabled()) initParams.set('stacks', '1');
-    if (activeFolderId) initParams.set('folder_id', String(activeFolderId));
+    if (state.activeFolderId) initParams.set('folder_id', String(state.activeFolderId));
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
     // in either case.
-    if (activeCollectionId) initParams.set('collection_id', String(activeCollectionId));
-    initParams.set('per_page', String(perPage));
+    if (state.activeCollectionId) initParams.set('collection_id', String(state.activeCollectionId));
+    initParams.set('per_page', String(state.perPage));
     var missingSnapshotVersionAtInitStart =
-      typeof _missingFoldersSnapshotVersion !== 'undefined'
-        ? _missingFoldersSnapshotVersion
+      typeof missingFoldersSnapshotVersion() !== 'undefined'
+        ? missingFoldersSnapshotVersion()
         : null;
     var data = await safeFetch('/api/browse/init?' + initParams.toString());
-    healthChangedDuringInit = folderHealthRefreshSeq !== bootstrapHealthSeq;
+    healthChangedDuringInit = state.folderHealthRefreshSeq !== bootstrapHealthSeq;
 
     // Seed the navbar's missing-folder snapshot from init's workspace-scoped
     // view so the first /api/folders/missing observation has a baseline to
@@ -162,8 +218,7 @@ async function bootstrapBrowse() {
     // (Codex review r3686452019). Conversely, a poll applied before this
     // request is known older and the helper adopts init directly
     // (Codex review r3687277899).
-    if (Array.isArray(data.missing_folder_ids) &&
-        typeof _reconcileMissingFoldersInitSnapshot === 'function') {
+    if (Array.isArray(data.missing_folder_ids)) {
       var initWasStale = _reconcileMissingFoldersInitSnapshot(
         data.missing_folder_ids,
         missingSnapshotVersionAtInitStart,
@@ -177,22 +232,22 @@ async function bootstrapBrowse() {
       // newer load owns the grid — otherwise a sort change during init would
       // leave Browse with no folder/keyword/collection lists at all.
       if (data.active_workspace_id != null) {
-        browseWorkspaceId = Number(data.active_workspace_id);
+        state.browseWorkspaceId = Number(data.active_workspace_id);
       }
       renderFolderTree(data.folders || []);
       renderKeywordTree(data.keywords || []);
       renderCollectionList(data.collections || []);
       if (bootstrapWindowIsCurrent()) {
         // Populate everything from a single response
-        photos = data.photos || [];
+        state.photos = data.photos || [];
         setBrowseTotals(data);
-        currentPage = 2; // next page to load
-        earliestPage = 1; // bootstrap always starts at the top of the dataset
-        if (photos.length >= totalPhotos) allLoaded = true;
+        state.currentPage = 2; // next page to load
+        state.earliestPage = 1; // bootstrap always starts at the top of the dataset
+        if (state.photos.length >= state.totalPhotos) state.allLoaded = true;
 
         renderGrid();
         updatePreviousPhotosButton();
-        browseDatasetReady = true;
+        state.browseDatasetReady = true;
         updateFilterSummary();
         hydrateColorLabelsForRenderedPage(bootstrapWindowIsCurrent);
       }
@@ -211,7 +266,7 @@ async function bootstrapBrowse() {
     // Universal filter bar: registry + persisted/deep-linked state load
     // async; when it comes up with active filters the unfiltered first
     // paint above is stale, so reload through the rules path.
-    browseFilterInitPromise = VireoFilter.init({
+    state.browseFilterInitPromise = VireoFilter.init({
       page: 'browse',
       root: document.getElementById('vireoFilterBar'),
       scopeLabel: 'Workspace \u00b7 All available photos',
@@ -224,9 +279,9 @@ async function bootstrapBrowse() {
       // clears activeCollectionId on filter apply, so this is a no-op there.
       getScope: function() {
         return {
-          folder_id: activeFolderId,
-          collection_id: (activeCollectionId && dashboardCollectionScope)
-            ? activeCollectionId : null,
+          folder_id: state.activeFolderId,
+          collection_id: (state.activeCollectionId && state.dashboardCollectionScope)
+            ? state.activeCollectionId : null,
         };
       },
       onCollectionSaved: function() { loadCollections(); },
@@ -238,8 +293,8 @@ async function bootstrapBrowse() {
     // any queued sidebar click (e.g. collection B awaiting init) resume as
     // stale \u2014 reopening the URL's collection A over the user's later
     // selection (Codex review r3624637674).
-    var bootstrapScopeGen = browseScopeGen;
-    browseFilterInitPromise.then(function() {
+    var bootstrapScopeGen = state.browseScopeGen;
+    state.browseFilterInitPromise.then(function() {
       // A user sidebar click (folder/keyword/collection) may have changed
       // scope while init was pending. Their newer selection is authoritative
       // for the collection deep-link replay below — reopening the URL's
@@ -248,8 +303,8 @@ async function bootstrapBrowse() {
       // chips: returning early here left them rendered in the bar without
       // ever running through resetAndLoad, so the grid didn't match the
       // visible chips until the user edited them (Codex review r3624766665).
-      var scopeChanged = browseScopeGen !== bootstrapScopeGen;
-      VireoFilter.setResultTotal(totalUnderlyingPhotos);
+      var scopeChanged = state.browseScopeGen !== bootstrapScopeGen;
+      VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
       // dashboard-scoped (?dashboard_scope=1&collection_id=..., composable).
@@ -286,18 +341,16 @@ async function bootstrapBrowse() {
       // saved rules + visual expression loads correctly; the URL filter
       // chips are cleared because loadExpression() replaces state.root, so
       // surface a toast so the drop isn't silent.
-      var deepLinkedCollection = collectionLink && activeCollectionId != null ? collectionsById[activeCollectionId] : null;
+      var deepLinkedCollection = collectionLink && state.activeCollectionId != null ? state.collectionsById[state.activeCollectionId] : null;
       var deepLinkedIsVisual = !!(deepLinkedCollection && deepLinkedCollection.visual_json);
-      if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
+      if (collectionLink && hasExplicitFilterParams && !state.dashboardCollectionScope) {
         if (deepLinkedIsVisual) {
-          if (typeof showToast === 'function') {
-            showToast(
-              'Opened the visual collection — URL filters (rating/date/etc.) were dropped so the visual clause applies. Edit the filter bar to add them back.',
-              'info'
-            );
-          }
+          showToast(
+            'Opened the visual collection — URL filters (rating/date/etc.) were dropped so the visual clause applies. Edit the filter bar to add them back.',
+            'info'
+          );
         } else {
-          dashboardCollectionScope = true;
+          state.dashboardCollectionScope = true;
         }
       }
       // Dashboard-scoped visual collection links (?dashboard_scope=1&collection_id=<visual>
@@ -309,24 +362,22 @@ async function bootstrapBrowse() {
       // expression loads correctly; any URL filter chips are cleared by
       // loadExpression() replacing state.root, so surface a toast if we dropped
       // filters the user asked for.
-      if (collectionLink && dashboardCollectionScope && deepLinkedIsVisual) {
-        dashboardCollectionScope = false;
-        if (typeof showToast === 'function') {
-          showToast(
-            hasExplicitFilterParams
-              ? 'Opened the visual collection — dashboard scope and URL filters were dropped so the visual clause applies. Edit the filter bar to add them back.'
-              : 'Opened the visual collection — dashboard scope was dropped so the visual clause applies.',
-            'info'
-          );
-        }
+      if (collectionLink && state.dashboardCollectionScope && deepLinkedIsVisual) {
+        state.dashboardCollectionScope = false;
+        showToast(
+          hasExplicitFilterParams
+            ? 'Opened the visual collection — dashboard scope and URL filters were dropped so the visual clause applies. Edit the filter bar to add them back.'
+            : 'Opened the visual collection — dashboard scope was dropped so the visual clause applies.',
+          'info'
+        );
       }
-      if (activeCollectionId && !dashboardCollectionScope && !scopeChanged) {
+      if (state.activeCollectionId && !state.dashboardCollectionScope && !scopeChanged) {
         // Plain collection deep link: open it into the filter bar as
         // editable chips (rules + visual round-trip), replacing the
         // historical collection-endpoint mode. Skipped when a user sidebar
         // click already claimed a different scope — their queued
         // filterByCollection/filterByFolder/filterByKeyword owns the view.
-        filterByCollection(activeCollectionId);
+        filterByCollection(state.activeCollectionId);
         return;
       }
       // A dashboard-scoped collection deep link (?dashboard_scope=1&collection_id=...)
@@ -338,7 +389,7 @@ async function bootstrapBrowse() {
       // scoped /api/photos/query here so ``loadPhotos`` populates the
       // availability state from the response (Codex review r3839992513).
       if (VireoFilter.hasFilters() ||
-          (activeCollectionId && dashboardCollectionScope && !scopeChanged)) {
+          (state.activeCollectionId && state.dashboardCollectionScope && !scopeChanged)) {
         resetAndLoad();
         loadSummary();
       }
@@ -352,7 +403,7 @@ async function bootstrapBrowse() {
     // holds the mutex, letting the intersection observer fire a duplicate
     // page-1 request against the same ``loadEpoch``
     // (Codex review r3686191138).
-    healthChangedDuringInit = folderHealthRefreshSeq !== bootstrapHealthSeq;
+    healthChangedDuringInit = state.folderHealthRefreshSeq !== bootstrapHealthSeq;
     /** @type {HTMLElement} */ (document.getElementById('loadingState')).textContent = 'Error loading.';
   }
   // If a folder-health event fired while /api/browse/init was in flight,
@@ -367,7 +418,7 @@ async function bootstrapBrowse() {
   // sort change claimed the window mid-init: its loadPhotos owns ``loading``
   // and releases it in its own finally.
   if (!healthChangedDuringInit && bootstrapWindowIsCurrent()) {
-    loading = false;
+    state.loading = false;
     if (bootstrapSucceeded) {
       rearmInfiniteScrollObserver();
       // Make sure a tall viewport still gets its second page even when the
@@ -383,7 +434,7 @@ async function bootstrapBrowse() {
 // interruptions, fall through to whatever refreshBrowseAfterFolderHealthChange
 // last rendered rather than deep-link forever (Codex review r3686778061).
 var _DEEP_LINK_MAX_RETRIES = 5;
-async function _runPhotoDeepLink(/** @type {number} */ photoId) {
+export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // A focused deep link must expose the requested photo as a top-level card.
   // Disable stacks for this view so its later lazy pages use the same shape.
   var stackToggle = /** @type {HTMLInputElement} */ (document.getElementById('browseStacksToggle'));
@@ -397,9 +448,9 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // releasing ``loading`` here would either clobber that fresher refresh
   // or let the intersection observer fire a duplicate page-1 request
   // against the same loadEpoch (Codex review r3686696351).
-  var deepLinkHealthSeq = folderHealthRefreshSeq;
+  var deepLinkHealthSeq = state.folderHealthRefreshSeq;
   var isDeepLinkHealthCurrent = function() {
-    return folderHealthRefreshSeq === deepLinkHealthSeq;
+    return state.folderHealthRefreshSeq === deepLinkHealthSeq;
   };
   // Signal to the outer retry loop whether we bailed out due to a
   // concurrent health refresh (retryable) versus completed / errored
@@ -409,7 +460,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   var wasSuperseded = false;
 
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
-  loading = true;
+  state.loading = true;
   var deepLinkLoaded = false;
   var isDeepLinkDatasetCurrent = /** @type {(() => boolean) | null} */ (null);
   try {
@@ -422,7 +473,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       // (its loadPhotos would then race the intersection observer). The
       // isDeepLinkHealthCurrent check above already returns early in that
       // case, so reaching here means it's safe to release.
-      loading = false;
+      state.loading = false;
       return wasSuperseded;
     }
 
@@ -439,20 +490,20 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     var deepLinkWindowIsCurrent = claimBrowseWindow();
 
     // Navigate to the photo's folder
-    activeFolderId = photo.folder_id;
-    activeKeyword = null;
-    activeCollectionId = null;
-    browseDatasetReady = false;
-    photos = [];
-    currentPage = 1;
-    allLoaded = false;
-    earliestPage = 1;
+    state.activeFolderId = photo.folder_id;
+    state.activeKeyword = null;
+    state.activeCollectionId = null;
+    state.browseDatasetReady = false;
+    state.photos = [];
+    state.currentPage = 1;
+    state.allLoaded = false;
+    state.earliestPage = 1;
     updatePreviousPhotosButton();
     // Same hazard as filterByCollection: leaving selectedPhotos populated
     // across a dataset switch leaves the batch bar armed against stale ids.
-    selectedPhotos.clear();
-    selectedPhotoId = null;
-    selectedIndex = -1;
+    state.selectedPhotos.clear();
+    state.selectedPhotoId = null;
+    state.selectedIndex = -1;
     closeDetail();
     /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
 
@@ -460,25 +511,25 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     // advances loadEpoch (and scope changes also advance browseScopeGen).
     // Snapshot the scope generation alongside the window claim above so a
     // later user selection cannot be overwritten by this deep-link response.
-    var deepLinkScopeGen = browseScopeGen;
+    var deepLinkScopeGen = state.browseScopeGen;
     var deepLinkFolderId = photo.folder_id;
     var deepLinkSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
     const datasetIsCurrent = isDeepLinkDatasetCurrent = function() {
       return deepLinkWindowIsCurrent() &&
-        browseScopeGen === deepLinkScopeGen &&
-        activeFolderId === deepLinkFolderId &&
+        state.browseScopeGen === deepLinkScopeGen &&
+        state.activeFolderId === deepLinkFolderId &&
         /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value === deepLinkSort;
     };
 
     // bootstrapBrowse was skipped, so load the target folder's first page and
     // the shared folder/keyword/collection trees before locating the photo.
     var missingSnapshotVersionAtInitStart =
-      typeof _missingFoldersSnapshotVersion !== 'undefined'
-        ? _missingFoldersSnapshotVersion
+      typeof missingFoldersSnapshotVersion() !== 'undefined'
+        ? missingFoldersSnapshotVersion()
         : null;
     var initParams = new URLSearchParams();
     initParams.set('folder_id', photo.folder_id);
-    initParams.set('per_page', String(perPage));
+    initParams.set('per_page', String(state.perPage));
     initParams.set('sort', deepLinkSort);
     initParams.set('focus_photo_id', String(photoId));
     var initData = await safeFetch('/api/browse/init?' + initParams.toString(), {}, { toast: false });
@@ -498,8 +549,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       // init→current transition when a newer observation landed in flight;
       // the subsequent isDeepLinkHealthCurrent check then skips stale render
       // data (Codex reviews r3686696347 and r3687277899).
-      if (Array.isArray(initData.missing_folder_ids) &&
-          typeof _reconcileMissingFoldersInitSnapshot === 'function') {
+      if (Array.isArray(initData.missing_folder_ids)) {
         _reconcileMissingFoldersInitSnapshot(
           initData.missing_folder_ids,
           missingSnapshotVersionAtInitStart,
@@ -511,22 +561,22 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       // Pin the workspace this tree came from so a later Remove action
       // targets the same workspace even on the deep-link entry point.
       if (initData.active_workspace_id != null) {
-        browseWorkspaceId = Number(initData.active_workspace_id);
+        state.browseWorkspaceId = Number(initData.active_workspace_id);
       }
       renderFolderTree(initData.folders || []);
       renderKeywordTree(initData.keywords || []);
       renderCollectionList(initData.collections || []);
       loadCollectionCounts();
-      photos = initData.photos || [];
+      state.photos = initData.photos || [];
       setBrowseTotals(initData);
       var focusPage = parseInt(initData.focus_page, 10);
       var hasFocusPage = Number.isInteger(focusPage) && focusPage >= 1;
-      earliestPage = hasFocusPage ? focusPage : 1;
-      currentPage = hasFocusPage ? focusPage + 1 : 2;
-      if (loadedWindowOffset() + photos.length >= totalPhotos) allLoaded = true;
+      state.earliestPage = hasFocusPage ? focusPage : 1;
+      state.currentPage = hasFocusPage ? focusPage + 1 : 2;
+      if (loadedWindowOffset() + state.photos.length >= state.totalPhotos) state.allLoaded = true;
       renderGrid();
       updatePreviousPhotosButton();
-      browseDatasetReady = true;
+      state.browseDatasetReady = true;
       /** @type {HTMLElement} */ (document.getElementById('loadingState')).style.display = 'none';
       deepLinkLoaded = true;
       hydrateColorLabelsForRenderedPage(function() {
@@ -544,7 +594,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     if (!el) {
       // loadPhotos() honors the setup guard, so release it before the explicit
       // compatibility/reconciliation scan or it would return immediately.
-      loading = false;
+      state.loading = false;
       el = await loadUntilPhotoRendered(photoId, function() {
         return isDeepLinkHealthCurrent() && datasetIsCurrent();
       });
@@ -572,7 +622,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     // live once the deep-link has finished loading. Drop any persisted
     // workspace filter — the explicit ?photo_id link should not be
     // silently overridden by whatever the user had saved on Browse.
-    if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (VireoFilter && !VireoFilter.isReady()) {
       VireoFilter.init({
         page: 'browse',
         root: document.getElementById('vireoFilterBar'),
@@ -580,13 +630,13 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
         onChange: onBrowseFilterChange,
         getScope: function() {
           return {
-            folder_id: activeFolderId,
-            collection_id: (activeCollectionId && dashboardCollectionScope)
-              ? activeCollectionId : null,
+            folder_id: state.activeFolderId,
+            collection_id: (state.activeCollectionId && state.dashboardCollectionScope)
+              ? state.activeCollectionId : null,
           };
         },
       }).then(function() {
-        VireoFilter.setResultTotal(totalUnderlyingPhotos);
+        VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
         if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
       }).catch(function() {});
     }
@@ -598,7 +648,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // (Codex review r3686696351).
   if (isDeepLinkHealthCurrent() &&
       (!isDeepLinkDatasetCurrent || isDeepLinkDatasetCurrent())) {
-    loading = false;
+    state.loading = false;
     if (deepLinkLoaded) {
       rearmInfiniteScrollObserver();
       requestAnimationFrame(ensureViewportHydrated);

@@ -1,6 +1,46 @@
-/* Browse: right-click menus for grid cards, folders and collections.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: right-click menus for grid cards, folders and collections. ES module (see
+   browse/README.md). */
+import { _noteColorLabelEdits, state } from './state.js';
+import {
+  VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
+  buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, coerceSelectionOnContext,
+  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, revealLabel,
+  safeFetch, showRevealFeedback, showToast,
+} from './shared.js';
+import {
+  _clearRepresentativeStateIfIneligible, addToCollection, batchAddKeyword, batchDelete,
+  batchSetColorLabel, batchSetFlag, batchSetRating, batchSubmitInat, developSelected,
+  openCaptureTimeModal, reviewLocationsForCollection, reviewLocationsForSelection,
+} from './batch-actions.js';
+import { openSelectedInBurstReview, updateBatchBar } from './batch-bar.js';
+import { openBestBatchForIds } from './best-batch.js';
+import { loadCalendarData } from './calendar.js';
+import { editCollection } from './collection-editor.js';
+import {
+  abandonDetailFocusForBatch, loadDetail, loadSummary, updateDetailFlagButtons,
+} from './detail.js';
+import {
+  _recoverColorLabelsAfterFailedWrite, refreshPendingSyncBanner, renderBatchInspector,
+  updateDetailColors,
+} from './edit-actions.js';
+import { makeAvailableOffline, openExportModal, prepareFullResolutionSelection } from './export.js';
+import { refreshGridCards } from './grid.js';
+import { resetAndLoad } from './loading.js';
+import { noteFocusedCardVisibility } from './scroll.js';
+import {
+  _browseDevelopmentPasteInFlight, copyDevelopmentSettingsFromPhoto, findBrowsePhoto,
+  openBrowseCompare, pasteEditSettingsToSelection,
+} from './selection-panel.js';
+import { getActiveSelection, refreshCardSelectionVisuals, selectionIdsKey } from './selection.js';
+import {
+  filterByCollection, loadCollectionCounts, loadCollections, scheduleCollectionCountsRefresh,
+} from './sidebar-collections.js';
+import { filterByFolder, loadFolders } from './sidebar-folders.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import {
+  browsePhotoNavigationList, browseSelectionIdsForClick, browseStackCoverIdForPhoto,
+  browseStackMemberIdsFor, reconcileBrowseStackCovers, refreshExpandedBrowseStackMembers,
+} from './stacks.js';
 
 /* ---------- Right-click context menu on grid cards ---------- */
 // Single-photo wrappers around the existing batch endpoints. The detail-panel
@@ -19,10 +59,10 @@ function _refreshInspectorAfterSinglePhotoEdit(/** @type {number} */ photoId, /*
     renderBatchInspector(getActiveSelection(), { preserveLocation: true });
     return;
   }
-  if (selectedPhotoId === photoId) singleFallback();
+  if (state.selectedPhotoId === photoId) singleFallback();
 }
 
-async function setRatingFor(/** @type {number} */ photoId, /** @type {number} */ rating) {
+export async function setRatingFor(/** @type {number} */ photoId, /** @type {number} */ rating) {
   try {
     await safeFetch('/api/batch/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -39,7 +79,7 @@ async function setRatingFor(/** @type {number} */ photoId, /** @type {number} */
   refreshPendingSyncBanner();
 }
 
-async function setFlagFor(/** @type {number} */ photoId, /** @type {BrowsePhoto['flag']} */ flag) {
+export async function setFlagFor(/** @type {number} */ photoId, /** @type {BrowsePhoto['flag']} */ flag) {
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -57,7 +97,7 @@ async function setFlagFor(/** @type {number} */ photoId, /** @type {BrowsePhoto[
   return true;
 }
 
-async function setColorLabelFor(/** @type {number} */ photoId, /** @type {string | null} */ color) {
+export async function setColorLabelFor(/** @type {number} */ photoId, /** @type {string | null} */ color) {
   _noteColorLabelEdits([photoId]);
   try {
     await safeFetch('/api/batch/color_label', {
@@ -66,21 +106,21 @@ async function setColorLabelFor(/** @type {number} */ photoId, /** @type {string
     });
   } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
   _noteColorLabelEdits([photoId]);
-  if (color) colorLabels[photoId] = color;
-  else delete colorLabels[photoId];
-  colorLabelsFetched.add(photoId);
+  if (color) state.colorLabels[photoId] = color;
+  else delete state.colorLabels[photoId];
+  state.colorLabelsFetched.add(photoId);
   refreshGridCards([photoId]);
   refreshExpandedBrowseStackMembers([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
   scheduleCollectionCountsRefresh();
 }
 
-function revealPhoto(/** @type {number} */ photoId) {
+export function revealPhoto(/** @type {number} */ photoId) {
   safeFetch('/api/files/reveal', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: photoId}),
   }, { toast: false }).then(function(data) {
-    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+    showRevealFeedback(data);
   }).catch(function(err) {
     if (typeof showToast === 'function') {
       showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
@@ -121,7 +161,7 @@ function viewPhotosOnMap(/** @type {number[]} */ photoIds) {
 
 // Stack membership comes from the same projection as the visible grid.
 // The old burst_id metadata column is not a reliable burst identifier.
-function filterToBrowseGroup(/** @type {number} */ photoId) {
+export function filterToBrowseGroup(/** @type {number} */ photoId) {
   var coverId = browseStackCoverIdForPhoto(photoId);
   var cover = findBrowsePhoto(coverId == null ? photoId : coverId);
   var ids = browseStackMemberIdsFor(cover);
@@ -130,7 +170,7 @@ function filterToBrowseGroup(/** @type {number} */ photoId) {
     (cover.browse_stack.kind === 'burst' ? 'Burst' : 'Duplicate group') + ' containing ' + cover.filename);
 }
 
-async function copyPhotoPaths(/** @type {number[]} */ photoIds) {
+export async function copyPhotoPaths(/** @type {number[]} */ photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
   }));
@@ -174,14 +214,15 @@ async function copyPhotoPaths(/** @type {number[]} */ photoIds) {
 // Prev/Next, mirroring the lightbox "Edit Photo" handoff.
 function openPhotoEditor(/** @type {number} */ photoId) {
   var navigationPhotos = browsePhotoNavigationList(photoId);
-  if (window.vireoEditNav) {
-    window.vireoEditNav.setList(navigationPhotos, photoId);
-    window.vireoEditNav.setLastPhoto(photoId);
+  var nav = editNav();
+  if (nav) {
+    nav.setList(navigationPhotos, photoId);
+    nav.setLastPhoto(photoId);
   }
   window.location.href = '/edit/' + photoId;
 }
 
-function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {number | null} */ contextPhotoId, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
+export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {number | null} */ contextPhotoId, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Capture the opener now: closeContextMenu removes the clicked menu item
   // before invoking its onClick, so document.activeElement would be body
   // (right-click) or an unrelated prior control by the time a batch dialog
@@ -206,9 +247,8 @@ function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {numb
   var groupCoverId = browseStackCoverIdForPhoto(developmentSourceId);
   var groupPhotoId = groupCoverId == null ? developmentSourceId : groupCoverId; var groupPhoto = groupPhotoId == null ? null : findBrowsePhoto(groupPhotoId);
   var groupStack = groupPhoto && groupPhoto.browse_stack;
-  var copiedDevelopment = window.vireoEditNav
-    ? window.vireoEditNav.getCopiedRecipe()
-    : null;
+  var nav = editNav();
+  var copiedDevelopment = nav ? nav.getCopiedRecipe() : null;
 
   var rateChip = function(/** @type {number} */ n) {
     return {
@@ -222,8 +262,8 @@ function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {numb
   var colorChip = function(/** @type {string | null} */ c, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon,
-      title: c && window.VireoColorLabels
-        ? window.VireoColorLabels.title(c, title)
+      title: c && VireoColorLabels
+        ? VireoColorLabels.title(c, title)
         : title,
       color: c,
       colorBaseTitle: title,
@@ -266,7 +306,7 @@ function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {numb
       disabledHint: 'Enable Stacks and choose a duplicate group',
       onClick: function() { if (developmentSourceId != null) filterToBrowseGroup(developmentSourceId); } },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
-      onClick: function() { if (typeof findSimilar === 'function' && photoIds[0] != null) findSimilar(photoIds[0]); } },
+      onClick: function() { if (photoIds[0] != null) findSimilar(photoIds[0]); } },
     { label: 'View on Map', disabled: noMapLocation,
       disabledHint: 'No map coordinates: no EXIF GPS and no location linked to a place',
       onClick: function() { viewPhotosOnMap(photoIds); } },
@@ -296,16 +336,16 @@ function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {numb
     { label: 'Develop',
       onClick: function() { developSelected(); } },
   ]).concat(buildOpenInEditorMenuItems(photoIds)).concat([
-    { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
+    { label: revealLabel(), disabled: !one, disabledHint: hint,
       onClick: function() { if (photoIds[0] != null) revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(opener); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(opener); } },
-  ]).concat(window.buildSpeciesHighlightMenuItems(photoIds, {
+  ]).concat(buildSpeciesHighlightMenuItems(photoIds, {
     showFetchFallback: true,
-  })).concat(window.buildSpeciesRepresentativeMenuItems(photoIds, {
+  })).concat(buildSpeciesRepresentativeMenuItems(photoIds, {
     getPhoto: function(id) {
       return findBrowsePhoto(id);
     },
@@ -336,7 +376,7 @@ function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {numb
 // launched from Add Keyword / Add to Collection restore focus to it on
 // Escape or Cancel instead of falling back to document.body (WebKit does
 // not necessarily focus a button on pointer click).
-function openBatchMoreMenu(/** @type {HTMLElement} */ btn) {
+export function openBatchMoreMenu(/** @type {HTMLElement} */ btn) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var r = btn.getBoundingClientRect();
@@ -359,8 +399,8 @@ document.addEventListener('contextmenu', function(e) {
   // Finder-style coercion: right-click on an item outside the selection
   // replaces the selection with that one item. Fold selectedPhotoId in first
   // so a single-focus click doesn't get silently dropped.
-  if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
-    selectedPhotos.add(selectedPhotoId);
+  if (state.selectedPhotos.size === 0 && state.selectedPhotoId !== null) {
+    state.selectedPhotos.add(state.selectedPhotoId);
   }
   // The "item" a collapsed stack card offers is the stack, so coercion
   // replaces the selection with every frame behind it unless they are all in
@@ -370,7 +410,7 @@ document.addEventListener('contextmenu', function(e) {
     ? [pid]
     : browseSelectionIdsForClick(pid);
   var wholeStackSelected = stackIds.every(function(stackId) {
-    return selectedPhotos.has(stackId);
+    return state.selectedPhotos.has(stackId);
   });
   var ids;
   if (stackIds.length > 1 && !wholeStackSelected) {
@@ -379,15 +419,15 @@ document.addEventListener('contextmenu', function(e) {
     // current and merges the pre-undo ids into the stack just chosen.
     // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
     // Codex P2 on PR #1672.
-    anchorRestoreEpoch++;
-    selectedPhotos = new Set(stackIds);
-    selectedPhotoId = null;
-    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    state.anchorRestoreEpoch++;
+    state.selectedPhotos = new Set(stackIds);
+    state.selectedPhotoId = null;
+    state.selectedIndex = state.photos.findIndex(function(p) { return p.id === pid; });
     abandonDetailFocusForBatch();
     ids = stackIds;
   } else {
-    var beforeCoercion = selectionIdsKey(Array.from(selectedPhotos));
-    ids = coerceSelectionOnContext(selectedPhotos, pid);
+    var beforeCoercion = selectionIdsKey(Array.from(state.selectedPhotos));
+    ids = coerceSelectionOnContext(state.selectedPhotos, pid);
     // Coercion replacing the selection is a selection change like any other,
     // so the generation moves with it — otherwise a restore still waiting on
     // stack hydration (undo/redo) considers itself current and merges the
@@ -395,17 +435,17 @@ document.addEventListener('contextmenu', function(e) {
     // changed: right-clicking inside the selection keeps it, and retiring a
     // pending restore for that would lose a selection nobody replaced.
     // Codex P2 on PR #1672.
-    if (selectionIdsKey(ids) !== beforeCoercion) anchorRestoreEpoch++;
+    if (selectionIdsKey(ids) !== beforeCoercion) state.anchorRestoreEpoch++;
   }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
   // reflects the right-clicked photo) and selectedIndex (the Shift-range
   // anchor — a subsequent Shift-click must range-select from this card).
-  if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
-    selectedPhotoId = pid;
-    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
-    if (selectedIndex < 0) {
+  if (ids.length === 1 && ids[0] === pid && state.selectedPhotoId !== pid) {
+    state.selectedPhotoId = pid;
+    state.selectedIndex = state.photos.findIndex(function(p) { return p.id === pid; });
+    if (state.selectedIndex < 0) {
       var coverId = browseStackCoverIdForPhoto(pid);
-      selectedIndex = photos.findIndex(function(p) { return p.id === coverId; });
+      state.selectedIndex = state.photos.findIndex(function(p) { return p.id === coverId; });
     }
     loadDetail(pid);
   }
@@ -413,7 +453,7 @@ document.addEventListener('contextmenu', function(e) {
   // is on screen by construction. Without this, a resize after right-clicking
   // a card would still be judged against wherever the *previous* selection was
   // scrolled to, and would refuse to keep this one visible.
-  lastClickedPhotoId = pid;
+  state.lastClickedPhotoId = pid;
   refreshCardSelectionVisuals();
   noteFocusedCardVisibility();
   updateBatchBar();
@@ -432,7 +472,7 @@ function revealFolder(/** @type {number} */ fid) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({folder_id: fid}),
   }, { toast: false }).then(function(data) {
-    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+    showRevealFeedback(data);
   }).catch(function(err) {
     if (typeof showToast === 'function') {
       showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
@@ -457,12 +497,12 @@ async function copyFolderPath(/** @type {number} */ fid) {
 
 var folderWorkspacesRequestSeq = 0;
 
-function hideFolderWorkspaces() {
+export function hideFolderWorkspaces() {
   folderWorkspacesRequestSeq += 1;
   /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesModal')).classList.remove('open');
 }
 
-async function showFolderWorkspaces(/** @type {number} */ fid) {
+export async function showFolderWorkspaces(/** @type {number} */ fid) {
   var requestSeq = ++folderWorkspacesRequestSeq;
   var modal = /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesModal'));
   var path = /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesPath'));
@@ -525,8 +565,9 @@ function moveFolder(/** @type {number} */ fid) {
 }
 
 function workLocallyFolder(/** @type {number} */ fid) {
-  if (window.vireoLocalFolders) {
-    window.vireoLocalFolders.stage(fid);
+  var local = localFolders();
+  if (local) {
+    local.stage(fid);
     return;
   }
   window.location.href = '/workspace#work-locally';
@@ -549,7 +590,7 @@ async function rescanFolder(/** @type {number} */ fid) {
 }
 
 async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
-  var folder = browseFolderRows.find(function(row) {
+  var folder = state.browseFolderRows.find(function(row) {
     return Number(row.id) === Number(fid);
   });
   if (!folder || !folder.is_workspace_root) return;
@@ -559,7 +600,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   // activation is persisted globally, so another tab switching workspaces
   // after render would otherwise redirect the destructive call at the
   // wrong workspace (Codex review r3798912101).
-  var wsId = browseWorkspaceId;
+  var wsId = state.browseWorkspaceId;
   if (wsId == null) {
     showToast(
       'Cannot remove the folder yet — the workspace context is still loading. Try again in a moment.',
@@ -583,7 +624,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   // no longer contains it (Codex review r3799361364).
   var removedSubtreeIds = (function collectSubtreeIds() {
     var childrenByParent = /** @type {Record<string, number[]>} */ ({});
-    browseFolderRows.forEach(function(row) {
+    state.browseFolderRows.forEach(function(row) {
       var pid = row.parent_id;
       if (pid == null) return;
       var key = Number(pid);
@@ -644,7 +685,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
       var urlFolderId = parseInt(urlParams.get('folder_id') || '', 10);
       if (!isNaN(urlFolderId)) {
         var stillVisible = !removedSubtreeIds[Number(urlFolderId)] &&
-          browseFolderRows.some(function(row) {
+          state.browseFolderRows.some(function(row) {
             return Number(row.id) === Number(urlFolderId);
           });
         if (!stillVisible) {
@@ -661,18 +702,18 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
     }
 
     // Refresh the authoritative local-folder payload before rebuilding
-    // the tree. Without this, ``window.vireoLocalFolderData`` still
+    // the tree. Without this, ``localFolderData()`` still
     // carries the removed root when ``renderFolderTree`` runs, so
     // ``folderLocalStatuses`` synthesizes a phantom top-level row for it
     // and leaves the removed folder visible until the next blocker poll
     // (Codex review r3798912105). ``load()`` swallows fetch failures and
     // returns ``null``; rendering against the pre-DELETE
-    // ``window.vireoLocalFolderData`` in that case would resurrect the
+    // ``localFolderData()`` in that case would resurrect the
     // removed root as a phantom, so reload instead of rebuilding from
     // stale local state (Codex review r3799142116).
-    if (window.vireoLocalFolders &&
-        typeof window.vireoLocalFolders.load === 'function') {
-      var localRefreshed = await window.vireoLocalFolders.load();
+    var local = localFolders();
+    if (local && typeof local.load === 'function') {
+      var localRefreshed = await local.load();
       if (localRefreshed === null) {
         window.location.reload();
         return;
@@ -690,15 +731,15 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
       window.location.reload();
       return;
     }
-    if (activeFolderId && !loaded[0].some(function(/** @type {BrowseFolder} */ row) {
-      return Number(row.id) === Number(activeFolderId);
+    if (state.activeFolderId && !loaded[0].some(function(/** @type {BrowseFolder} */ row) {
+      return Number(row.id) === Number(state.activeFolderId);
     })) {
-      activeFolderId = null;
+      state.activeFolderId = null;
     }
-    await resetAndLoad({ preserveCollection: !!activeCollectionId });
+    await resetAndLoad({ preserveCollection: !!state.activeCollectionId });
     loadCollectionCounts();
     loadSummary();
-    if (timelineMode) loadCalendarData();
+    if (state.timelineMode) loadCalendarData();
     showToast('Folder removed from this workspace.', 'success');
   } catch (err) {
     console.error('removeWorkspaceRootFromBrowse failed', err);
@@ -716,7 +757,7 @@ document.addEventListener('contextmenu', function(e) {
   var items = [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
-    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
+    { label: revealLabel(), onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { label: 'Show Associated Workspaces…', onClick: function() { showFolderWorkspaces(fid); } },
     { separator: true },
@@ -789,11 +830,11 @@ async function deleteCollectionById(/** @type {number} */ cid, /** @type {string
   // disappears but the filter bar and grid keep applying the deleted
   // collection's expression until the user manually clears it (Codex
   // review r3621903982).
-  if (activeCollectionId === cid) {
-    activeCollectionId = null;
+  if (state.activeCollectionId === cid) {
+    state.activeCollectionId = null;
     resetAndLoad();
-  } else if (openedCollectionId === cid) {
-    openedCollectionId = null;
+  } else if (state.openedCollectionId === cid) {
+    state.openedCollectionId = null;
     if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
     resetAndLoad();
   }
@@ -812,7 +853,7 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = /** @type {HTMLElement | null} */ (ti.querySelector('.collection-name'));
   var name = nameEl ? nameEl.textContent : '';
-  var meta = collectionsById[cid];
+  var meta = state.collectionsById[cid];
   var isUnavailable = !!(meta && meta.count_error);
   // Degraded collections can't be filtered (the /photos endpoint would 400)
   // and location review reads from the same collection rules — hide both while
@@ -822,7 +863,7 @@ document.addEventListener('contextmenu', function(e) {
   if (!isUnavailable) {
     items.push({ label: 'Filter by this Collection',
       onClick: function() { filterByCollection(cid); } });
-    if (!(collectionsById[cid] || {}).has_visual) {
+    if (!(state.collectionsById[cid] || {}).has_visual) {
       items.push({ label: 'Add Locations by Capture Time',
         onClick: function() { reviewLocationsForCollection(cid, 'time'); } });
     }

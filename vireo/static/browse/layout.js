@@ -1,6 +1,6 @@
-/* Browse: resizable sidebar and detail panel.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: resizable sidebar and detail panel. ES module (see
+   browse/README.md). */
+import { updateGridTail } from './grid.js';
 
 /* ---------- Resizable sidebar ---------- */
 var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
@@ -60,7 +60,7 @@ function updateBrowsePanelResizeLimits() {
   if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
 }
 
-function setBrowseSidebarWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
+export function setBrowseSidebarWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
   var sidebar = /** @type {HTMLElement} */ (document.getElementById('browseSidebar'));
   var resizer = /** @type {HTMLElement} */ (document.getElementById('browseSidebarResizer'));
   if (!sidebar || !resizer) return;
@@ -138,7 +138,7 @@ function initBrowseSidebarResize() {
   });
 }
 
-function setBrowseDetailPanelWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
+export function setBrowseDetailPanelWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
   var detailPanel = /** @type {HTMLElement} */ (document.getElementById('detailPanel'));
   var resizer = /** @type {HTMLElement} */ (document.getElementById('detailPanelResizer'));
   if (!detailPanel || !resizer) return;

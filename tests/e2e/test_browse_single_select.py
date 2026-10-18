@@ -73,12 +73,12 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
 
     state = page.evaluate(
         """() => {
-          totalPhotos = 50000;
-          allLoaded = false;
-          updateGridTail();
+          browseState.totalPhotos = 50000;
+          browseState.allLoaded = false;
+          pageModules.grid.updateGridTail();
           var container = document.getElementById('gridContainer');
           container.scrollTop = container.scrollHeight;
-          updateScrollPosition();
+          pageModules.viewControls.updateScrollPosition();
           return {
             skeletons: document.querySelectorAll('#gridTail .skel-card').length,
             spacers: document.querySelectorAll('#gridTail .grid-tail-spacer').length,
@@ -101,23 +101,23 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
             if (url === '/api/photos/query') {
               calls++;
               var perPage = JSON.parse(options.body).per_page;
-              if (calls >= 10) return Promise.resolve({photos: [], total: totalPhotos});
+              if (calls >= 10) return Promise.resolve({photos: [], total: browseState.totalPhotos});
               var batch = [];
               for (var i = 0; i < perPage; i++) {
                 batch.push({id: nextId++, filename: 'photo-' + nextId + '.jpg'});
               }
-              return Promise.resolve({photos: batch, total: totalPhotos});
+              return Promise.resolve({photos: batch, total: browseState.totalPhotos});
             }
             return originalSafeFetch(url, options, fetchOptions);
           };
           try {
             // The test observer is intentionally non-native; opt into the
             // scroll-driven path directly without enabling observer races.
-            infiniteScrollObserverIsNative = true;
-            infiniteScrollObserverDisconnected = false;
+            pageModules.scroll.infiniteScroll.observerIsNative = true;
+            pageModules.scroll.infiniteScroll.observerDisconnected = false;
             var container = document.getElementById('gridContainer');
             container.scrollTop = container.scrollHeight;
-            ensureViewportHydrated();
+            pageModules.scroll.ensureViewportHydrated();
 
             var deadline = Date.now() + 3000;
             while (Date.now() < deadline) {
@@ -125,10 +125,10 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
               var boundaryIsPastViewport = firstSkeleton &&
                 firstSkeleton.getBoundingClientRect().top -
                   container.getBoundingClientRect().bottom > 3200;
-              if (calls > 0 && !loading && (boundaryIsPastViewport || allLoaded)) break;
+              if (calls > 0 && !browseState.loading && (boundaryIsPastViewport || browseState.allLoaded)) break;
               await new Promise(function(resolve) { setTimeout(resolve, 20); });
             }
-            return {calls: calls, loaded: photos.length, allLoaded: allLoaded};
+            return {calls: calls, loaded: browseState.photos.length, allLoaded: browseState.allLoaded};
           } finally {
             safeFetch = originalSafeFetch;
           }
@@ -190,7 +190,7 @@ def test_batch_bar_starts_inert_so_a_slow_double_click_passes_through(
     first.wait_for(state="visible")
 
     # Stretch the quiet window so this asserts the rule rather than the clock.
-    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 4000")
+    page.evaluate("pageModules.batchBar.batchBarTiming.activateQuietMs = 4000")
     first.click()
 
     # The bar appears immediately for feedback but starts inert — its clicks
@@ -255,7 +255,7 @@ def test_batch_bar_activates_as_soon_as_the_pointer_moves(live_server, page):
 
     # Far longer than any platform double-click interval, so the timer cannot
     # be what activates the bar below.
-    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+    page.evaluate("pageModules.batchBar.batchBarTiming.activateQuietMs = 60000")
     first.click()
     expect(bar).to_have_class(re.compile(r"\bbatch-bar-inert\b"))
 
@@ -342,7 +342,7 @@ def test_slow_double_click_still_opens_photo_when_bar_activated_between_clicks(
     page.goto(f"{live_server['url']}/browse")
     # Collapse the quiet window so the bar activates immediately after the
     # first click — the scenario the guard has to cover.
-    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+    page.evaluate("pageModules.batchBar.batchBarTiming.activateQuietMs = 1")
 
     page.locator("#browseStacksToggle").check()
     cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
@@ -445,7 +445,7 @@ def test_keyboard_activated_batch_button_is_not_swallowed_by_the_redirect(
     bar = page.locator("#batchBar")
     # Collapse the quiet window so the bar activates immediately and the
     # test does not need to wait a second for the shipped interval.
-    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 1")
+    page.evaluate("pageModules.batchBar.batchBarTiming.activateQuietMs = 1")
     first.click()
     expect(bar).to_be_visible()
     expect(bar).not_to_have_class(re.compile(r"\bbatch-bar-inert\b"), timeout=2000)
@@ -458,7 +458,7 @@ def test_keyboard_activated_batch_button_is_not_swallowed_by_the_redirect(
     page.keyboard.press("Enter")
 
     expect(bar).to_be_hidden()
-    assert page.evaluate("getActiveSelection().length") == 0
+    assert page.evaluate("pageModules.selection.getActiveSelection().length") == 0
 
 
 def test_non_card_selection_flow_shows_bar_active_immediately(
@@ -484,7 +484,7 @@ def test_non_card_selection_flow_shows_bar_active_immediately(
 
     # Stretch the quiet window so the assertion is about the starting state,
     # not about a timer that would activate the bar anyway on a fast machine.
-    page.evaluate("BATCH_BAR_ACTIVATE_QUIET_MS = 60000")
+    page.evaluate("pageModules.batchBar.batchBarTiming.activateQuietMs = 60000")
 
     # Simulate a Select-all-style flow: populate the selection without any
     # card mousedown, then let updateBatchBar() raise the bar.
@@ -492,11 +492,11 @@ def test_non_card_selection_flow_shows_bar_active_immediately(
     page.evaluate(
         """
         photoIds => {
-          selectedPhotos.clear();
-          photoIds.forEach(id => selectedPhotos.add(id));
-          selectedPhotoId = null;
-          renderGrid();
-          updateBatchBar();
+          browseState.selectedPhotos.clear();
+          photoIds.forEach(id => browseState.selectedPhotos.add(id));
+          browseState.selectedPhotoId = null;
+          pageModules.grid.renderGrid();
+          pageModules.batchBar.updateBatchBar();
         }
         """,
         selected_ids,
@@ -514,7 +514,7 @@ def test_non_card_selection_flow_shows_bar_active_immediately(
     # the grid, leaving the bar visible with a different selection.
     page.locator("#batchBar button", has_text="Clear").click()
     expect(bar).to_be_hidden()
-    assert page.evaluate("getActiveSelection().length") == 0
+    assert page.evaluate("pageModules.selection.getActiveSelection().length") == 0
 
 
 def test_export_defaults_beside_original_and_offers_folder_browser(
@@ -720,7 +720,7 @@ def test_export_preset_persists_browse_preferences_on_apply(live_server, page):
     expect(page.locator("#exportSubfolderName")).to_have_value("from-preset")
     expect(page.locator("#exportRevealAfter")).not_to_be_checked()
     expect(page.locator("#exportMetadataRating")).to_be_checked()
-    assert page.evaluate("() => selectedExportMetadataFields()") == [
+    assert page.evaluate("() => pageModules.export.selectedExportMetadataFields()") == [
         "capture_date", "rating",
     ]
 
@@ -744,7 +744,7 @@ def test_export_preset_persists_browse_preferences_on_apply(live_server, page):
     expect(page.locator("#exportSubfolderName")).to_have_value("from-preset")
     expect(page.locator("#exportRevealAfter")).not_to_be_checked()
     expect(page.locator("#exportMetadataRating")).to_be_checked()
-    assert page.evaluate("() => selectedExportMetadataFields()") == [
+    assert page.evaluate("() => pageModules.export.selectedExportMetadataFields()") == [
         "capture_date", "rating",
     ]
 
@@ -1331,7 +1331,7 @@ def test_prepare_full_resolution_uses_active_browse_selection(live_server, page)
     click_more_menu_item(page, "Prepare Full Resolution")
 
     page.wait_for_function(
-        "() => window._prepareFullResolutionJobId === null"
+        "() => pageModules.export._prepareFullResolutionJobId === null"
     )
     assert submitted == [{"photo_ids": [selected_id]}]
 
@@ -1364,7 +1364,7 @@ def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
     click_more_menu_item(page, "Prepare Full Resolution")
 
     page.wait_for_function(
-        "() => window._prepareFullResolutionJobId === null"
+        "() => pageModules.export._prepareFullResolutionJobId === null"
     )
     expect(page.locator("#toastContainer > div").last).to_have_text(
         "Full-resolution preparation failed: database unavailable"
@@ -1412,7 +1412,7 @@ def test_prepare_full_resolution_summarizes_result(
     click_more_menu_item(page, "Prepare Full Resolution")
 
     page.wait_for_function(
-        "() => window._prepareFullResolutionJobId === null"
+        "() => pageModules.export._prepareFullResolutionJobId === null"
     )
     expect(page.locator("#toastContainer > div").last).to_have_text(
         "Full-resolution preparation complete: 2 ready, 2 copied locally, "
@@ -1456,7 +1456,7 @@ def test_closing_detail_hides_batch_bar(live_server, page):
 
     # Trigger closeDetail via the summary/close button inside the detail panel.
     # Falling back to pressing Escape which browse.html wires to the same path.
-    page.evaluate("closeDetail()")
+    page.evaluate("pageModules.detail.closeDetail()")
 
     expect(bar).to_be_hidden()
 
@@ -1500,7 +1500,7 @@ def test_clear_button_clears_single_focus(live_server, page):
 
     expect(bar).to_be_hidden()
     # selectedPhotoId must be cleared too so batch actions no longer target it.
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("browseState.selectedPhotoId") is None
 
 
 def test_clear_button_closes_detail_panel(live_server, page):
@@ -1584,11 +1584,11 @@ def test_multiselect_keyword_picker_shows_and_applies_suggestion(live_server, pa
     page.evaluate(
         """
         photoIds => {
-          selectedPhotos.clear();
-          photoIds.forEach(id => selectedPhotos.add(id));
-          selectedPhotoId = null;
-          renderGrid();
-          updateBatchBar();
+          browseState.selectedPhotos.clear();
+          photoIds.forEach(id => browseState.selectedPhotos.add(id));
+          browseState.selectedPhotoId = null;
+          pageModules.grid.renderGrid();
+          pageModules.batchBar.updateBatchBar();
         }
         """,
         selected_ids,
@@ -1721,7 +1721,7 @@ def test_needs_identification_refreshes_after_identification_added(live_server, 
     page.goto(f"{live_server['url']}/browse")
     page.wait_for_function("window.VireoFilter && VireoFilter.isReady()")
     with page.expect_response(is_collection_query):
-        page.evaluate("(id) => filterByCollection(id)", collection_id)
+        page.evaluate("(id) => pageModules.sidebarCollections.filterByCollection(id)", collection_id)
 
     target_card = page.locator(f'.grid-card[data-id="{target_id}"]').first
     expect(target_card).to_be_visible()
@@ -1829,7 +1829,7 @@ def test_shift_selected_detail_keyword_add_applies_to_selection(live_server, pag
     cards.nth(2).click(modifiers=["Shift"])
 
     selected_ids = page.evaluate(
-        "getActiveSelection().slice().sort((a, b) => a - b)"
+        "pageModules.selection.getActiveSelection().slice().sort((a, b) => a - b)"
     )
     assert len(selected_ids) == 3
     expect(page.locator("#batchCount")).to_have_text("3 selected")
@@ -1875,8 +1875,8 @@ def test_singleton_multiselect_detail_keyword_add_stays_single_photo(live_server
     cards.nth(1).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
 
-    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
-    assert page.evaluate("selectedPhotoId") == a_id
+    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
+    assert page.evaluate("browseState.selectedPhotoId") == a_id
     expect(page.locator("#addKeywordInput")).to_be_visible()
 
     keyword_name = "Singleton Detail Keyword"
@@ -1929,9 +1929,9 @@ def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
 
     # Active selection must only contain B, and the focused id must be cleared
     # so the visible highlight and getActiveSelection() agree.
-    active = page.evaluate("getActiveSelection()")
+    active = page.evaluate("pageModules.selection.getActiveSelection()")
     assert active == [b_id], f"expected [{b_id}], got {active}"
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("browseState.selectedPhotoId") is None
 
     # The stale detail panel must be hidden so its (now no-op) handlers
     # can't be invoked against a null selectedPhotoId.
@@ -1972,13 +1972,13 @@ def test_close_detail_preserves_multiselect_highlight(live_server, page):
     cards.nth(1).click(modifiers=["Meta"])  # cmd-click B: set={A,B}, focus=A
     cards.nth(1).click(modifiers=["Meta"])  # cmd-click B again: set={A}, focus=A
 
-    page.evaluate("closeDetail()")
+    page.evaluate("pageModules.detail.closeDetail()")
 
     # Bar must still reflect the surviving multi-select entry.
     expect(page.locator("#batchBar")).to_be_visible()
     expect(page.locator("#batchCount")).to_have_text("1 selected")
-    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
+    assert page.evaluate("browseState.selectedPhotoId") is None
 
     # Card A must still paint as selected so the user can see what will be acted on.
     assert page.evaluate(
@@ -2006,13 +2006,13 @@ def test_resetAndLoad_clears_multiselect_set(live_server, page):
 
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
-    assert page.evaluate("selectedPhotos.size") == 1
+    assert page.evaluate("browseState.selectedPhotos.size") == 1
 
     # Simulate any dataset-changing action (sort change, filter, folder click).
-    page.evaluate("resetAndLoad()")
+    page.evaluate("pageModules.loading.resetAndLoad()")
 
-    assert page.evaluate("selectedPhotos.size") == 0
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("browseState.selectedPhotoId") is None
     expect(bar).to_be_hidden()
 
 
@@ -2035,8 +2035,8 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
     cards.nth(0).click(modifiers=["Meta"])
 
     # Cmd-click one item from fresh state leaves set={A} with no single-focus.
-    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
-    assert page.evaluate("selectedPhotoId") is None
+    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
+    assert page.evaluate("browseState.selectedPhotoId") is None
     expect(page.locator("#batchBar")).to_be_visible()
 
     # "3" maps to _shortcuts.rate_3 by default.
@@ -2044,7 +2044,7 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
 
     # batchSetRating updates local state after the API call returns.
     page.wait_for_function(
-        f"(photos.find(function(p){{return p.id==={a_id};}}) || {{}}).rating === 3",
+        f"(browseState.photos.find(function(p){{return p.id==={a_id};}}) || {{}}).rating === 3",
         timeout=3000,
     )
 
@@ -2063,15 +2063,15 @@ def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
 
     cards = page.locator(".grid-card")
     cards.nth(1).wait_for(state="visible")
-    page.wait_for_function("photos.length === 2 && totalPhotos > photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
 
     cards.nth(1).click()
-    assert page.evaluate("selectedIndex") == 1
+    assert page.evaluate("browseState.selectedIndex") == 1
 
     page.keyboard.press("ArrowRight")
 
-    page.wait_for_function("photos.length > 2 && selectedIndex === 2", timeout=3000)
-    assert page.evaluate("selectedPhotoId === photos[2].id")
+    page.wait_for_function("browseState.photos.length > 2 && browseState.selectedIndex === 2", timeout=3000)
+    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[2].id")
 
 
 def test_arrow_navigation_loads_past_trailing_offline_photo(live_server, page):
@@ -2079,43 +2079,33 @@ def test_arrow_navigation_loads_past_trailing_offline_photo(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
 
+    # A loaded window whose last photo is offline; the next page holds 203.
+    # The page's own loader fetches it (the navbar's safeFetch, stubbed for
+    # the query) and its own selection selects it.
     result = page.evaluate(
         """async () => {
-          const originalPhotos = photos;
-          const originalSelectedIndex = selectedIndex;
-          const originalAllLoaded = allLoaded;
-          const originalLoadPhotos = loadPhotos;
-          const originalSelectPhoto = selectPhoto;
-          const originalScrollToCard = scrollToCard;
+          const originalSafeFetch = window.safeFetch;
           let loads = 0;
-          let selected = null;
-          try {
-            photos = [
-              {id: 201, folder_status: 'ok'},
-              {id: 202, folder_status: 'missing'}
-            ];
-            selectedIndex = 0;
-            allLoaded = false;
-            loadPhotos = async function() {
+          window.safeFetch = function(url, options, fetchOptions) {
+            if (url === '/api/photos/query') {
               loads += 1;
-              photos.push({id: 203, folder_status: 'ok'});
-              allLoaded = true;
-            };
-            selectPhoto = function(event, id, index) {
-              selected = {id, index};
-              selectedIndex = index;
-            };
-            scrollToCard = function() {};
-
-            await moveBrowseSelection(1, {});
-            return {loads, selected};
+              return Promise.resolve({photos: [{id: 203, folder_status: 'ok', filename: 'next.jpg'}], total: 3});
+            }
+            return originalSafeFetch(url, options, fetchOptions);
+          };
+          try {
+            browseState.photos = [
+              {id: 201, folder_status: 'ok', filename: 'a.jpg'},
+              {id: 202, folder_status: 'missing', filename: 'b.jpg'}
+            ];
+            browseState.selectedIndex = 0;
+            browseState.selectedPhotoId = 201;
+            browseState.allLoaded = false;
+            browseState.loading = false;
+            await pageModules.keyboard.moveBrowseSelection(1, {});
+            return {loads, selected: {id: browseState.selectedPhotoId, index: browseState.selectedIndex}};
           } finally {
-            photos = originalPhotos;
-            selectedIndex = originalSelectedIndex;
-            allLoaded = originalAllLoaded;
-            loadPhotos = originalLoadPhotos;
-            selectPhoto = originalSelectPhoto;
-            scrollToCard = originalScrollToCard;
+            window.safeFetch = originalSafeFetch;
           }
         }"""
     )
@@ -2131,17 +2121,17 @@ def test_vertical_arrow_navigation_moves_by_rendered_grid_columns(live_server, p
 
     page.locator(".grid-card").first.wait_for(state="visible")
     page.locator(".grid-card").first.click()
-    columns = page.evaluate("getBrowseGridColumnCount()")
+    columns = page.evaluate("pageModules.keyboard.getBrowseGridColumnCount()")
     assert columns >= 2
-    page.wait_for_function("cols => photos.length > cols", arg=columns)
+    page.wait_for_function("cols => browseState.photos.length > cols", arg=columns)
 
     page.keyboard.press("ArrowDown")
-    page.wait_for_function("cols => selectedIndex === cols", arg=columns)
-    assert page.evaluate("selectedPhotoId === photos[selectedIndex].id")
+    page.wait_for_function("cols => browseState.selectedIndex === cols", arg=columns)
+    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[browseState.selectedIndex].id")
 
     page.keyboard.press("ArrowUp")
-    page.wait_for_function("selectedIndex === 0")
-    assert page.evaluate("selectedPhotoId === photos[0].id")
+    page.wait_for_function("browseState.selectedIndex === 0")
+    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[0].id")
 
 
 def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
@@ -2150,11 +2140,11 @@ def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
     page.goto(f"{url}/browse")
 
     page.locator(".grid-card").first.wait_for(state="visible")
-    assert page.evaluate("selectedIndex") == -1
+    assert page.evaluate("browseState.selectedIndex") == -1
 
     page.keyboard.press("ArrowDown")
-    page.wait_for_function("selectedIndex === 0")
-    assert page.evaluate("selectedPhotoId === photos[0].id")
+    page.wait_for_function("browseState.selectedIndex === 0")
+    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[0].id")
 
 
 def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
@@ -2173,14 +2163,14 @@ def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
 
     cards = page.locator(".grid-card")
     cards.nth(1).wait_for(state="visible")
-    page.wait_for_function("photos.length === 2 && totalPhotos > photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
 
     cards.nth(1).click()
     page.keyboard.press("Shift+ArrowRight")
 
-    page.wait_for_function("photos.length > 2 && selectedPhotos.has(photos[2].id)")
-    assert page.evaluate("selectedPhotos.has(photos[1].id)")
-    assert page.evaluate("selectedPhotoId === photos[1].id")
+    page.wait_for_function("browseState.photos.length > 2 && browseState.selectedPhotos.has(browseState.photos[2].id)")
+    assert page.evaluate("browseState.selectedPhotos.has(browseState.photos[1].id)")
+    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[1].id")
 
 
 def test_multiselect_offers_partial_keyword_fill(live_server, page):
@@ -2193,9 +2183,9 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     assert cards.count() >= 5
 
     page.evaluate("""
-      photos.forEach(function(p) { selectedPhotos.add(p.id); });
-      renderGrid();
-      updateBatchBar();
+      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      pageModules.grid.renderGrid();
+      pageModules.batchBar.updateBatchBar();
     """)
 
     expect(page.locator("#selectionPanel")).to_be_visible()
@@ -2205,7 +2195,7 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
 
     original_with_keyword = page.evaluate("""
       async () => {
-        const ids = photos.map(p => p.id);
+        const ids = browseState.photos.map(p => p.id);
         const details = await Promise.all(
           ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
         );
@@ -2220,7 +2210,7 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
 
     page.wait_for_function("""
       async () => {
-        const ids = photos.map(p => p.id);
+        const ids = browseState.photos.map(p => p.id);
         const details = await Promise.all(
           ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
         );
@@ -2238,7 +2228,7 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     page.evaluate("async () => (await fetch('/api/undo', {method: 'POST'})).ok")
     restored_with_keyword = page.evaluate("""
       async () => {
-        const ids = photos.map(p => p.id);
+        const ids = browseState.photos.map(p => p.id);
         const details = await Promise.all(
           ids.map(id => fetch('/api/photos/' + id).then(r => r.json()))
         );
@@ -2262,11 +2252,11 @@ def test_selection_panel_delegation_survives_refresh_and_keyboard_activation(liv
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      photos.forEach(p => selectedPhotos.add(p.id));
-      renderGrid();
-      updateBatchBar();
-      Vireo.browse.selectionPanel.bindActions();
-      Vireo.browse.selectionPanel.bindActions();
+      browseState.photos.forEach(p => browseState.selectedPhotos.add(p.id));
+      pageModules.grid.renderGrid();
+      pageModules.batchBar.updateBatchBar();
+      pageModules.selectionPanelEvents.bindSelectionPanelActions();
+      pageModules.selectionPanelEvents.bindSelectionPanelActions();
     """)
     row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
     add = row.locator("button", has_text="Add to 4")
@@ -2300,9 +2290,9 @@ def test_multiselect_shows_and_removes_keyword_shared_by_all_photos(live_server,
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      photos.forEach(function(p) { selectedPhotos.add(p.id); });
-      renderGrid();
-      updateBatchBar();
+      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      pageModules.grid.renderGrid();
+      pageModules.batchBar.updateBatchBar();
     """)
 
     row = page.locator(".selection-keyword-row", has_text=keyword_name)
@@ -2343,9 +2333,9 @@ def test_multiselect_groups_metadata_and_bulk_updates_wildlife_workflow(
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      photos.forEach(function(p) { selectedPhotos.add(p.id); });
-      renderGrid();
-      updateBatchBar();
+      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      pageModules.grid.renderGrid();
+      pageModules.batchBar.updateBatchBar();
     """)
 
     taxonomy = page.locator(
@@ -2386,12 +2376,12 @@ def test_wildlife_batch_completion_refreshes_current_selection(live_server, page
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      selectedPhotoId = null;
-      selectedPhotos.clear();
-      photos.slice(0, 2).forEach(function(photo) {
-        selectedPhotos.add(photo.id);
+      browseState.selectedPhotoId = null;
+      browseState.selectedPhotos.clear();
+      browseState.photos.slice(0, 2).forEach(function(photo) {
+        browseState.selectedPhotos.add(photo.id);
       });
-      updateBatchBar();
+      pageModules.batchBar.updateBatchBar();
     """)
     expect(
         page.locator("#selectionWildlifeActions button", has_text="Exclude 2")
@@ -2410,7 +2400,7 @@ def test_wildlife_batch_completion_refreshes_current_selection(live_server, page
         return window.__originalApiJson(url, opts, options);
       };
       window.__wildlifeBatchDone = false;
-      setSelectionWildlifeExcluded(true).finally(function() {
+      pageModules.selectionPanel.setSelectionWildlifeExcluded(true).finally(function() {
         window.__wildlifeBatchDone = true;
       });
       void 0;
@@ -2418,11 +2408,11 @@ def test_wildlife_batch_completion_refreshes_current_selection(live_server, page
     page.wait_for_function("typeof window.__releaseWildlifeBatch === 'function'")
 
     page.evaluate("""
-      selectedPhotos.clear();
-      photos.slice(2, 5).forEach(function(photo) {
-        selectedPhotos.add(photo.id);
+      browseState.selectedPhotos.clear();
+      browseState.photos.slice(2, 5).forEach(function(photo) {
+        browseState.selectedPhotos.add(photo.id);
       });
-      updateBatchBar();
+      pageModules.batchBar.updateBatchBar();
     """)
     current_action = page.locator(
         "#selectionWildlifeActions button", has_text="Exclude 3"
@@ -2440,21 +2430,21 @@ def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):
     page.goto(f"{url}/browse")
 
     page.locator(".grid-card").first.wait_for(state="visible")
-    first_filename = page.evaluate("photos[0].filename")
+    first_filename = page.evaluate("browseState.photos[0].filename")
 
     page.evaluate("""
-      selectedPhotoId = photos[0].id;
-      selectedIndex = 0;
-      selectedPhotos.clear();
-      selectedPhotos.add(photos[0].id);
-      selectedPhotos.add(photos[1].id);
-      updateBatchBar();
+      browseState.selectedPhotoId = browseState.photos[0].id;
+      browseState.selectedIndex = 0;
+      browseState.selectedPhotos.clear();
+      browseState.selectedPhotos.add(browseState.photos[0].id);
+      browseState.selectedPhotos.add(browseState.photos[1].id);
+      pageModules.batchBar.updateBatchBar();
     """)
     expect(page.locator("#selectionPanel")).to_be_visible()
 
     page.evaluate("""
-      selectedPhotos.delete(photos[1].id);
-      updateBatchBar();
+      browseState.selectedPhotos.delete(browseState.photos[1].id);
+      pageModules.batchBar.updateBatchBar();
     """)
 
     expect(page.locator("#selectionPanel")).to_be_hidden()
@@ -2487,7 +2477,7 @@ def test_reject_shortcut_keeps_existing_thumbnail_nodes(live_server, page):
 
     page.keyboard.press("x")
     page.wait_for_function(
-        f"(photos.find(function(p){{return p.id==={pid};}}) || {{}}).flag === 'rejected'",
+        f"(browseState.photos.find(function(p){{return p.id==={pid};}}) || {{}}).flag === 'rejected'",
         timeout=3000,
     )
 
@@ -2528,8 +2518,8 @@ def test_collection_count_refresh_ignores_stale_response(live_server, page):
 
     final_count = page.evaluate(
         """async () => {
-          renderCollectionList([{id: 999001, name: 'Rejected', photo_count: 0}]);
-          collectionCountLoadGen = 0;
+          pageModules.sidebarCollections.renderCollectionList([{id: 999001, name: 'Rejected', photo_count: 0}]);
+          browseState.collectionCountLoadGen = 0;
           var originalSafeFetch = safeFetch;
           var resolvers = [];
           safeFetch = function(url, opts, options) {
@@ -2539,8 +2529,8 @@ def test_collection_count_refresh_ignores_stale_response(live_server, page):
             return originalSafeFetch(url, opts, options);
           };
           try {
-            var first = loadCollectionCounts();
-            var second = loadCollectionCounts();
+            var first = pageModules.sidebarCollections.loadCollectionCounts();
+            var second = pageModules.sidebarCollections.loadCollectionCounts();
             resolvers[1]([{id: 999001, photo_count: 2}]);
             await second;
             resolvers[0]([{id: 999001, photo_count: 1}]);
@@ -2579,25 +2569,25 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
 
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
-    assert page.evaluate("selectedPhotos.size") == 1
+    assert page.evaluate("browseState.selectedPhotos.size") == 1
 
     # Switch to a collection; stale selection must drop before loadPhotos.
     # Collections now open INTO the filter bar as an editable expression
     # (Phase 5) — the reload goes through resetAndLoad, which clears the
     # selection; the chips prove the collection's rules were applied.
-    page.evaluate("loadCollections()")
+    page.evaluate("pageModules.sidebarCollections.loadCollections()")
     page.wait_for_function(
-        f"window.collectionsById && collectionsById[{collection_id}]", timeout=4000
+        f"browseState.collectionsById && browseState.collectionsById[{collection_id}]", timeout=4000
     )
-    page.evaluate(f"filterByCollection({collection_id})")
+    page.evaluate(f"pageModules.sidebarCollections.filterByCollection({collection_id})")
     page.wait_for_function(
         "document.querySelector('.vf-chips') && "
         "document.querySelector('.vf-chips').textContent.includes('File extension')",
         timeout=4000,
     )
 
-    page.wait_for_function("selectedPhotos.size === 0", timeout=4000)
-    assert page.evaluate("selectedPhotoId") is None
+    page.wait_for_function("browseState.selectedPhotos.size === 0", timeout=4000)
+    assert page.evaluate("browseState.selectedPhotoId") is None
     expect(bar).to_be_hidden()
 
 
@@ -2643,12 +2633,12 @@ def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
 
     # Text sitting in the quick-search box (no Enter yet) must not apply
     # later and overwrite the opened collection's expression.
-    page.evaluate("loadCollections()")
+    page.evaluate("pageModules.sidebarCollections.loadCollections()")
     page.wait_for_function(
-        f"window.collectionsById && collectionsById[{collection_id}]", timeout=4000
+        f"browseState.collectionsById && browseState.collectionsById[{collection_id}]", timeout=4000
     )
     page.locator(".vf-search input").fill("hum")
-    page.evaluate(f"filterByCollection({collection_id})")
+    page.evaluate(f"pageModules.sidebarCollections.filterByCollection({collection_id})")
     page.wait_for_function(
         "document.querySelector('.vf-chips') && "
         "document.querySelector('.vf-chips').textContent.includes('File extension')",

@@ -6,7 +6,7 @@
     <label for="panoramaDestination" style="font-size:12px;">Save in folder</label>
     <div style="display:flex;gap:8px;margin:6px 0;">
       <input id="panoramaDestination" class="modal-input" type="text" placeholder="Beside the first selected photo" style="flex:1;min-width:0;margin:0;">
-      <button id="panoramaBrowse" class="modal-btn modal-btn-cancel" type="button" onclick="exportFolderBrowser.open('panorama')">Browse…</button>
+      <button data-browse-on="click:openPanoramaFolderBrowser" id="panoramaBrowse" class="modal-btn modal-btn-cancel" type="button">Browse…</button>
     </div>
     <p style="font-size:12px;color:var(--text-secondary);margin:8px 0 16px;line-height:1.4;">Saved as the first photo’s name plus “_panorama”. Existing files are preserved by adding a number. Rescan the output folder to add the result to Browse.</p>
     <label for="panoramaFormat" style="font-size:12px;display:block;margin-bottom:4px;">Format</label>
@@ -23,8 +23,8 @@
     <label style="font-size:12px;display:block;margin:12px 0;"><input id="panoramaReveal" type="checkbox" checked> Show the result in the file manager</label>
     <p id="panoramaStatus" role="status" style="font-size:12px;overflow-wrap:anywhere;"></p>
     <div class="modal-actions">
-      <button id="panoramaSubmit" class="modal-btn modal-btn-primary" type="button" onclick="startPanorama()">Create Panorama</button>
-      <button class="modal-btn modal-btn-cancel" type="button" onclick="closePanoramaModal()">Close</button>
+      <button data-browse-on="click:startPanorama" id="panoramaSubmit" class="modal-btn modal-btn-primary" type="button">Create Panorama</button>
+      <button data-browse-on="click:closePanoramaModal" class="modal-btn modal-btn-cancel" type="button">Close</button>
     </div>
   </div>
 </div>

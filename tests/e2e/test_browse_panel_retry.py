@@ -14,7 +14,7 @@ def select_pair(page, first=0):
     cards.nth(first).click()
     cards.nth(first + 1).click(modifiers=["ControlOrMeta"])
     expect(page.locator("#selectionPanel")).to_be_visible()
-    ids = page.evaluate("getActiveSelection()")
+    ids = page.evaluate("pageModules.selection.getActiveSelection()")
     assert len(ids) == 2
     return sorted(ids)
 
@@ -49,7 +49,7 @@ def test_selection_panel_retry_recovers_without_reselection(live_server, page, k
     expect(retry).to_have_count(0)
     expect(panel).not_to_contain_text("Checking")
     expect(panel).not_to_contain_text("Could not load")
-    assert sorted(page.evaluate("getActiveSelection()")) == selected
+    assert sorted(page.evaluate("pageModules.selection.getActiveSelection()")) == selected
 
 
 @pytest.mark.parametrize("kind,panel_id,endpoint,label", PANELS)
@@ -78,8 +78,8 @@ def test_late_retry_cannot_repaint_a_different_selection(live_server, page, kind
     with page.expect_request(pattern):
         page.evaluate(
             """kind => {
-          window.pendingPanelRetry = Vireo.browse.panelLoaders[kind].retry();
-          Vireo.browse.panelLoaders[kind].retry();
+          window.pendingPanelRetry = pageModules.panelLoaders.panelLoaders[kind].retry();
+          pageModules.panelLoaders.panelLoaders[kind].retry();
         }""",
             kind,
         )
@@ -92,7 +92,7 @@ def test_late_retry_cannot_repaint_a_different_selection(live_server, page, kind
     held[0].fulfill(json={kind: [row], "selected_count": 2})
     page.evaluate("async () => { await window.pendingPanelRetry; }")
     assert panel.inner_html() == before
-    assert sorted(page.evaluate("getActiveSelection()")) == selected
+    assert sorted(page.evaluate("pageModules.selection.getActiveSelection()")) == selected
 
 
 def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page):
@@ -109,7 +109,7 @@ def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page
     page.route(pattern, intercept)
     page.goto(f"{live_server['url']}/browse")
     page.locator("#grid .grid-card").first.click()
-    selected = page.evaluate("selectedPhotoId")
+    selected = page.evaluate("browseState.selectedPhotoId")
     panel = page.locator("#detailPredictions")
     retry = panel.get_by_role("button", name="Retry loading photo predictions", exact=True)
     expect(retry).to_be_visible()
@@ -119,7 +119,7 @@ def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page
     expect(panel).not_to_contain_text("Loading predictions")
     expect(panel).not_to_contain_text("Could not load")
     assert requests[0] == requests[1]
-    assert page.evaluate("selectedPhotoId") == selected
+    assert page.evaluate("browseState.selectedPhotoId") == selected
 
 
 @pytest.mark.parametrize("kind,panel_id,endpoint,label", PANELS)
@@ -137,14 +137,14 @@ def test_menu_action_target_does_not_replace_panel_selection(live_server, page, 
     page.evaluate(
         """id => {
       nativeMenuSetPhotoIdsOverride([id]);
-      batchAddKeyword();
+      pageModules.batchActions.batchAddKeyword();
     }""",
         selected[0],
     )
     dialog = page.locator("#batchKeywordModal")
     expect(dialog).to_be_visible()
-    assert page.evaluate("getActiveSelection()") == [selected[0]]
-    assert sorted(page.evaluate("getBrowseSelection()")) == selected
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == [selected[0]]
+    assert sorted(page.evaluate("pageModules.selection.getBrowseSelection()")) == selected
     with page.expect_response(pattern):
         if fails:
             held[0].fulfill(status=503, json={"error": "Temporary failure"})
@@ -152,7 +152,7 @@ def test_menu_action_target_does_not_replace_panel_selection(live_server, page, 
             held[0].continue_()
     expect(panel).not_to_contain_text("Checking")
     dialog.get_by_role("button", name="Cancel", exact=True).click()
-    assert sorted(page.evaluate("getActiveSelection()")) == selected
+    assert sorted(page.evaluate("pageModules.selection.getActiveSelection()")) == selected
     retry = panel.get_by_role("button", name=label, exact=True)
     if fails:
         expect(retry).to_be_visible()

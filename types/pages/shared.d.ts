@@ -155,7 +155,11 @@ interface CompareController {
   step(delta: number): Promise<void> | undefined;
   resetViews(): void; destroy(): void;
 }
-interface Window {VireoBrowseCompare: {create(options: CompareOptions): CompareController};}
+type CompareControls = Pick<CompareController, 'close' | 'resetViews' | 'step'>;
+interface Window {VireoBrowseCompare: {
+  create(options: CompareOptions): CompareController;
+  bindControls(document: Document, getCompare: () => CompareControls | null | undefined): void;
+};}
 
 interface FindTextRun {text: string; parts: {node: Text; start: number; end: number}[];}
 interface FindTextSegment {start: number; end: number; group: Element[];}

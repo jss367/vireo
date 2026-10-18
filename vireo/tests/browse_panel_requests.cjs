@@ -4,6 +4,16 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
 
+// The browse files are ES modules. Run each one's body as a script, as
+// tests/frontend/module-source.mjs does: drop its imports (the context supplies
+// those names) and its `export` keywords. Page state is `state.<field>`, and
+// the context stands in for `state`.
+function moduleAsScript(source) {
+  return source
+    .replace(/^import\s[^;]*?\sfrom\s+'[^']+';\n/gm, '')
+    .replace(/(^|\*\/ )export (?=(?:async\s+)?function|const |let |var |class )/gm, '$1');
+}
+
 function setup() {
   const elements = new Map();
   const pending = [];
@@ -62,9 +72,11 @@ function setup() {
     getActiveSelection: () => ctx._vireoNativeMenuPhotoIdsOverride || ctx._activeSelection || [],
   });
   ctx.window = ctx;
+  ctx.state = ctx;
   vm.runInContext(fs.readFileSync('vireo/static/vireo-panel-loader.js', 'utf8'), ctx);
+  ctx.VireoPanelLoader = ctx.window.VireoPanelLoader;
   for (const file of ['panel-requests.js', 'selection-panel-state.js', 'selection-panel.js', 'prediction-panels.js', 'panel-loaders.js']) {
-    vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
+    vm.runInContext(moduleAsScript(fs.readFileSync('vireo/static/browse/' + file, 'utf8')), ctx);
   }
   // Rendering is independent of network ownership; record which responses
   // reach it while executing the real loaders and their failure paths.
@@ -75,7 +87,7 @@ function setup() {
     const load = ctx[name];
     ctx[name] = ids => { ctx._activeSelection = ids.slice(); return load(ids); };
   }
-  return {ctx, elements, pending, rendered, renderedCounts, opened, lanes: ctx.Vireo.browse.panelRequests};
+  return {ctx, elements, pending, rendered, renderedCounts, opened, lanes: ctx.panelRequests};
 }
 
 for (const [loader, responseField, elementId] of [
@@ -135,7 +147,7 @@ for (const [loader, responseField, elementId] of [
   test(loader + ': Retry recovers repeatedly without duplicate requests', async () => {
     const {ctx, elements, pending, rendered} = setup();
     const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
-    const controller = ctx.Vireo.browse.panelLoaders[kind];
+    const controller = ctx.panelLoaders[kind];
     const first = ctx[loader]([1, 2]);
     pending[0].reject(new Error('offline'));
     await first;
@@ -168,7 +180,7 @@ for (const [loader, responseField, elementId] of [
     pending[0].reject(new Error('offline'));
     await first;
     lanes[kind].invalidate();
-    await ctx.Vireo.browse.panelLoaders[kind].retry();
+    await ctx.panelLoaders[kind].retry();
     assert.equal(pending.length, 1);
   });
 
@@ -179,7 +191,7 @@ for (const [loader, responseField, elementId] of [
     pending[0].reject(new Error('offline'));
     await first;
     ctx._activeSelection = [3, 4];
-    await ctx.Vireo.browse.panelLoaders[kind].retry();
+    await ctx.panelLoaders[kind].retry();
     assert.equal(pending.length, 1);
   });
 
@@ -191,7 +203,7 @@ for (const [loader, responseField, elementId] of [
     pending[0].reject(new Error('offline'));
     await first;
     const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
-    const retry = ctx.Vireo.browse.panelLoaders[kind].retry();
+    const retry = ctx.panelLoaders[kind].retry();
     assert.deepEqual(JSON.parse(pending[1].options.body).photo_ids, [1, 2]);
     pending[1].resolve({[responseField]: ['original selection']});
     await retry;
@@ -210,7 +222,7 @@ for (const [loader, responseField, elementId] of [
     const {ctx, pending, rendered} = setup();
     const current = ctx[loader]([3, 4]);
     const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
-    const stale = ctx.Vireo.browse.panelLoaders[kind].load([1, 2]);
+    const stale = ctx.panelLoaders[kind].load([1, 2]);
     assert.equal(pending.length, 1);
     pending[0].resolve({[responseField]: ['current']});
     await Promise.all([current, stale]);
@@ -235,7 +247,7 @@ for (const [loader, responseField, elementId] of [
     pending[0].reject(new Error('offline'));
     await current;
     const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
-    const retry = ctx.Vireo.browse.panelLoaders[kind].retry();
+    const retry = ctx.panelLoaders[kind].retry();
     assert.deepEqual(JSON.parse(pending[1].options.body).photo_ids, [1, 2]);
     pending[1].resolve({[responseField]: ['recovered']});
     await retry;
@@ -302,7 +314,7 @@ test('an observation is invalidated even before the first request', () => {
 
 test('Show photos stops batching when its selection is replaced', async () => {
   const {ctx, lanes, pending, opened} = setup();
-  ctx.Vireo.browse.selectionPanel.predictions.replaceRows([
+  ctx.selectionPanel.predictions.replaceRows([
     {predicted_photo_ids: Array.from({length: 600}, (_, i) => i + 1)},
   ]);
   const button = {disabled: false, textContent: 'Show 600 photos'};
@@ -318,7 +330,7 @@ test('Show photos stops batching when its selection is replaced', async () => {
 
 test('only the latest Show click opens the lightbox', async () => {
   const {ctx, pending, opened} = setup();
-  ctx.Vireo.browse.selectionPanel.predictions.replaceRows([
+  ctx.selectionPanel.predictions.replaceRows([
     {predicted_photo_ids: [1, 2]}, {predicted_photo_ids: [3, 4]},
   ]);
   const old = ctx.showSelectionPredictionPhotos(0);
@@ -334,9 +346,9 @@ test('only the latest Show click opens the lightbox', async () => {
 for (const failure of [false, true]) {
   test('departed detail prediction ' + (failure ? 'failure' : 'success') + ' cannot repaint', async () => {
     const {ctx, elements, pending, rendered} = setup();
-    ctx._detailPhotoId = 1;
+    ctx.detailPhotoId = 1;
     const old = ctx.loadDetailPredictions(1);
-    ctx._detailPhotoId = 2;
+    ctx.detailPhotoId = 2;
     elements.get('detailPredictions').innerHTML = 'Photo 2';
     if (failure) pending[0].reject(new Error('late failure'));
     else pending[0].resolve(['photo 1']);
@@ -348,17 +360,17 @@ for (const failure of [false, true]) {
 
 test('detail prediction Retry works before the first successful render and retires on departure', async () => {
   const {ctx, pending, rendered} = setup();
-  ctx._detailPhotoId = 1;
+  ctx.detailPhotoId = 1;
   const first = ctx.loadDetailPredictions(1);
   pending[0].reject(new Error('offline'));
   await first;
-  const retry = ctx.Vireo.browse.panelLoaders.detailPredictions.retry();
+  const retry = ctx.panelLoaders.detailPredictions.retry();
   assert.match(pending[1].url, /photo_ids=1/);
-  ctx._detailPhotoId = 2;
+  ctx.detailPhotoId = 2;
   pending[1].resolve({predictions: ['old photo']});
   await retry;
   assert.deepEqual(rendered, []);
-  await ctx.Vireo.browse.panelLoaders.detailPredictions.retry();
+  await ctx.panelLoaders.detailPredictions.retry();
   assert.equal(pending.length, 2);
 });
 
@@ -374,7 +386,7 @@ test('clearing wildlife state prevents a late response from restoring batch cont
 
 test('retiring panel rows prevents keyword writes, prediction acceptance, and stale toggles', async () => {
   const {ctx, pending, rendered} = setup();
-  const state = ctx.Vireo.browse.selectionPanel;
+  const state = ctx.selectionPanel;
   state.keywords.replace([{id: 7, name: "Cooper's Hawk", missing_photo_ids: [1], present_photo_ids: [2]}]);
   state.predictions.remember([{species: "Say's Phoebe"}], 2, {});
   state.predictions.replaceRows([{species: "Say's Phoebe", acceptable_prediction_ids: [100]}]);
@@ -390,7 +402,7 @@ test('retiring panel rows prevents keyword writes, prediction acceptance, and st
 
 test('row actions retain a snapshot even when the source arrays change', () => {
   const {ctx} = setup();
-  const state = ctx.Vireo.browse.selectionPanel;
+  const state = ctx.selectionPanel;
   const keyword = {id: 7, missing_photo_ids: [1], present_photo_ids: [2]};
   const prediction = {species: "Say's Phoebe", acceptable_prediction_ids: [100], predicted_photo_ids: [1, 2]};
   state.keywords.replace([keyword]);
@@ -407,7 +419,7 @@ test('row actions retain a snapshot even when the source arrays change', () => {
 
 test('loading a different selection immediately retires the old actionable rows', async () => {
   const {ctx, pending} = setup();
-  const state = ctx.Vireo.browse.selectionPanel;
+  const state = ctx.selectionPanel;
   state.keywords.replace([{id: 7, missing_photo_ids: [1]}]);
   state.predictions.replaceRows([{species: "Say's Phoebe", acceptable_prediction_ids: [100]}]);
   const keywords = ctx.loadSelectionKeywordSuggestions([3, 4]);
@@ -433,7 +445,7 @@ function setupActions() {
   });
   ctx.window = ctx;
   for (const file of ['selection-panel-state.js', 'selection-panel-events.js']) {
-    vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
+    vm.runInContext(moduleAsScript(fs.readFileSync('vireo/static/browse/' + file, 'utf8')), ctx);
   }
   for (const name of ['openBatchDevelopmentEditor', 'pasteEditSettingsToSelection',
     'setSelectionWildlifeExcluded', 'applySelectionKeyword', 'removeSelectionKeyword',
@@ -441,9 +453,10 @@ function setupActions() {
     'openPredictionInReview']) {
     ctx[name] = (...args) => calls.push([name, ...args]);
   }
-  const state = ctx.Vireo.browse.selectionPanel;
+  const state = ctx.selectionPanel;
   state.predictions.replaceRows([{species: "Say's Phoebe", ambiguous_photo_ids: [12]}]);
-  state.bindActions();
+  const bindActions = ctx.bindSelectionPanelActions;
+  bindActions();
   function click(action, attrs = {}, options = {}) {
     const attributes = {'data-selection-action': action, ...attrs};
     const button = Object.assign(new HTMLButtonElement(), {
@@ -456,12 +469,12 @@ function setupActions() {
     listeners.forEach(handler => handler(event));
     return button;
   }
-  return {state, listeners, calls, click, Element};
+  return {state, bindActions, listeners, calls, click, Element};
 }
 
 test('delegated actions bind once and preserve each button argument', () => {
-  const {state, listeners, calls, click} = setupActions();
-  state.bindActions();
+  const {bindActions, listeners, calls, click} = setupActions();
+  bindActions();
   assert.equal(listeners.length, 1);
   click('edit');
   click('paste');

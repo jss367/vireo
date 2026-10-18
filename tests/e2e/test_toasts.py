@@ -110,7 +110,7 @@ def test_partial_path_copy_uses_warning_with_counts(live_server, page):
             value: {writeText: async text => { copied = text; }}
           });
           try {
-            await copyPhotoPaths([1, 2, 3]);
+            await pageModules.contextMenus.copyPhotoPaths([1, 2, 3]);
             return {copied, seen};
           } finally {
             window.safeFetch = original.safeFetch;

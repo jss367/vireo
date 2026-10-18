@@ -1,26 +1,48 @@
-/* Browse: detail-panel location editing (Google Places, keywords, EXIF suggestion).
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: detail-panel location editing (Google Places, keywords, EXIF suggestion). ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { VireoFilter, escapeHtml, googleMaps, safeFetch, setGoogleMapsCallback } from './shared.js';
+import { confirmBatchKeyword } from './batch-actions.js';
+import { _cfgPromise } from './config.js';
+import { loadDetail, loadSummary } from './detail.js';
+import { addKeyword, refreshPendingSyncBanner, renderBatchInspector } from './edit-actions.js';
+import { refreshGridCards } from './grid.js';
+import {
+  bindKeywordAutocomplete, invalidateKeywordAutocompleteCache, keywordMatchScore,
+  loadKeywordAutocompleteOptions,
+} from './keyword-autocomplete.js';
+import { resetAndLoad } from './loading.js';
+import { findBrowsePhoto } from './selection-panel.js';
+import { getActiveSelection, selectionIdsKey } from './selection.js';
+import {
+  MUTATION_KEYWORD, filterByCollection, scheduleCollectionCountsRefresh,
+} from './sidebar-collections.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import { refreshExpandedBrowseStackMembers } from './stacks.js';
+import { bindBrowseMarkup } from './markup.js';
 
 /* ---------- Location section ---------- */
+// Bumped by every location write, so a slower EXIF suggestion that started
+// before it cannot repaint over the result.
+var locationMutationEpoch = 0;
 let googleMapsLoadPromise = /** @type {Promise<BrowseGoogle> | null} */ (null);
 function loadGoogleMapsJs() {
   if (googleMapsLoadPromise) return googleMapsLoadPromise;
-  const apiKey = window.GOOGLE_MAPS_API_KEY || '';
+  const apiKey = state.googleMapsApiKey;
   if (!apiKey) {
     googleMapsLoadPromise = Promise.reject(new Error('no_api_key'));
     return googleMapsLoadPromise;
   }
   googleMapsLoadPromise = new Promise(function(resolve, reject) {
-    window._gmapsCallback = function() { resolve(window.google); };
+    setGoogleMapsCallback(function() { resolve(googleMaps()); });
     var s = document.createElement('script');
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' +
       encodeURIComponent(apiKey) +
       '&libraries=places' +
-      (window.GOOGLE_MAPS_PREFER_ENGLISH ? '&language=en' : '') +
+      (state.googleMapsPreferEnglish ? '&language=en' : '') +
       '&loading=async&callback=_gmapsCallback';
     s.async = true;
-    s.onerror = function() { reject(new Error('gmaps_load_failed')); };
+    s.addEventListener('error', function() { reject(new Error('gmaps_load_failed')); });
     document.head.appendChild(s);
   });
   return googleMapsLoadPromise;
@@ -30,7 +52,8 @@ function loadGoogleMapsJs() {
 // whether a `place_changed` event recently fired (and thus the Enter
 // handler should defer to it).
 var _locationAutocomplete = /** @type {BrowseGoogleAutocomplete | null} */ (null);
-var _locationLastPickedAt = 0;
+// When place_changed last fired: an object, so a browser test can set it.
+export const locationPick = {lastPickedAt: 0};
 var _locationAutocompleteBound = false;
 // Pending free-text submit triggered by Enter. Held for ~300ms so a
 // keyboard-selected autocomplete suggestion (where place_changed fires
@@ -71,12 +94,12 @@ function renderLocationKeywordSuggestions() {
   var dropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   if (!input || !dropdown) return;
   var query = input.value.trim().toLowerCase();
-  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+  if (!query || !state.keywordAutocompleteCache || !state.keywordAutocompleteCache.length) {
     hideLocationKeywordSuggestions();
     return;
   }
 
-  _locationKeywordState.matches = keywordAutocompleteCache
+  _locationKeywordState.matches = state.keywordAutocompleteCache
     .filter(function(k) { return k && k.type === 'location'; })
     .map(function(k) {
       return { keyword: k, score: keywordMatchScore(k.search, query) };
@@ -127,13 +150,13 @@ function chooseLocationKeywordSuggestion(/** @type {number} */ index) {
     clearTimeout(_locationPendingTextSubmit);
     _locationPendingTextSubmit = null;
   }
-  _locationLastPickedAt = Date.now();
+  locationPick.lastPickedAt = Date.now();
   _submitLocationKeyword(keyword);
 }
 
 function _locationApplyPhotoIds() {
   // Batch flow (Cmd/Ctrl-click without ever opening a single-photo detail)
-  // leaves window._detailPhotoId unset even though getActiveSelection() has
+  // leaves detailPhotoId unset even though getActiveSelection() has
   // targets, so derive from the selection directly rather than gating on
   // the focused-detail photo.
   return getActiveSelection();
@@ -152,7 +175,7 @@ var LOCATION_BATCH_LIMIT = 1000;
 // place on an unrelated photo, whose × button would then clear *that* photo.
 // Capture the target before the await and paint only if it is still open.
 function _locationTargetKey() {
-  return selectionIdsKey(_locationApplyPhotoIds()) + '|' + (window._detailPhotoId || '');
+  return selectionIdsKey(_locationApplyPhotoIds()) + '|' + (state.detailPhotoId || '');
 }
 
 async function _postLocationBatched(/** @type {string} */ endpoint, /** @type {BrowseLocationBody} */ baseBody, /** @type {number[]} */ ids) {
@@ -179,19 +202,19 @@ async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @typ
   // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
   // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
   // just given a location and repaints A's stale Accept line.
-  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
+  locationMutationEpoch++;
   invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
-  if (activeCollectionId) {
-    await filterByCollection(activeCollectionId);
+  if (state.activeCollectionId) {
+    await filterByCollection(state.activeCollectionId);
     return;
   }
   // A saved location is a location keyword, so the same rule as the keyword
   // paths applies: re-run the query when the active expression can notice,
   // and keep the user where they were when it does.
-  if (window.VireoFilter && VireoFilter.hasFilters() &&
+  if (VireoFilter && VireoFilter.hasFilters() &&
       (!VireoFilter.dependsOnMutation ||
        VireoFilter.dependsOnMutation([MUTATION_KEYWORD]))) {
     resetAndLoad({ preserveScroll: true });
@@ -224,7 +247,7 @@ async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @typ
   var activeSel = getActiveSelection();
   if (activeSel.length > 1) {
     renderBatchInspector(activeSel);
-  } else if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+  } else if (detailPhotoId && state.selectedPhotoId === detailPhotoId) {
     loadDetail(detailPhotoId);
   } else {
     loadSummary();
@@ -233,12 +256,12 @@ async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @typ
 
 async function bindLocationAutocomplete() {
   if (_locationAutocompleteBound) return;
-  // Wait for the /api/config fetch to resolve so window.GOOGLE_MAPS_API_KEY
+  // Wait for the /api/config fetch to resolve so googleMapsApiKey
   // is populated. The user can focus the input before _cfgPromise has
   // resolved on a slow page load — without this await we'd take the
   // empty-key branch permanently.
   try { await _cfgPromise; } catch(e) {}
-  if (!window.GOOGLE_MAPS_API_KEY) return;  // no key -> free-text only
+  if (!state.googleMapsApiKey) return;  // no key -> free-text only
   _locationAutocompleteBound = true;
   var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (!input) return;
@@ -258,7 +281,7 @@ async function bindLocationAutocomplete() {
     _locationAutocomplete.addListener('place_changed', function() {
       var place = _locationAutocomplete?.getPlace();
       if (!place || !place.place_id) return;
-      _locationLastPickedAt = Date.now();
+      locationPick.lastPickedAt = Date.now();
       // Cancel any pending free-text submit from the Enter that triggered
       // this place_changed event — keydown fires synchronously BEFORE
       // place_changed, so the text path's setTimeout is still queued.
@@ -304,12 +327,12 @@ async function _submitLocationPlace(/** @type {string | number} */ placeId, /** 
   _hideLocationError();
   // Derive the target photos from the batch-aware selection so a fresh
   // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
-  // still applies to every selected photo. window._detailPhotoId is unset in
+  // still applies to every selected photo. detailPhotoId is unset in
   // that flow, so gating on it up front would silently apply to none.
   var ids = _locationApplyPhotoIds();
   if (!ids.length) return;
   var useBatch = ids.length > 1;
-  var detailPhotoId = window._detailPhotoId || null;
+  var detailPhotoId = state.detailPhotoId || null;
   var targetKey = _locationTargetKey();
   var body = /** @type {BrowseLocationBody} */ ({ place_id: placeId });
   if (placeDetails) body.place = placeDetails;
@@ -336,7 +359,7 @@ async function _submitLocationKeyword(/** @type {BrowseKeywordOption} */ keyword
   var ids = _locationApplyPhotoIds();
   if (!ids.length) return;
   var useBatch = ids.length > 1;
-  var detailPhotoId = window._detailPhotoId || null;
+  var detailPhotoId = state.detailPhotoId || null;
   var targetKey = _locationTargetKey();
   var body = { keyword_id: keyword.id };
   try {
@@ -356,12 +379,12 @@ async function _submitLocationKeyword(/** @type {BrowseKeywordOption} */ keyword
   }
 }
 
-async function _submitLocationText(/** @type {string} */ name) {
+export async function _submitLocationText(/** @type {string} */ name) {
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
   if (!ids.length) return;
   var useBatch = ids.length > 1;
-  var detailPhotoId = window._detailPhotoId || null;
+  var detailPhotoId = state.detailPhotoId || null;
   var targetKey = _locationTargetKey();
   try {
     var resp = useBatch
@@ -380,8 +403,8 @@ async function _submitLocationText(/** @type {string} */ name) {
   }
 }
 
-async function clearPhotoLocation() {
-  var photoId = window._detailPhotoId;
+export async function clearPhotoLocation() {
+  var photoId = state.detailPhotoId;
   if (!photoId) return;
   _hideLocationError();
   try {
@@ -397,7 +420,7 @@ async function clearPhotoLocation() {
 // data-photo-id owner tag). Every scrub site must go through this helper so
 // they can't silently diverge — e.g. if a future scrub also needs to clear a
 // stored placeId. Codex nitpick on PR #1097.
-function clearExifSuggestion() {
+export function clearExifSuggestion() {
   var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
   sugg.hidden = true;
@@ -410,7 +433,7 @@ function formatCoordinatePair(/** @type {number | null | undefined} */ latitude,
   return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
 }
 
-function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+export function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   var el = /** @type {HTMLElement} */ (document.getElementById('locationCoordinateStatus'));
   if (!el) return;
   var status = photo && photo.location_status ? photo.location_status : 'none';
@@ -430,7 +453,7 @@ function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined} */ ph
   el.textContent = text;
 }
 
-function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
+export function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
   var filled = /** @type {HTMLElement} */ (document.getElementById('locationFilled'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('locationEmpty'));
   if (!filled || !empty) return;
@@ -447,8 +470,9 @@ function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
         '<span class="filled-place">' + escapeHtml(loc.name || '') + '</span>' +
         parentsHtml +
       '</div>' +
-      '<button class="clear-location" type="button" title="Clear location" onclick="clearPhotoLocation()">×</button>' +
+      '<button class="clear-location" type="button" title="Clear location" data-browse-on="click:clearPhotoLocation">×</button>' +
     '</div>';
+  bindBrowseMarkup(filled);
   filled.hidden = false;
   empty.hidden = true;
   // Reset the input value for next time.
@@ -462,7 +486,7 @@ function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
   clearExifSuggestion();
 }
 
-function renderLocationEmpty(/** @type {{preserveExifSuggestion?: boolean, selectionIds?: number[]}} */ opts = {}) {
+export function renderLocationEmpty(/** @type {{preserveExifSuggestion?: boolean, selectionIds?: number[]}} */ opts = {}) {
   opts = opts || {};
   var filled = /** @type {HTMLElement} */ (document.getElementById('locationFilled'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('locationEmpty'));
@@ -498,7 +522,7 @@ function renderLocationEmpty(/** @type {{preserveExifSuggestion?: boolean, selec
    reverse-geocode suggestion and offer it as an inline Accept line. Bails
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
-async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+export async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   clearExifSuggestion();
   var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
@@ -515,10 +539,10 @@ async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined
   // the counter past what we captured. The post-await guard bails on any
   // mismatch. Closes the batch-save-during-pending-geocode race that the
   // DOM `!filled.hidden` check alone can't catch (see below).
-  var requestEpoch = window._locationMutationEpoch || 0;
+  var requestEpoch = locationMutationEpoch;
 
   await _cfgPromise;
-  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  var apiKey = state.googleMapsApiKey.trim();
   if (!apiKey) return;
   try {
     var params = new URLSearchParams({lat: String(photo.latitude), lng: String(photo.longitude)});
@@ -528,11 +552,11 @@ async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined
     if (!data || !data.place_id || !data.summary) return;
     // Three races the post-await guards must handle.
     //   1. Stale response for a photo the detail already navigated away
-    //      from (open A → open B): caught by _detailPhotoId, which
+    //      from (open A → open B): caught by detailPhotoId, which
     //      renderDetail overwrites on every open.
     //   2. Slow response for an anchor the user has since dropped from a
     //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
-    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      renderBatchInspector never touches detailPhotoId, so the anchor
     //      pointer could still match while getActiveSelection() no longer
     //      includes A. Accept posts to getActiveSelection(), so the guard
     //      must recheck selection membership too. Codex P1 on PR #1097.
@@ -540,23 +564,23 @@ async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined
     //      the detail panel, clearing the batch, or Cmd-click-dropping the
     //      anchor, then Select All that brings the departed photo back
     //      into the batch. The DOM scrub in each of those sites isn't
-    //      enough on its own: without also nulling _detailPhotoId the
+    //      enough on its own: without also nulling detailPhotoId the
     //      pointer keeps matching after Select All re-includes the photo,
     //      and Accept would apply the departed anchor's EXIF place to the
-    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      whole batch. Those sites now null detailPhotoId, so the first
     //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
-    if (window._detailPhotoId !== requestPhotoId) return;
+    if (state.detailPhotoId !== requestPhotoId) return;
     if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
     // Fourth race: while we were awaiting reverse-geocode, the user saved
     // a location for this photo (via the input, a keyword pick, or a batch
     // op). Every mutation path funnels through _afterLocationMutation, which
-    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // bumps locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
     // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
     // just-saved batch location. The DOM `!filled.hidden` check below alone
     // can't catch that — after a batch save, _afterLocationMutation runs
     // renderBatchInspector → renderLocationEmpty, which rehides
     // #locationFilled, so the paint sneaks through.)
-    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    if (locationMutationEpoch !== requestEpoch) return;
     // Defense-in-depth: if a filled row is on screen right now, whoever
     // painted it wanted the suggestion gone. The epoch check above already
     // covers the batch race; this catches any future save site that renders
@@ -585,7 +609,7 @@ async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined
 }
 
 async function acceptExifSuggestion(/** @type {string | number} */ placeId) {
-  var photoId = window._detailPhotoId;
+  var photoId = state.detailPhotoId;
   if (!photoId || !placeId) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
@@ -624,7 +648,7 @@ function _onLocationInputInput() {
 function _onLocationInputKeydown(/** @type {KeyboardEvent} */ e) {
   var dropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
-  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  var googlePlacesMayHandleKeyboard = !!state.googleMapsApiKey.trim();
   if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
     e.preventDefault();
     _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
@@ -653,7 +677,7 @@ function _onLocationInputKeydown(/** @type {KeyboardEvent} */ e) {
   // letting Enter through has no native side effect.
   // If a place was JUST picked (e.g. mouse click within ~500ms ago),
   // skip outright.
-  if (Date.now() - _locationLastPickedAt < 500) return;
+  if (Date.now() - locationPick.lastPickedAt < 500) return;
   var input = e.target; if (!(input instanceof HTMLInputElement)) return;
   var val = (input.value || '').trim();
   if (!val) return;
@@ -666,7 +690,7 @@ function _onLocationInputKeydown(/** @type {KeyboardEvent} */ e) {
   _locationPendingTextSubmit = setTimeout(function() {
     _locationPendingTextSubmit = null;
     // Final guard: place_changed may have raced in just before this fired.
-    if (Date.now() - _locationLastPickedAt < 1000) return;
+    if (Date.now() - locationPick.lastPickedAt < 1000) return;
     _submitLocationText(val);
   }, 300);
 }

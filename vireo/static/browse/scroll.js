@@ -1,36 +1,46 @@
-/* Browse: infinite scroll and keeping the focused card visible.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: infinite scroll and keeping the focused card visible. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { getBrowsePhotoElement, updateGridTail } from './grid.js';
+import { setBrowseDetailPanelWidth, setBrowseSidebarWidth } from './layout.js';
+import { loadPhotos, prependPreviousPhotos } from './loading.js';
+import { browseStackCoverIdForPhoto } from './stacks.js';
+import { updateScrollPosition } from './view-controls.js';
 
 /* ---------- Infinite Scroll ---------- */
-var gridContainer = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
-var infiniteScrollObserverDisconnected = false;
-var infiniteScrollObserverIsNative = (
-  typeof window.IntersectionObserver === 'function' &&
-  String(window.IntersectionObserver).indexOf('[native code]') !== -1
-);
-var observer = new IntersectionObserver(function(entries) {
-  if (entries[0]?.isIntersecting) loadPhotos({ silent: photos.length > 0 });
+export var gridContainer = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
+// Whether the infinite-scroll observer is disconnected, and whether it is the
+// browser's own IntersectionObserver (a test double is not, and the
+// scroll-driven path stays off for it). Fields, so browser tests can set them.
+export const infiniteScroll = {
+  observerDisconnected: false,
+  observerIsNative: (
+    typeof window.IntersectionObserver === 'function' &&
+    String(window.IntersectionObserver).indexOf('[native code]') !== -1
+  ),
+};
+export var observer = new IntersectionObserver(function(entries) {
+  if (entries[0]?.isIntersecting) loadPhotos({ silent: state.photos.length > 0 });
 }, { root: gridContainer, rootMargin: '3200px 0px' });
 
 var _observerObserve = observer.observe.bind(observer);
 var _observerDisconnect = observer.disconnect.bind(observer);
 observer.observe = function(target) {
-  infiniteScrollObserverDisconnected = false;
+  infiniteScroll.observerDisconnected = false;
   return _observerObserve(target);
 };
 observer.disconnect = function() {
-  infiniteScrollObserverDisconnected = true;
+  infiniteScroll.observerDisconnected = true;
   return _observerDisconnect();
 };
 
-function rearmInfiniteScrollObserver() {
+export function rearmInfiniteScrollObserver() {
   // With the 3200px root margin, the sentinel can remain intersecting after
   // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
-  if (infiniteScrollObserverDisconnected) return;
-  if (allLoaded || typeof observer === 'undefined') return;
+  if (infiniteScroll.observerDisconnected) return;
+  if (state.allLoaded || typeof observer === 'undefined') return;
   var sentinel = /** @type {HTMLElement} */ (document.getElementById('scrollSentinel'));
   if (!sentinel) return;
   observer.unobserve(sentinel);
@@ -40,10 +50,10 @@ function rearmInfiniteScrollObserver() {
 /* Scroll-driven page loading. The primary trigger is proximity to the loading
    boundary (the first skeleton cell). Fires on scroll and chains after each
    successful page load until the viewport is covered by real cards. */
-function ensureViewportHydrated() {
-  if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
-  if (loading || allLoaded || anchorScanDepth > 0) return;
-  if (photos.length === 0) return;
+export function ensureViewportHydrated() {
+  if (infiniteScroll.observerDisconnected || !infiniteScroll.observerIsNative) return;
+  if (state.loading || state.allLoaded || state.anchorScanDepth > 0) return;
+  if (state.photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
   var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
@@ -57,8 +67,8 @@ function ensureViewportHydrated() {
    instead of the sticky explanation banner, whose sticky geometry remains in
    the viewport even when the actual loading boundary is far above it. */
 function ensurePreviousViewportHydrated() {
-  if (loading || earliestPage <= 1 || anchorScanDepth > 0) return;
-  if (photos.length === 0) return;
+  if (state.loading || state.earliestPage <= 1 || state.anchorScanDepth > 0) return;
+  if (state.photos.length === 0) return;
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var contRect = gridContainer.getBoundingClientRect();
   var gridRect = grid.getBoundingClientRect();
@@ -83,19 +93,19 @@ window.addEventListener('resize', function() {
 // viewport pushes it past the bottom edge the same way. Put it back in view —
 // but only when it was on screen to begin with, so a resize never hauls the
 // grid back to a selection the user has deliberately scrolled away from.
-function focusedBrowsePhotoId() {
+export function focusedBrowsePhotoId() {
   // The most recent click wins. A cmd/shift-click extends the selection while
   // leaving selectedPhotoId on the older detail focus, and the card the user
   // just clicked is the one they are looking at. It only wins while it has a
   // card on screen, though: collapsing a stack after a stack-wide Select all
   // leaves the last-clicked member selected but unrendered, with
   // selectedPhotoId deliberately pinned to the visible cover.
-  if (lastClickedPhotoId != null &&
-      (lastClickedPhotoId === selectedPhotoId || selectedPhotos.has(lastClickedPhotoId)) &&
-      renderedCardForFocus(lastClickedPhotoId)) {
-    return lastClickedPhotoId;
+  if (state.lastClickedPhotoId != null &&
+      (state.lastClickedPhotoId === state.selectedPhotoId || state.selectedPhotos.has(state.lastClickedPhotoId)) &&
+      renderedCardForFocus(state.lastClickedPhotoId)) {
+    return state.lastClickedPhotoId;
   }
-  return selectedPhotoId;
+  return state.selectedPhotoId;
 }
 
 // The card standing in for a focused photo. A focused photo that is not itself
@@ -105,7 +115,7 @@ function focusedBrowsePhotoId() {
 // target). Grid and lightbox navigation already resolve that focus to the
 // cover — getBrowseShortcutPhoto — so the resize correction does too, instead
 // of giving up and letting the visibly-selected cover reflow off screen.
-function renderedCardForFocus(/** @type {number | null} */ photoId) {
+export function renderedCardForFocus(/** @type {number | null} */ photoId) {
   if (photoId == null) return null;
   var card = getBrowsePhotoElement(photoId);
   if (card) return card;
@@ -128,12 +138,12 @@ function focusedCardBox() {
 
 var gridViewportSize = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
 var gridSyncBannerHeight = (document.getElementById('syncBanner')?.offsetHeight || 0);
-var focusedCardWasOnScreen = false;
+export var focusedCardWasOnScreen = false;
 
 // Whether the focused card was on screen *before* the reflow. A ResizeObserver
 // only ever sees the layout that already happened, so this has to be sampled
 // as the user scrolls and selects.
-function noteFocusedCardVisibility() {
+export function noteFocusedCardVisibility() {
   // A reflow can dispatch its scroll event before the observer has compensated
   // for it. Sampling then would record the post-reflow (usually off-screen)
   // position and suppress the very correction it exists to authorize.

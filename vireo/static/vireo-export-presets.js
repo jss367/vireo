@@ -1,9 +1,10 @@
 /* Saved export presets for the export modal (Browse and Photo Editor).
  *
- * Both host pages render the modal with identical control ids and define the
- * same helper globals (applyExportPreset, markExportCustom,
+ * Both host pages render the modal with identical control ids and register the
+ * same page hooks (applyExportPreset, markExportCustom,
  * updateExportFormatControls, updateExportPreview,
- * selectedExportMetadataFields), so this shared file owns everything
+ * selectedExportMetadataFields; see vireo-page-hooks.js), so this shared file
+ * owns everything
  * preset-shaped: listing, applying, saving, deleting, and re-applying the
  * last-used preset when the modal opens. Controls that only exist on one
  * page (e.g. the reveal-after-export checkbox) are feature-detected.
@@ -117,9 +118,8 @@ var VireoExportPresets = (function() {
     });
     restorationControlStates = null;
     syncSubfolderNameState();
-    if (typeof updateExportFormatControls === 'function') {
-      updateExportFormatControls();
-    }
+    var updateFormatControls = Vireo.pageHook('updateExportFormatControls');
+    if (updateFormatControls) updateFormatControls();
   }
 
   function subfolderName() {
@@ -234,8 +234,7 @@ var VireoExportPresets = (function() {
       max_size: maxSize,
       quality: parseInt($('exportQuality').value, 10) || 92,
       naming_template: $('exportTemplate').value || '{original}',
-      metadata_fields: typeof selectedExportMetadataFields === 'function'
-        ? selectedExportMetadataFields() : [],
+      metadata_fields: (Vireo.pageHook('selectedExportMetadataFields') || function() { return []; })(),
     };
   }
 
@@ -294,8 +293,10 @@ var VireoExportPresets = (function() {
     });
     syncSubfolderNameState();
     persistPresetAffectedPreferences();
-    if (typeof updateExportFormatControls === 'function') updateExportFormatControls();
-    if (typeof updateExportPreview === 'function') updateExportPreview();
+    var updateFormat = Vireo.pageHook('updateExportFormatControls');
+    if (updateFormat) updateFormat();
+    var updatePreview = Vireo.pageHook('updateExportPreview');
+    if (updatePreview) updatePreview();
   }
 
   /* applySettings() writes controls with .value/.checked assignments, which
@@ -333,7 +334,8 @@ var VireoExportPresets = (function() {
         delete combined.dataset.presetFields;
         persistCaptureSplitHint();
       }
-      if (typeof applyExportPreset === 'function') applyExportPreset(value);
+      var applyPreset = Vireo.pageHook('applyExportPreset');
+      if (applyPreset) applyPreset(value);
     }
     VireoViewPreferences.write(LAST_USED_KEY, value);
     updateButtons();
@@ -708,9 +710,8 @@ var VireoExportPresets = (function() {
         applySettings(preset.settings);
       } else {
         sel.value = last;
-        if (sel.value === last && typeof applyExportPreset === 'function') {
-          applyExportPreset(last);
-        }
+        var applyLast = Vireo.pageHook('applyExportPreset');
+        if (sel.value === last && applyLast) applyLast(last);
       }
       restorationComplete = true;
       updateButtons();
@@ -745,7 +746,8 @@ var VireoExportPresets = (function() {
    * applySettings). */
   function markCustom() {
     modalEditGeneration++;
-    if (typeof markExportCustom === 'function') markExportCustom();
+    var markPageCustom = Vireo.pageHook('markExportCustom');
+    if (markPageCustom) markPageCustom();
     VireoViewPreferences.write(LAST_USED_KEY, 'custom');
     updateButtons();
   }
@@ -787,9 +789,9 @@ var VireoExportPresets = (function() {
         }
         markCustom();
         if (target.id === 'exportSubfolder') syncSubfolderNameState();
-        if ((target.id === 'exportSubfolder' || target.id === 'exportSubfolderName') &&
-            typeof updateExportPreview === 'function') {
-          updateExportPreview();
+        var updateNamePreview = Vireo.pageHook('updateExportPreview');
+        if ((target.id === 'exportSubfolder' || target.id === 'exportSubfolderName') && updateNamePreview) {
+          updateNamePreview();
         }
       });
     });

@@ -5,5 +5,4 @@ declare function isTauri(): boolean;
 declare const L: {map(containerId: string, options: Record<string, unknown>): {
   invalidateSize(options: {pan: boolean; debounceMoveend: boolean}): void;
 }};
-declare function buildExportPreflightRequest(): ExportPreflightRequest | null;
 declare function loadStoragePanel(): Promise<void>;

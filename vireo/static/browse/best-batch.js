@@ -1,84 +1,29 @@
-/* Browse: best-of-batch picker.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: best-of-batch picker. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { safeFetch, showToast } from './shared.js';
+import {
+  _clearRepresentativeStateIfIneligible, _refreshBatchInspectorIfActive,
+} from './batch-actions.js';
+import { showUndoToast } from './detail.js';
+import { refreshGridCards } from './grid.js';
+import { findBrowsePhoto } from './selection-panel.js';
+import { getActiveSelection } from './selection.js';
+import { scheduleCollectionCountsRefresh } from './sidebar-collections.js';
+import { reconcileBrowseStackCovers, refreshExpandedBrowseStackMembers } from './stacks.js';
 
 function bestBatchSeedId() {
-  if (selectedPhotoId != null) return selectedPhotoId;
+  if (state.selectedPhotoId != null) return state.selectedPhotoId;
   var ids = getActiveSelection();
   return ids.length ? ids[0] : null;
 }
 
-function hideBestBatch() {
+export function hideBestBatch() {
   var modal = /** @type {HTMLElement} */ (document.getElementById('bestBatchModal'));
   if (modal) modal.classList.remove('open');
 }
 
-function bestBatchRoleLabel(/** @type {string} */ role) {
-  if (role === 'best') return 'Best';
-  if (role === 'alternate') return 'Alt';
-  return 'Reject';
-}
-
-function bestBatchScoreText(/** @type {BrowseBestBatchCard} */ card) {
-  var parts = [];
-  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
-  if (card.focus != null) parts.push('F ' + Math.round(card.focus * 100));
-  if (card.sharpness != null) parts.push('S ' + Math.round(card.sharpness));
-  return parts.join(' · ') || 'No score';
-}
-
-function renderBestBatch(/** @type {BrowseBestBatch} */ data) {
-  bestBatchData = data;
-  var content = /** @type {HTMLElement} */ (document.getElementById('bestBatchContent'));
-  if (!content) return;
-  var best = (data.cards || []).find(function(c) { return c.id === data.best_photo_id; }) || (data.cards || [])[0];
-  if (!best) {
-    content.className = 'best-batch-empty';
-    content.textContent = 'No scored photos found in this batch.';
-    return;
-  }
-  var countText = data.count + ' photos';
-  if (data.sequence_range) {
-    countText += ' · #' + data.sequence_range[0] + '–' + data.sequence_range[1];
-  }
-  var reasonHtml = (data.best_reasons || []).map(function(r) {
-    return '<span class="best-batch-reason">' + escapeHtml(r) + '</span>';
-  }).join('');
-  var cards = (data.cards || []).map(function(card) {
-    var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
-    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(card) : '/thumbnails/' + card.id + '.jpg';
-    return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-      '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
-      '<div class="best-batch-card-body">' +
-        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role || '') + '</div>' +
-        '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
-        '<div class="best-batch-card-line">' + escapeHtml(bestBatchScoreText(card)) + '</div>' +
-        '<div class="best-batch-card-line">' + reasons + '</div>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-  var bestThumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(best) : '/thumbnails/' + best.id + '.jpg';
-  content.className = '';
-  content.innerHTML =
-    '<div class="best-batch-head">' +
-      '<div class="best-batch-pick">' +
-        '<img src="' + escapeAttr(bestThumbUrl) + '" alt="' + escapeAttr(best.filename || '') + '">' +
-        '<div class="best-batch-pick-meta">' +
-          '<div class="best-batch-eyebrow">Best Pick</div>' +
-          '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
-          '<div class="best-batch-score">' + escapeHtml(bestBatchScoreText(best)) + '</div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="best-batch-summary">' +
-        '<div class="best-batch-eyebrow">' + escapeHtml(countText) + '</div>' +
-        '<div>' + escapeHtml(best.filename || 'This photo') + ' is the top-ranked frame in the detected batch.</div>' +
-        '<div class="best-batch-reasons">' + reasonHtml + '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="best-batch-list">' + cards + '</div>';
-}
-
-function openBestBatchForIds(/** @type {number[]} */ ids, /** @type {number | null | undefined} */ seedId = undefined) {
+export function openBestBatchForIds(/** @type {number[]} */ ids, /** @type {number | null | undefined} */ seedId = undefined) {
   ids = Array.isArray(ids) ? ids.filter(function(id) { return id != null; }) : [];
   seedId = seedId || (ids.length ? ids[0] : bestBatchSeedId());
   if (!seedId) {
@@ -95,15 +40,10 @@ function openBestBatchForIds(/** @type {number[]} */ ids, /** @type {number | nu
   window.location.href = '/best-batch?photo_id=' + encodeURIComponent(seedId);
 }
 
-function openBestBatch() {
-  var ids = getActiveSelection();
-  openBestBatchForIds(ids, bestBatchSeedId());
-}
-
-function openBestBatchInReview() {
-  if (!bestBatchData || !bestBatchData.photo_ids || bestBatchData.photo_ids.length < 2) return;
+export function openBestBatchInReview() {
+  if (!state.bestBatchData || !state.bestBatchData.photo_ids || state.bestBatchData.photo_ids.length < 2) return;
   try {
-    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(bestBatchData.photo_ids));
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(state.bestBatchData.photo_ids));
   } catch (e) {
     showToast('Could not open burst review for this batch.', 'error');
     return;
@@ -111,9 +51,9 @@ function openBestBatchInReview() {
   window.location.href = '/pipeline/review?browse_burst=1';
 }
 
-async function applyBestBatchPickOnly() {
-  if (!bestBatchData || !bestBatchData.best_photo_id) return;
-  var bestId = bestBatchData.best_photo_id;
+export async function applyBestBatchPickOnly() {
+  if (!state.bestBatchData || !state.bestBatchData.best_photo_id) return;
+  var bestId = state.bestBatchData.best_photo_id;
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST',
@@ -132,10 +72,10 @@ async function applyBestBatchPickOnly() {
   showToast('Flagged best photo.', 'success');
 }
 
-async function applyBestBatchPickAndReject() {
-  if (!bestBatchData || !bestBatchData.best_photo_id) return;
-  var bestId = bestBatchData.best_photo_id;
-  var rejectIds = (bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
+export async function applyBestBatchPickAndReject() {
+  if (!state.bestBatchData || !state.bestBatchData.best_photo_id) return;
+  var bestId = state.bestBatchData.best_photo_id;
+  var rejectIds = (state.bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
   try {
     await safeFetch('/api/batch/best-batch-flags', {
       method: 'POST',

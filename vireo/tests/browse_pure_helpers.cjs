@@ -8,18 +8,23 @@ const assert = require('node:assert/strict');
 
 const DIR = 'vireo/static/browse/';
 
+// The browse files are ES modules: a declaration may be exported, and page
+// state is read as `state.<field>`. The context stands in for `state` too, so
+// a test's globals are the state fields the helper reads.
 function declaration(file, name) {
   const src = fs.readFileSync(DIR + file, 'utf8');
-  const fn = src.match(new RegExp('(?:^|\\n)((?:async )?function ' + name + '\\([^]*?\\n\\})'));
+  const fn = src.match(new RegExp('(?:^|\\n)(?:export )?((?:async )?function ' + name + '\\([^]*?\\n\\})'));
   if (fn) return fn[1];
-  const v = src.match(new RegExp('(?:^|\\n)(var ' + name + ' = [^]*?;)(?=\\n)'));
+  const v = src.match(new RegExp('(?:^|\\n)(?:export )?(?:var|let|const) (' + name + ' = [^]*?;)(?=\\n)'));
   assert(v, name + ' is not declared in ' + file);
-  return v[1];
+  // As a var, so the declaration lands on the context.
+  return 'var ' + v[1];
 }
 
 // load({'cards.js': ['formatFileSize']}, {extra: globals}) -> context
 function load(spec, globals) {
   const ctx = vm.createContext(Object.assign({}, globals));
+  ctx.state = ctx;
   for (const [file, names] of Object.entries(spec)) {
     for (const name of names) vm.runInContext(declaration(file, name), ctx);
   }
@@ -265,16 +270,6 @@ test('exportExtensionForFormat defaults to jpg', () => {
   assert.equal(exportExtensionForFormat(undefined), 'jpg');
 });
 
-test('best-batch labels and score text', () => {
-  const ctx = load({'best-batch.js': ['bestBatchRoleLabel', 'bestBatchScoreText']});
-  assert.equal(ctx.bestBatchRoleLabel('best'), 'Best');
-  assert.equal(ctx.bestBatchRoleLabel('alternate'), 'Alt');
-  assert.equal(ctx.bestBatchRoleLabel('reject'), 'Reject');
-  assert.equal(ctx.bestBatchScoreText({quality_pct: 87, focus: 0.456, sharpness: 312.6}), 'Q 87 · F 46 · S 313');
-  assert.equal(ctx.bestBatchScoreText({quality_pct: 0}), 'Q 0');
-  assert.equal(ctx.bestBatchScoreText({}), 'No score');
-});
-
 test('selectionIdsKey is order-independent and leaves its input alone', () => {
   const {selectionIdsKey} = load({'selection.js': ['selectionIdsKey']});
   const ids = [10, 2, 33];
@@ -286,10 +281,10 @@ test('selectionIdsKey is order-independent and leaves its input alone', () => {
 
 test('browseFocusCandidateChunks keeps each focused lookup under the server cap', () => {
   const ctx = load({
-    'state.js': ['BROWSE_MAX_FOCUS_CANDIDATES'],
+    'state.js': ['browseLimits'],
     'loading.js': ['browseFocusCandidateChunks'],
   });
-  assert.equal(ctx.BROWSE_MAX_FOCUS_CANDIDATES, 200);
+  assert.equal(ctx.browseLimits.maxFocusCandidates, 200);
   same(ctx.browseFocusCandidateChunks(null, true), []);
   same(ctx.browseFocusCandidateChunks({photoId: 5}, false), []);
   same(ctx.browseFocusCandidateChunks({photoId: 5}, true), [[5]]);

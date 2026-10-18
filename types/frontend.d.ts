@@ -73,16 +73,9 @@ interface BrowseSelectionPanel {
     replaceRows(rows: SelectionPredictionSuggestion[]): void;
     getRow(index: number): PredictionPanelRow | undefined;
   };
-  // Assigned by selection-panel-events.js after the state script loads.
-  bindActions?: () => void;
 }
 
 interface VireoNamespace {
-  browse?: {
-    panelRequests?: Record<'keywords' | 'predictions' | 'detailPredictions' | 'predictionPhotos' | 'wildlife', PanelRequestLane>;
-    selectionPanel?: BrowseSelectionPanel;
-    panelLoaders?: BrowsePanelLoaders;
-  };
   pollWhileVisible?: VisiblePoll;
   predictions?: GroupedPredictions;
 }

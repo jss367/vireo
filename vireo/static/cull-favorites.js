@@ -14,6 +14,7 @@ var cullCompareState = null;
 var cullComparisonSeq = 0;
 /** @type {CullCompare | null} */
 var browseCompare = null;
+VireoBrowseCompare.bindControls(document, function() { return browseCompare; });
 
 function hasCullFilters() {
   return cullSelectedSpecies.size > 0 || !!/** @type {HTMLInputElement} */ (document.getElementById('cullDateFrom')).value ||

@@ -130,8 +130,8 @@ def test_latest_development_settings_copy_wins(live_server, page):
             return originalSafeFetch(url, options, config);
           };
           try {
-            const older = copyDevelopmentSettingsFromPhoto(photoIds[0]);
-            const latest = copyDevelopmentSettingsFromPhoto(photoIds[1]);
+            const older = pageModules.selectionPanel.copyDevelopmentSettingsFromPhoto(photoIds[0]);
+            const latest = pageModules.selectionPanel.copyDevelopmentSettingsFromPhoto(photoIds[1]);
             while (!pending[String(photoIds[0])] || !pending[String(photoIds[1])]) {
               await new Promise(resolve => setTimeout(resolve, 0));
             }
@@ -174,7 +174,7 @@ def test_later_cross_tab_development_settings_copy_wins(live_server, page):
                 }
                 return originalSafeFetch(url, options, config);
               };
-              window.__oldCopyPromise = copyDevelopmentSettingsFromPhoto(photoId);
+              window.__oldCopyPromise = pageModules.selectionPanel.copyDevelopmentSettingsFromPhoto(photoId);
             }""",
             photo_id,
         )
@@ -216,9 +216,9 @@ def test_development_settings_paste_blocks_overlapping_requests(
     pending_state = page.evaluate(
         """async photoId => {
           await window.vireoEditNav.setCopiedRecipe({adjustments: {exposure: 1.0}});
-          selectedPhotos.clear();
-          selectedPhotos.add(photoId);
-          selectedPhotoId = photoId;
+          browseState.selectedPhotos.clear();
+          browseState.selectedPhotos.add(photoId);
+          browseState.selectedPhotoId = photoId;
           const originalSafeFetch = window.safeFetch;
           window.__originalPasteSafeFetch = originalSafeFetch;
           window.__pasteRequestCount = 0;
@@ -229,13 +229,13 @@ def test_development_settings_paste_blocks_overlapping_requests(
             }
             return originalSafeFetch(url, options, config);
           };
-          window.__pastePromise = pasteEditSettingsToSelection();
-          pasteEditSettingsToSelection();
-          const pasteItem = buildPhotoContextMenu([photoId], photoId)
+          window.__pastePromise = pageModules.selectionPanel.pasteEditSettingsToSelection();
+          pageModules.selectionPanel.pasteEditSettingsToSelection();
+          const pasteItem = pageModules.contextMenus.buildPhotoContextMenu([photoId], photoId)
             .find(item => item.label === 'Paste Development Settings');
           return {
             requestCount: window.__pasteRequestCount,
-            inFlight: _browseDevelopmentPasteInFlight,
+            inFlight: pageModules.selectionPanel._browseDevelopmentPasteInFlight,
             menuDisabled: pasteItem.disabled,
             menuHint: pasteItem.disabledHint,
           };
@@ -258,7 +258,7 @@ def test_development_settings_paste_blocks_overlapping_requests(
           window.safeFetch = window.__originalPasteSafeFetch;
         }"""
     )
-    assert page.evaluate("() => _browseDevelopmentPasteInFlight") is False
+    assert page.evaluate("() => pageModules.selectionPanel._browseDevelopmentPasteInFlight") is False
 
 
 def test_view_on_map_context_action_targets_right_clicked_photo(live_server, page):
@@ -269,19 +269,19 @@ def test_view_on_map_context_action_targets_right_clicked_photo(live_server, pag
     )
     live_server["db"].conn.commit()
     url = live_server["url"]
+    page.route("https://unpkg.com/**", stub_leaflet)
     page.goto(f"{url}/browse")
 
     cards = page.locator(".grid-card")
     cards.first.wait_for(state="visible")
     pid = int(cards.nth(1).get_attribute("data-id"))
 
-    page.evaluate("window.viewPhotoOnMap = id => { window.__mapTarget = id; }")
     cards.nth(1).click(button="right")
     menu = page.locator(".vireo-ctx-menu")
     expect(menu).to_be_visible()
 
     menu.get_by_text("View on Map", exact=True).click()
-    assert page.evaluate("window.__mapTarget") == pid
+    page.wait_for_url(f"**/map?photo_id={pid}")
 
 
 def test_view_on_map_with_several_selected_photos_maps_just_those(live_server, page):
@@ -320,13 +320,14 @@ def test_view_on_map_context_action_disables_photo_without_coordinates(live_serv
     page.goto(f"{live_server['url']}/browse")
     card = page.locator(".grid-card").first
     card.wait_for(state="visible")
-    page.evaluate("window.__mapTarget = null; window.viewPhotoOnMap = id => { window.__mapTarget = id; }")
+    browse_url = page.url
     card.click(button="right")
     item = page.locator(".vireo-ctx-menu").get_by_text("View on Map", exact=True)
     expect(item).to_have_class(re.compile(r".*disabled.*"))
     expect(item).to_have_attribute("title", "No map coordinates: no EXIF GPS and no location linked to a place")
     item.click(force=True)
-    assert page.evaluate("window.__mapTarget") is None
+    page.wait_for_timeout(200)
+    assert page.url == browse_url
 
 
 @pytest.mark.parametrize("has_coordinates", [False, True])
@@ -340,24 +341,26 @@ def test_expanded_stack_member_map_action_uses_loaded_location(live_server, page
     if has_coordinates:
         db.conn.execute("UPDATE photos SET latitude = 1.5, longitude = 2.5 WHERE id = ?", (member_id,))
         db.conn.commit()
+    page.route("https://unpkg.com/**", stub_leaflet)
     page.goto(f"{live_server['url']}/browse")
     page.locator("#browseStacksToggle").check()
     page.locator(".browse-stack-badge").click()
     member = page.locator(f'.browse-stack-member[data-id="{member_id}"]')
     expect(member).to_be_visible()
-    assert page.evaluate("id => !photos.some(photo => photo.id === id)", member_id)
-    page.evaluate("window.__mapTarget = null; window.viewPhotoOnMap = id => { window.__mapTarget = id; }")
+    assert page.evaluate("id => !browseState.photos.some(photo => photo.id === id)", member_id)
+    browse_url = page.url
     member.click(button="right")
     item = page.locator(".vireo-ctx-menu").get_by_text("View on Map", exact=True)
     if has_coordinates:
         expect(item).not_to_have_class(re.compile(r".*disabled.*"))
         item.click()
-        assert page.evaluate("window.__mapTarget") == member_id
+        page.wait_for_url(f"**/map?photo_id={member_id}")
     else:
         expect(item).to_have_class(re.compile(r".*disabled.*"))
         expect(item).to_have_attribute("title", "No map coordinates: no EXIF GPS and no location linked to a place")
         item.click(force=True)
-        assert page.evaluate("window.__mapTarget") is None
+        page.wait_for_timeout(200)
+        assert page.url == browse_url
 
 
 def test_browse_selection_opens_burst_review(live_server, page):
@@ -371,7 +374,7 @@ def test_browse_selection_opens_burst_review(live_server, page):
 
     cards.nth(0).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
-    assert page.evaluate("selectedPhotos.size") == 2
+    assert page.evaluate("browseState.selectedPhotos.size") == 2
 
     expect(page.locator("#burstReviewBtn")).to_be_visible()
     page.locator("#burstReviewBtn").click()
@@ -606,7 +609,7 @@ def test_right_click_rating_applies(live_server, page):
     # setRating writes to the server and updates the local photos array after
     # the fetch resolves. Poll the in-memory photo record for the new rating.
     page.wait_for_function(
-        f"(photos.find(p => p.id === {pid}) || {{}}).rating === 3",
+        f"(browseState.photos.find(p => p.id === {pid}) || {{}}).rating === 3",
         timeout=3000,
     )
 
@@ -630,8 +633,8 @@ def test_right_click_outside_selection_replaces_selection(live_server, page):
 
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
     # Selection should now be exactly card 2.
-    assert page.evaluate("selectedPhotos.size") == 1
-    assert page.evaluate(f"selectedPhotos.has({c2_id})") is True
+    assert page.evaluate("browseState.selectedPhotos.size") == 1
+    assert page.evaluate(f"browseState.selectedPhotos.has({c2_id})") is True
 
 
 def test_right_click_inside_selection_preserves_multi(live_server, page):
@@ -649,15 +652,15 @@ def test_right_click_inside_selection_preserves_multi(live_server, page):
     # Build a 2-item selection via cmd-clicks so selectedPhotos holds both.
     cards.nth(0).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
-    assert page.evaluate("selectedPhotos.size") == 2
+    assert page.evaluate("browseState.selectedPhotos.size") == 2
 
     # Right-click one of the already-selected cards; the set must survive.
     cards.nth(0).click(button="right")
 
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
-    assert page.evaluate("selectedPhotos.size") == 2
-    assert page.evaluate(f"selectedPhotos.has({c0_id})") is True
-    assert page.evaluate(f"selectedPhotos.has({c1_id})") is True
+    assert page.evaluate("browseState.selectedPhotos.size") == 2
+    assert page.evaluate(f"browseState.selectedPhotos.has({c0_id})") is True
+    assert page.evaluate(f"browseState.selectedPhotos.has({c1_id})") is True
 
 
 def test_right_click_outside_selection_updates_detail(live_server, page):
@@ -678,7 +681,7 @@ def test_right_click_outside_selection_updates_detail(live_server, page):
     cards.nth(0).click()
     c0_id = int(cards.nth(0).get_attribute("data-id"))
     page.wait_for_function(
-        f"window._detailPhotoId === {c0_id}", timeout=3000
+        f"browseState.detailPhotoId === {c0_id}", timeout=3000
     )
 
     # Right-click a different card that is NOT in the selection.
@@ -688,7 +691,7 @@ def test_right_click_outside_selection_updates_detail(live_server, page):
 
     # Detail panel must now reflect the right-clicked photo.
     page.wait_for_function(
-        f"window._detailPhotoId === {c2_id}", timeout=3000
+        f"browseState.detailPhotoId === {c2_id}", timeout=3000
     )
 
 
@@ -709,12 +712,12 @@ def test_right_click_updates_shift_range_anchor(live_server, page):
 
     # Left-click card 0 so selectedIndex = 0.
     cards.nth(0).click()
-    assert page.evaluate("selectedIndex") == 0
+    assert page.evaluate("browseState.selectedIndex") == 0
 
     # Right-click card 2 — coercion must update the anchor to index 2.
     cards.nth(2).click(button="right")
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
-    assert page.evaluate("selectedIndex") == 2
+    assert page.evaluate("browseState.selectedIndex") == 2
 
     # Dismiss the menu via Escape so the outside-click swallower doesn't
     # fire — an outside mousedown would eat the subsequent Shift-click.
@@ -731,7 +734,7 @@ def test_right_click_updates_shift_range_anchor(live_server, page):
     c1_id = int(cards.nth(1).get_attribute("data-id"))
     c2_id = int(cards.nth(2).get_attribute("data-id"))
     c3_id = int(cards.nth(3).get_attribute("data-id"))
-    selected_array = page.evaluate("Array.from(selectedPhotos)")
+    selected_array = page.evaluate("Array.from(browseState.selectedPhotos)")
     assert c2_id in selected_array, f"card 2 (id={c2_id}) missing from selection {selected_array}"
     assert c3_id in selected_array, f"card 3 (id={c3_id}) missing from selection {selected_array}"
     # Cards 0 and 1 must NOT be included — the anchor moved with the right-click.

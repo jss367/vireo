@@ -27,6 +27,7 @@
     "../vireo/static/browse/lightbox.js",
     "../vireo/static/browse/loading.js",
     "../vireo/static/browse/location.js",
+    "../vireo/static/browse/markup.js",
     "../vireo/static/browse/panel-loaders.js",
     "../vireo/static/browse/panel-requests.js",
     "../vireo/static/browse/prediction-panels.js",
@@ -35,11 +36,13 @@
     "../vireo/static/browse/selection-panel-state.js",
     "../vireo/static/browse/selection-panel.js",
     "../vireo/static/browse/selection.js",
+    "../vireo/static/browse/shared.js",
     "../vireo/static/browse/sidebar-collections.js",
     "../vireo/static/browse/sidebar-folders.js",
     "../vireo/static/browse/sidebar-keywords.js",
     "../vireo/static/browse/stacks.js",
     "../vireo/static/browse/state.js",
-    "../vireo/static/browse/view-controls.js"
+    "../vireo/static/browse/view-controls.js",
+    "../tests/frontend/browse-type-contracts.ts"
   ]
 }

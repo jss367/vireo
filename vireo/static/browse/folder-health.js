@@ -1,6 +1,14 @@
-/* Browse: refreshing Browse when folder health (missing/restored) changes.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: refreshing Browse when folder health (missing/restored) changes. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { localFolders, markMissingFoldersReconciliationPending } from './shared.js';
+import { loadCalendarData } from './calendar.js';
+import { _cfgPromise, applyBrowseConfig } from './config.js';
+import { loadSummary } from './detail.js';
+import { resetAndLoad } from './loading.js';
+import { loadCollectionCounts, loadCollections } from './sidebar-collections.js';
+import { loadFolders } from './sidebar-folders.js';
+import { loadKeywords } from './sidebar-keywords.js';
 
 // ``folderHealthRefreshSeq`` is initialized above the bootstrapBrowse()
 // invocation so the pre-await snapshot inside bootstrap reads ``0`` instead
@@ -20,7 +28,7 @@ function folderRowsContainScope(/** @type {BrowseFolder[]} */ rows, /** @type {n
 }
 
 function folderHealthTouchesActiveScope(/** @type {BrowseFolderHealthChange | undefined} */ detail, /** @type {BrowseFolder[]} */ beforeRows, /** @type {BrowseFolder[]} */ afterRows) {
-  const scopeId = activeFolderId; if (!scopeId) return true;
+  const scopeId = state.activeFolderId; if (!scopeId) return true;
   var restored = detail && Array.isArray(detail.restored) ? detail.restored : [];
   var wentMissing = detail && Array.isArray(detail.wentMissing) ? detail.wentMissing : [];
   var changedIds = restored.concat(wentMissing);
@@ -33,8 +41,8 @@ function folderHealthTouchesActiveScope(/** @type {BrowseFolderHealthChange | un
   });
 }
 
-async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealthChange | undefined} */ detail) {
-  var seq = ++folderHealthRefreshSeq;
+export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealthChange | undefined} */ detail) {
+  var seq = ++state.folderHealthRefreshSeq;
   // A health-driven dataset refresh is not a user scope change: bumping
   // browseScopeGen here would make any in-flight sidebar click
   // (filterByFolder/filterByKeyword/filterByCollection) or the initial
@@ -54,7 +62,7 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
   // or duplicated across the boundary (Codex review r3686912883).
   // applyBrowseConfig is idempotent — safe to call again after bootstrap.
   try { applyBrowseConfig(await _cfgPromise); } catch (e) {}
-  if (seq !== folderHealthRefreshSeq) return;
+  if (seq !== state.folderHealthRefreshSeq) return;
 
   // Refresh the scope controls first. If the selected folder just went
   // offline it disappears from /api/folders; clear that stale scope before
@@ -67,8 +75,8 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
   // seq check would fire too late to undo the DOM mutation. Guarding
   // *before* render means only the winning generation's data ever reaches
   // the tree (Codex review r3685193225).
-  var isCurrent = function() { return seq === folderHealthRefreshSeq; };
-  var beforeFolderRows = browseFolderRows.slice();
+  var isCurrent = function() { return seq === state.folderHealthRefreshSeq; };
+  var beforeFolderRows = state.browseFolderRows.slice();
   var loaded = await Promise.all([
     loadFolders({ shouldRender: isCurrent }),
     loadKeywords({ shouldRender: isCurrent }),
@@ -97,9 +105,7 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
       // navbar so the next successful poll fires a synthetic reconciliation
       // event regardless of the ID diff, letting this handler re-attempt
       // the refresh with a healthy endpoint (Codex review r3687331927).
-      if (typeof window.markMissingFoldersReconciliationPending === 'function') {
-        window.markMissingFoldersReconciliationPending();
-      }
+      markMissingFoldersReconciliationPending();
       return;
     }
     var retryDetail = Object.assign({}, detail || {}, {
@@ -123,9 +129,9 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
   // (or synthesize a top-level row) immediately. Encoding folder health in
   // the 15-second blocker fingerprint either misses non-mapped ancestors or
   // makes that lightweight polling payload grow with catalog size.
-  if (window.vireoLocalFolders &&
-      typeof window.vireoLocalFolders.load === 'function') {
-    window.vireoLocalFolders.load();
+  var local = localFolders();
+  if (local && typeof local.load === 'function') {
+    local.load();
   }
   // Use the health-owned response rather than the DOM. A later unrelated
   // loadFolders() call may supersede this render while still being in flight;
@@ -134,19 +140,19 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
   var currentFolderRows = loaded[0];
   var activeScopeWasAffected = folderHealthTouchesActiveScope(
     detail, beforeFolderRows, currentFolderRows);
-  if (activeFolderId &&
-      !currentFolderRows.some(function(/** @type {BrowseFolder} */ folder) { return folder.id === activeFolderId; })) {
-    activeFolderId = null;
+  if (state.activeFolderId &&
+      !currentFolderRows.some(function(/** @type {BrowseFolder} */ folder) { return folder.id === state.activeFolderId; })) {
+    state.activeFolderId = null;
     activeScopeWasAffected = true;
   }
 
   // A transition in an unrelated folder cannot change a leaf-folder result
   // set. Keep its selection, detail panel, and scroll position intact while
   // still refreshing workspace-wide sidebar and summary counts.
-  if (!activeScopeWasAffected && browseDatasetReady) {
+  if (!activeScopeWasAffected && state.browseDatasetReady) {
     loadCollectionCounts();
     loadSummary();
-    if (timelineMode) loadCalendarData();
+    if (state.timelineMode) loadCalendarData();
     return;
   }
 
@@ -168,35 +174,23 @@ async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealt
     // navbar reconciliation marker set so an unchanged normal poll retries
     // after a transient first-page query/collection failure instead of
     // leaving Browse empty indefinitely.
-    if (typeof window.markMissingFoldersReconciliationPending === 'function') {
-      window.markMissingFoldersReconciliationPending();
-    }
+    markMissingFoldersReconciliationPending();
     return;
   }
   loadCollectionCounts();
   loadSummary();
-  if (timelineMode) loadCalendarData();
+  if (state.timelineMode) loadCalendarData();
 }
 
-// Track the currently-running refresh so awaiters (the photo deep-link
-// loader in particular) can wait for it to settle before re-snapshotting
-// their generation counter and retrying. Without this, a health event
-// that fires while ``?photo_id=…`` is awaiting ``_cfgPromise`` /
-// ``/api/photos/<id>`` / ``/api/browse/init`` used to cancel the deep
-// link permanently — the refresh has no idea what folder the target
-// photo lives in, so Browse fell back to the unscoped workspace grid
-// without scrolling to the requested photo (and VireoFilter was left
-// uninitialized) (Codex review r3686778061).
-var _activeFolderHealthRefresh = Promise.resolve();
 
-async function waitForFolderHealthRefreshesToSettle() {
+export async function waitForFolderHealthRefreshesToSettle() {
   // A second event can replace the active promise while an awaiter is still
   // waiting on the first. Keep observing until the promise that just settled
   // is still the active one, so photo deep-link retries cannot resume in the
   // gap between overlapping refreshes.
   while (true) {
-    var observed = _activeFolderHealthRefresh;
+    var observed = state._activeFolderHealthRefresh;
     try { await observed; } catch (e) { /* keep draining newer refreshes */ }
-    if (observed === _activeFolderHealthRefresh) return;
+    if (observed === state._activeFolderHealthRefresh) return;
   }
 }

@@ -380,5 +380,30 @@
       destroy: destroy
     });
   }
-  root.VireoBrowseCompare = Object.freeze({ create: create });
+
+  /**
+   * Bind _photo_compare.html's controls (its data-compare-control markup) to
+   * the page's comparison. ``getCompare`` returns the page's current
+   * comparison, or null before it has one. Clicks inside the toolbar and the
+   * stage ("stop") do not close the overlay or reach the document.
+   * @param {Document} document
+   * @param {() => CompareControls | null | undefined} getCompare
+   */
+  function bindControls(document, getCompare) {
+    var overlay = document.getElementById('browseCompareOverlay');
+    if (!overlay) return;
+    overlay.addEventListener('click', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var control = target && target.closest('[data-compare-control]');
+      var action = control && control.getAttribute('data-compare-control');
+      var compare = getCompare();
+      if (compare && action === 'close') compare.close(event);
+      else if (compare && action === 'reset') compare.resetViews();
+      else if (compare && action === 'prev') compare.step(-1);
+      else if (compare && action === 'next') compare.step(1);
+      if (target && target.closest('[data-compare-control="stop"]')) event.stopPropagation();
+    });
+  }
+
+  root.VireoBrowseCompare = Object.freeze({ create: create, bindControls: bindControls });
 })(window);

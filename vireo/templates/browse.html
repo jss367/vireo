@@ -1901,7 +1901,7 @@ body.sidebar-resizing {
       <div class="sidebar-title">Collections</div>
       <div id="collectionList"></div>
       <div style="margin-top:6px;">
-        <button onclick="showCollectionModal(null, this)" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
+        <button data-browse-on="click:showCollectionModal" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
       </div>
     </div>
   </aside>
@@ -1924,7 +1924,7 @@ body.sidebar-resizing {
              one line with the filter bar's chip row. Keep option labels about as
              long as "Capture date (oldest)": a much longer one widens the select,
              pushes the chip row onto its own line, and costs the grid ~32px. -->
-        <select id="sortSelect" onchange="onSortChanged()" title="Sort order"
+        <select data-browse-on="change:onSortChanged" id="sortSelect" title="Sort order"
                 data-view-preference="vireo.browse.sort">
           <option value="date">Capture date (oldest)</option>
           <option value="date_desc">Capture date (newest)</option>
@@ -1940,77 +1940,68 @@ body.sidebar-resizing {
                   title="Ranks each photo by its strongest current species prediction that you haven't rejected — weakest first, so the guesses worth checking come up front. Photos with no prediction sort last, because no guess is not a low-confidence guess.">AI confidence (lowest)</option>
         </select>
         <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
-          <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
+          <input data-browse-on="input:updateThumbSize" type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
                  data-view-preference="vireo.browse.thumbSize"
-                 style="width:80px;accent-color:var(--accent);"
-                 oninput="updateThumbSize(this.value)">
+                 style="width:80px;accent-color:var(--accent);">
           <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
         </label>
         <label class="browse-stack-toggle" title="Collapse exact duplicates and camera bursts. A burst is a run of consecutive frames from one folder taken within the burst time gap that share the same species and location keywords — an untagged frame inside a tagged run stays its own item. A stacked card stands for every frame in it, so selecting one selects them all; expand a stack to work on single frames. Gap and keyword handling are in Settings › Display.">
-          <input type="checkbox" id="browseStacksToggle"
-                 data-view-preference="vireo.browse.stacks"
-                 onchange="toggleBrowseStacks()">
+          <input data-browse-on="change:toggleBrowseStacks" type="checkbox" id="browseStacksToggle"
+                 data-view-preference="vireo.browse.stacks">
           <span>Stacks</span>
         </label>
-        <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
+        <button data-browse-on="click:toggleDetectionBoxes" id="detBoxToggle" title="Show/hide detection boxes"
                 style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
           &#9634; Boxes
         </button>
-        <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
+        <button data-browse-on="click:toggleTimelineMode" id="calToggle" title="Calendar heatmap"
                 style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
           &#128197; Calendar
         </button>
         <span class="filter-summary" id="filterSummary"></span>
       </div>
-      <script>
-        // The desktop build resolves includes only; compose the shared row in the browser.
-        document.querySelector('#vireoFilterBar .vf-secondary').appendChild(
-          document.querySelector('.browse-view-controls')
-        );
-      </script>
     </div>
 
     <div class="offline-collection-notice" id="offlineCollectionNotice">
       <span id="offlineCollectionText"></span>
-      <button type="button" id="offlineCollectionToggle"
-              onclick="toggleOfflineCollectionPhotos()"></button>
+      <button data-browse-on="click:toggleOfflineCollectionPhotos" type="button" id="offlineCollectionToggle"></button>
     </div>
 
     <!-- Calendar Heatmap (Timeline Mode) -->
     <div class="calendar-container" id="calendarContainer">
       <div class="calendar-header">
-        <button id="calYearPrev" onclick="calendarChangeYear(-1)">&larr;</button>
+        <button data-browse-on="click:calendarChangeYear" data-browse-arg="-1" id="calYearPrev">&larr;</button>
         <span class="year-label" id="calYearLabel"></span>
-        <button id="calYearNext" onclick="calendarChangeYear(1)">&rarr;</button>
+        <button data-browse-on="click:calendarChangeYear" data-browse-arg="1" id="calYearNext">&rarr;</button>
       </div>
       <div class="calendar-months" id="calMonthLabels"></div>
       <div class="calendar-grid" id="calGrid"></div>
     </div>
     <div class="calendar-selection" id="calSelection">
       <span id="calSelectionText"></span>
-      <button class="clear-btn" onclick="clearCalendarSelection()" title="Clear selection">&times;</button>
+      <button data-browse-on="click:clearCalendarSelection" class="clear-btn" title="Clear selection">&times;</button>
     </div>
     <div class="day-tooltip" id="dayTooltip"></div>
 
     <!-- Batch Action Bar -->
     <div id="batchBar" role="region" aria-label="Selected photo actions" style="display:none;">
       <span id="batchCount" style="font-size:12px;color:var(--accent);font-weight:600;"></span>
-      <button onclick="batchSetRating(1)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
-      <button onclick="batchSetRating(3)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
-      <button onclick="batchSetRating(5)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;5</button>
-      <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
-      <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
+      <button data-browse-on="click:batchSetRating" data-browse-arg="1" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
+      <button data-browse-on="click:batchSetRating" data-browse-arg="3" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
+      <button data-browse-on="click:batchSetRating" data-browse-arg="5" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;5</button>
+      <button data-browse-on="click:batchSetFlag" data-browse-arg="flagged" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
+      <button data-browse-on="click:batchSetFlag" data-browse-arg="rejected" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <span style="width:1px;height:20px;background:var(--border-primary);"></span>
-      <button onclick="batchAddKeyword(this)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button onclick="addToCollection(this)" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button data-browse-on="click:batchAddKeyword" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button data-browse-on="click:addToCollection" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <span style="width:1px;height:20px;background:var(--border-primary);"></span>
-      <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
-      <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
+      <button data-browse-on="click:openBrowseCompare" id="compareBtn" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
+      <button data-browse-on="click:openSelectedInBurstReview" id="burstReviewBtn" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <span style="width:1px;height:20px;background:var(--border-primary);"></span>
-      <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
-      <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
-      <button id="batchMoreBtn" onclick="openBatchMoreMenu(this)" title="All actions for the selected photos — same menu as right-click" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;font-weight:600;">More &#9662;</button>
-      <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
+      <button data-browse-on="click:openExportModal" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
+      <button data-browse-on="click:batchDelete" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
+      <button data-browse-on="click:openBatchMoreMenu" id="batchMoreBtn" title="All actions for the selected photos — same menu as right-click" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;font-weight:600;">More &#9662;</button>
+      <button data-browse-on="click:clearSelection" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
     <!-- Export Modal -->
@@ -2048,8 +2039,8 @@ body.sidebar-resizing {
                   <input id="exportDest" class="modal-input" type="text"
                          placeholder="Same folder as each original"
                          style="flex:1;min-width:0;margin-bottom:0;">
-                  <button class="modal-btn modal-btn-cancel" type="button"
-                          onclick="browseForExportDestination()">Browse…</button>
+                  <button data-browse-on="click:browseForExportDestination" class="modal-btn modal-btn-cancel" type="button"
+                         >Browse…</button>
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
                   Leave blank to export each photo beside its original.
@@ -2074,13 +2065,13 @@ body.sidebar-resizing {
                 <label for="exportTemplate" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
                 <input id="exportTemplate" class="modal-input" type="text" value="{original}">
                 <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
-                  <button class="export-var-pill" onclick="insertTemplateVar('{original}')">{original}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{date}')">{date}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{species}')">{species}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{rating}')">{rating}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{seq}')">{seq}</button>
-                  <button class="export-var-pill" onclick="insertTemplateVar('{folder}')">{folder}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{original}" class="export-var-pill">{original}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{date}" class="export-var-pill">{date}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{datetime}" class="export-var-pill">{datetime}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{species}" class="export-var-pill">{species}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{rating}" class="export-var-pill">{rating}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{seq}" class="export-var-pill">{seq}</button>
+                  <button data-browse-on="click:insertTemplateVar" data-browse-arg="{folder}" class="export-var-pill">{folder}</button>
                 </div>
               </div>
               <div class="export-settings-group">
@@ -2122,8 +2113,8 @@ body.sidebar-resizing {
           </section>
         </div>
         <div class="modal-actions">
-          <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" onclick="startExport()">Export</button>
-          <button class="modal-btn modal-btn-cancel" data-export-cancel onclick="closeExportModal()">Cancel</button>
+          <button data-browse-on="click:startExport" id="exportSubmitBtn" class="modal-btn modal-btn-primary">Export</button>
+          <button data-browse-on="click:closeExportModal" class="modal-btn modal-btn-cancel" data-export-cancel>Cancel</button>
         </div>
       </div>
     </div>
@@ -2141,7 +2132,7 @@ body.sidebar-resizing {
            boxes). -->
       <div id="loadPreviousPhotosBanner" style="display:none;position:sticky;top:8px;z-index:5;margin:8px auto;padding:8px 14px;max-width:640px;border:1px solid var(--border-subtle);border-radius:4px;background:var(--bg-secondary);color:var(--text-secondary);font-size:13px;text-align:center;">
         <span id="loadPreviousPhotosText"></span>
-        <button id="loadPreviousPhotosButton" onclick="loadPreviousPhotos()" style="margin-left:10px;padding:5px 12px;border:1px solid var(--border-subtle);border-radius:3px;background:var(--bg-tertiary);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;">Browse from beginning</button>
+        <button data-browse-on="click:loadPreviousPhotos" id="loadPreviousPhotosButton" style="margin-left:10px;padding:5px 12px;border:1px solid var(--border-subtle);border-radius:3px;background:var(--bg-tertiary);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;">Browse from beginning</button>
       </div>
       <div class="grid" id="grid" tabindex="-1"></div>
       <div class="scroll-sentinel" id="scrollSentinel"></div>
@@ -2218,10 +2209,10 @@ body.sidebar-resizing {
 
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
-      <button class="detail-close" onclick="closeDetail()">&times;</button>
-      <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, browsePhotoNavigationList(window._detailPhotoId))">
+      <button data-browse-on="click:closeDetail" class="detail-close">&times;</button>
+      <img data-browse-on="click:openDetailInLightbox" class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;">
       <div class="detail-filename single-only" id="detailFilename"></div>
-      <button class="detail-source-control single-only" id="detailSourceControl" type="button" onclick="event.stopPropagation(); vireoTogglePairSource(window._detailPhotoId);"></button>
+      <button data-browse-on="click:toggleDetailPairSource" class="detail-source-control single-only" id="detailSourceControl" type="button"></button>
 
       <div class="detail-section">
         <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
@@ -2231,26 +2222,26 @@ body.sidebar-resizing {
       <div class="detail-section">
         <div class="detail-section-title">Flag <span class="batch-mixed" id="flagMixed" hidden>· Mixed</span></div>
         <div class="detail-flags" id="detailFlags">
-          <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
-          <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
-          <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+          <button data-browse-on="click:setFlag" data-browse-arg="none" class="detail-flag-btn">None</button>
+          <button data-browse-on="click:setFlag" data-browse-arg="flagged" class="detail-flag-btn">Flag (P)</button>
+          <button data-browse-on="click:setFlag" data-browse-arg="rejected" class="detail-flag-btn">Reject (X)</button>
         </div>
         <div class="detail-flag-note single-only" id="detailFlagNote" hidden></div>
       </div>
 
       <div class="detail-section single-only">
         <div class="detail-section-title">Wildlife Classification</div>
-        <button class="detail-wildlife-btn" id="detailWildlifeExcluded" onclick="toggleDetailWildlifeExcluded()">Not Wildlife</button>
+        <button data-browse-on="click:toggleDetailWildlifeExcluded" class="detail-wildlife-btn" id="detailWildlifeExcluded">Not Wildlife</button>
       </div>
 
       <div class="detail-section">
         <div class="detail-section-title">Color Label <span class="batch-mixed" id="colorMixed" hidden>· Mixed</span></div>
         <div class="detail-colors" id="detailColors">
-          <button class="detail-color-btn" data-color="red" data-color-label-control onclick="setColorLabel('red')" title="Red (6)" aria-label="Red label"></button>
-          <button class="detail-color-btn" data-color="yellow" data-color-label-control onclick="setColorLabel('yellow')" title="Yellow (7)" aria-label="Yellow label"></button>
-          <button class="detail-color-btn" data-color="green" data-color-label-control onclick="setColorLabel('green')" title="Green (8)" aria-label="Green label"></button>
-          <button class="detail-color-btn" data-color="blue" data-color-label-control onclick="setColorLabel('blue')" title="Blue (9)" aria-label="Blue label"></button>
-          <button class="detail-color-btn" data-color="purple" data-color-label-control onclick="setColorLabel('purple')" title="Purple" aria-label="Purple label"></button>
+          <button data-browse-on="click:setColorLabel" data-browse-arg="red" class="detail-color-btn" data-color="red" data-color-label-control title="Red (6)" aria-label="Red label"></button>
+          <button data-browse-on="click:setColorLabel" data-browse-arg="yellow" class="detail-color-btn" data-color="yellow" data-color-label-control title="Yellow (7)" aria-label="Yellow label"></button>
+          <button data-browse-on="click:setColorLabel" data-browse-arg="green" class="detail-color-btn" data-color="green" data-color-label-control title="Green (8)" aria-label="Green label"></button>
+          <button data-browse-on="click:setColorLabel" data-browse-arg="blue" class="detail-color-btn" data-color="blue" data-color-label-control title="Blue (9)" aria-label="Blue label"></button>
+          <button data-browse-on="click:setColorLabel" data-browse-arg="purple" class="detail-color-btn" data-color="purple" data-color-label-control title="Purple" aria-label="Purple label"></button>
         </div>
       </div>
 
@@ -2299,18 +2290,18 @@ body.sidebar-resizing {
 
       <div class="detail-section single-only" id="detailMetadataSection" style="display:none;">
         <div class="detail-section-title">All Metadata</div>
-        <input type="text" id="metadataSearch" class="add-kw-input"
+        <input data-browse-on="input:filterMetadata" type="text" id="metadataSearch" class="add-kw-input"
                placeholder="Search metadata..."
-               oninput="filterMetadata(this.value)"
+              
                style="margin-bottom:8px;">
         <div id="metadataGroups"></div>
       </div>
 
       <div class="detail-section single-only" style="display:flex;gap:8px;">
-        <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        <button data-browse-on="click:findSimilarToDetail" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Find Similar
         </button>
-        <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        <button data-browse-on="click:openDetailPipeline" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Inspect Pipeline
         </button>
       </div>
@@ -2322,8 +2313,7 @@ body.sidebar-resizing {
 {% include '_work_locally_stage_modal.html' %}
 
 <!-- Folder Workspace Membership Modal -->
-<div class="modal-overlay" id="folderWorkspacesModal"
-     onclick="if(event.target===this) hideFolderWorkspaces()">
+<div data-browse-on="click:hideFolderWorkspacesFromBackdrop" class="modal-overlay" id="folderWorkspacesModal">
   <div class="modal" style="width:440px;max-width:calc(100vw - 32px);">
     <h3>Associated Workspaces</h3>
     <div id="folderWorkspacesPath"
@@ -2332,7 +2322,7 @@ body.sidebar-resizing {
       <div style="color:var(--text-secondary);font-size:13px;">Loading workspaces…</div>
     </div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-cancel" onclick="hideFolderWorkspaces()">Close</button>
+      <button data-browse-on="click:hideFolderWorkspaces" class="modal-btn modal-btn-cancel">Close</button>
     </div>
   </div>
 </div>
@@ -2343,12 +2333,12 @@ body.sidebar-resizing {
     <h3 id="collectionModalTitle">New Smart Collection</h3>
     <input class="modal-input" id="collectionName" aria-label="Collection name" placeholder="Collection name">
     <div id="ruleRows"></div>
-    <button onclick="addRuleRow()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
-    <button onclick="addRuleGroup()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Group</button>
+    <button data-browse-on="click:addRuleRow" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
+    <button data-browse-on="click:addRuleGroup" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Group</button>
     <div class="modal-preview" id="rulePreview"></div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="collectionSaveBtn" onclick="saveCollection()">Save</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideCollectionModal()">Cancel</button>
+      <button data-browse-on="click:saveCollection" class="modal-btn modal-btn-primary" id="collectionSaveBtn">Save</button>
+      <button data-browse-on="click:hideCollectionModal" class="modal-btn modal-btn-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -2363,8 +2353,8 @@ body.sidebar-resizing {
       <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
     </div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="confirmBatchKeyword()">Add</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideBatchKeywordModal()">Cancel</button>
+      <button data-browse-on="click:confirmBatchKeyword" class="modal-btn modal-btn-primary">Add</button>
+      <button data-browse-on="click:hideBatchKeywordModal" class="modal-btn modal-btn-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -2374,10 +2364,10 @@ body.sidebar-resizing {
   <div class="modal">
     <h3 id="batchCollectionTitle">Add to Collection</h3>
     <div id="batchCollectionList" style="margin-bottom:12px;max-height:200px;overflow-y:auto;"></div>
-    <input class="modal-input" id="batchCollectionNewName" aria-label="New collection name" placeholder="Or type a name to create new collection" onkeydown="if(event.key==='Enter')confirmBatchCollection()">
+    <input data-browse-on="keydown:confirmBatchCollectionOnEnter" class="modal-input" id="batchCollectionNewName" aria-label="New collection name" placeholder="Or type a name to create new collection">
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+      <button data-browse-on="click:confirmBatchCollection" class="modal-btn modal-btn-primary">Add</button>
+      <button data-browse-on="click:hideBatchCollectionModal" class="modal-btn modal-btn-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -2388,10 +2378,10 @@ body.sidebar-resizing {
     <h3>Best Batch</h3>
     <div id="bestBatchContent" class="best-batch-empty">Loading batch...</div>
     <div class="best-batch-actions">
-      <button class="modal-btn modal-btn-cancel" onclick="hideBestBatch()">Close</button>
-      <button class="modal-btn" id="bestBatchReviewBtn" onclick="openBestBatchInReview()" style="background:var(--bg-tertiary);color:var(--text-secondary);">Review Burst</button>
-      <button class="modal-btn modal-btn-primary" id="bestBatchFlagBtn" onclick="applyBestBatchPickOnly()">Flag Best</button>
-      <button class="modal-btn" id="bestBatchRejectBtn" onclick="applyBestBatchPickAndReject()" style="background:var(--danger);color:white;">Flag Best + Reject Rest</button>
+      <button data-browse-on="click:hideBestBatch" class="modal-btn modal-btn-cancel">Close</button>
+      <button data-browse-on="click:openBestBatchInReview" class="modal-btn" id="bestBatchReviewBtn" style="background:var(--bg-tertiary);color:var(--text-secondary);">Review Burst</button>
+      <button data-browse-on="click:applyBestBatchPickOnly" class="modal-btn modal-btn-primary" id="bestBatchFlagBtn">Flag Best</button>
+      <button data-browse-on="click:applyBestBatchPickAndReject" class="modal-btn" id="bestBatchRejectBtn" style="background:var(--danger);color:white;">Flag Best + Reject Rest</button>
     </div>
   </div>
 </div>
@@ -2406,19 +2396,19 @@ body.sidebar-resizing {
     <div class="capture-time-grid">
       <div class="capture-time-field">
         <label for="captureTimeTargetOffset">Target offset</label>
-        <input class="modal-input" id="captureTimeTargetOffset" value="-10:00" placeholder="-10:00" oninput="updateCaptureTimePreview()">
+        <input data-browse-on="input:updateCaptureTimePreview" class="modal-input" id="captureTimeTargetOffset" value="-10:00" placeholder="-10:00">
       </div>
       <div class="capture-time-field">
         <label for="captureTimeManualShift">Manual shift, minutes</label>
-        <input class="modal-input" id="captureTimeManualShift" type="number" value="0" step="1" oninput="updateCaptureTimePreview()">
+        <input data-browse-on="input:updateCaptureTimePreview" class="modal-input" id="captureTimeManualShift" type="number" value="0" step="1">
       </div>
     </div>
     <label class="capture-time-option">
-      <input type="radio" name="captureTimeMode" value="preserve_instant" checked onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      <input data-browse-on="change:syncCaptureTimeFields" type="radio" name="captureTimeMode" value="preserve_instant" checked>
       Set offset and preserve actual instant
     </label>
     <label class="capture-time-option">
-      <input type="radio" name="captureTimeMode" value="manual" onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      <input data-browse-on="change:syncCaptureTimeFields" type="radio" name="captureTimeMode" value="manual">
       Use manual time shift
     </label>
     <label class="capture-time-option">
@@ -2427,8 +2417,8 @@ body.sidebar-resizing {
     </label>
     <div id="captureTimePreview" class="capture-time-preview"></div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="captureTimeApplyBtn" onclick="startCaptureTimeJob()">Apply</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideCaptureTimeModal()">Cancel</button>
+      <button data-browse-on="click:startCaptureTimeJob" class="modal-btn modal-btn-primary" id="captureTimeApplyBtn">Apply</button>
+      <button data-browse-on="click:hideCaptureTimeModal" class="modal-btn modal-btn-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -2449,49 +2439,13 @@ body.sidebar-resizing {
 <script defer src="/static/vireo-thumbnail-queue.js"></script>
 <script defer src="/static/vireo-panorama.js"></script>
 <script defer src="/static/vireo-browse-compare.js"></script>
-{# Browse's page script, split by concern into classic scripts that share page
-   globals. Order is load-time dependency order: a file may only use, while it
-   loads, what an earlier file (or itself) declares. Files that only declare come
-   first; scroll/keyboard/lightbox/context-menu handlers come late so a handler
-   cannot fire before the code it reaches has loaded; boot.js is last because it
-   starts the work (bootstrap, folder-health subscription, infinite scroll, photo
-   deep link) that reaches every other file. #}
-<script defer src="/static/browse/state.js"></script>
-<script defer src="/static/browse/panel-requests.js"></script>
-<script defer src="/static/browse/selection-panel-state.js"></script>
-<script defer src="/static/browse/keyword-autocomplete.js"></script>
-<script defer src="/static/browse/config.js"></script>
-<script defer src="/static/browse/cards.js"></script>
-<script defer src="/static/browse/stacks.js"></script>
-<script defer src="/static/browse/grid.js"></script>
-<script defer src="/static/browse/anchors.js"></script>
-<script defer src="/static/browse/sidebar-folders.js"></script>
-<script defer src="/static/browse/sidebar-keywords.js"></script>
-<script defer src="/static/browse/sidebar-collections.js"></script>
-<script defer src="/static/browse/folder-health.js"></script>
-<script defer src="/static/browse/collection-editor.js"></script>
-<script defer src="/static/browse/loading.js"></script>
-<script defer src="/static/browse/layout.js"></script>
-<script defer src="/static/browse/calendar.js"></script>
-<script defer src="/static/browse/view-controls.js"></script>
-<script defer src="/static/browse/selection.js"></script>
-<script defer src="/static/browse/batch-bar.js"></script>
-<script defer src="/static/browse/best-batch.js"></script>
-<script defer src="/static/browse/selection-panel.js"></script>
-<script defer src="/static/browse/prediction-panels.js"></script>
-<script defer src="/static/browse/panel-loaders.js"></script>
-<script defer src="/static/browse/selection-panel-events.js"></script>
-<script defer src="/static/browse/batch-actions.js"></script>
-<script defer src="/static/browse/detail.js"></script>
-<script defer src="/static/browse/edit-actions.js"></script>
-<script defer src="/static/browse/location.js"></script>
-<script defer src="/static/browse/export.js"></script>
 <script defer src="/static/vireo-release-originals.js"></script>
-<script defer src="/static/browse/lightbox.js"></script>
-<script defer src="/static/browse/scroll.js"></script>
-<script defer src="/static/browse/keyboard.js"></script>
-<script defer src="/static/browse/context-menus.js"></script>
-<script defer src="/static/browse/boot.js"></script>
+{# Browse's page script: ES modules under static/browse/ (see
+   browse/README.md). boot.js is the entry; it loads the rest through its
+   imports, binds the markup's data-browse-on handlers, registers the page
+   hooks and starts the page. Module scripts run after the document is parsed,
+   after the deferred classic scripts above. #}
+<script type="module" src="/static/browse/boot.js"></script>
 
 
 </body>

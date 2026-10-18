@@ -50,8 +50,10 @@ def _sources():
 
 
 def _shared_scripts():
-    """The shared navbar and lightbox scripts, which every page loads."""
-    return sorted(STATIC.glob("navbar-*.js")) + sorted((STATIC / "lightbox").glob("*.js"))
+    """The shared navbar and lightbox scripts, which every page loads, and the
+    shared export-modal controllers that call back into their pages."""
+    return (sorted(STATIC.glob("navbar-*.js")) + sorted((STATIC / "lightbox").glob("*.js"))
+            + [STATIC / "vireo-export-presets.js", STATIC / "vireo-export-collisions.js"])
 
 
 def _registered_names(text):

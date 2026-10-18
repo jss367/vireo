@@ -105,9 +105,9 @@ def test_folder_health_refresh_preserves_active_collection(live_server, page, tm
     # drops the flag, this asserts the option is still honored.
     result = page.evaluate(
         f"(async () => {{"
-        f"  activeCollectionId = {collection_id};"
-        f"  await resetAndLoad({{ preserveCollection: true }});"
-        f"  return activeCollectionId;"
+        f"  browseState.activeCollectionId = {collection_id};"
+        f"  await pageModules.loading.resetAndLoad({{ preserveCollection: true }});"
+        f"  return browseState.activeCollectionId;"
         f"}})()"
     )
     assert result == collection_id
@@ -421,7 +421,7 @@ def test_bootstrap_defers_load_lock_release_during_health_refresh(
 
     # Wait for the health-refresh chain's loadPhotos to populate the
     # grid. The 5 photos come from the two restored folders.
-    page.wait_for_function("photos.length === 5", timeout=15000)
+    page.wait_for_function("browseState.photos.length === 5", timeout=15000)
 
     # Now release init. Bootstrap sees healthChangedDuringInit=true and
     # must skip both the render block AND the load-lock release; the
@@ -437,8 +437,8 @@ def test_bootstrap_defers_load_lock_release_during_health_refresh(
     # had released the mutex, the observer could have double-fetched page 1
     # and produced 10 (or 5 with duplicates in ``photos``).
     expect(page.locator(".grid-card")).to_have_count(5)
-    unique_photos = page.evaluate("new Set(photos.map(p => p.id)).size")
-    assert unique_photos == page.evaluate("photos.length"), (
+    unique_photos = page.evaluate("new Set(browseState.photos.map(p => p.id)).size")
+    assert unique_photos == page.evaluate("browseState.photos.length"), (
         "duplicate photos in grid — bootstrap released the load lock and "
         "the intersection observer double-fetched page 1"
     )
@@ -475,7 +475,7 @@ def test_unrelated_health_event_initializes_pending_folder_bootstrap(
             break
         page.wait_for_timeout(100)
     assert held_init, "folder-scoped init request was never issued"
-    assert page.evaluate("browseDatasetReady") is False
+    assert page.evaluate("browseState.browseDatasetReady") is False
 
     # Yard changes while park's first paint is still held. The park scope is
     # unaffected, but there is no initialized grid to preserve: the health
@@ -490,14 +490,14 @@ def test_unrelated_health_event_initializes_pending_folder_bootstrap(
         f"{{detail: {{restored: [], wentMissing: [{folder_ids[1]}], "
         "source: 'test'}}))"
     )
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
     held_init[0].continue_()
     page.wait_for_function(
-        "browseDatasetReady && !loading && photos.length === 3",
+        "browseState.browseDatasetReady && !browseState.loading && browseState.photos.length === 3",
         timeout=10000,
     )
-    assert page.evaluate("activeFolderId") == folder_ids[0]
+    assert page.evaluate("browseState.activeFolderId") == folder_ids[0]
     expect(page.locator(".grid-card")).to_have_count(3)
 
 
@@ -635,9 +635,9 @@ def test_bootstrap_adopts_init_when_poll_baseline_is_known_older(
     db.conn.commit()
     page.unroute("**/api/config", _hold_all_cfg)
 
-    page.wait_for_function("browseDatasetReady", timeout=10000)
+    page.wait_for_function("browseState.browseDatasetReady", timeout=10000)
     state = page.evaluate(
-        "({photoCount: photos.length, missingIds: _missingFoldersLastIds, "
+        "({photoCount: browseState.photos.length, missingIds: _missingFoldersLastIds, "
         "events: window._folderHealthEvents, "
         "snapshotVersion: _missingFoldersSnapshotVersion})"
     )
@@ -699,7 +699,7 @@ def test_bootstrap_snapshot_invalidates_older_inflight_poll(
         route.continue_()
     page.unroute("**/api/config", _hold_all_cfg)
     page.wait_for_function(
-        f"browseDatasetReady && _missingFoldersLastIds.length === 1 && "
+        f"browseState.browseDatasetReady && _missingFoldersLastIds.length === 1 && "
         f"_missingFoldersLastIds[0] === {folder_ids[0]}",
         timeout=10000,
     )
@@ -811,7 +811,7 @@ def test_newer_init_server_snapshot_supersedes_delivered_old_poll(
     )
     page.evaluate("_snapshotFetchControls.init.release()")
     page.wait_for_function(
-        f"browseDatasetReady && _missingFoldersLastIds.length === 1 && "
+        f"browseState.browseDatasetReady && _missingFoldersLastIds.length === 1 && "
         f"_missingFoldersLastIds[0] === {folder_ids[0]}",
         timeout=10000,
     )
@@ -827,7 +827,7 @@ def test_newer_init_server_snapshot_supersedes_delivered_old_poll(
 def test_older_init_version_reconciles_when_missing_ids_match(live_server, page):
     """A stale init version must refresh even when both missing sets are []."""
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseDatasetReady", timeout=5000)
+    page.wait_for_function("browseState.browseDatasetReady", timeout=5000)
 
     result = page.evaluate(
         "() => {"
@@ -848,7 +848,7 @@ def test_older_init_version_reconciles_when_missing_ids_match(live_server, page)
         "stale": True,
         "events": ["same-ids-version-reconcile"],
     }
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
 
 def test_bootstrap_defers_lock_release_when_init_rejects(
@@ -917,14 +917,14 @@ def test_bootstrap_defers_lock_release_when_init_rejects(
     )
 
     # Wait for the health refresh's loadPhotos to populate the grid.
-    page.wait_for_function("photos.length === 5", timeout=15000)
+    page.wait_for_function("browseState.photos.length === 5", timeout=15000)
 
     # Bootstrap's catch has already run (init rejected synchronously via
     # the 500). Its finally-region MUST have deferred to the concurrent
     # refresh — no duplicate cards, no double-fetch.
     expect(page.locator(".grid-card")).to_have_count(5)
-    unique_photos = page.evaluate("new Set(photos.map(p => p.id)).size")
-    assert unique_photos == page.evaluate("photos.length"), (
+    unique_photos = page.evaluate("new Set(browseState.photos.map(p => p.id)).size")
+    assert unique_photos == page.evaluate("browseState.photos.length"), (
         "duplicate photos in grid — bootstrap's catch released the load "
         "lock even though the concurrent health refresh owned it"
     )
@@ -1179,7 +1179,7 @@ def test_load_folders_generation_guard_prevents_stale_render(
 
     # Kick off the older ("stale") call. Do NOT await the returned promise —
     # ``page.evaluate`` would otherwise block until the held response returns.
-    page.evaluate("() => { window._staleLoad = loadFolders(); }")
+    page.evaluate("() => { window._staleLoad = pageModules.sidebarFolders.loadFolders(); }")
     for _ in range(50):
         if held:
             break
@@ -1197,7 +1197,7 @@ def test_load_folders_generation_guard_prevents_stale_render(
     )
     db.conn.commit()
 
-    page.evaluate("() => { window._freshLoad = loadFolders(); }")
+    page.evaluate("() => { window._freshLoad = pageModules.sidebarFolders.loadFolders(); }")
     # Wait for the newer render to repaint the tree with the shorter list.
     page.wait_for_function(
         f"document.querySelectorAll('#folderTree .tree-item').length "
@@ -1249,7 +1249,7 @@ def test_load_folders_renders_older_success_after_newer_failure(
     page.route("**/api/folders?*", _hold_success_then_fail)
     page.evaluate(
         "() => { window._olderSuccessfulFolderLoad = "
-        "loadFolders({ shouldRender: () => true }); }"
+        "pageModules.sidebarFolders.loadFolders({ shouldRender: () => true }); }"
     )
     for _ in range(50):
         if held:
@@ -1264,7 +1264,7 @@ def test_load_folders_renders_older_success_after_newer_failure(
         (folder_ids[0],),
     )
     db.conn.commit()
-    page.evaluate("() => { window._failedFolderLoad = loadFolders(); }")
+    page.evaluate("() => { window._failedFolderLoad = pageModules.sidebarFolders.loadFolders(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
 
@@ -1282,7 +1282,7 @@ def test_load_collections_renders_older_success_after_newer_failure(
     """A failed superseder must not suppress the newest successful list."""
     db = live_server["db"]
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("!loading", timeout=5000)
+    page.wait_for_function("!browseState.loading", timeout=5000)
 
     held = []
     request_count = 0
@@ -1300,7 +1300,7 @@ def test_load_collections_renders_older_success_after_newer_failure(
     page.route("**/api/collections", _hold_success_then_fail)
     page.evaluate(
         "() => { window._olderSuccessfulCollectionLoad = "
-        "loadCollections({ shouldRender: () => true }); }"
+        "pageModules.sidebarCollections.loadCollections({ shouldRender: () => true }); }"
     )
     for _ in range(50):
         if held:
@@ -1312,7 +1312,7 @@ def test_load_collections_renders_older_success_after_newer_failure(
     # this new collection. A later request starts first but fails; the older
     # success is therefore the newest usable response and must be rendered.
     collection_id = db.collections.add("Fallback collection", "[]")
-    page.evaluate("() => { window._failedCollectionLoad = loadCollections(); }")
+    page.evaluate("() => { window._failedCollectionLoad = pageModules.sidebarCollections.loadCollections(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
 
@@ -1329,7 +1329,7 @@ def test_load_keywords_renders_older_success_after_newer_failure(
     """A failed superseder must not suppress the newest successful tree."""
     db = live_server["db"]
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("!loading", timeout=5000)
+    page.wait_for_function("!browseState.loading", timeout=5000)
 
     held = []
     request_count = 0
@@ -1347,7 +1347,7 @@ def test_load_keywords_renders_older_success_after_newer_failure(
     page.route("**/api/keywords", _hold_success_then_fail)
     page.evaluate(
         "() => { window._olderSuccessfulKeywordLoad = "
-        "loadKeywords({ shouldRender: () => true }); }"
+        "pageModules.sidebarKeywords.loadKeywords({ shouldRender: () => true }); }"
     )
     for _ in range(50):
         if held:
@@ -1358,7 +1358,7 @@ def test_load_keywords_renders_older_success_after_newer_failure(
     keyword_name = "Fallback keyword"
     keyword_id = db.add_keyword(keyword_name)
     db.tag_photo(live_server["data"]["photos"][0], keyword_id)
-    page.evaluate("() => { window._failedKeywordLoad = loadKeywords(); }")
+    page.evaluate("() => { window._failedKeywordLoad = pageModules.sidebarKeywords.loadKeywords(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
 
@@ -1372,7 +1372,7 @@ def test_load_summary_renders_older_success_after_newer_failure(
 ):
     """An identical-scope failed superseder must retain a usable summary."""
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseDatasetReady", timeout=5000)
+    page.wait_for_function("browseState.browseDatasetReady", timeout=5000)
     expect(page.locator("#summaryPhotoCount")).to_have_text("5", timeout=5000)
 
     held = []
@@ -1392,7 +1392,7 @@ def test_load_summary_renders_older_success_after_newer_failure(
     page.evaluate(
         "() => {"
         "  document.getElementById('summaryPhotoCount').textContent = 'stale';"
-        "  window._olderSuccessfulSummaryLoad = loadSummary();"
+        "  window._olderSuccessfulSummaryLoad = pageModules.detail.loadSummary();"
         "}"
     )
     for _ in range(50):
@@ -1401,7 +1401,7 @@ def test_load_summary_renders_older_success_after_newer_failure(
         page.wait_for_timeout(100)
     assert held, "older summary request was never issued"
 
-    page.evaluate("() => { window._failedSummaryLoad = loadSummary(); }")
+    page.evaluate("() => { window._failedSummaryLoad = pageModules.detail.loadSummary(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
 
@@ -1413,8 +1413,8 @@ def test_load_calendar_renders_older_success_after_newer_failure(
 ):
     """An identical-scope failed superseder must retain a usable calendar."""
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseDatasetReady", timeout=5000)
-    expected_year = str(page.evaluate("calendarYear"))
+    page.wait_for_function("browseState.browseDatasetReady", timeout=5000)
+    expected_year = str(page.evaluate("browseState.calendarYear"))
 
     held = []
     request_count = 0
@@ -1433,7 +1433,7 @@ def test_load_calendar_renders_older_success_after_newer_failure(
     page.evaluate(
         "() => {"
         "  document.getElementById('calYearLabel').textContent = 'stale';"
-        "  window._olderSuccessfulCalendarLoad = loadCalendarData();"
+        "  window._olderSuccessfulCalendarLoad = pageModules.calendar.loadCalendarData();"
         "}"
     )
     for _ in range(50):
@@ -1442,7 +1442,7 @@ def test_load_calendar_renders_older_success_after_newer_failure(
         page.wait_for_timeout(100)
     assert held, "older calendar request was never issued"
 
-    page.evaluate("() => { window._failedCalendarLoad = loadCalendarData(); }")
+    page.evaluate("() => { window._failedCalendarLoad = pageModules.calendar.loadCalendarData(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
 
@@ -1538,7 +1538,7 @@ def test_health_refresh_awaits_config_before_loading_photos(
     held_cfg[0].continue_()
 
     # Wait for the refresh to complete (page 1 fetched from restored folders).
-    page.wait_for_function("photos.length > 0", timeout=10000)
+    page.wait_for_function("browseState.photos.length > 0", timeout=10000)
 
     # Any photo-query request issued by the health refresh must have used
     # the configured per_page=3, never the hard-coded 50 that used to leak
@@ -1589,7 +1589,7 @@ def test_health_refresh_uses_its_folder_response_when_render_is_superseded(
             break
         page.wait_for_timeout(100)
     assert len(held) == 1, "health refresh did not request the folder tree"
-    page.evaluate("() => { window._winningFolderLoad = loadFolders(); }")
+    page.evaluate("() => { window._winningFolderLoad = pageModules.sidebarFolders.loadFolders(); }")
     for _ in range(50):
         if len(held) == 2:
             break
@@ -1600,7 +1600,7 @@ def test_health_refresh_uses_its_folder_response_when_render_is_superseded(
     # is still pending, so the DOM remains stale; the refresh must use the
     # returned rows themselves to see that the active folder disappeared.
     held[0].continue_()
-    page.wait_for_function("activeFolderId === null", timeout=10000)
+    page.wait_for_function("browseState.activeFolderId === null", timeout=10000)
     expect(page.locator(".grid-card")).to_have_count(2)
 
     held[1].continue_()
@@ -1635,8 +1635,8 @@ def test_unrelated_folder_health_change_preserves_leaf_selection(
         "document.getElementById('detailContent').classList.contains('visible')",
         timeout=3000,
     )
-    selected_id = page.evaluate("selectedPhotoId")
-    load_epoch = page.evaluate("loadEpoch")
+    selected_id = page.evaluate("browseState.selectedPhotoId")
+    load_epoch = page.evaluate("browseState.loadEpoch")
 
     # Only the unrelated yard folder changes health. The park-scoped grid is
     # identical, so the health refresh should update sidebars/counts without
@@ -1646,10 +1646,10 @@ def test_unrelated_folder_health_change_preserves_leaf_selection(
         lambda response: response.url.endswith("/api/folders/check-health")
     ):
         page.evaluate("openMissingFoldersModal()")
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
-    assert page.evaluate("loadEpoch") == load_epoch
-    assert page.evaluate("selectedPhotoId") == selected_id
+    assert page.evaluate("browseState.loadEpoch") == load_epoch
+    assert page.evaluate("browseState.selectedPhotoId") == selected_id
     assert page.evaluate(
         "document.getElementById('detailContent').classList.contains('visible')"
     )
@@ -1682,22 +1682,22 @@ def test_folder_health_refresh_drops_selection_when_photo_goes_offline(
     target = page.locator(f'.grid-card[data-id="{target_id}"]')
     target.wait_for(state="visible")
     target.click()
-    page.wait_for_function("id => selectedPhotoId === id", arg=target_id)
+    page.wait_for_function("id => browseState.selectedPhotoId === id", arg=target_id)
 
     # Keep offline collection members in the next health-driven reload. The
     # selected yard photo then remains rendered, but only as a placeholder.
-    page.evaluate("showOfflineCollectionPhotos = true")
+    page.evaluate("browseState.showOfflineCollectionPhotos = true")
     yard.rmdir()
     with page.expect_response(
         lambda response: response.url.endswith("/api/folders/check-health")
     ):
         page.evaluate("openMissingFoldersModal()")
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
     expect(target).to_have_class("grid-card offline")
-    assert page.evaluate("selectedPhotoId") is None
-    assert page.evaluate("selectedIndex") == -1
-    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("browseState.selectedIndex") == -1
+    assert page.evaluate("browseState.selectedPhotos.size") == 0
     expect(page.locator("#detailContent")).not_to_have_class("visible")
 
 
@@ -1739,7 +1739,7 @@ def test_health_refresh_skips_stale_reset_when_load_folders_fails(
 
     # Select park so the health refresh has a folder scope to potentially
     # mis-preserve. Once selected, only park's 3 photos are visible.
-    page.evaluate(f"filterByFolder({folder_ids[0]})")
+    page.evaluate(f"pageModules.sidebarFolders.filterByFolder({folder_ids[0]})")
     expect(page.locator(".grid-card")).to_have_count(3)
 
     # Ensure the initial /api/folders/missing poll seeded the baseline so
@@ -1793,7 +1793,7 @@ def test_health_refresh_skips_stale_reset_when_load_folders_fails(
     # succeeds against a park-less tree, membership check clears
     # activeFolderId, and the workspace-scoped reset lands on yard.
     page.wait_for_function(
-        "activeFolderId === null",
+        "browseState.activeFolderId === null",
         timeout=5000,
     )
     expect(page.locator(".grid-card")).to_have_count(2)
@@ -1822,8 +1822,8 @@ def test_health_refresh_retry_preserves_unrelated_transition_ids(
         "document.getElementById('detailContent').classList.contains('visible')",
         timeout=3000,
     )
-    selected_id = page.evaluate("selectedPhotoId")
-    load_epoch = page.evaluate("loadEpoch")
+    selected_id = page.evaluate("browseState.selectedPhotoId")
+    load_epoch = page.evaluate("browseState.loadEpoch")
 
     fail_state = {"fired": False}
 
@@ -1855,8 +1855,8 @@ def test_health_refresh_retry_preserves_unrelated_transition_ids(
         timeout=5000,
     )
     assert fail_state["fired"], "the first folder-tree request did not fail"
-    assert page.evaluate("loadEpoch") == load_epoch
-    assert page.evaluate("selectedPhotoId") == selected_id
+    assert page.evaluate("browseState.loadEpoch") == load_epoch
+    assert page.evaluate("browseState.selectedPhotoId") == selected_id
     assert page.evaluate(
         "document.getElementById('detailContent').classList.contains('visible')"
     )
@@ -1884,7 +1884,7 @@ def test_bounded_folder_retries_reconcile_on_next_normal_poll(live_server, page)
         "detail: {restored: [], wentMissing: [], source: 'test', "
         "refreshRetryAttempt: 3}}))"
     )
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
     # Attempt 3 is the cap: no fourth event should be scheduled two seconds
     # later, and therefore no second folder-tree request should appear.
@@ -1897,7 +1897,7 @@ def test_bounded_folder_retries_reconcile_on_next_normal_poll(live_server, page)
     # the persistent dirty marker and refresh the folder tree successfully.
     fail_folders["value"] = False
     page.evaluate("checkMissingFolders()")
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
     assert page.evaluate("_missingFoldersReconciliationPending") is False
     assert len(folder_requests) == 2
 
@@ -1928,7 +1928,7 @@ def test_failed_health_grid_reload_reconciles_on_next_normal_poll(
         "document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {"
         "detail: {restored: [], wentMissing: [], source: 'test'}}))"
     )
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
     expect(page.locator(".grid-card")).to_have_count(0)
     assert len(photo_requests) == 1
@@ -1938,7 +1938,7 @@ def test_failed_health_grid_reload_reconciles_on_next_normal_poll(
     # synthetic health event and retries the failed page-one grid load.
     fail_photos["value"] = False
     page.evaluate("checkMissingFolders()")
-    page.evaluate("() => window._activeFolderHealthRefresh")
+    page.evaluate("() => browseState._activeFolderHealthRefresh")
 
     expect(page.locator(".grid-card")).to_have_count(5)
     assert len(photo_requests) == 2
@@ -1948,18 +1948,18 @@ def test_failed_health_grid_reload_reconciles_on_next_normal_poll(
 def test_wait_for_folder_health_refreshes_drains_replacements(live_server, page):
     """A deep-link waiter must not resume between refresh A and refresh B."""
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseDatasetReady", timeout=5000)
+    page.wait_for_function("browseState.browseDatasetReady", timeout=5000)
 
     page.evaluate(
         "() => {"
         "  window._refreshWaitDone = false;"
-        "  _activeFolderHealthRefresh = new Promise(resolve => {"
+        "  browseState._activeFolderHealthRefresh = new Promise(resolve => {"
         "    window._resolveRefreshA = resolve;"
         "  });"
-        "  window._refreshWait = waitForFolderHealthRefreshesToSettle().then(() => {"
+        "  window._refreshWait = pageModules.folderHealth.waitForFolderHealthRefreshesToSettle().then(() => {"
         "    window._refreshWaitDone = true;"
         "  });"
-        "  _activeFolderHealthRefresh = new Promise(resolve => {"
+        "  browseState._activeFolderHealthRefresh = new Promise(resolve => {"
         "    window._resolveRefreshB = resolve;"
         "  });"
         "  window._resolveRefreshA();"
@@ -2082,7 +2082,7 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
     page.goto(f"{url}/browse")
 
     page.locator(".grid-card").first.wait_for(state="visible")
-    page.evaluate("updateThumbSize(400)")
+    page.evaluate("pageModules.viewControls.updateThumbSize(400)")
 
     page.evaluate("VireoFilter.quickSearch('American Robin')")
     # Metadata search includes predictions: both robins match, even though
@@ -2103,12 +2103,12 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
 
     page.evaluate("VireoFilter.quickSearch('')")
     page.wait_for_function(
-        "(id) => photos.length === 5 && selectedPhotoId === id",
+        "(id) => browseState.photos.length === 5 && browseState.selectedPhotoId === id",
         arg=selected_id,
     )
     page.wait_for_timeout(100)  # allow the anchor-restoration animation frame
 
-    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("browseState.selectedPhotos.size") == 0
     expect(selected).to_have_class("grid-card selected")
     top_after = page.evaluate(
         """(id) => {
@@ -2166,7 +2166,7 @@ def test_toolbar_history_requeries_flag_filter_and_keeps_collection(live_server,
     ]))
     page.goto(live_server['url'] + '/browse')
     page.locator('.grid-card').first.wait_for(state='visible')
-    page.evaluate("id => setFlagFor(id, 'rejected')", ids[0])
+    page.evaluate("id => pageModules.contextMenus.setFlagFor(id, 'rejected')", ids[0])
     page.locator(f'.tree-item[data-collection-id="{collection_id}"]').click()
     expect(page.locator('.grid-card')).to_have_count(2)
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
@@ -2174,16 +2174,16 @@ def test_toolbar_history_requeries_flag_filter_and_keeps_collection(live_server,
     expect(page.locator('.grid-card')).to_have_count(1)
     expect(page.locator('.grid-card')).to_have_attribute('data-id', str(ids[1]))
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    assert page.evaluate('openedCollectionId') == collection_id
+    assert page.evaluate('browseState.openedCollectionId') == collection_id
     page.locator('#historyRedoBtn').click()
     expect(page.locator('.grid-card')).to_have_count(2)
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     # Keyboard and toolbar share the query refresh, including collection scope.
-    page.evaluate('(id) => { activeCollectionId = id; }', collection_id)
-    page.evaluate('undoLast()')
+    page.evaluate('(id) => { browseState.activeCollectionId = id; }', collection_id)
+    page.evaluate('pageModules.detail.undoLast()')
     expect(page.locator('.grid-card')).to_have_count(1)
-    assert page.evaluate('openedCollectionId') == collection_id
-    assert page.evaluate('activeCollectionId') == collection_id
+    assert page.evaluate('browseState.openedCollectionId') == collection_id
+    assert page.evaluate('browseState.activeCollectionId') == collection_id
 
 
 def test_toolbar_history_requeries_rating_sort(live_server, page):
@@ -2194,7 +2194,7 @@ def test_toolbar_history_requeries_rating_sort(live_server, page):
     page.goto(live_server['url'] + '/browse')
     page.locator('#sortSelect').select_option('rating')
     expect(page.locator('.grid-card').first).to_have_attribute('data-id', str(ids[0]))
-    page.evaluate('id => setRatingFor(id, 5)', ids[1])
+    page.evaluate('id => pageModules.contextMenus.setRatingFor(id, 5)', ids[1])
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()

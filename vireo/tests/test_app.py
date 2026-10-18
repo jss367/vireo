@@ -88,7 +88,7 @@ def test_browse_slim_batch_bar_and_unified_menu(app_and_db):
     assert "colorChip('purple'" in html
     # Kept on the bar: Compare, Review Burst, Export, Delete
     for kept in ('id="compareBtn"', 'id="burstReviewBtn"',
-                 'onclick="openExportModal()"', 'onclick="batchDelete()"'):
+                 'data-browse-on="click:openExportModal"', 'data-browse-on="click:batchDelete"'):
         assert kept in html
 
 
@@ -22073,12 +22073,15 @@ def _browse_js_function_body(html, signature):
     """The source text of one inline Browse function, for structure asserts."""
     start = html.find(signature)
     assert start != -1, f"{signature} must exist in Browse's scripts"
-    nxt = html.find("\nfunction ", start + 1)
-    nxt_async = html.find("\nasync function ", start + 1)
-    # Browse's JS is several scripts; the last function in one ends at its
+    # The next top-level declaration, exported or not (Browse's files are ES
+    # modules).
+    nexts = [html.find(marker, start + 1) for marker in (
+        "\nfunction ", "\nasync function ", "\nexport function ", "\nexport async function ",
+    )]
+    # Browse's JS is several modules; the last function in one ends at its
     # script's close, not at the next file's first function.
     script_end = html.find("</script>", start + 1)
-    ends = [i for i in (nxt, nxt_async, script_end) if i != -1]
+    ends = [i for i in (*nexts, script_end) if i != -1]
     return html[start: min(ends) if ends else len(html)]
 
 
@@ -22152,10 +22155,7 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     # changed here, only the state its rows are computed from.
     assert "loadDetail(" in body
     assert "loadSelectionKeywordSuggestions(" in body
-    # The strict-typed form is `(Vireo && Vireo.browse).panelRequests.keywords
-    # .invalidate()`, so the test matches the `.panelRequests.keywords.
-    # invalidate()` suffix that is unique to this call.
-    key_at = body.find(".panelRequests.keywords.invalidate()")
+    key_at = body.find("panelRequests.keywords.invalidate()")
     assert key_at != -1 and key_at < body.find(
         "loadSelectionKeywordSuggestions("
     ), "stale selection key would make the keyword refresh a no-op"
@@ -22181,13 +22181,13 @@ def test_browse_undo_bails_when_selection_moves_during_hydration(app_and_db):
     )
     reset_at = handler.find("await resetAndLoad(")
     assert reset_at != -1, "the handler must reload the query"
-    snapshot_at = handler.find("restoreEpoch = anchorRestoreEpoch", reset_at)
+    snapshot_at = handler.find("restoreEpoch = state.anchorRestoreEpoch", reset_at)
     assert snapshot_at != -1, (
         "the handler must snapshot anchorRestoreEpoch after resetAndLoad "
         "so the restore below can tell a mid-hydration click apart"
     )
     guard_at = handler.find(
-        "anchorRestoreEpoch === restoreEpoch", snapshot_at
+        "state.anchorRestoreEpoch === restoreEpoch", snapshot_at
     )
     assert guard_at != -1, (
         "the previousSelection restore must be gated on the snapshot"
@@ -22307,6 +22307,17 @@ if (process.argv[2] === 'render') {
 """
 
 
+# Browse's modules read and write page state as ``state.<field>`` (state.js).
+# The harnesses below declare those fields as plain variables (``var photos =
+# ...``), so ``state`` forwards each field to the variable of that name.
+_BROWSE_STATE_PROXY = """
+var state = new Proxy({}, {
+  get: function(_target, key) { return eval(key); },
+  set: function(_target, key, __value) { eval(key + ' = __value'); return true; },
+});
+"""
+
+
 def _run_node(source, args):
     """Execute a JS snippet under node and return its parsed JSON stdout."""
     import json as _json
@@ -22320,6 +22331,8 @@ def _run_node(source, args):
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required to execute Browse's inline panel JS")
+    if re.search(r"\bstate\.[A-Za-z_]", source) and not re.search(r"\b(?:var|let|const) state\b", source):
+        source = _BROWSE_STATE_PROXY + source
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "panel.js"
         script.write_text(source, encoding="utf-8")
@@ -22371,7 +22384,7 @@ var predictions = Array.from({length: 6}, function(_, idx) {
 (async function() {
   renderSelectionPredictions(predictions, 3, {});
   var collapsedHTML = __list.innerHTML;
-  Vireo.browse.selectionPanel.predictions.toggle();
+  selectionPanel.predictions.toggle();
   renderSelectionPredictions(predictions, 3, {});
   var button = {disabled: false, textContent: 'Accept on all 3'};
   await acceptSelectionPrediction(0, true, button);
@@ -22438,7 +22451,7 @@ def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db
         _browse_js_function_body(html, "function renderSelectionPredictions("),
         _browse_js_function_body(html, "async function acceptSelectionPrediction("),
         """
-Vireo.browse.selectionPanel.predictions.toggle();
+selectionPanel.predictions.toggle();
 var requests = [];
 var selection = [];
 for (var i = 1; i <= 15; i++) selection.push(i);
@@ -22741,6 +22754,7 @@ var selectedPhotoId = null;
 var selectedIndex = -1;
 var photos = [];
 var browseStackMembers = {};
+var detailPhotoId = null;
 var __batchUpdates = 0;
 function loadDetail(id) { __detail.visible = true; __detail.photoId = id; }
 function hideDetailPanel() { __detail.visible = false; __detail.photoId = null; }
@@ -22773,7 +22787,7 @@ function seedGrid() {
   __detail.visible = false;
   __detail.photoId = null;
 }
-function state() {
+function selectionSnapshot() {
   return {
     selected: Array.from(selectedPhotos),
     focused: selectedPhotoId,
@@ -22820,10 +22834,10 @@ def test_clicking_a_stack_card_selects_every_frame_behind_it(app_and_db):
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 selectPhoto(CLICK, 10, 0);
-var stackClick = state();
+var stackClick = selectionSnapshot();
 seedGrid();
 selectPhoto(CLICK, 30, 2);
-var singleClick = state();
+var singleClick = selectionSnapshot();
 process.stdout.write(JSON.stringify(
   {stackClick: stackClick, singleClick: singleClick}
 ));
@@ -22857,17 +22871,17 @@ def test_stack_cards_toggle_and_range_select_as_whole_stacks(app_and_db):
 seedGrid();
 selectPhoto(CLICK, 10, 0);
 selectPhoto(CMD_CLICK, 20, 1);
-var twoStacks = state();
+var twoStacks = selectionSnapshot();
 selectPhoto(CMD_CLICK, 20, 1);
-var afterUntoggle = state();
+var afterUntoggle = selectionSnapshot();
 seedGrid();
 selectedPhotos = new Set([11]);
 selectPhoto(CMD_CLICK, 10, 0);
-var partialFilledIn = state();
+var partialFilledIn = selectionSnapshot();
 seedGrid();
 selectPhoto(CLICK, 10, 0);
 selectPhoto(SHIFT_CLICK, 30, 2);
-var range = state();
+var range = selectionSnapshot();
 process.stdout.write(JSON.stringify({
   twoStacks: twoStacks.selected, afterUntoggle: afterUntoggle.selected,
   partialFilledIn: partialFilledIn.selected, range: range.selected,
@@ -22895,7 +22909,7 @@ def test_restoring_focus_to_a_stack_card_does_not_select_the_stack(app_and_db):
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 selectPhoto(CLICK, 10, 0, {stackAware: false});
-process.stdout.write(JSON.stringify(state()));
+process.stdout.write(JSON.stringify(selectionSnapshot()));
 """), [])
     assert result == {"selected": [], "focused": 10, "index": 0, "detail": 10}
     body = _browse_js_function_body(html, "function selectBrowseStackMember(")
@@ -22921,7 +22935,7 @@ seedGrid();
 browseStackMembers['10'] = [{id: 11}, {id: 10}, {id: 12}];
 selectPhoto(CLICK, 11, 0, {stackAware: false});
 selectPhoto(SHIFT_CLICK, 10, 0, {stackAware: false});
-process.stdout.write(JSON.stringify(state()));
+process.stdout.write(JSON.stringify(selectionSnapshot()));
 """), [])
     assert sorted(result["selected"]) == [10, 11]
 
@@ -23080,7 +23094,7 @@ def test_clicking_a_stack_card_scrubs_the_previous_detail_owner(app_and_db):
 
     ``hideDetailPanel`` is CSS-only. If photo A had detail focus with a
     reverse-geocode in flight, and the user then clicks an unrelated collapsed
-    stack card, ``window._detailPhotoId`` still points at A and the EXIF-
+    stack card, ``state.detailPhotoId`` still points at A and the EXIF-
     suggestion element still carries A's ``data-photo-id``. A subsequent
     Select All (or any batch that folds A back in) satisfies
     ``maybeShowExifSuggestion``'s owner check when the fetch finally lands and
@@ -23097,9 +23111,9 @@ seedGrid();
 // Photo 30 is a single: click it to give the detail panel an owner and
 // stand in for a reverse-geocode that has not yet resolved.
 selectPhoto(CLICK, 30, 2);
-window._detailPhotoId = 30;
+detailPhotoId = 30;
 var beforeStackClick = {
-  detailOwner: window._detailPhotoId,
+  detailOwner: detailPhotoId,
   clearCalls: __clearCalls,
 };
 // The click that would otherwise leave A's owner pointer behind.
@@ -23108,7 +23122,7 @@ process.stdout.write(JSON.stringify({
   before: beforeStackClick,
   after: {
     selected: Array.from(selectedPhotos),
-    detailOwner: window._detailPhotoId,
+    detailOwner: detailPhotoId,
     clearCalls: __clearCalls,
   },
 }));
@@ -23163,7 +23177,7 @@ def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
         "entering a batch must scrub the pending EXIF suggestion, or a late "
         "reverse-geocode can repaint A's Accept line for the whole batch"
     )
-    assert "window._detailPhotoId = null" in helper, (
+    assert "state.detailPhotoId = null" in helper, (
         "entering a batch must null the ambient detail-photo pointer, which "
         "is the other half of that same owner check"
     )
