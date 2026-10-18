@@ -181,7 +181,7 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert finalize>", "exec"), ns)
     db = types.SimpleNamespace(
         model_runs=repo,
-        get_folder_tree=lambda: [{"id": 1, "path": "/invented"}],
+        folders=types.SimpleNamespace(tree=lambda: [{"id": 1, "path": "/invented"}]),
         get_predictions_for_detection=lambda did, **kw: [
             dict(r)
             for r in c.execute(

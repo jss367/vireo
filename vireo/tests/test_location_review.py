@@ -439,7 +439,7 @@ def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
     elif merge_kind == 'relocate':
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (source_folder,))
         db.conn.commit()
-        db.relocate_folder(source_folder, str(archive))
+        db.folders.relocate(source_folder, str(archive))
     else:
         _pair_raw_jpeg_companions(db)
 

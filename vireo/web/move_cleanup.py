@@ -57,7 +57,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                 source = config["source_path"]
                 # A successful cleanup can retire the old ID. Resolve the
                 # current row by path so a reused ID cannot guard another folder.
-                folder_id = db.get_folder_id_by_path(source)
+                folder_id = db.folders.id_by_path(source)
                 if folder_id is not None:
                     error = guard_move_folder(db, folder_id)
                     if error:

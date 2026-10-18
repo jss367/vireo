@@ -34,10 +34,10 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
         expected = [moved, unselected] if keep_visible else [unselected]
         assert db.photo_visibility.visible_photo_ids([moved, unselected, unrelated]) == expected
         assert bool(db.photos.get(moved, verify_workspace=True)) == keep_visible
-        visible_folders = {row["id"] for row in db.get_folder_tree()}
+        visible_folders = {row["id"] for row in db.folders.tree()}
         assert (destination in visible_folders) == keep_visible
         if keep_visible:
-            assert next(row for row in db.get_folder_tree() if row["id"] == destination)["photo_count"] == 1
+            assert next(row for row in db.folders.tree() if row["id"] == destination)["photo_count"] == 1
             coverage = db.get_folder_coverage_stats()
             assert next(row for row in coverage if row["folder_id"] == destination)["total"] == 1
         db.set_active_workspace(a)
@@ -154,7 +154,7 @@ def test_reimport_moved_duplicate_grants_only_existing_photo(tmp_path, monkeypat
         (tmp_path / "moved").mkdir()
         moved_result = move_folder(db, row["folder_id"], str(tmp_path / "moved"))
         assert moved_result["moved"] == 1, moved_result
-        folder = db.get_folder(row["folder_id"])
+        folder = db.folders.get(row["folder_id"])
         from pathlib import Path
         _, sibling = _photo(db, Path(folder["path"]), "unrelated.jpg", b"unrelated")
         db.set_active_workspace(b)
@@ -199,7 +199,7 @@ def test_grant_only_folder_is_not_a_storage_import_root(tmp_path):
         db.conn.commit()
         assert db.get_workspace_folders(b) == []
         db.set_active_workspace(b)
-        assert folder in {row["id"] for row in db.get_folder_tree()}
+        assert folder in {row["id"] for row in db.folders.tree()}
 
 
 def test_deleting_folder_does_not_delete_another_workspaces_granted_photo(tmp_path):
@@ -309,7 +309,7 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
         assert progress[-1]['total_photos'] == 1
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (folder,))
         db.conn.commit()
-        assert db.get_missing_folders()[0]['photo_count'] == 1
+        assert db.folders.missing()[0]['photo_count'] == 1
         assert db.photo_visibility.visible_photo_ids([visible, hidden]) == [visible]
 
 
@@ -451,13 +451,13 @@ def test_grant_only_folder_is_excluded_from_audit_roots(app_and_db, tmp_path):
     db.conn.commit()
     db.set_active_workspace(b)
     # Direct repository check: the audit root paths exclude the grant-only
-    # folder even though ``get_folder_tree`` surfaces it as a parentless
+    # folder even though ``folders.tree`` surfaces it as a parentless
     # entry (its own synthetic root).
     audit_roots = db.get_audit_root_paths()
     assert str(linked_dir) in audit_roots
     assert str(grant_dir) not in audit_roots
     assert any(not row['parent_id'] and row['path'] == str(grant_dir)
-               for row in db.get_folder_tree()), \
+               for row in db.folders.tree()), \
         'tree still carries the synthetic grant-only entry for folder reads'
     client = app.test_client()
     assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
@@ -513,7 +513,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     )
     assert response.status_code == 404
     # The folder row still points at its original location.
-    assert db.get_folder(folder)['path'] == str(folder_dir)
+    assert db.folders.get(folder)['path'] == str(folder_dir)
     # The owner still has mutation rights.
     assert client.post(f'/api/workspaces/{owner}/activate').status_code == 200
     assert db.workspace_has_folder_link(folder, owner)
@@ -591,10 +591,10 @@ def test_mount_loss_rollback_revokes_duplicate_grants_and_demotes_promotion(tmp_
             (workspace, pre_existing_photo),
         ).fetchone()
         # Promoted folder is back to 'missing'.
-        assert db.get_folder(folder)['status'] == 'missing'
+        assert db.folders.get(folder)['status'] == 'missing'
         # Unrelated missing folder also stays 'missing' -- the demotion
         # list only touches ids the tracked grant promoted.
-        assert db.get_folder(unrelated)['status'] == 'missing'
+        assert db.folders.get(unrelated)['status'] == 'missing'
         # Unrelated photo in another folder is untouched.
         assert not db.conn.execute(
             'SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?',
@@ -624,7 +624,7 @@ def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_a
     assert (source / "shared.jpg").exists() and (source / "private.jpg").read_bytes() == b"private"
     assert untracked.read_bytes() == b"untracked"
     assert not list(destination.iterdir())
-    assert db.get_folder(folder)["path"] == str(source)
+    assert db.folders.get(folder)["path"] == str(source)
     assert db.photos.get(sibling) is not None
     assert client.post(f"/api/workspaces/{owner}/activate").status_code == 200
     assert client.post("/api/move-folder/preflight", json=body).status_code == 200
@@ -725,7 +725,7 @@ def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(
         assert not db.workspace_has_folder_link(child)
         candidates = db.species_curation.get_highlights_candidates(parent, min_quality=.1)
         assert [row["id"] for row in candidates] == [shared]
-        counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
+        counts = {row["id"]: row["photo_count"] for row in db.folders.with_quality_data()}
         assert counts[parent] == counts[child] == len(candidates) == 1
 
 
@@ -745,7 +745,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         db.delete_folder(gap)  # Unlink the subtree from active, preserving the owner's catalog.
         db.photo_visibility.grant(active, [shared])
         db.conn.commit()
-        tree = {row["id"]: row for row in db.get_folder_tree()}
+        tree = {row["id"]: row for row in db.folders.tree()}
         assert tree[day]["parent_id"] == parent
         assert gap not in tree
         assert set(db.get_folder_subtree_ids(parent)) == {parent, day}
@@ -754,5 +754,5 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         assert db.get_browse_summary(folder_id=parent)["filtered_total"] == 2
         assert db.photos.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
         assert [row["id"] for row in db.species_curation.get_highlights_candidates(parent, min_quality=.1)] == [shared]
-        counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
+        counts = {row["id"]: row["photo_count"] for row in db.folders.with_quality_data()}
         assert counts[parent] == counts[day] == 1

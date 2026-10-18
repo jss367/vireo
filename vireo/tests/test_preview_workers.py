@@ -282,7 +282,7 @@ def test_real_worker_preserves_offline_working_copy_crop_and_local_mask(client_w
     app, db, photo_id = client_with_photo
     root = Path(app.config['DB_PATH']).parent
     photo = db.photos.get(photo_id)
-    original = Path(db.get_folder(photo['folder_id'])['path']) / photo['filename']
+    original = Path(db.folders.get(photo['folder_id'])['path']) / photo['filename']
     copy = root / 'working' / f'{photo_id}.jpg'
     copy.parent.mkdir()
     original.replace(copy)

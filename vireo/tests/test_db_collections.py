@@ -781,7 +781,7 @@ def test_private_helpers_stay_callable_on_the_facade(db, folder):
     assert db.collections._burst_keys_for_ids([a]) == {}
     folder_join, join, where, params = db._build_query_from_rules([])
     assert db.collections._folder_filter_values(folder_join, join, where, params, q=None, limit=5) == [
-        {"value": db.get_folder(folder)["path"], "count": 1},
+        {"value": db.folders.get(folder)["path"], "count": 1},
     ]
 
 

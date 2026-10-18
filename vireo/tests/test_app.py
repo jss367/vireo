@@ -295,7 +295,7 @@ def test_api_photos_extensions_returns_distinct_lowercased(app_and_db):
     app, db = app_and_db
     # Fixture seeds three .jpg photos. Add a mixed-case + raw to verify
     # collapsing and sorting.
-    fid = db.get_folder_tree()[0]['id']
+    fid = db.folders.tree()[0]['id']
     db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
                  file_size=1, file_mtime=99.0)
     db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
@@ -677,7 +677,7 @@ def test_api_coverage(app_and_db):
 def test_api_folder_get_returns_linked_folder(app_and_db):
     """GET /api/folders/<id> returns id/name/path for a folder in the active ws."""
     app, db = app_and_db
-    fid = db.get_folder_tree()[0]['id']
+    fid = db.folders.tree()[0]['id']
     client = app.test_client()
     resp = client.get(f'/api/folders/{fid}')
     assert resp.status_code == 200
@@ -2633,7 +2633,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
     )
     db.conn.commit()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="verdin.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -2728,7 +2728,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
     )
     db.conn.commit()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="subject-verdin.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -2806,7 +2806,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
         "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
     )
     db.conn.commit()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="verdin-multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -2902,7 +2902,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
         "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
     )
     db.conn.commit()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="verdin-mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -9105,7 +9105,7 @@ def test_highlight_bucket_canonicalizes_accepted_hierarchy_species():
 def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
     """Unscored-only workspaces must not silently blank the Highlights page.
 
-    ``get_folders_with_quality_data`` is scored-only, so the payload's
+    ``folders.with_quality_data`` is scored-only, so the payload's
     ``folders`` list is empty when nothing has been analyzed. But the
     highlights payload can still return eligible content (buckets and
     unidentified photos) via the min_quality<=0 admission of unscored
@@ -10249,7 +10249,7 @@ def test_selection_keyword_suggestions_return_partial_and_shared_keywords(app_an
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
     """Large selection suggestions must not exceed SQLite's variable limit."""
     app, db = app_and_db
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     ids = [
         db.add_photo(
             folder_id,
@@ -10714,7 +10714,7 @@ def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
 def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
     """Large batch keyword adds must not exceed SQLite's variable limit."""
     app, db = app_and_db
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     ids = [
         db.add_photo(
             folder_id,
@@ -11358,7 +11358,7 @@ def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path
     """A folder health flip must clear the Missing Originals cache.
 
     Regression: ``api_folders_check_health`` calls
-    ``db.check_folder_health`` which flips folders to/from ``missing`` as
+    ``db.folders.check_health`` which flips folders to/from ``missing`` as
     disk state changes. Without invalidation, a ready cached payload
     survives the flip: a folder going ok→missing hides the new ghosts,
     and missing→ok keeps resurfacing photos whose originals just came
@@ -11727,7 +11727,7 @@ def test_scan_job_invalidates_missing_originals_cache(app_and_db, tmp_path):
     pre-scan folder-health check doesn't flip anything.
 
     Regression: the scan work function only invalidated the cache when
-    ``check_folder_health`` returned a nonzero change count. But a
+    ``folders.check_health`` returned a nonzero change count. But a
     normal scan (e.g. Browse's "Rescan this Folder" after the user
     restored an original) still commits photo rows and can make a
     ready missing-originals payload stale. Without a post-scan
@@ -12599,7 +12599,7 @@ def test_api_folder_relocate_conflict_after_revalidation_invalidates_missing_cac
 ):
     """A relocate conflict can still mutate folder health and stale the cache.
 
-    ``Database.relocate_folder`` revalidates a missing source folder whose old
+    ``FolderRepository.relocate`` revalidates a missing source folder whose old
     path came back online, commits ``status='ok'``, then raises if the requested
     new path is already tracked. The API returns 409, but the ready Missing
     Originals cache must still be dropped because the folder is now online.
@@ -12641,7 +12641,7 @@ def test_api_folder_relocate_conflict_after_revalidation_invalidates_missing_cac
 def test_api_folder_relocate_rebases_configured_developed_dir(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate rebases the darktable output subdir.
 
-    Regression: /api/folders/<id>/relocate only called db.relocate_folder,
+    Regression: /api/folders/<id>/relocate only called db.folders.relocate,
     never invoking relocate_developed_dir. Any previously-developed photo
     in a relocated folder would silently fall back to RAW on export
     because the path-derived key changes when the folder's path changes.
@@ -12815,10 +12815,10 @@ def test_folder_health_check_runs_at_startup(app_and_db):
     app, db = app_and_db
     # Folders in test fixture use fake paths that don't exist on disk.
     # The health check should mark them missing.
-    changed = db.check_folder_health()
+    changed = db.folders.check_health()
     assert changed >= 1  # /photos/2024 and /photos/2024/January don't exist
 
-    missing = db.get_missing_folders()
+    missing = db.folders.missing()
     assert len(missing) >= 1
 
 
@@ -17401,7 +17401,7 @@ def test_add_workspace_folder_unknown_ids_return_404(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     ws_id = db._active_workspace_id
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
 
     resp = client.post(f'/api/workspaces/{ws_id}/folders',
                        json={"folder_id": 999999})
@@ -17580,7 +17580,7 @@ def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
     lists beyond the SQLite bound-parameter cap don't raise OperationalError."""
     app, db = app_and_db
     client = app.test_client()
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
     # More ids than one 900-param chunk so the query must split.
     photo_ids = [
         db.add_photo(folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
@@ -18682,7 +18682,7 @@ def _seed_prediction_photo(db, filename, species, confidence,
                            labels_fingerprint="fp1", folder_id=None):
     """Add a photo with one detection carrying one prediction."""
     if folder_id is None:
-        folder_id = db.get_folder_tree()[0]["id"]
+        folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -18930,7 +18930,7 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     existing, _ = _seed_prediction_photo(db, "all-existing.jpg", "Bald Eagle", 0.9)
     outside, _ = _seed_prediction_photo(db, "all-outside.jpg", "Bald Eagle", 0.9)
     unclassified = db.add_photo(
-        folder_id=db.get_folder_tree()[0]["id"], filename="all-unclassified.jpg",
+        folder_id=db.folders.tree()[0]["id"], filename="all-unclassified.jpg",
         extension=".jpg", file_size=100, file_mtime=1.0,
     )
     eagle = db.add_keyword("Bald Eagle", is_species=True)
@@ -19320,7 +19320,7 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped(filename):
         photo_id = db.add_photo(
@@ -19400,7 +19400,7 @@ def test_batch_reject_does_not_hide_earlier_undoable_edit(app_and_db):
 def test_prediction_states_distinguish_empty_reasons(app_and_db):
     """Four different reasons a photo shows no predictions, kept apart."""
     app, db = app_and_db
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     untouched = db.add_photo(
         folder_id=folder_id, filename="state-none.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -19437,7 +19437,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
     """
     app, db = app_and_db
     assert app is not None
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     fallback_only = db.add_photo(
         folder_id=folder_id, filename="state-fallback.jpg", extension=".jpg",
@@ -19614,7 +19614,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     # Photo A: same species predicted on two separate detections.
     photo_multi = db.add_photo(
@@ -19696,7 +19696,7 @@ def test_selection_prediction_suggestions_marks_photo_ambiguous_across_siblings(
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -19756,7 +19756,7 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species):
         photo_id = db.add_photo(
@@ -19828,7 +19828,7 @@ def test_selection_prediction_suggestions_ignores_minority_frame_confidence(
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species, confidence):
         photo_id = db.add_photo(
@@ -19891,7 +19891,7 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     photo_id = db.add_photo(
         folder_id=folder_id, filename="burst-sparrow-only.jpg", extension=".jpg",
@@ -19944,7 +19944,7 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
     db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.80})
 
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species, confidence):
         photo_id = db.add_photo(
@@ -19998,7 +19998,7 @@ def test_predictions_api_exposes_consensus_species_for_burst(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="consensus.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -20166,7 +20166,7 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     # 600 photos × 2 classifier models on one detection = 1,200 ids, above
     # the old 1,000 cap. Kept modest so the test is quick but still crosses
@@ -20223,7 +20223,7 @@ def test_batch_accept_grouped_scopes_photos_per_model_bucket(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_two_models(filename):
         photo_id = db.add_photo(
@@ -20311,7 +20311,7 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     pred_ids = []
     for i in range(1001):
@@ -21006,7 +21006,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="drift.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -21103,7 +21103,7 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="no-expected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -21200,7 +21200,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_member(name):
         photo_id = db.add_photo(
@@ -21271,7 +21271,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_with_alternative(name):
         photo_id = db.add_photo(
@@ -21361,7 +21361,7 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     # 400 photos × 3 classifier models = 1,200 ids: more ids than photos
     # (the shape any id-count cap gets wrong) and wider than one
@@ -21443,7 +21443,7 @@ def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     photos, pred_ids = [], []
     for i in range(MAX_SELECTION_PHOTOS + 1):
@@ -21503,7 +21503,7 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_member(filename):
         photo_id = db.add_photo(
@@ -21573,7 +21573,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     pred_ids, photos = [], []
     for name in ("cover-a.jpg", "cover-b.jpg", "cover-c.jpg"):
@@ -21704,7 +21704,7 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
 
 def _seed_two_subject_photo(db, filename, first_species, second_species):
     """A photo with two detections, each carrying one pending prediction."""
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -21829,7 +21829,7 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
     client = app.test_client()
     # Seed the Little Egret detection first; then promote the sparrow
     # row to a burst-minority frame whose consensus is Robin.
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     photo_id = db.add_photo(
         folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -21887,7 +21887,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_photo(filename):
         photo_id = db.add_photo(
@@ -24622,7 +24622,7 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     group_id = "grp-reviewed"
     photo_ids = []
     pred_ids = []

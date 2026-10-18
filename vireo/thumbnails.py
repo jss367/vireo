@@ -464,7 +464,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     os.makedirs(cache_dir, exist_ok=True)
 
     photos = db.photos.list_page(per_page=999999)
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
 
     # Filter to only photos needing thumbnails
     needed = _photos_needing_thumbnails(db, photos, cache_dir, cancel_check)

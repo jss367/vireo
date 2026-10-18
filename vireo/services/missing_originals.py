@@ -619,7 +619,7 @@ class MissingOriginals:
             health_db = None
             try:
                 health_db = Database(self.db_path)
-                changed = health_db.check_folder_health()
+                changed = health_db.folders.check_health()
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
                     # A background ok↔missing flip would otherwise leave a

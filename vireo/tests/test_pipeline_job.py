@@ -2130,7 +2130,7 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path):
     # Switch to a fresh workspace that has no folders.
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    assert db.get_folder_tree() == []
+    assert db.folders.tree() == []
 
     src = tmp_path / "source"
     src.mkdir()
@@ -2154,7 +2154,7 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path):
     # Re-open DB to pick up writes made on the worker thread's own connection.
     db2 = Database(db_path)
     db2.set_active_workspace(other_ws)
-    other_folders = {f["path"] for f in db2.get_folder_tree()}
+    other_folders = {f["path"] for f in db2.folders.tree()}
     assert str(dup_folder) in other_folders, (
         f"Expected {dup_folder!r} to be linked to Other workspace after "
         f"pipeline dedupped all source files; got {other_folders!r}"
@@ -11974,6 +11974,7 @@ def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
     """
     import pipeline as pipeline_mod
     from db import Database
+    from repositories.folders import FolderRepository
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -11991,7 +11992,7 @@ def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        Database, "get_folder_tree",
+        FolderRepository, "tree",
         lambda self: [],
     )
 
@@ -12033,6 +12034,7 @@ def test_detect_eye_keypoints_stage_skips_synthetic_100pct_on_abort(
     """
     import pipeline as pipeline_mod
     from db import Database
+    from repositories.folders import FolderRepository
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -12045,7 +12047,7 @@ def test_detect_eye_keypoints_stage_skips_synthetic_100pct_on_abort(
         lambda self, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
     )
     monkeypatch.setattr(
-        Database, "get_folder_tree",
+        FolderRepository, "tree",
         lambda self: [],
     )
     monkeypatch.setattr(
@@ -12097,6 +12099,7 @@ def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
     """
     import pipeline as pipeline_mod
     from db import Database
+    from repositories.folders import FolderRepository
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -12109,7 +12112,7 @@ def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
         lambda self, **k: [{"id": 1}, {"id": 2}],
     )
     monkeypatch.setattr(
-        Database, "get_folder_tree",
+        FolderRepository, "tree",
         lambda self: [],
     )
     monkeypatch.setattr(

@@ -1341,7 +1341,7 @@ class _ThumbnailRequest:
         self._retry_with_working_copy = _retry_thumbnail_with_working_copy
         self.vireo_dir = os.path.dirname(self.thumb_dir)
         # Look up the photo's folder path directly rather than via
-        # ``get_folder_tree()``: the tree filter excludes folders whose
+        # ``folders.tree()``: the tree filter excludes folders whose
         # status is ``'missing'``, which would leave the canonical-path
         # helper with an empty mapping and silently fall back to
         # ``os.path.join('', photo['filename'])`` — a CWD-relative path
@@ -1349,7 +1349,7 @@ class _ThumbnailRequest:
         # unrelated same-named file in the server's working directory.
         # The routes already decided the photo may be shown (workspace
         # membership, or duplicate-group membership on the Duplicates
-        # page), so a direct ``get_folder`` lookup here is safe and
+        # page), so a direct ``folders.get`` lookup here is safe and
         # status-agnostic.
         self.folders = (
             {self.folder_row["id"]: self.folder_row["path"]}
@@ -2277,7 +2277,7 @@ def create_media_blueprint(
         404s on those. This route replaces the workspace check with
         duplicate-group membership (a photo sharing its ``file_hash`` with
         another row), which is exactly the set that page can show; any
-        other photo still 404s. The folder comes from ``get_folder`` by id,
+        other photo still 404s. The folder comes from ``folders.get`` by id,
         which is not workspace-scoped, so the source path never falls back
         to a CWD-relative join.
         """
@@ -2298,7 +2298,7 @@ def create_media_blueprint(
     def _serve_photo_thumbnail(db, photo_id, photo, filename):
         """Serve or self-heal the thumbnail of a photo the caller may show."""
         thumb_dir = config["THUMB_CACHE_DIR"]
-        folder_row = db.get_folder(photo["folder_id"])
+        folder_row = db.folders.get(photo["folder_id"])
         if not folder_row:
             return "", 404
         pair_source, pair_source_path = _requested_pair_source(
@@ -2536,7 +2536,7 @@ def create_media_blueprint(
                 image_path = wc
                 using_working_copy = True
         if image_path is None:
-            folder = db.get_folder(photo["folder_id"])
+            folder = db.folders.get(photo["folder_id"])
             if not folder:
                 return _CROP_FOLDER_MISSING
             image_path = os.path.join(folder["path"], photo["filename"])
@@ -2569,7 +2569,7 @@ def create_media_blueprint(
             # existence check above but before Pillow opens it. Re-resolve
             # the primary source once so an otherwise healthy crop request
             # does not become a transient 500 during eviction.
-            folder = db.get_folder(photo["folder_id"])
+            folder = db.folders.get(photo["folder_id"])
             original_path = (
                 os.path.join(folder["path"], photo["filename"])
                 if folder else None
@@ -2772,7 +2772,7 @@ def create_media_blueprint(
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
         except ValueError as exc:
             return json_error(str(exc), 404)
-        img, source = _focus_source_image(photo, db.get_folder(photo["folder_id"]), source_choice)
+        img, source = _focus_source_image(photo, db.folders.get(photo["folder_id"]), source_choice)
         if img is None:
             if source_choice in {"working", "original"}:
                 return json_error(f"The {source_choice} image is not available", 404)
@@ -3110,7 +3110,7 @@ def create_media_blueprint(
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         recipe = db.get_photo_edit_recipe(photo_id)
-        folder_row = db.get_folder(photo["folder_id"])
+        folder_row = db.folders.get(photo["folder_id"])
         if not folder_row:
             return "Not found", 404
         pair_source, pair_source_path = _requested_pair_source(
@@ -3375,7 +3375,7 @@ def create_media_blueprint(
             if not apply_crop:
                 display_recipe.pop("crop", None)
             vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-            folder_row = db.get_folder(photo["folder_id"])
+            folder_row = db.folders.get(photo["folder_id"])
             if not folder_row:
                 return "Not found", 404
             if not config.get('EDIT_PREVIEW_IN_PROCESS', False):
@@ -3469,7 +3469,7 @@ def create_media_blueprint(
             for key in ("version", "rotation", "flip", "straighten", "crop")
             if key in recipe
         }
-        folder_row = db.get_folder(photo["folder_id"])
+        folder_row = db.folders.get(photo["folder_id"])
         if not folder_row:
             return json_error("Photo not found", 404)
         edit = _EditPreviewRequest(
@@ -3531,7 +3531,7 @@ def create_media_blueprint(
             os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
         )
 
-        folder = db.get_folder(photo["folder_id"])
+        folder = db.folders.get(photo["folder_id"])
         if not folder:
             return "Not found", 404
 

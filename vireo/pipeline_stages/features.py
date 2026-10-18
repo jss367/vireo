@@ -618,7 +618,7 @@ class _MaskPass:
         ]
 
     def open_worklist(self) -> None:
-        self.folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
+        self.folders = {f["id"]: f["path"] for f in self.thread_db.folders.tree()}
         self.total = len(self.photos_to_process)
         # Now that ``total`` is known, build the preflight outage
         # message. The denominator has to be the mask-candidate

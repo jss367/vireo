@@ -125,7 +125,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
         # counts grow much larger or roots live on network mounts where
         # each realpath/listdir is a round trip.
         source_real = os.path.realpath(source)
-        for row in db.get_all_folders():
+        for row in db.folders.all_rows():
             froot = row["path"]
             if not froot:
                 continue

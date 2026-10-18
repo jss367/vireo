@@ -193,7 +193,7 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path(tmp_pa
 
     scan.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
-        get_folder=lambda folder_id: {"path": str(folder)},
+        folders=SimpleNamespace(get=lambda folder_id: {"path": str(folder)}),
     )
 
     # Companion JPEG arrives first (file ordering).
@@ -253,7 +253,7 @@ def test_on_scanned_photo_keeps_companion_path_when_canonical_raw_missing(tmp_pa
 
     scan.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
-        get_folder=lambda folder_id: {"path": str(folder)},
+        folders=SimpleNamespace(get=lambda folder_id: {"path": str(folder)}),
     )
 
     scan._on_scanned_photo(42, str(folder / "IMG_001.jpg"))
@@ -304,7 +304,7 @@ def test_on_scanned_photo_leaves_matching_basename_alone():
 
     scan.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
-        get_folder=record_folder,
+        folders=SimpleNamespace(get=record_folder),
     )
 
     scan._on_scanned_photo(42, "/root/elsewhere/IMG_001.cr3")
@@ -358,7 +358,7 @@ def test_scan_resets_dedup_set_between_invocations():
     scan.pipeline_cfg = {}
     scan.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_filenames=lambda ids: {}),
-        get_folder=lambda folder_id: None,
+        folders=SimpleNamespace(get=lambda folder_id: None),
     )
 
     def do_scan_a(root, db, **kwargs):
@@ -424,7 +424,7 @@ def _make_thumb_pass(tmp_path):
 class _RowLike:
     """Stand-in for ``sqlite3.Row``: subscript access only, no ``dict.get``.
 
-    ``Database.get_folder`` returns a real ``sqlite3.Row``, so test
+    ``FolderRepository.get`` returns a real ``sqlite3.Row``, so test
     mocks that return plain ``dict`` instances hide a production-only
     ``AttributeError`` on ``.get()``. Using this fake in every
     ``_still_owns`` test shape makes the mocks fail the same way the
@@ -473,7 +473,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
         )),
-        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        folders=SimpleNamespace(get=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None),
         get_photo_edit_recipe=lambda _id: None,
     )
     thumbs.generate_thumbnail = _generate_must_not_run
@@ -492,7 +492,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # is also skipped.
     thumbs.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_by_ids=lambda ids: {}),
-        get_folder=lambda _fid: None,
+        folders=SimpleNamespace(get=lambda _fid: None),
         get_photo_edit_recipe=lambda _id: None,
     )
     orphan = _ThumbPhoto(photo_id=99, photo_path="/anywhere/anything.jpg")
@@ -509,7 +509,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
         )),
-        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        folders=SimpleNamespace(get=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None),
         get_photo_edit_recipe=lambda _id: None,
     )
     thumbs.generate_thumbnail = lambda *_a, **_k: generated_path
@@ -547,7 +547,7 @@ def test_thumbnail_skips_queue_entry_when_folder_differs(tmp_path):
             {42: _RowLike(folder_id=7, filename="IMG_001.jpg", companion_path=None)}
             if 42 in ids else {}
         )),
-        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 7 else None,
+        folders=SimpleNamespace(get=lambda fid: _RowLike(id=fid, path="/B") if fid == 7 else None),
         get_photo_edit_recipe=lambda _id: None,
     )
     # Queue entry is /A/IMG_001.jpg (same basename, folder A).
@@ -598,7 +598,7 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
 
     thumbs.thread_db = SimpleNamespace(
         photos=SimpleNamespace(get_by_ids=get_photos_by_ids),
-        get_folder=get_folder,
+        folders=SimpleNamespace(get=get_folder),
         get_photo_edit_recipe=lambda _id: None,
     )
 
@@ -622,7 +622,7 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
 
 
 def test_thumbnail_still_owns_works_with_real_sqlite_row_folders(tmp_path):
-    """``Database.get_folder`` returns a real ``sqlite3.Row``, not a dict.
+    """``FolderRepository.get`` returns a real ``sqlite3.Row``, not a dict.
     ``_still_owns`` must use subscript access rather than ``dict.get``
     — reaching for ``folder.get("path")`` would raise AttributeError
     on every live thumbnail and fail the entire scanned queue. Drive
@@ -651,7 +651,7 @@ def test_thumbnail_still_owns_works_with_real_sqlite_row_folders(tmp_path):
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
         )),
-        get_folder=get_folder,
+        folders=SimpleNamespace(get=get_folder),
         get_photo_edit_recipe=lambda _id: None,
     )
     generated_path = os.path.join(str(tmp_path), "42.jpg")
@@ -689,9 +689,9 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
             {42: _RowLike(folder_id=99, filename="IMG_001.cr3", companion_path=None)}
             if 42 in ids else {}
         ), get=lambda _id: None),
-        get_folder=lambda fid: (
+        folders=SimpleNamespace(get=lambda fid: (
             _RowLike(id=99, path="/B") if fid == 99 else None
-        ),
+        )),
         get_photo_edit_recipe=lambda _id: None,
     )
     generated_path = os.path.join(str(tmp_path), "42.jpg")
@@ -743,7 +743,7 @@ def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(t
             )}
             if 42 in ids else {}
         )),
-        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        folders=SimpleNamespace(get=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None),
         get_photo_edit_recipe=lambda _id: None,
     )
     generated_path = os.path.join(str(tmp_path), "42.jpg")
@@ -767,7 +767,7 @@ def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(t
             )}
             if 42 in ids else {}
         )),
-        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        folders=SimpleNamespace(get=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None),
         get_photo_edit_recipe=lambda _id: None,
     )
 

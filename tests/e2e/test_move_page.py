@@ -5,7 +5,7 @@ from playwright.sync_api import expect
 
 
 def test_move_folder_button_shows_preflight_progress(live_server, page):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 
@@ -61,7 +61,7 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
 
 
 def test_existing_destination_confirmation_is_scannable(live_server, page):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     page.goto(f"{live_server['url']}/move")
 
     page.route(
@@ -122,7 +122,7 @@ def test_existing_destination_confirmation_is_scannable(live_server, page):
 def test_existing_destination_confirmation_scrolls_on_short_viewport(
     live_server, page
 ):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     page.set_viewport_size({"width": 800, "height": 420})
     page.goto(f"{live_server['url']}/move")
 
@@ -159,7 +159,7 @@ def test_existing_destination_confirmation_scrolls_on_short_viewport(
 
 
 def test_move_folder_shows_source_while_choosing_destination(live_server, page):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 
@@ -206,7 +206,7 @@ def test_move_folder_browser_navigates_to_recent_destinations(
 
 
 def test_move_folder_prints_full_move_before_submission(live_server, page):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 
@@ -222,7 +222,7 @@ def test_move_folder_prints_full_move_before_submission(live_server, page):
 
 
 def test_move_folder_can_be_renamed_in_final_location_preview(live_server, page):
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 
@@ -258,7 +258,7 @@ def test_move_folder_preserves_untouched_name_with_surrounding_spaces(
         folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0, timestamp="2024-04-01T10:00:00",
     )
-    db.update_folder_counts()
+    db.folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 

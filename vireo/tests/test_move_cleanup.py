@@ -131,8 +131,8 @@ def test_finish_removes_only_empty_selected_folder(cleanup_case):
     assert source.parent.exists()
     assert db.conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone() is None
     assert db.conn.execute("SELECT 1 FROM workspace_folders WHERE folder_id = ?", (folder_id,)).fetchone() is None
-    db.check_folder_health()
-    assert str(source) not in [row["path"] for row in db.get_missing_folders()]
+    db.folders.check_health()
+    assert str(source) not in [row["path"] for row in db.folders.missing()]
 
 
 def test_cleanup_retires_empty_child_catalog_rows(cleanup_case):

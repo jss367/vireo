@@ -70,7 +70,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
     app, db, first = client_with_photo
     second = _second_photo(db, first)
     source_id = db.photos.get(first)["folder_id"]
-    db.update_folder_counts()
+    db.folders.update_counts()
     destination = tmp_path / "moved"
     entered, release = threading.Event(), threading.Event()
     copies = []
@@ -96,7 +96,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         _wait_status(runner, job_id, "paused")
         assert len(copies) == 1
         moved_folder = db.photos.get(first)["folder_id"]
-        tree = {f["id"]: f for f in db.get_folder_tree()}
+        tree = {f["id"]: f for f in db.folders.tree()}
         assert tree[source_id]["photo_count"] == 1
         assert tree[moved_folder]["photo_count"] == 1
         db.conn.execute("UPDATE photos SET rating=3 WHERE id=?", (first,))
@@ -104,7 +104,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         assert client.post(f"/api/jobs/{job_id}/{action}").status_code == 200
         job = wait_for_job_via_client(client, job_id)
         assert job["status"] == ("completed" if action == "resume" else "cancelled")
-        tree = {f["id"]: f for f in db.get_folder_tree()}
+        tree = {f["id"]: f for f in db.folders.tree()}
         assert tree[source_id]["photo_count"] == (0 if action == "resume" else 1)
         assert tree[moved_folder]["photo_count"] == (2 if action == "resume" else 1)
         assert job["result"]["moved"] == (2 if action == "resume" else 1)
