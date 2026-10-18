@@ -199,6 +199,25 @@ def test_preview_delete_missing_is_noop(db):
     assert db.caches.preview_total_bytes() == 0
 
 
+def test_set_thumbnail_paths_writes_each_pair_without_committing(db):
+    a = _photo(db, "a.jpg")
+    b = _photo(db, "b.jpg")
+    db.caches.set_thumbnail_paths([("a-thumb.jpg", a), ("b-thumb.jpg", b)])
+    rows = dict(db.conn.execute(
+        "SELECT id, thumb_path FROM photos WHERE id IN (?, ?)", (a, b),
+    ).fetchall())
+    assert rows == {a: "a-thumb.jpg", b: "b-thumb.jpg"}
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        assert reader.execute(
+            "SELECT thumb_path FROM photos WHERE id = ?", (a,),
+        ).fetchone()[0] is None
+    finally:
+        reader.close()
+    db.rollback()
+
+
 def test_preview_total_bytes_empty_is_zero(db):
     total = db.caches.preview_total_bytes()
     assert total == 0
