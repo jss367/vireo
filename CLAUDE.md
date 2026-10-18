@@ -79,6 +79,10 @@ The Windows legs of both workflows run with `--reruns 1`: a test that fails once
 
 Do not monkeypatch `sqlite3.connect` globally in tests: coverage flushes per-test contexts to its own SQLite file at every test boundary, so a global fake crashes the xdist worker. Fake only the connection for the database path under test (see `test_pipeline_queue.py`).
 
+### Broad exception handlers
+
+`vireo/tests/test_broad_except_ratchet.py` counts the broad handlers in every module under `vireo/` (outside `tests/` and `testing/`): `except:`, `except Exception`, `except BaseException` (alone or in a tuple) and `contextlib.suppress` of either. `vireo/tests/broad_except_baseline.json` holds each module's exact count, so a new broad handler fails, and so does a removed one until its entry is lowered with `python vireo/tests/test_broad_except_ratchet.py --write-baseline` (the writer never raises an entry, and refuses new module entries after bootstrap; a genuine move/split needs a reviewed manual baseline-key migration because matching totals cannot prove movement). Catch what the try body can actually raise (`OSError`, `ValueError`, `sqlite3.Error`, `json.JSONDecodeError`, ...); when a boundary must stay broad (a per-item job loop, best-effort cleanup, a third-party call with an undocumented error set), narrow or remove another broad handler in the same module. Under the test's `DOCUMENTED_ROOTS`, every broad handler must also re-raise, log the traceback (`log.exception` or `exc_info=`), or carry a `# broad: <reason>` comment on the `except` line or the comment lines under it (above the `with` line for `suppress`); a deliberate boundary gets both the log and the reason, and a failure the user should see is surfaced in the response or job status, not just the log (CORE_PHILOSOPHY.md, "No black boxes"). Add a directory or module to `DOCUMENTED_ROOTS` once it is clean.
+
 ### Browser tests
 
 `tests/e2e` is excluded from the default `addopts`, so the browser suite only runs

@@ -30,14 +30,7 @@ def _known_paths_for_workspace(db, workspace_id):
     ``companion_path`` makes the same walk converge to zero instead of leaving
     a stuck banner.
     """
-    rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename, p.companion_path
-           FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-           WHERE wf.workspace_id = ?""",
-        (workspace_id,),
-    ).fetchall()
+    rows = db.photo_visibility.active_path_rows(workspace_id)
     known = set()
     for row in rows:
         known.add(os.path.join(row["folder_path"], row["filename"]))
@@ -74,10 +67,7 @@ def staged_source_paths(db):
     """
     return [
         row["source_path"]
-        for row in db.conn.execute(
-            "SELECT source_path FROM local_folder_mappings "
-            "WHERE is_root = 1 ORDER BY source_path"
-        ).fetchall()
+        for row in db.local_folders.root_source_paths()
         if row["source_path"]
     ]
 
@@ -160,16 +150,9 @@ def mapped_roots(db, workspace_id, *, include_missing=False):
     one chain are both marked roots (e.g. /A and /A/B/C with /A/B unlinked):
     os.walk'ing both would count files under /A/B/C twice.
     """
-    status_clause = "" if include_missing else (
-        " AND f.status IN ('ok', 'partial')"
+    rows = db.workspace_folders.linked_folder_rows(
+        workspace_id, include_missing=include_missing,
     )
-    rows = db.conn.execute(
-        """SELECT f.id, f.path, f.parent_id, wf.is_root
-           FROM folders f
-           JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ?""" + status_clause,
-        (workspace_id,),
-    ).fetchall()
     root_ids = {r["id"] for r in rows if r["is_root"]}
     if not root_ids:
         return []
@@ -178,7 +161,7 @@ def mapped_roots(db, workspace_id, *, include_missing=False):
     # chains where intermediate folders may not themselves be roots.
     parent_of = {
         r["id"]: r["parent_id"]
-        for r in db.conn.execute("SELECT id, parent_id FROM folders").fetchall()
+        for r in db.workspace_folders.folder_parent_rows()
     }
 
     def has_root_ancestor(folder_id):
@@ -1344,8 +1327,7 @@ def invalidate_new_images_after_scan(db, root):
     # over-invalidation that triggers a re-walk. The descendant pattern uses
     # os.sep so it matches what the scanner stores via str(Path(...)) on both
     # POSIX and Windows.
-    touched_ids = [r["id"] for r in db.conn.execute(
-        "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
-        (root, root.rstrip("/\\") + os.sep + "%"),
-    ).fetchall()]
+    touched_ids = [r["id"] for r in db.workspace_folders.folder_ids_at_or_like(
+        root, root.rstrip("/\\") + os.sep + "%",
+    )]
     db.invalidate_new_images_cache_for_folders(touched_ids)

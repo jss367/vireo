@@ -742,14 +742,15 @@ def _destination_folder_rows(db, dest_path_str):
     # Unicode-aware folding via _case_fold_path) ever sees it. Register a
     # Unicode-aware LOWER function on the connection so both sides agree.
     if _WINDOWS:
-        db.conn.create_function(
+        sql_functions = [(
             "LOWER_UNICODE", 1,
             lambda s: s.lower() if s is not None else None,
-        )
+        )]
         path_sql_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
         dest_path_sql_param = dest_path_sql.lower()
         dest_like_prefix_param = dest_like_prefix.lower()
     else:
+        sql_functions = []
         path_sql_expr = "f.path"
         dest_path_sql_param = dest_path_sql
         dest_like_prefix_param = dest_like_prefix
@@ -758,22 +759,9 @@ def _destination_folder_rows(db, dest_path_str):
     if dest_path_sql_stripped:
         folder_scope = f"AND ({path_sql_expr} = ? OR {path_sql_expr} LIKE ? ESCAPE '\\')"
         folder_params = (dest_path_sql_param, dest_like_prefix_param)
-    folder_rows = []
-    for identity, source in (
-        ("p", "photos p"),
-        ("c", "companion_identities c JOIN photos p ON p.id=c.photo_id AND p.companion_path=c.filename"),
-    ):
-        folder_rows.extend(db.conn.execute(
-            f"""SELECT {identity}.file_hash, {identity}.filename,
-                       {identity}.file_size, {identity}.timestamp,
-                       f.path AS folder_path
-                  FROM {source}
-                  JOIN folders f ON p.folder_id = f.id
-                 WHERE ({identity}.file_hash IS NOT NULL OR {identity}.timestamp IS NOT NULL)
-                   AND f.status IN ('ok', 'partial') {folder_scope}""",
-            folder_params,
-        ).fetchall())
-    return folder_rows
+    return db.imports.destination_identity_rows(
+        folder_scope, folder_params, sql_functions,
+    )
 
 
 @dataclass
