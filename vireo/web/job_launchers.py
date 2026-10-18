@@ -31,6 +31,7 @@ from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
 )
+from repositories.masks_features import MaskQuality, PipelineFeatures
 from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
@@ -2009,21 +2010,20 @@ class _MaskExtractionRun:
             variant=self.sam2_variant,
             path=mask_path,
             detector_model=photo["detector_model"],
-            prompt_x=photo["prompt"][0],
-            prompt_y=photo["prompt"][1],
-            prompt_w=photo["prompt"][2],
-            prompt_h=photo["prompt"][3],
-            subject_size=mask_subject_size,
-            subject_tenengrad=mask_subject_tenengrad,
-            bg_tenengrad=mask_bg_tenengrad,
-            crop_complete=completeness,
-            quality_input_recipe=None,
-            subject_clip_high=features.pop("subject_clip_high", None),
-            subject_clip_low=features.pop("subject_clip_low", None),
-            subject_y_median=features.pop("subject_y_median", None),
-            bg_separation=features.pop("bg_separation", None),
-            phash_crop=features.pop("phash_crop", None),
-            noise_estimate=features.pop("noise_estimate", None),
+            prompt=photo["prompt"],
+            quality=MaskQuality(
+                subject_size=mask_subject_size,
+                subject_tenengrad=mask_subject_tenengrad,
+                bg_tenengrad=mask_bg_tenengrad,
+                crop_complete=completeness,
+                quality_input_recipe=None,
+                subject_clip_high=features.pop("subject_clip_high", None),
+                subject_clip_low=features.pop("subject_clip_low", None),
+                subject_y_median=features.pop("subject_y_median", None),
+                bg_separation=features.pop("bg_separation", None),
+                phash_crop=features.pop("phash_crop", None),
+                noise_estimate=features.pop("noise_estimate", None),
+            ),
             _commit=False,
         )
         thread_db.set_active_mask_variant(
@@ -2036,7 +2036,7 @@ class _MaskExtractionRun:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, **features, _commit=False,
+                photo_id, PipelineFeatures(**features), _commit=False,
             )
         thread_db.masks_features.update_embeddings(
             photo_id,

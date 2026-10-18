@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timedelta
 
 import numpy as np
+from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -29,15 +30,17 @@ def _setup_db(tmp_path):
         )
         db.masks_features.update_pipeline_features(
             pid,
-            mask_path=f"/masks/{pid}.png",
-            subject_tenengrad=100 + i * 80,
-            bg_tenengrad=30,
-            crop_complete=0.5 + i * 0.1,  # ranges from 0.5 to 1.0
-            bg_separation=50.0,
-            subject_clip_high=0.01 + i * 0.06,  # ranges from 0.01 to 0.31
-            subject_clip_low=0.01,
-            subject_y_median=120.0,
-            phash_crop=f"{pid:016x}",
+            PipelineFeatures(
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=100 + i * 80,
+                bg_tenengrad=30,
+                crop_complete=0.5 + i * 0.1,
+                bg_separation=50.0,
+                subject_clip_high=0.01 + i * 0.06,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            ),
         )
         db.masks_features.update_embeddings(
             pid,

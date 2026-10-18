@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from page_scripts import page_with_scripts
+from repositories.masks_features import PipelineFeatures
 from testing.waits import synchronization_timeout
 
 
@@ -1388,15 +1389,17 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     for idx, pid in enumerate(ordered_ids):
         db.masks_features.update_pipeline_features(
             pid,
-            mask_path=f"/masks/{pid}.png",
-            subject_tenengrad=250 + idx * 25,
-            bg_tenengrad=30,
-            crop_complete=0.9,
-            bg_separation=40.0,
-            subject_clip_high=0.01,
-            subject_clip_low=0.01,
-            subject_y_median=120.0,
-            phash_crop=f"{pid:016x}",
+            PipelineFeatures(
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=250 + idx * 25,
+                bg_tenengrad=30,
+                crop_complete=0.9,
+                bg_separation=40.0,
+                subject_clip_high=0.01,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            ),
         )
         db.update_photo_quality(pid, subject_size=0.1)
         det_id = db.save_detections(
@@ -11165,7 +11168,7 @@ def _seed_mask(db, masks_dir, pid, variant, body=b"PNGBYTES"):
         fh.write(body)
     db.masks_features.upsert_mask(
         photo_id=pid, variant=variant, path=path,
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     return path
 
@@ -11247,7 +11250,7 @@ def test_api_serve_mask_404_when_file_missing(app_and_db):
     pid = db.get_photos()[0]["id"]
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path="/nope/missing.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
@@ -11291,7 +11294,7 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
     db.masks_features.upsert_mask(
         photo_id=pid, variant="unknown", path=legacy_path,
         detector_model="unknown",
-        prompt_x=-1, prompt_y=-1, prompt_w=-1, prompt_h=-1,
+        prompt=(-1, -1, -1, -1),
     )
 
     client = app.test_client()
@@ -11355,10 +11358,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
                 variant="sam2-small",
                 path=new_path,
                 detector_model="md",
-                prompt_x=0,
-                prompt_y=0,
-                prompt_w=0,
-                prompt_h=0,
+                prompt=(0, 0, 0, 0),
             )
             _os.unlink(old_path)
             raise FileNotFoundError(old_path)
@@ -11395,7 +11395,7 @@ def test_legacy_serve_mask_direct_file_served_when_db_backed(app_and_db):
         fh.write(b"LEGACYDIRECT")
     db.masks_features.upsert_mask(
         photo_id=pid, variant="legacy", path=mask_file,
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     client = app.test_client()
@@ -11449,7 +11449,7 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     outside.write_bytes(b"SECRET")
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path=str(outside),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     client = app.test_client()
@@ -11681,8 +11681,11 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
     arr[:, : width // 2] = 255
     PILImage.fromarray(arr, "L").save(path, "PNG")
     db.masks_features.upsert_mask(
-        photo_id, "sam2-small", path, "megadetector-v6",
-        0.0, 0.0, 0.5, 1.0,
+        photo_id,
+        "sam2-small",
+        path,
+        "megadetector-v6",
+        (0.0, 0.0, 0.5, 1.0),
     )
     db.set_active_mask_variant(photo_id, "sam2-small")
     return path
@@ -11766,10 +11769,7 @@ def test_local_mask_snapshot_retries_predecessor_cleanup(
                 "sam2-small",
                 new_path,
                 "megadetector-v6",
-                0.0,
-                0.0,
-                0.5,
-                1.0,
+                (0.0, 0.0, 0.5, 1.0),
             )
             os.unlink(old_path)
             raise FileNotFoundError(old_path)
@@ -12228,7 +12228,11 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     arr[:300, :] = 255
     PILImage.fromarray(arr, "L").save(path2, "PNG")
     db.masks_features.upsert_mask(
-        pid2, "sam2-small", path2, "megadetector-v6", 0.0, 0.0, 1.0, 0.5,
+        pid2,
+        "sam2-small",
+        path2,
+        "megadetector-v6",
+        (0.0, 0.0, 1.0, 0.5),
     )
     db.set_active_mask_variant(pid2, "sam2-small")
 
