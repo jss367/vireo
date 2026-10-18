@@ -51,7 +51,7 @@ def change_photo_location(
         db.begin_immediate()
     old_value = db.edit_history.photo_location_state(photo_id)
     if keyword_id is None:
-        db.clear_photo_location(photo_id)
+        db.locations.clear_photo(photo_id)
     else:
         db.set_photo_location(photo_id, keyword_id)
     new_value = db.edit_history.photo_location_state(photo_id)

@@ -49,7 +49,7 @@ def _request_photo_ids_arg():
     rather than silently widening the query to the whole workspace.
 
     Capped at the same 1000 ids ``parse_selection_photo_ids`` allows:
-    ``/api/predictions`` runs one ``_photo_in_workspace`` query per id, so
+    ``/api/predictions`` runs one ``photo_in_workspace`` query per id, so
     an unbounded list turns a single GET into unbounded database work.
     """
     raw = request.args.get("photo_ids")
@@ -271,7 +271,7 @@ def create_predictions_blueprint(
             return json_error(str(e), 400)
         if explicit_photo_ids is not None:
             for pid in explicit_photo_ids:
-                if not db._photo_in_workspace(pid):
+                if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                     return json_error(
                         f"Photo {pid} does not belong to the active workspace",
                         403,
@@ -1460,7 +1460,7 @@ def create_predictions_blueprint(
         # One workspace query per distinct photo, not per prediction id:
         # several rows on one photo must not cost several round trips each.
         for photo_id in dict.fromkeys(photo_by_pred.values()):
-            if not db._photo_in_workspace(photo_id):
+            if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
                 return None, json_error(
                     f"Photo {photo_id} does not belong to the "
                     "active workspace", 403,
@@ -2010,7 +2010,7 @@ def create_predictions_blueprint(
 
         # Pre-validate all photo IDs against workspace before any mutations
         for pid in picks + rejects:
-            if not db._photo_in_workspace(pid):
+            if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         # Everything below — the stale filter, the keyword/flag writes, and

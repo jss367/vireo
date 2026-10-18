@@ -104,8 +104,8 @@ class SpeciesResolver:
         self._ambiguous_common = set()
         if db is not None:
             from taxonomy import COMMON_NAME_IDENTITY_VERSION
-            self._common_names_verified = db.get_meta("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
-            self._ambiguous_common = set(json.loads(db.get_meta("ambiguous_common_names") or "[]"))
+            self._common_names_verified = db.meta.get("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
+            self._ambiguous_common = set(json.loads(db.meta.get("ambiguous_common_names") or "[]"))
 
     def _lookup_id(self, taxon_id):
         if self.taxonomy is not None:

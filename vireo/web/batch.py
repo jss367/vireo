@@ -148,7 +148,7 @@ def create_batch_blueprint(
             # A custom name chosen from the map should be available as a
             # nearby saved suggestion next time. Preserve an existing
             # location's established map point when the name is reused.
-            db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
+            db.locations.fill_missing_coordinates(leaf_id, latitude, longitude)
 
         items = []
         for pid in photo_ids:
@@ -543,7 +543,7 @@ def create_batch_blueprint(
             return json_error("keyword not found", 404)
 
         for pid in clean_ids:
-            if not db._photo_in_workspace(pid):
+            if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(
                     f"Photo {pid} does not belong to the active workspace", 403
                 )

@@ -650,7 +650,7 @@ def _sync_preview_pending_fingerprint(db, ws_id):
     ``change_type``, or ``photo_id`` differ, and the cached snapshot
     would then be served to a client that had never seen the new row.
     """
-    value = db.get_meta(f"pending_changes_version:{ws_id}")
+    value = db.meta.get(f"pending_changes_version:{ws_id}")
     return int(value) if value is not None else 0
 
 
@@ -1084,7 +1084,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
 
         # The detail panel, review and exported GPS/hierarchy must all choose
         # the same leaf when a photo has several linked locations.
-        leaves = db.get_photo_location_keywords(photo_ids)
+        leaves = db.locations.get_photo_leaves(photo_ids)
 
         chain_cache = {}
         result = {}
@@ -1138,7 +1138,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         import config as cfg
 
         effective_config = db.get_effective_config(cfg.load())
-        photos = db.count_photos_with_location()
+        photos = db.locations.count_photos_with_location()
         queued = db.pending_changes.count_queued_location_photos()
         return jsonify({
             "photos_with_location": photos,

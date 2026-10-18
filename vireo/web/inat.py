@@ -443,7 +443,7 @@ def create_inat_blueprint(
         photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return json_error(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )
@@ -797,7 +797,7 @@ def create_inat_blueprint(
         photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return json_error(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )
@@ -880,7 +880,7 @@ def create_inat_blueprint(
         photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return {"photo_id": photo_id, "error": "Photo not found"}
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return {
                 "photo_id": photo_id,
                 "error": (

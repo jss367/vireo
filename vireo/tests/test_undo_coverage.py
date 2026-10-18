@@ -17,7 +17,7 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
     old_ids = [db.get_or_create_text_location(name) for name in ['Old place', 'Other place']]
     db.tag_photo(pids[0], old_ids[0], source=None)
     db.tag_photo(pids[0], old_ids[1], source='accept')
-    db.save_location_gps_reviews([(pids[0], 'kept-gps')])
+    db.locations.save_gps_reviews([(pids[0], 'kept-gps')])
     db.commit()
     before = [db.edit_history.photo_location_state(pid) for pid in pids]
     new_id = db.get_or_create_text_location('New place')
@@ -49,7 +49,7 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
         assert client.post('/api/redo').status_code == 200
         assert [db.edit_history.photo_location_state(pid) for pid in pids] == after
     # Replaying must queue a corrective sidecar write, even after prior sync.
-    assert db.has_pending_location_change(pids[0])
+    assert db.locations.has_pending_change(pids[0])
 
 
 def test_repeating_location_assignment_and_empty_clear_do_not_create_history(app_and_db):
@@ -224,7 +224,7 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
     keyword_id = db.get_or_create_text_location('Existing place')
     for pid in pids:
         db.set_photo_location(pid, keyword_id)
-    assert not any(db.has_pending_location_change(pid) for pid in pids)
+    assert not any(db.locations.has_pending_change(pid) for pid in pids)
     # An unrelated undone edit must remain redoable after this assignment.
     assert client.post(f'/api/photos/{pids[0]}/rating', json={'rating': 5}).status_code == 200
     assert client.post('/api/undo').status_code == 200
@@ -237,9 +237,9 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
         url = f'/api/photos/{pids[0]}/location/text'
     response = client.post(url, json=body)
     assert response.status_code == 200, response.json
-    row = db.get_keyword_place_row(keyword_id)
+    row = db.locations.keyword_place_row(keyword_id)
     assert (row['latitude'], row['longitude']) == (12.0, 34.0)
-    assert all(db.has_pending_location_change(pid) for pid in pids)
+    assert all(db.locations.has_pending_change(pid) for pid in pids)
     assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == count
     assert client.get('/api/redo/status').json['available'] is True
     assert client.get('/api/undo/status').json['available'] is False

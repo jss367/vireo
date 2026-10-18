@@ -259,7 +259,7 @@ def create_photo_location_keywords_blueprint(
             # and pipe characters.
             return json_error("missing name", 400)
         if latitude is not None:
-            db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
+            db.locations.fill_missing_coordinates(leaf_id, latitude, longitude)
         item = change_photo_location(db, photo_id, leaf_id)
         if item is not None:
             db.record_edit(

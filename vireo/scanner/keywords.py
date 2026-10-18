@@ -219,7 +219,7 @@ def backfill_embedded_keywords(db: Database) -> int:
     retryable, while durable offered keys protect prior imports and removals
     on that retry. Returns the number of photos that gained a keyword.
     """
-    if db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1":
+    if db.meta.get(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1":
         return 0
     rows = db.scanning.embedded_keyword_rows()
     imported = 0
@@ -242,7 +242,7 @@ def backfill_embedded_keywords(db: Database) -> int:
         if offered and _photo_keyword_count(db, row["id"]) > before:
             imported += 1
     if complete:
-        db.set_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
+        db.meta.set(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
     return imported
 
 

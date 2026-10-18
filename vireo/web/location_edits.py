@@ -201,7 +201,7 @@ def walk_parent_chain(db, leaf_parent_id):
     for _ in range(10):
         if current_parent_id is None:
             break
-        row = db.get_keyword_place_row(current_parent_id)
+        row = db.locations.keyword_place_row(current_parent_id)
         if row is None or row["type"] != "location":
             break
         parents.append({"id": row["id"], "name": row["name"]})
@@ -227,7 +227,7 @@ def serialize_photo_location(db, photo_id):
 
     Returns ``None`` if the photo has no ``type='location'`` keyword link.
     """
-    leaf = db.get_photo_location_leaf(photo_id)
+    leaf = db.locations.photo_location_leaf(photo_id)
     if leaf is None:
         return None
 
@@ -286,7 +286,7 @@ class LocationErrors:
         """Return an error response when a photo cannot be edited in this workspace."""
         if photo_id not in db.photos.existing_ids([photo_id]):
             return self._photo_not_found_error()
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return self._json_error(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )

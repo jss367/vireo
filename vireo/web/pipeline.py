@@ -143,15 +143,13 @@ def create_pipeline_blueprint(
         # from the plan even though the run walks them via
         # folders.subtree_ids_by_path.
         for fid in folder_ids:
-            if not db.get_workspace_visible_folder_ids([fid]):
+            if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
                 return None, json_error("folder not found", 404)
             subtree_ids.update(db.get_folder_subtree_ids(fid))
             # Intersect the path-based descendants with the workspace's
             # folder set so nothing leaks in from another workspace that
             # happens to share a path prefix.
-            subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db.folders.subtree_ids_by_path(fid),
-            ))
+            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(fid)))
         return [
             r["id"]
             for r in db.photos.in_workspace_folders(
@@ -848,7 +846,7 @@ def create_pipeline_blueprint(
                     "folder_id is outside SQLite's signed 64-bit integer range",
                     400,
                 )
-            if not db.get_workspace_visible_folder_ids([folder_id]):
+            if not db.workspace_folders.visible_ids(db.active_workspace_id, [folder_id]):
                 return json_error("Folder not found in this workspace", 404)
             # Mirror /api/pipeline/plan and /api/jobs/pipeline folder
             # resolution so the filter includes the same photos a scoped
@@ -857,9 +855,7 @@ def create_pipeline_blueprint(
             # would be silently omitted and the "N not in saved review"
             # banner would understate the scope.
             subtree_ids = set(db.get_folder_subtree_ids(folder_id))
-            subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db.folders.subtree_ids_by_path(folder_id),
-            ))
+            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(folder_id)))
             photo_ids = [
                 r["id"]
                 for r in db.photos.in_workspace_folders(
@@ -1474,7 +1470,7 @@ def create_pipeline_blueprint(
             # Same workspace guard the apply endpoint uses, so a malicious
             # or buggy client can't read flag/keyword state for photos that
             # don't belong to the active workspace.
-            if not db._photo_in_workspace(pid):
+            if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 continue
             row = db.photos.get(pid)
             if not row:
@@ -1522,7 +1518,7 @@ def create_pipeline_blueprint(
             if body.get("expected_burst_photo_ids") != ids or not set(removed) <= set(ids):
                 return json_error("The photo groups changed. Reload before applying.", 409)
             for pid in removed:
-                if not db._photo_in_workspace(pid):
+                if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                     return json_error(f"Photo {pid} is not in the active workspace", 403)
                 detach_review_photo(results, enc_idx, burst_idx, pid)
         return None
@@ -1596,7 +1592,7 @@ def create_pipeline_blueprint(
 
         # All photos must be in the active workspace.
         for pid in picks + rejects + candidates:
-            if not db._photo_in_workspace(pid):
+            if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         results = load_results_raw(os.path.dirname(db_path), db.require_workspace_id())
@@ -2318,7 +2314,7 @@ class _PipelineLaunch:
         db = self.db
         subtree_ids = set()
         for fid in self.folder_ids:
-            if not db.get_workspace_visible_folder_ids([fid]):
+            if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
                 return None, self.json_error("folder not found", 404)
             # Union — a workspace can link both a root and a nested
             # folder, so the same descendant can appear twice.
@@ -2336,9 +2332,7 @@ class _PipelineLaunch:
             # nothing leaks in from another workspace that happens to
             # share a path prefix. The repository splits large legacy
             # subtrees across multiple IN(...) statements.
-            subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db.folders.subtree_ids_by_path(fid),
-            ))
+            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(fid)))
         return subtree_ids, None
 
     def _folder_scope_photo_ids(self, subtree_ids):

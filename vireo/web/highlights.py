@@ -467,7 +467,7 @@ def create_highlights_blueprint(get_db, json_error):
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
             return f"Unknown photo_ids: {missing}", 404
-        outside = [pid for pid in photo_ids if not db._photo_in_workspace(pid)]
+        outside = [pid for pid in photo_ids if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id())]
         if outside:
             return (
                 f"Photo IDs do not belong to the active workspace: {outside}",

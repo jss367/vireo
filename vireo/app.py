@@ -1293,7 +1293,7 @@ def _migrate_edit_math_render_caches(app):
     preview_dir = os.path.join(vireo_dir, "previews")
     db = Database(app.config["DB_PATH"])
     try:
-        stored = db.get_meta("edit_math_version")
+        stored = db.meta.get("edit_math_version")
         try:
             stored_version = int(stored) if stored is not None else 1
         except (TypeError, ValueError):
@@ -1336,7 +1336,7 @@ def _migrate_edit_math_render_caches(app):
             )
             return
 
-        db.set_meta("edit_math_version", EDIT_MATH_VERSION, _commit=False)
+        db.meta.set("edit_math_version", EDIT_MATH_VERSION, _commit=False)
         db.commit()
 
         if photo_ids:

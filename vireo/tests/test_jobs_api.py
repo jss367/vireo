@@ -8316,7 +8316,7 @@ def test_import_location_choices_stop_when_cancelled_during_planning(
     client = app.test_client()
     runner = app._job_runner
     photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.clear_photo_location(photo_id)
+    db.locations.clear_photo(photo_id)
 
     def imported_result(job, runner, db_path, workspace_id, params):
         return {

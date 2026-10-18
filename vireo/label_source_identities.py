@@ -130,7 +130,7 @@ def pending_label_sets(db, saved_metas=None):
     pending = []
     for row in db.species_identity_repairs.label_fingerprints(TOL_SENTINEL, LEGACY_SENTINEL):
         fingerprint = row["fingerprint"]
-        if db.get_meta(MARKER_PREFIX + fingerprint) is not None:
+        if db.meta.get(MARKER_PREFIX + fingerprint) is not None:
             continue
         if not db.species_identity_repairs.has_unstamped_prediction_for_fingerprint(fingerprint):
             continue
@@ -278,7 +278,7 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
     marker = MARKER_PREFIX + fingerprint
     with db.transaction():
         db.begin_immediate()
-        if db.get_meta(marker) is not None:
+        if db.meta.get(marker) is not None:
             return 0
         if label_set is not None and _source_snapshot(label_set["metas"]) != label_set["source_snapshot"]:
             raise RuntimeError("Label source files changed during identity lookup; retry required")
@@ -291,7 +291,7 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
             repairs.unstamped_predictions_for_fingerprint(fingerprint), planned, REPAIR_REASON,
         )
         count = apply_repairs(db, changes, retire_artifacts=False)
-        db.set_meta(marker, json.dumps({
+        db.meta.set(marker, json.dumps({
             "labels": label_count,
             "identified": len(planned),
             "predictions_updated": count,
@@ -303,7 +303,7 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
 def legacy_pass_needed(db):
     """Whether pre-fingerprint predictions are waiting for the legacy pass."""
     return (
-        db.get_meta(LEGACY_MARKER) is None
+        db.meta.get(LEGACY_MARKER) is None
         and db.species_identity_repairs.has_unstamped_legacy_prediction()
     )
 
@@ -412,7 +412,7 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
         # Nothing ever writes new rows under 'legacy', so these runs are
         # retired from export like any other corrected historical run.
         count = apply_repairs(db, changes)
-        db.set_meta(LEGACY_MARKER, json.dumps({"predictions_updated": count}), _commit=False)
+        db.meta.set(LEGACY_MARKER, json.dumps({"predictions_updated": count}), _commit=False)
     return count
 
 

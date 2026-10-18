@@ -136,9 +136,9 @@ def test_label_identities_and_markers(db):
     assert [tuple(r) for r in repairs.label_identities()] == [
         ("Robin", 12727, "Turdus migratorius "),
     ]
-    db.set_meta("label_source_identities:fp1", json.dumps({"unidentified": ["Redhead"]}))
-    db.set_meta("label_source_identities:legacy", "{}")
-    db.set_meta("other", "x")
+    db.meta.set("label_source_identities:fp1", json.dumps({"unidentified": ["Redhead"]}))
+    db.meta.set("label_source_identities:legacy", "{}")
+    db.meta.set("other", "x")
     assert repairs.marker_values("label_source_identities:", "label_source_identities:legacy") == [
         json.dumps({"unidentified": ["Redhead"]}),
     ]

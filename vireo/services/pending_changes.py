@@ -81,7 +81,7 @@ def queue_location_sync_if_enabled(
 ) -> None:
     """Queue GPS sidecar sync or cleanup work for location edits."""
     if workspace_id is None:
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return
     elif not db.workspace_folders.photo_in_workspace(photo_id, workspace_id):
         return

@@ -757,7 +757,7 @@ class _PhotoExportBatch:
             _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
         )
         self.location_map = (
-            db.get_effective_photo_locations(self.photo_ids, verify_workspace=False)
+            db.locations.get_effective(self.photo_ids, verify_workspace=False)
             if "location" in self.metadata_fields else {}
         )
 

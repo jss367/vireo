@@ -489,7 +489,7 @@ def test_get_missing_folders_scoped_with_counts(db):
 
 def test_get_folder_health_version(db):
     assert db.get_folder_health_version() == 0
-    db.set_meta("folder_health_version", "7")
+    db.meta.set("folder_health_version", "7")
     assert db.get_folder_health_version() == 7
 
 

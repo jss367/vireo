@@ -1,8 +1,8 @@
 """Persistence for the ``db_meta`` key/value table.
 
 ``db_meta`` holds catalog-wide markers (one-shot migration flags, version
-stamps), so the repository takes no workspace id. ``Database`` keeps its
-``get_meta`` / ``set_meta`` methods as thin wrappers over this class.
+stamps), so the repository takes no workspace id. Callers reach it as
+``db.meta`` (a fresh repository per access, see ``Database.meta``).
 """
 
 

@@ -1,9 +1,8 @@
 """Behavior pins for the ``db_meta`` key/value domain of ``Database``.
 
-The tests exercise ``get_meta`` and ``set_meta`` only through the public
-``Database`` façade, so they hold regardless of whether the SQL lives in
-``db.py`` or in ``repositories/meta.py``; the structural test at the end
-keeps it in the repository.
+The tests exercise ``meta.get`` and ``meta.set`` through the ``db.meta``
+accessor; the structural tests at the end keep the SQL in the repository and
+the forwarding wrappers off ``Database``.
 """
 
 import ast
@@ -25,11 +24,11 @@ def _read_other(db, key):
     return row[0] if row else None
 
 
-# -- get_meta -----------------------------------------------------------------
+# -- meta.get -----------------------------------------------------------------
 
 
 def test_get_missing_key_returns_none(db):
-    assert db.get_meta("meta_test_never_set") is None
+    assert db.meta.get("meta_test_never_set") is None
 
 
 def test_get_returns_stored_string(db):
@@ -37,7 +36,7 @@ def test_get_returns_stored_string(db):
         "INSERT INTO db_meta (key, value) VALUES ('meta_test_raw', 'hello')"
     )
     db.conn.commit()
-    value = db.get_meta("meta_test_raw")
+    value = db.meta.get("meta_test_raw")
     assert value == "hello"
     assert type(value) is str
 
@@ -48,7 +47,7 @@ def test_get_returns_none_for_null_value(db):
         "INSERT INTO db_meta (key, value) VALUES ('meta_test_null', NULL)"
     )
     db.conn.commit()
-    assert db.get_meta("meta_test_null") is None
+    assert db.meta.get("meta_test_null") is None
 
 
 def test_get_returns_empty_string_not_none(db):
@@ -56,21 +55,21 @@ def test_get_returns_empty_string_not_none(db):
         "INSERT INTO db_meta (key, value) VALUES ('meta_test_empty', '')"
     )
     db.conn.commit()
-    assert db.get_meta("meta_test_empty") == ""
+    assert db.meta.get("meta_test_empty") == ""
 
 
 def test_get_is_exact_key_match(db):
-    db.set_meta("meta_test_key", "v")
-    assert db.get_meta("META_TEST_KEY") is None
-    assert db.get_meta("meta_test_ke") is None
-    assert db.get_meta("meta_test_%") is None
+    db.meta.set("meta_test_key", "v")
+    assert db.meta.get("META_TEST_KEY") is None
+    assert db.meta.get("meta_test_ke") is None
+    assert db.meta.get("meta_test_%") is None
 
 
 def test_get_issues_one_parameterized_select(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.get_meta("meta_test_trace")
+        db.meta.get("meta_test_trace")
     finally:
         db.conn.set_trace_callback(None)
     assert statements == [
@@ -79,37 +78,37 @@ def test_get_issues_one_parameterized_select(db):
 
 
 def test_get_does_not_open_a_transaction(db):
-    db.set_meta("meta_test_tx", "1")
-    db.get_meta("meta_test_tx")
+    db.meta.set("meta_test_tx", "1")
+    db.meta.get("meta_test_tx")
     assert not db.conn.in_transaction
 
 
 def test_get_sees_uncommitted_write_on_same_connection(db):
-    db.set_meta("meta_test_pending", "x", _commit=False)
-    assert db.get_meta("meta_test_pending") == "x"
+    db.meta.set("meta_test_pending", "x", _commit=False)
+    assert db.meta.get("meta_test_pending") == "x"
     db.conn.rollback()
-    assert db.get_meta("meta_test_pending") is None
+    assert db.meta.get("meta_test_pending") is None
 
 
 def test_get_needs_no_active_workspace(db):
-    db.set_meta("meta_test_ws", "1")
+    db.meta.set("meta_test_ws", "1")
     db.set_active_workspace(None)
-    assert db.get_meta("meta_test_ws") == "1"
+    assert db.meta.get("meta_test_ws") == "1"
 
 
-# -- set_meta -----------------------------------------------------------------
+# -- meta.set -----------------------------------------------------------------
 
 
 def test_set_returns_none_and_commits(db):
-    assert db.set_meta("meta_test_commit", "yes") is None
+    assert db.meta.set("meta_test_commit", "yes") is None
     assert not db.conn.in_transaction
     assert _read_other(db, "meta_test_commit") == "yes"
 
 
 def test_set_overwrites_existing_value(db):
-    db.set_meta("meta_test_upsert", "first")
-    db.set_meta("meta_test_upsert", "second")
-    assert db.get_meta("meta_test_upsert") == "second"
+    db.meta.set("meta_test_upsert", "first")
+    db.meta.set("meta_test_upsert", "second")
+    assert db.meta.get("meta_test_upsert") == "second"
     count = db.conn.execute(
         "SELECT COUNT(*) FROM db_meta WHERE key = 'meta_test_upsert'"
     ).fetchone()[0]
@@ -118,11 +117,11 @@ def test_set_overwrites_existing_value(db):
 
 def test_set_upsert_keeps_rowid(db):
     """ON CONFLICT DO UPDATE updates in place; INSERT OR REPLACE would not."""
-    db.set_meta("meta_test_rowid", "a")
+    db.meta.set("meta_test_rowid", "a")
     before = db.conn.execute(
         "SELECT rowid FROM db_meta WHERE key = 'meta_test_rowid'"
     ).fetchone()[0]
-    db.set_meta("meta_test_rowid", "b")
+    db.meta.set("meta_test_rowid", "b")
     after = db.conn.execute(
         "SELECT rowid FROM db_meta WHERE key = 'meta_test_rowid'"
     ).fetchone()[0]
@@ -143,8 +142,8 @@ def test_set_upsert_keeps_rowid(db):
     ],
 )
 def test_set_coerces_value_with_str(db, value, stored):
-    db.set_meta("meta_test_coerce", value)
-    got = db.get_meta("meta_test_coerce")
+    db.meta.set("meta_test_coerce", value)
+    got = db.meta.get("meta_test_coerce")
     assert got == stored
     assert type(got) is str
 
@@ -153,7 +152,7 @@ def test_set_binds_key_and_str_value_as_parameters(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.set_meta("meta_test_sql", 7)
+        db.meta.set("meta_test_sql", 7)
     finally:
         db.conn.set_trace_callback(None)
     assert [s.strip() for s in statements] == [
@@ -165,7 +164,7 @@ def test_set_binds_key_and_str_value_as_parameters(db):
 
 
 def test_set_without_commit_leaves_transaction_open(db):
-    db.set_meta("meta_test_nocommit", "1", _commit=False)
+    db.meta.set("meta_test_nocommit", "1", _commit=False)
     assert db.conn.in_transaction
     assert _read_other(db, "meta_test_nocommit") is None
     db.conn.commit()
@@ -173,17 +172,17 @@ def test_set_without_commit_leaves_transaction_open(db):
 
 
 def test_set_without_commit_rolls_back_with_caller(db):
-    db.set_meta("meta_test_rb", "old")
-    db.set_meta("meta_test_rb", "new", _commit=False)
+    db.meta.set("meta_test_rb", "old")
+    db.meta.set("meta_test_rb", "new", _commit=False)
     db.conn.rollback()
-    assert db.get_meta("meta_test_rb") == "old"
+    assert db.meta.get("meta_test_rb") == "old"
 
 
 def test_set_without_commit_issues_no_commit(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.set_meta("meta_test_nocommit_sql", "1", _commit=False)
+        db.meta.set("meta_test_nocommit_sql", "1", _commit=False)
     finally:
         db.conn.set_trace_callback(None)
     assert "COMMIT" not in statements
@@ -192,48 +191,49 @@ def test_set_without_commit_issues_no_commit(db):
 
 def test_set_commit_flushes_pending_caller_writes(db):
     """The default commit also commits writes the caller left open."""
-    db.set_meta("meta_test_a", "1", _commit=False)
-    db.set_meta("meta_test_b", "2")
+    db.meta.set("meta_test_a", "1", _commit=False)
+    db.meta.set("meta_test_b", "2")
     assert _read_other(db, "meta_test_a") == "1"
     assert _read_other(db, "meta_test_b") == "2"
 
 
 def test_set_needs_no_active_workspace(db):
     db.set_active_workspace(None)
-    db.set_meta("meta_test_ws_set", "1")
+    db.meta.set("meta_test_ws_set", "1")
     assert _read_other(db, "meta_test_ws_set") == "1"
 
 
 def test_set_persists_across_reopen(tmp_path):
     path = str(tmp_path / "meta.db")
     first = Database(path)
-    first.set_meta("meta_test_reopen", "kept")
+    first.meta.set("meta_test_reopen", "kept")
     first.close()
     second = Database(path)
     try:
-        assert second.get_meta("meta_test_reopen") == "kept"
+        assert second.meta.get("meta_test_reopen") == "kept"
     finally:
         second.close()
 
 
 def test_meta_signatures():
-    assert list(inspect.signature(Database.get_meta).parameters) == ["self", "key"]
-    params = inspect.signature(Database.set_meta).parameters
+    from repositories.meta import MetaRepository
+
+    assert list(inspect.signature(MetaRepository.get).parameters) == ["self", "key"]
+    params = inspect.signature(MetaRepository.set).parameters
     assert list(params) == ["self", "key", "value", "_commit"]
     assert params["_commit"].default is True
 
 
 # -- structure: the db_meta SQL lives in the repository -----------------------
 
-# Database methods whose SQL moved to repositories/meta.py. Each stays on
-# Database as a thin wrapper so existing call sites keep working; none may
-# reach the connection directly again.
-_DELEGATING_META_METHODS = ("get_meta", "set_meta")
 
-
-@pytest.mark.parametrize("name", _DELEGATING_META_METHODS)
-def test_meta_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+def test_meta_is_reached_through_the_accessor():
+    """The ``get_meta`` and ``set_meta`` wrappers are gone; callers use ``db.meta``."""
+    for name in ("get_meta", "set_meta"):
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.meta"
+    accessor = Database.__dict__["meta"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
     fn = ast.parse(source).body[0]
     attrs = {
         node.attr
@@ -242,9 +242,11 @@ def test_meta_method_delegates_to_repository(name):
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to MetaRepository"
-    )
-    assert "_meta_repository" in attrs, (
-        f"Database.{name} no longer delegates to MetaRepository"
-    )
+    assert "_meta_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_meta_accessor_builds_a_fresh_repository(db):
+    first = db.meta
+    assert db.meta is not first
+    assert first.conn is db.conn

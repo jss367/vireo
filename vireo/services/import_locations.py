@@ -225,7 +225,7 @@ def _google_suggestion(
 
 def _location_path(db: Database, keyword_id: int) -> tuple[str, list[str]] | None:
     """A location keyword's name and its broadest-first parent names."""
-    row = db.get_keyword_place_row(keyword_id)
+    row = db.locations.keyword_place_row(keyword_id)
     if row is None or row["type"] != "location":
         return None
     parents = []
@@ -233,7 +233,7 @@ def _location_path(db: Database, keyword_id: int) -> tuple[str, list[str]] | Non
     for _ in range(10):
         if parent_id is None:
             break
-        parent = db.get_keyword_place_row(parent_id)
+        parent = db.locations.keyword_place_row(parent_id)
         if parent is None or parent["type"] != "location":
             break
         parents.append(parent["name"])
@@ -558,7 +558,7 @@ def _google_details(
 def _choice_leaf(db: Database, choice: JsonDict, details: JsonDict | None) -> tuple[int, str]:
     """The location keyword a choice names, created if needed: (id, name)."""
     if choice["kind"] == "keyword":
-        row = db.get_keyword_place_row(choice["keyword_id"])
+        row = db.locations.keyword_place_row(choice["keyword_id"])
         if row is None or row["type"] != "location":
             raise LocationChoiceError(
                 "a location chosen on the import page no longer exists")
@@ -566,7 +566,7 @@ def _choice_leaf(db: Database, choice: JsonDict, details: JsonDict | None) -> tu
     if choice["kind"] == "google":
         existing = db.locations.find_place_keyword(choice["place_id"])
         if existing is not None:
-            row = db.get_keyword_place_row(existing["id"])
+            row = db.locations.keyword_place_row(existing["id"])
             return existing["id"], row["name"] if row else choice["name"]
         if details is None:
             # Added between the lookup and this transaction, then removed.
@@ -574,7 +574,7 @@ def _choice_leaf(db: Database, choice: JsonDict, details: JsonDict | None) -> tu
         return db.upsert_place_chain(details), details.get("name") or choice["name"]
     leaf_id = db.get_or_create_text_location(choice["name"])
     if choice.get("latitude") is not None:
-        db.fill_missing_location_coordinates(leaf_id, choice["latitude"], choice["longitude"])
+        db.locations.fill_missing_coordinates(leaf_id, choice["latitude"], choice["longitude"])
     return leaf_id, choice["name"]
 
 
