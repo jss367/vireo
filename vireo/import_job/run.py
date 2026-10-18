@@ -1,5 +1,9 @@
 """``run_import_job``: the import job's entry point."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from db import Database
 from import_job.batch_loop import _ImportBatchLoop
 from import_job.cataloging import _extract_deferred_working_copies
@@ -15,8 +19,13 @@ from import_job.resume import (
 from import_job.state import _ImportRunState
 from import_job.transports import _make_transport
 
+if TYPE_CHECKING:
+    from import_job.state import ImportParams
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
 
-def run_import_job(job, runner, db_path, workspace_id, params):
+
+def run_import_job(job: JobDict, runner: JobRunner, db_path: str, workspace_id: int, params: ImportParams) -> JsonDict:
     """Copy card(s) -> archive, hash-verify, and catalog incrementally.
 
     THE import orchestrator, for both destinations: picks the byte

@@ -4,12 +4,22 @@ What a retry or resume uses to prove a carried photo or a selected
 source file is still the same bytes it was when the run recorded it.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterable, Iterator, Mapping
+
+    from db import Database
+    from import_job.import_types import SourceSnapshot
 
 
-def _capture_source_snapshots(files, sources):
+def _capture_source_snapshots(files: list[Path], sources: list[str]) -> dict[str, SourceSnapshot]:
     """Return ``{source_str: {"count": N, "signature": HEX}}`` per source.
 
     Persisted in the import result so a recovery retry can verify each
@@ -83,7 +93,7 @@ def _capture_source_snapshots(files, sources):
     return snapshots
 
 
-def _fingerprint_for_row(row):
+def _fingerprint_for_row(row: sqlite3.Row | Mapping[str, Any]) -> str | None:
     """Format one photo row into a stable identity string.
 
     Format: ``folder_path/filename|s=SIZE|h=HASH``. Path alone is not
@@ -110,7 +120,7 @@ def _fingerprint_for_row(row):
     return f"{folder_path}/{filename}|s={size_str}|h={file_hash}"
 
 
-def _capture_photo_fingerprints(db, photo_ids):
+def _capture_photo_fingerprints(db: Database, photo_ids: Iterable[int]) -> dict[str, str]:
     """Capture ``{id: fingerprint_string}`` for each landed photo.
 
     Persisted in the import result so a retry can verify each carried ID
@@ -134,7 +144,7 @@ def _capture_photo_fingerprints(db, photo_ids):
     return fingerprints
 
 
-def _chunks(items, size=500):
+def _chunks[T](items: Iterable[T], size: int = 500) -> Iterator[list[T]]:
     """Yield ``items`` split into lists of up to ``size`` elements.
 
     Kept module-private so callers here don't reach into ``db._chunks``.

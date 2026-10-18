@@ -1,7 +1,9 @@
 """Import planning: discovery, selection, and batching by destination."""
 
+from __future__ import annotations
+
 import logging
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from import_dedup import CatalogIndex, DuplicateChecker
 from import_job.file_selection import _apply_selection
@@ -12,6 +14,14 @@ from ingest import (
     build_destination_path,
     discover_source_files,
 )
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from pathlib import Path
+
+    from db import Database
+    from import_job.import_types import Emit, ImportBatch, SourceSnapshot
+    from import_job.state import ImportParams, _ImportRunState
 
 log = logging.getLogger(__name__)
 
@@ -35,20 +45,20 @@ class _ImportPlan(NamedTuple):
     ``_plan_import``; they ride along for PR 7's orchestrator.
     """
 
-    files: list
+    files: list[Path]
     discovered: int
-    source_snapshots: dict
-    include_paths: set | None
+    source_snapshots: dict[str, SourceSnapshot]
+    include_paths: set[str] | None
     queued: int
     deselected: int
-    vanished_paths: set
+    vanished_paths: set[str]
     appeared: int
-    checker: object  # DuplicateChecker | None
-    timestamps: dict
-    batches: list
+    checker: DuplicateChecker | None
+    timestamps: dict[Path, datetime | None]
+    batches: list[ImportBatch]
 
 
-def _plan_import(db, params, emit, state):
+def _plan_import(db: Database, params: ImportParams, emit: Emit, state: _ImportRunState) -> _ImportPlan:
     """Discovery → source snapshots → selection → checker → batching.
 
     ORDERING IS LOAD-BEARING: ``_capture_source_snapshots`` runs before
@@ -128,7 +138,7 @@ def _plan_import(db, params, emit, state):
     )
 
 
-def _discover_import_files(params, state):
+def _discover_import_files(params: ImportParams, state: _ImportRunState) -> list[Path]:
     """Enumerate every source; enumeration errors land on ``state``."""
     # Enumeration errors (permission denied, macOS TCC block on a
     # removable volume, unreadable subtree) get silently swallowed by
@@ -139,7 +149,7 @@ def _discover_import_files(params, state):
     # tied to the source path where it occurred.
     files = []
 
-    def _discovery_onerror(exc):
+    def _discovery_onerror(exc: OSError) -> None:
         state.discovery_errors.append(exc)
         log.warning("Import discovery error: %s", exc)
 
@@ -151,7 +161,9 @@ def _discover_import_files(params, state):
     return files
 
 
-def _batch_by_destination(files, timestamps, params):
+def _batch_by_destination(
+    files: list[Path], timestamps: dict[Path, datetime | None], params: ImportParams,
+) -> list[ImportBatch]:
     """Group ``files`` into ``(rel, batch)`` pairs, in template-folder order."""
     # Group by destination (template) folder, template order, then chunk.
     # Chunking is companion-aware: each ``_ImportBatchState`` holds its own
