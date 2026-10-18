@@ -46,7 +46,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 # listed here may have none. Lower an entry (or delete it at zero) when you
 # move a module's SQL into a repository; never raise one.
 CONN_USE_LIMITS = {
-    "capture_time.py": 7,
     "culling.py": 6,
     "export.py": 2,
     "keyword_identity.py": 48,
