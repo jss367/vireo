@@ -58,7 +58,6 @@ CONN_USE_LIMITS = {
     "ingest.py": 2,
     "keyword_identity.py": 48,
     "label_source_identities.py": 8,
-    "local_masks.py": 1,
     "location_review.py": 1,
     "misses.py": 4,
     "move_cleanup.py": 11,
@@ -71,8 +70,6 @@ CONN_USE_LIMITS = {
     "pipeline_stages/features.py": 4,
     "pipeline_stages/media.py": 2,
     "pipeline_stages/scanning.py": 1,
-    "preview_cache.py": 4,
-    "render_source.py": 2,
     "schema.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,
@@ -81,7 +78,6 @@ CONN_USE_LIMITS = {
     "sync.py": 5,
     "thumbnails.py": 11,
     "volume_reachability.py": 8,
-    "working_copy_cache.py": 9,
 }
 
 
