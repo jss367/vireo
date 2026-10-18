@@ -1221,8 +1221,8 @@ def test_resolved_prediction_taxonomy_replaces_a_neighbours_guess(db):
 # before it shows, searches or submits the name — then list itself here.
 RAW_SCIENTIFIC_NAME_READERS = {
     "repositories/culling.py": "identity via SpeciesResolver.prediction in culling._load_top_predictions",
-    "pipeline.py": "identity via SpeciesResolver.prediction",
     "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
+    "repositories/pipeline_features.py": "pipeline.py resolves identity via SpeciesResolver.prediction",
     "repositories/predictions.py": (
         "get_top_prediction_for_photo returns provenance; web/inat.py resolves it; "
         "get_predictions_by_id's decision rows resolved via SpeciesResolver in web/predictions.py; "

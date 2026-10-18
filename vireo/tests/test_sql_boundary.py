@@ -55,7 +55,6 @@ CONN_USE_LIMITS = {
     "label_source_identities.py": 8,
     "location_review.py": 1,
     "new_images.py": 5,
-    "pipeline.py": 18,
     "pipeline_job.py": 9,
     "pipeline_plan.py": 2,
     "pipeline_stages/classification.py": 2,
