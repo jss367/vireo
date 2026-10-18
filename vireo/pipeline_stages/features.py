@@ -7,7 +7,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 import numpy as np
 from pipeline_locks import (
@@ -992,7 +992,12 @@ class _MaskPass:
         # No-op on subsequent iterations.
         self._ensure_weights()
 
-        proxy = self.render_proxy(item.image_path, longest_edge=self.proxy_longest_edge)
+        # ``image_loader`` returns a ``FloatImage`` only in RAW_DECODE_LINEAR
+        # mode, which ``render_proxy`` never requests.
+        proxy = cast(
+            "Image.Image | None",
+            self.render_proxy(item.image_path, longest_edge=self.proxy_longest_edge),
+        )
         if proxy is None:
             # The source didn't load. Ask how far the
             # problem reaches before deciding whether to

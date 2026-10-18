@@ -15,7 +15,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime as dt
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 from pipeline_stages.context import PipelineRun
@@ -496,7 +496,9 @@ class _ClassifyPass:
             report = img.info.get("_vireo_raw_analysis")
             if report is not None:
                 self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
-        return img, folder_path, image_path
+        # ``image_loader`` returns a ``FloatImage`` only in RAW_DECODE_LINEAR
+        # mode, which ``_prepare_image`` never requests.
+        return cast("Image.Image | None", img), folder_path, image_path
 
     def _should_stop(self) -> bool | str | None:
         return self.run.control.should_abort(self.run.abort) or self.offline_reason
