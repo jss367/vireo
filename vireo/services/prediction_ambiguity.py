@@ -203,7 +203,7 @@ def _detections_by_consensus_key(
     # adds a keyword this index has no holder for and a neighbouring
     # detection's prediction reads it as another subject's conflict.
     detections_by_key: dict[int, dict[str, set[int]]] = {}
-    for photo_id, rows in db.get_live_prediction_rows_by_photo(
+    for photo_id, rows in db.predictions.get_live_rows_by_photo(
         [pid for pid in photo_ids if pid in species_by_photo]
     ).items():
         held = detections_by_key.setdefault(photo_id, {})
@@ -279,7 +279,7 @@ def ambiguous_prediction_ids(db: Database, rows: Iterable[PredictionRow]) -> set
     # in this check, and in Review.
     alt_keys = {
         (row["detection_id"], row["model"])
-        for row in db.get_predictions(
+        for row in db.predictions.get_rows(
             photo_ids=photo_ids, status="alternative",
         )
     }

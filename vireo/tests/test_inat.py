@@ -290,7 +290,7 @@ def app_and_db(tmp_path):
     det_ids = d.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    d.add_prediction(det_ids[0], "Northern Cardinal", 0.95, "test-model",
+    d.predictions.add(det_ids[0], "Northern Cardinal", 0.95, "test-model",
                      taxonomy={"scientific_name": "Cardinalis cardinalis"})
     # A custom-label prediction's binomial comes from resolving its label
     # against the catalog's taxonomy, as in a real catalog.

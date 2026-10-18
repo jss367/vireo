@@ -160,7 +160,7 @@ def _issue_report_app_state(get_db):
         photo_count = db.photos.count_all()
         # Predictions are global now; workspace scoping happens through
         # the detection -> photo -> workspace_folders join.
-        pred_count = db.count_workspace_predictions()
+        pred_count = db.predictions.count_in_workspace()
     except Exception:
         # broad: issue reports are how users report a degraded catalog; collect
         # what we can and keep going.

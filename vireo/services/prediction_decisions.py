@@ -180,4 +180,4 @@ def out_of_workspace_prediction_ids(db: Database, pred_ids: Sequence[int]) -> se
     Call it after ``begin_prediction_decision``: only an in-lock read closes
     the window.
     """
-    return db.get_out_of_workspace_prediction_ids(pred_ids)
+    return db.predictions.out_of_workspace_ids(pred_ids)

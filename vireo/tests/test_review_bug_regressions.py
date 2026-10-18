@@ -253,7 +253,7 @@ def test_prediction_suggestions_count_all_keywords_for_same_identity(app_and_db)
     db.tag_photo(pid, linked)
     did = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                                    "confidence": 0.9, "category": "animal"}], detector_model="MDV6")[0]
-    db.add_prediction(did, "Bald Eagle", 0.9, "bioclip", labels_fingerprint="fp1")
+    db.predictions.add(did, "Bald Eagle", 0.9, "bioclip", labels_fingerprint="fp1")
     response = app.test_client().post("/api/selection/prediction-suggestions", json={"photo_ids": [pid]})
     assert response.status_code == 200
     eagle = next(row for row in response.get_json()["predictions"] if row["species"] == "Bald Eagle")

@@ -416,7 +416,7 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
     _classifier_input, classifier_input_fp = classification_input(
         PHOTO_HASH, RUNTIME, classifier_subjects,
     )
-    source.add_prediction(
+    source.predictions.add(
         detection_id,
         "European Robin",
         0.87,
@@ -652,7 +652,7 @@ def test_fresh_classifier_run_is_promoted_and_published(tmp_path):
     source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
-    source.add_prediction(
+    source.predictions.add(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short,
     )
@@ -737,7 +737,7 @@ def test_evicted_working_copy_classifier_run_stays_local_only(tmp_path):
     source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
-    source.add_prediction(
+    source.predictions.add(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short,
     )
@@ -1365,7 +1365,7 @@ def test_materialize_handles_predictions_without_classifier_run(tmp_path, review
     db, _, _ = _database_with_photo(tmp_path / "orphan.db", "photo.jpg")
     materialize_artifacts(db, [detection_artifact()], known_runtimes={RUNTIME})
     detection_id = db.conn.execute("SELECT id FROM detections").fetchone()[0]
-    db.add_prediction(detection_id, "Robin", .5, "bioclip-2.5",
+    db.predictions.add(detection_id, "Robin", .5, "bioclip-2.5",
                       status="accepted" if reviewed else "pending", labels_fingerprint="3" * 12,
                       taxonomy={"scientific_name": "Old species"})
     assert db.conn.execute("SELECT count(*) FROM classifier_runs").fetchone()[0] == 0
@@ -1473,7 +1473,7 @@ def test_match_strength_survives_publish_and_export(tmp_path):
     source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
-    source.add_prediction(
+    source.predictions.add(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short, match_score=0.31,
     )
@@ -2276,7 +2276,7 @@ def test_exported_classification_keeps_input_recipe(tmp_path):
         [{"key": "d0", "kind": "box", "box": box, "category": "animal"}],
     )
     full = "3" * 64
-    source.add_prediction(
+    source.predictions.add(
         detection_id, "Robin", 0.9, "bioclip-2.5",
         labels_fingerprint=full[:12], labels_fingerprint_full=full,
     )

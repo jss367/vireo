@@ -890,7 +890,7 @@ def _eye_ready(db, name, fid, conf=0.9, box=BOX, taxonomy=None, species="Robin",
                species_conf=0.8, model="BioCLIP"):
     pid = _photo(db, name, fid)
     det = _det(db, pid, conf=conf, box=box)
-    db.add_prediction(det, species=species, confidence=species_conf,
+    db.predictions.add(det, species=species, confidence=species_conf,
                       model=model, taxonomy=taxonomy)
     _mask(db, pid, box=box, path=f"/m/{pid}.png")
     db.set_active_mask_variant(pid, "sam2-small")
@@ -928,7 +928,7 @@ def test_list_photos_for_eye_keypoint_stage_filters(db):
     _det(db, stale, conf=0.99, box=OTHER_BOX)
     unmasked = _photo(db, "unmasked.jpg", fid)
     det = _det(db, unmasked)
-    db.add_prediction(det, species="Robin", confidence=0.5, model="BioCLIP")
+    db.predictions.add(det, species="Robin", confidence=0.5, model="BioCLIP")
     no_pred = _photo(db, "nopred.jpg", fid)
     _det(db, no_pred)
     _mask(db, no_pred)
@@ -947,7 +947,7 @@ def test_list_photos_for_eye_keypoint_stage_filters(db):
 def test_list_photos_for_eye_keypoint_stage_prefers_routable_predictions(db):
     fid = _folder(db)
     pid, det = _eye_ready(db, "a.jpg", fid, species="Bird", species_conf=0.95)
-    db.add_prediction(det, species="Robin", confidence=0.4, model="BioCLIP",
+    db.predictions.add(det, species="Robin", confidence=0.4, model="BioCLIP",
                       taxonomy={"scientific_name": "Turdus migratorius"})
     rows = db.list_photos_for_eye_keypoint_stage()
     assert len(rows) == 1
@@ -963,7 +963,7 @@ def test_list_photos_for_eye_keypoint_stage_uses_latest_label_set(db):
         (det,),
     )
     db.conn.commit()
-    db.add_prediction(det, species="New", confidence=0.1, model="BioCLIP",
+    db.predictions.add(det, species="New", confidence=0.1, model="BioCLIP",
                       labels_fingerprint="fp-new")
     rows = db.list_photos_for_eye_keypoint_stage()
     assert [r["species"] for r in rows] == ["New"]

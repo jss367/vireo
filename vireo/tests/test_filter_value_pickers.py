@@ -57,7 +57,7 @@ def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
     a = _photo(db, folder, "a.jpg")
     def predict(pid, model, confidence=0.95, status="pending"):
         det = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": confidence}], detector_model=model)[0]
-        db.add_prediction(det, species="Hawk", confidence=0.9, model=model, status=status)
+        db.predictions.add(det, species="Hawk", confidence=0.9, model=model, status=status)
     predict(a, "Visible model")
     predict(a, "Hidden detector", confidence=0.01)
     predict(a, "Alternative only", status="alternative")

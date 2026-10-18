@@ -1575,7 +1575,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det_id, species="Robin", confidence=0.9,
+    db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     # Seed a collection the classify path can consume.
@@ -1655,7 +1655,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det_id, species="Robin", confidence=0.9,
+    db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
@@ -1777,7 +1777,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="legacy",
     )
@@ -2228,7 +2228,7 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
     assert row["labels_fingerprint"] == "fp-active"
 
     # And the fingerprint-aware cache lookup must now find it.
-    hits = db.get_existing_prediction_photo_ids(
+    hits = db.predictions.get_existing_photo_ids(
         "bioclip-2", labels_fingerprint="fp-active",
     )
     assert hits == {photo_id}
@@ -2296,7 +2296,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
     assert [row["species"] for row in cached] == ["Robin", "Sparrow"]
     assert cached[0]["category"] == "match"
 
-    reviewed = db.get_predictions(photo_ids=[photo_id])
+    reviewed = db.predictions.get_rows(photo_ids=[photo_id])
     statuses = {row["species"]: row["status"] for row in reviewed}
     assert statuses == {"Robin": "accepted", "Sparrow": "alternative"}
 
@@ -2538,7 +2538,7 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     run("match", [{"species": "Sparrow", "confidence": 0.12}], {})
     statuses = {
         r["species"]: r["status"]
-        for r in db.get_predictions(photo_ids=[photo_id])
+        for r in db.predictions.get_rows(photo_ids=[photo_id])
     }
     assert statuses == {"Robin": "accepted", "Sparrow": "alternative"}
 
@@ -2546,7 +2546,7 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     # surfaces the cached prediction (_existing) and skips inference.
     run("disagreement", [], {"_existing": True})
 
-    rows = {r["species"]: r for r in db.get_predictions(photo_ids=[photo_id])}
+    rows = {r["species"]: r for r in db.predictions.get_rows(photo_ids=[photo_id])}
     assert rows["Robin"]["status"] == "pending"        # back in the queue
     assert rows["Robin"]["category"] == "disagreement"  # stale marker cleared
     assert rows["Sparrow"]["status"] == "alternative"   # still nested
@@ -2622,7 +2622,7 @@ def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypa
     # Run 1: sole recognized taxon matches -> auto-accepted, out of queue.
     write_sidecar(tmp_path / "a.xmp", {"Robin"}, set())
     run({})
-    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    accepted = db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
     assert [r["species"] for r in accepted] == ["Robin"]
 
     # Run 2: sidecar now has a second recognized taxon. Category stays
@@ -2630,11 +2630,11 @@ def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypa
     write_sidecar(tmp_path / "a.xmp", {"Robin", "Sparrow"}, set())
     run({"_existing": True})
 
-    row = db.get_predictions(photo_ids=[photo_id])[0]
+    row = db.predictions.get_rows(photo_ids=[photo_id])[0]
     assert row["species"] == "Robin"
     assert row["category"] == "match"
     assert row["status"] == "pending"        # stale auto-accept cleared
-    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert not db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
 
 
 def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
@@ -2699,12 +2699,12 @@ def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
 
     assert result["predictions_stored"] == 1
     assert result["already_labeled"] == 0
-    rows = db.get_predictions(photo_ids=[photo_id])
+    rows = db.predictions.get_rows(photo_ids=[photo_id])
     assert len(rows) == 1
     assert rows[0]["species"] == "Robin"
     assert rows[0]["category"] == "match"
     assert rows[0]["status"] == "pending"
-    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert not db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
 
 
 def test_hierarchy_keyword_still_auto_accepts_single_species_match(
@@ -2774,7 +2774,7 @@ def test_hierarchy_keyword_still_auto_accepts_single_species_match(
 
     assert result["already_labeled"] == 1
     assert result["predictions_stored"] == 0
-    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    accepted = db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
     assert [r["species"] for r in accepted] == ["Robin"]
 
 
@@ -2873,12 +2873,12 @@ def test_multiple_distinct_descendants_stay_pending(tmp_path, monkeypatch):
 
     assert result["predictions_stored"] == 1
     assert result["already_labeled"] == 0
-    rows = db.get_predictions(photo_ids=[photo_id])
+    rows = db.predictions.get_rows(photo_ids=[photo_id])
     assert len(rows) == 1
     assert rows[0]["species"] == "Sparrow"
     assert rows[0]["category"] == "match"
     assert rows[0]["status"] == "pending"
-    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert not db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
 
 
 def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
@@ -2948,7 +2948,7 @@ def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
 
     assert result["already_labeled"] == 1
     assert result["predictions_stored"] == 0
-    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    accepted = db.predictions.get_rows(photo_ids=[photo_id], status="accepted")
     assert [r["species"] for r in accepted] == ["Sparrow"]
 
 
@@ -3005,16 +3005,16 @@ def test_match_flip_preserves_manual_review_on_reuse(
         )
 
     run("disagreement")
-    pred_id = db.get_predictions(photo_ids=[photo_id])[0]["id"]
+    pred_id = db.predictions.get_rows(photo_ids=[photo_id])[0]["id"]
     db.update_prediction_status(pred_id, manual_status)
 
     run("match")
-    matched = db.get_predictions(photo_ids=[photo_id])[0]
+    matched = db.predictions.get_rows(photo_ids=[photo_id])[0]
     assert matched["category"] == "match"
     assert matched["status"] == manual_status
 
     run("disagreement")
-    downgraded = db.get_predictions(photo_ids=[photo_id])[0]
+    downgraded = db.predictions.get_rows(photo_ids=[photo_id])[0]
     assert downgraded["category"] == "disagreement"
     assert downgraded["status"] == manual_status
 
@@ -3086,12 +3086,12 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
         )
 
     run("match", {})
-    accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
+    accepted = db.predictions.get_rows(photo_ids=photo_ids, status="accepted")
     assert {r["detection_id"] for r in accepted} == set(det_ids)
 
     run("disagreement", {"_existing": True})
 
-    pending = db.get_predictions(photo_ids=photo_ids, status="pending")
+    pending = db.predictions.get_rows(photo_ids=photo_ids, status="pending")
     by_det = {r["detection_id"]: r for r in pending}
     assert set(by_det) == set(det_ids)
     for r in by_det.values():
@@ -3173,13 +3173,13 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
         )
 
     run("match", {})
-    accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
+    accepted = db.predictions.get_rows(photo_ids=photo_ids, status="accepted")
     assert {r["detection_id"] for r in accepted} == set(det_ids)
     assert {r["species"] for r in accepted} == {"Robin", "Sparrow"}
 
     run("disagreement", {"_existing": True})
 
-    pending = db.get_predictions(photo_ids=photo_ids, status="pending")
+    pending = db.predictions.get_rows(photo_ids=photo_ids, status="pending")
     by_det = {r["detection_id"]: r for r in pending}
     # Both detections, including the dissenting Sparrow frame, re-enter
     # review; none stay hidden as a stale auto-accepted match.
@@ -3190,7 +3190,7 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
         assert r["status"] == "pending"
         assert r["category"] == "disagreement"
         assert not r["group_id"]
-    assert not db.get_predictions(photo_ids=photo_ids, status="accepted")
+    assert not db.predictions.get_rows(photo_ids=photo_ids, status="accepted")
 
 
 def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
@@ -3272,7 +3272,7 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
         db=db, labels_fingerprint="fp-active",
     )
 
-    rows = db.get_predictions(photo_ids=photo_ids, status="pending")
+    rows = db.predictions.get_rows(photo_ids=photo_ids, status="pending")
     by_det = {r["detection_id"]: r for r in rows}
     assert set(by_det) == set(det_ids)
     for det_id, row in by_det.items():
@@ -3362,7 +3362,7 @@ def test_grouped_burst_consensus_equals_each_row_species(tmp_path, monkeypatch):
         db=db, labels_fingerprint="fp-active",
     )
 
-    rows = db.get_predictions(photo_ids=photo_ids, status="pending")
+    rows = db.predictions.get_rows(photo_ids=photo_ids, status="pending")
     assert rows and all(r["group_id"] for r in rows)
     for row in rows:
         assert json.loads(row["individual"]) == {"Robin": 2}, (
@@ -3453,7 +3453,7 @@ def test_ungrouped_burst_clears_stale_group_id_on_reuse(
     # species) -> both detections share a burst group_id.
     run(10, {})
     initial = {r["detection_id"]: r
-               for r in db.get_predictions(photo_ids=photo_ids)}
+               for r in db.predictions.get_rows(photo_ids=photo_ids)}
     gid_before = initial[det_ids[0]]["group_id"]
     assert gid_before, "Run 1 should assign a burst group_id"
     assert initial[det_ids[1]]["group_id"] == gid_before
@@ -3465,7 +3465,7 @@ def test_ungrouped_burst_clears_stale_group_id_on_reuse(
     run(1, {"_existing": True})
 
     after = {r["detection_id"]: r
-             for r in db.get_predictions(photo_ids=photo_ids)}
+             for r in db.predictions.get_rows(photo_ids=photo_ids)}
     for det_id in det_ids:
         assert not after[det_id]["group_id"], (
             f"Stale group_id survived cache reuse for detection {det_id}: "
@@ -3791,7 +3791,7 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
     # Simulate _store_grouped_predictions persisting the prediction row,
     # then re-run the publish pass — the classifier_runs row now gets
     # its real runtime_fingerprint and the artifact appears in exports.
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
@@ -3885,7 +3885,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
 
     # After the missing prediction row lands, cache is now really
     # satisfied.
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-cached",
     )
@@ -4433,14 +4433,14 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
 
     assert result["predictions_stored"] == 1
 
-    all_preds = db.get_predictions()
+    all_preds = db.predictions.get_rows()
     assert len(all_preds) == 3  # 1 pending + 2 alternatives
 
-    pending = db.get_predictions(status="pending")
+    pending = db.predictions.get_rows(status="pending")
     assert len(pending) == 1
     assert pending[0]["species"] == "Robin"
 
-    alts = db.get_predictions(status="alternative")
+    alts = db.predictions.get_rows(status="alternative")
     assert len(alts) == 2
     alt_species = {p["species"] for p in alts}
     assert alt_species == {"Sparrow", "Finch"}
@@ -4483,8 +4483,8 @@ def test_store_grouped_predictions_single_photo():
 
     assert result["predictions_stored"] == 1
     assert result["burst_groups"] == 0
-    mock_db.add_prediction.assert_called_once()
-    call_kwargs = mock_db.add_prediction.call_args[1]
+    mock_db.predictions.add.assert_called_once()
+    call_kwargs = mock_db.predictions.add.call_args[1]
     assert call_kwargs["species"] == "Northern Cardinal"
     assert call_kwargs["detection_id"] == 101
 
@@ -4535,17 +4535,17 @@ def test_store_grouped_predictions_burst_group():
 
     assert result["predictions_stored"] == 2
     assert result["burst_groups"] >= 1
-    assert mock_db.add_prediction.call_count == 2
+    assert mock_db.predictions.add.call_count == 2
 
 
-    first_groups = {call.kwargs["group_id"] for call in mock_db.add_prediction.call_args_list}
+    first_groups = {call.kwargs["group_id"] for call in mock_db.predictions.add.call_args_list}
     assert None not in first_groups
     mock_db.reset_mock()
     _store_grouped_predictions(
         raw_results=raw_results, job_id="classify-test", model_name="Other model",
         grouping_window=10, similarity_threshold=0.85, tax=None, db=mock_db,
     )
-    second_groups = {call.kwargs["group_id"] for call in mock_db.add_prediction.call_args_list}
+    second_groups = {call.kwargs["group_id"] for call in mock_db.predictions.add.call_args_list}
     assert first_groups.isdisjoint(second_groups)
 
 
@@ -4612,7 +4612,7 @@ def test_store_grouped_predictions_folds_species_before_group_consensus():
         "raw species strings differ only by apostrophe glyph"
     )
     # Both frames should be stored with a group_id and full vote counts.
-    calls = mock_db.add_prediction.call_args_list
+    calls = mock_db.predictions.add.call_args_list
     assert len(calls) == 2
     for c in calls:
         kwargs = c.kwargs or c[1]
@@ -4684,7 +4684,7 @@ def test_store_grouped_predictions_folds_case_for_burst_consensus():
     )
 
     assert result["burst_groups"] == 1
-    calls = mock_db.add_prediction.call_args_list
+    calls = mock_db.predictions.add.call_args_list
     assert len(calls) == 2
     for c in calls:
         kwargs = c.kwargs or c[1]
@@ -4775,7 +4775,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
     mock_db_instance.get_folder_tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
-    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     # Nothing cached: the cache-coverage shortcut finds no classifiable
     # detections, so the job runs real classification.
@@ -4825,8 +4825,8 @@ def test_run_classify_job_full_pipeline(tmp_path):
     assert result["total"] == 1
     assert result["predictions_stored"] == 1
     assert result["failed"] == 0
-    mock_db_instance.add_prediction.assert_called_once()
-    assert mock_db_instance.add_prediction.call_args.kwargs["refresh_output"] is True
+    mock_db_instance.predictions.add.assert_called_once()
+    assert mock_db_instance.predictions.add.call_args.kwargs["refresh_output"] is True
 
 
 # ── Task 7: Integration test — route delegates to run_classify_job ─────────
@@ -5558,9 +5558,9 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det_first, species="Robin", confidence=0.9,
+    db.predictions.add(det_first, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
-    db.add_prediction(det_second, species="Robin", confidence=0.9,
+    db.predictions.add(det_second, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     class FlipRunner(FakeRunner):
@@ -5660,7 +5660,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det, species="Robin", confidence=0.9,
+    db.predictions.add(det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     runner = FakeRunner()
@@ -5878,7 +5878,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
             reclassify=True,
         )
 
-    clear_calls = mock_db.clear_predictions.call_args_list
+    clear_calls = mock_db.predictions.clear.call_args_list
     assert len(clear_calls) == 2, (
         f"clear_predictions must be called once per photo for reclassify; "
         f"got {len(clear_calls)} calls"
@@ -5953,7 +5953,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
             reclassify=False,
         )
 
-    mock_db.clear_predictions.assert_not_called()
+    mock_db.predictions.clear.assert_not_called()
 
 
 def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_path, monkeypatch):
@@ -5999,9 +5999,9 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det_first, species="Robin", confidence=0.9,
+    db.predictions.add(det_first, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
-    db.add_prediction(det_second, species="Robin", confidence=0.9,
+    db.predictions.add(det_second, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     class FlipRunner(FakeRunner):
@@ -6111,7 +6111,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
         {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(stale_det, species="Robin", confidence=0.9,
+    db.predictions.add(stale_det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     runner = FakeRunner()
@@ -6207,7 +6207,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
         {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(stale_det, species="Robin", confidence=0.9,
+    db.predictions.add(stale_det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-old")
     db.model_runs.record_classifier_run(stale_det, "BioCLIP", "fp-old",
                              prediction_count=1)
@@ -6308,9 +6308,9 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
     # Each photo has a prior prediction; the reclassify clear will wipe
     # them per-photo, and the test asserts the new run replaced them
     # rather than leaving them empty after the cancel.
-    db.add_prediction(det_a, species="OldA", confidence=0.5,
+    db.predictions.add(det_a, species="OldA", confidence=0.5,
                       model="BioCLIP", labels_fingerprint="legacy")
-    db.add_prediction(det_b, species="OldB", confidence=0.5,
+    db.predictions.add(det_b, species="OldB", confidence=0.5,
                       model="BioCLIP", labels_fingerprint="legacy")
 
     class FlipRunner(FakeRunner):
@@ -6502,7 +6502,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     # Classification happened despite cancel = True.
     assert len(raw_results) == 1
     assert raw_results[0]["prediction"] == "Sparrow"
-    mock_db.clear_predictions.assert_called_once_with(
+    mock_db.predictions.clear.assert_called_once_with(
         model="BioCLIP", collection_photo_ids=[1], labels_fingerprint="fp-x",
     )
 
@@ -6550,7 +6550,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     mock_db_instance.get_folder_tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
-    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
@@ -6622,7 +6622,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     assert detect_called["n"] == 1, "_detect_subjects must have been called"
     # The processed photo's classification was rebuilt despite the cancel —
     # add_prediction was called for it via finalization.
-    assert mock_db_instance.add_prediction.call_count >= 1, (
+    assert mock_db_instance.predictions.add.call_count >= 1, (
         "Post-detect cancel on reclassify with non-empty detection_map "
         "must classify the processed subset and store predictions. "
         "add_prediction was never called — the recovery path bailed "
@@ -6631,7 +6631,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # All add_prediction calls must be for the processed photo (id 1).
     # The untouched photo (id 2) is not in detection_map and must not
     # be touched by the recovery path.
-    for call in mock_db_instance.add_prediction.call_args_list:
+    for call in mock_db_instance.predictions.add.call_args_list:
         # add_prediction(detection_id, species=..., ...) — detection_id is
         # the first positional arg. Photo 1's stub detection id is 101.
         det_id = call.args[0] if call.args else call.kwargs.get("detection_id")
@@ -6673,7 +6673,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     mock_db_instance.get_folder_tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
-    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
@@ -6770,7 +6770,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
         "Preservation pass must reach the classifier; the bound cancel "
         "probe should be suspended for finish_cleared_only."
     )
-    assert mock_db_instance.add_prediction.call_count >= 1, (
+    assert mock_db_instance.predictions.add.call_count >= 1, (
         "Preservation pass must persist a replacement prediction so the "
         "processed subset is not stranded empty."
     )
@@ -7069,7 +7069,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     mock_db_instance.get_folder_tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
-    mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
+    mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
@@ -7150,7 +7150,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     # The empty-scene photo (id 1) had its predictions cascaded away by
     # _detect_subjects detections.clear; the recovery path must classify
     # it via the full-image fallback so it doesn't end up empty.
-    assert mock_db_instance.add_prediction.call_count >= 1, (
+    assert mock_db_instance.predictions.add.call_count >= 1, (
         "Post-detect cancel on reclassify with an empty-scene processed "
         "photo must classify it via the full-image fallback. Without the "
         "_detect_processed_ids tracking, the photo is stranded with "
@@ -7159,7 +7159,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     # All add_prediction calls must be for the empty-scene photo's
     # synthetic full-image detection (id 201). Photo 2 was never
     # processed and must not be touched.
-    for call in mock_db_instance.add_prediction.call_args_list:
+    for call in mock_db_instance.predictions.add.call_args_list:
         det_id = call.args[0] if call.args else call.kwargs.get("detection_id")
         assert det_id == 201, (
             f"Recovery path wrote a prediction for unexpected detection "
@@ -7330,16 +7330,16 @@ def test_store_pending_alt_that_folds_to_primary_does_not_hide_top1(tmp_path):
             db=db,
         )
 
-    all_preds = db.get_predictions()
+    all_preds = db.predictions.get_rows()
     species = sorted(p["species"] for p in all_preds)
     assert species == ["Cassin's kingbird", "Say's phoebe"], species
 
-    pending = db.get_predictions(status="pending")
+    pending = db.predictions.get_rows(status="pending")
     assert [p["species"] for p in pending] == ["Say's phoebe"], (
         "the primary must remain in the pending queue — an alternative that "
         "folds to the same species must not upsert status='alternative' onto it"
     )
-    alts = db.get_predictions(status="alternative")
+    alts = db.predictions.get_rows(status="alternative")
     assert [p["species"] for p in alts] == ["Cassin's kingbird"]
 
 
@@ -7544,7 +7544,7 @@ def test_burst_consensus_non_ascii_case_variants_stay_split(tmp_path):
         db=mock_db,
     )
 
-    calls = mock_db.add_prediction.call_args_list
+    calls = mock_db.predictions.add.call_args_list
     assert len(calls) == 2
     for c in calls:
         kwargs = c.kwargs or c[1]
@@ -7580,7 +7580,7 @@ def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
     # reject it as unsatisfied so the retry re-runs classification
     # instead of shortcutting to _finalize_cached_only.
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "abc123", prediction_count=1)
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="abc123",
     )
@@ -7622,12 +7622,12 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
     # Add matching predictions rows so the coverage query treats each
     # classifier_run as a genuine cache row rather than a torn write.
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-a", prediction_count=1)
-    db.add_prediction(
+    db.predictions.add(
         det_ids[0], species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-a",
     )
     db.model_runs.record_classifier_run(det_ids[1], "BioCLIP", "fp-b", prediction_count=1)
-    db.add_prediction(
+    db.predictions.add(
         det_ids[1], species="Sparrow", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-b",
     )
@@ -7664,12 +7664,12 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
     ], detector_model="megadetector-v6")
     for det_id in det2:
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-a", prediction_count=1)
-        db.add_prediction(
+        db.predictions.add(
             det_id, species="Robin", confidence=0.9, model="BioCLIP",
             labels_fingerprint="fp-a",
         )
     db.model_runs.record_classifier_run(det2[0], "Other", "fp-x", prediction_count=1)
-    db.add_prediction(
+    db.predictions.add(
         det2[0], species="Other bird", confidence=0.8, model="Other",
         labels_fingerprint="fp-x",
     )
@@ -7750,7 +7750,7 @@ def test_all_photos_cache_satisfied_rejects_stale_classifier_runtime(tmp_path):
            VALUES (?, ?, ?, ?, ?)""",
         (det_id, "BioCLIP", labels_short, stale_runtime, 1),
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
@@ -7893,7 +7893,7 @@ def test_all_photos_cache_satisfied_rejects_pre_synonym_classifier_runtime(
            VALUES (?, ?, ?, ?, ?)""",
         (det_id, "BioCLIP", labels_short, pre_synonym_runtime, 1),
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Bubulcus ibis", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )
@@ -7960,7 +7960,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 2, "y": 2, "w": 1, "h": 1}, "confidence": 0.3, "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.add_prediction(det_ids[0], species="Robin", confidence=0.9,
+    db.predictions.add(det_ids[0], species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-cached")
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
                              prediction_count=1)
@@ -8026,7 +8026,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Western Cattle-Egret", confidence=0.9,
         model="timm-inat21", labels_fingerprint="fp-cached",
     )
@@ -8141,7 +8141,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
         "confidence": 0,
         "category": "animal",
     }], detector_model="full-image")[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Full-image Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
@@ -8197,7 +8197,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         "UPDATE detections SET category = NULL WHERE id = ?",
         (detection_id,),
     )
-    db.add_prediction(
+    db.predictions.add(
         detection_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
@@ -8262,7 +8262,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
@@ -8375,7 +8375,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
@@ -8547,7 +8547,7 @@ def test_describe_cached_label_source_ignores_runs_coverage_ignores(tmp_path):
     db.model_runs.record_classifier_match_score(
         det_id, "BioCLIP", "fp-no-match", max_match_score=0.04,
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-recipe",
     )
@@ -8603,7 +8603,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
     # filter can select it — otherwise the "no sidecar" branch is never
     # reached and this test would collapse into the eligibility test
     # below.
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-orphan",
     )
@@ -8655,7 +8655,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
     # Eligible detection: run against the list actually reused
     # ("fp-eligible") — a matching predictions row proves the cache hit
     # is real.
-    db.add_prediction(
+    db.predictions.add(
         eligible_det, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-eligible",
     )
@@ -8668,7 +8668,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
     # eligible detection under a THIRD fingerprint ("fp-torn") that has
     # no matching predictions row — covers the second exclusion in the
     # coverage query.
-    db.add_prediction(
+    db.predictions.add(
         ineligible_det, species="Sparrow", confidence=0.5,
         model="BioCLIP", labels_fingerprint="fp-below-threshold",
     )
@@ -8737,7 +8737,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    db.add_prediction(det_id, species="Robin", confidence=0.9,
+    db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-cached")
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
@@ -8809,7 +8809,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     # under a different name than the request. Without the explicit-id
     # rejection, the cache satisfaction check would accept it since
     # ``desired_classifier_model`` would fall back to None.
-    db.add_prediction(det_id, species="Robin", confidence=0.9,
+    db.predictions.add(det_id, species="Robin", confidence=0.9,
                       model="SomeOtherModel", labels_fingerprint="fp-x")
     db.model_runs.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
                              prediction_count=1)
@@ -8882,7 +8882,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
     for det_id in (det_a, det_b):
-        db.add_prediction(det_id, species="Robin", confidence=0.9,
+        db.predictions.add(det_id, species="Robin", confidence=0.9,
                           model="BioCLIP", labels_fingerprint="fp-cached")
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                                  prediction_count=1)
@@ -9019,7 +9019,7 @@ def test_pre_heal_classifier_run_does_not_satisfy_cache(tmp_path):
            VALUES (?, ?, ?, ?, ?)""",
         (det_id, "timm-inat21", labels_short, pre_heal_runtime, 1),
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Bubulcus ibis", confidence=0.9, model="timm-inat21",
         labels_fingerprint=labels_short,
     )
@@ -9121,7 +9121,7 @@ def test_all_photos_cache_satisfied_excludes_unreviewed_legacy_timm_after_heal(
            VALUES (?, ?, ?, ?, ?)""",
         (det_id, "timm-inat21", labels_short, "legacy", 1),
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Bubulcus ibis", confidence=0.9,
         model="timm-inat21", labels_fingerprint=labels_short,
     )
@@ -9246,7 +9246,7 @@ def test_all_photos_cache_satisfied_still_grandfathers_legacy_bioclip(tmp_path):
            VALUES (?, ?, ?, ?, ?)""",
         (det_id, "BioCLIP", labels_short, "legacy", 1),
     )
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint=labels_short,
     )

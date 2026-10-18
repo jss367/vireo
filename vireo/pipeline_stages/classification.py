@@ -1616,7 +1616,7 @@ class _ClassifyPass:
             else:
                 clear_ids = [p["id"] for p in self.photos]
             if clear_ids:
-                thread_db.clear_predictions(
+                thread_db.predictions.clear(
                     model=spec.model_name,
                     collection_photo_ids=clear_ids,
                     labels_fingerprint=spec.fp,

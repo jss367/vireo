@@ -456,7 +456,7 @@ def create_inat_blueprint(
         min_conf = db.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
-        pred = db.get_top_prediction_for_photo(
+        pred = db.predictions.get_top_for_photo(
             photo_id, min_detector_confidence=min_conf,
         )
 
@@ -821,7 +821,7 @@ def create_inat_blueprint(
         min_conf = db.get_effective_config(user_cfg).get(
             "detector_confidence", 0.2
         )
-        pred = db.get_top_prediction_for_photo(
+        pred = db.predictions.get_top_for_photo(
             photo_id, min_detector_confidence=min_conf,
         )
 
@@ -901,7 +901,7 @@ def create_inat_blueprint(
         # Current-fingerprint + workspace-scoped top prediction,
         # respecting the active detector_confidence floor — avoids
         # submitting a stale-label-set or now-hidden taxon to iNaturalist.
-        pred = db.get_top_prediction_for_photo(
+        pred = db.predictions.get_top_for_photo(
             photo_id, min_detector_confidence=min_conf,
         )
 

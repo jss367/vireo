@@ -1781,7 +1781,7 @@ def create_pipeline_blueprint(
         # Also pin to the most recent labels_fingerprint per
         # (detection, classifier_model) so a workspace that rotated label
         # sets doesn't see a debug payload mixing stale and current labels.
-        preds = db.get_inspector_predictions_for_photo(photo_id, min_conf)
+        preds = db.predictions.inspector_rows_for_photo(photo_id, db.active_workspace_id, min_conf)
         # A custom-label row's stored taxonomy may be another species' guess;
         # show the label's resolved binomial instead.
         from species_identity import SpeciesResolver, resolved_prediction_taxonomy

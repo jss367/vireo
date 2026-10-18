@@ -109,7 +109,7 @@ def test_source_identity_survives_fetch_save_merge_and_classifier(tmp_path, monk
     assert enriched["class"] == "Aves"
     assert enriched["scientific_name"] == RED["scientific_name"]
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, prediction["species"], .9, "BioCLIP-2.5",
+    db.predictions.add(det, prediction["species"], .9, "BioCLIP-2.5",
                       labels_fingerprint=compute_full_fingerprint(labels)[:12], taxonomy=enriched)
     stored = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
     from classify_job import _cached_prediction_taxonomy
@@ -442,9 +442,9 @@ def _photo(db, tmp_path, name="photo.jpg"):
 
 def test_repair_preserves_review_state_and_is_idempotent(db, tmp_path):
     pid, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .91, "BioCLIP-2.5", status="accepted",
+    db.predictions.add(det, "Red-crowned Amazon", .91, "BioCLIP-2.5", status="accepted",
                       labels_fingerprint="abcdef123456", taxonomy={"scientific_name": BROWED["scientific_name"]})
-    db.add_prediction(det, "Red-browed Parrot", .8, "iNat21", labels_fingerprint="tol",
+    db.predictions.add(det, "Red-browed Parrot", .8, "iNat21", labels_fingerprint="tol",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
     before = [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")]
     plan = plan_repairs(db)
@@ -464,7 +464,7 @@ def test_repair_preserves_review_state_and_is_idempotent(db, tmp_path):
 
 def test_stale_repair_plan_rolls_back(db, tmp_path):
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
+    db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
     plan = plan_repairs(db)
     db.conn.execute("UPDATE predictions SET scientific_name = 'changed'")
@@ -476,7 +476,7 @@ def test_stale_repair_plan_rolls_back(db, tmp_path):
 
 def test_upgrade_repairs_existing_database_once(db, tmp_path):
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", status="rejected",
+    db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", status="rejected",
                       labels_fingerprint="custom", taxonomy={"scientific_name": BROWED["scientific_name"]})
     from species_identity import resolution_identity
     db.set_meta("species_identity_repair:" + resolution_identity(), "0")
@@ -507,7 +507,7 @@ def test_burst_grouping_uses_identity_and_keeps_raw_labels(db, tmp_path, taxonom
                     "taxonomy": {"taxon_id": source["taxon_id"], "scientific_name": source["scientific_name"]},
                     "timestamp": datetime(2026, 9, 1, 10, 0, i)})
     _store_grouped_predictions(raw, "test-job", "BioCLIP-2.5", 10, .99, taxonomy, db, "custom")
-    rows = db.get_predictions()
+    rows = db.predictions.get_rows()
     assert len(rows) == 2
     assert {r["species"] for r in rows} == {r["prediction"] for r in raw}
     if same_species:
@@ -519,9 +519,9 @@ def test_burst_grouping_uses_identity_and_keeps_raw_labels(db, tmp_path, taxonom
 
 def test_pipeline_agrees_across_models_and_preserves_native_identity(db, tmp_path):
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .92, "BioCLIP-2.5", labels_fingerprint="custom",
+    db.predictions.add(det, "Red-crowned Amazon", .92, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": RED["scientific_name"], "taxon_id": 18976})
-    db.add_prediction(det, "Red-crowned Parrot", .9, "iNat21", labels_fingerprint="tol",
+    db.predictions.add(det, "Red-crowned Parrot", .9, "iNat21", labels_fingerprint="tol",
                       taxonomy={"scientific_name": RED["scientific_name"]})
     photos = load_photo_features(db)
     assert len(photos) == 1
@@ -681,7 +681,7 @@ def test_cached_refresh_preserves_authoritative_unconfirmed_override(taxonomy, s
 def test_repair_rejects_changed_eligibility_and_run_key(db, tmp_path, field):
     _, det = _photo(db, tmp_path)
     _, other_det = _photo(db, tmp_path, "other.jpg")
-    db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
+    db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
     plan = plan_repairs(db)
     value = other_det if field == "detection_id" else "changed"
@@ -743,7 +743,7 @@ def test_api_lookup_cannot_reintroduce_ambiguous_names(tmp_path):
 
 def test_stored_id_only_prediction_retains_source_identity(db, tmp_path, taxonomy):
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP", labels_fingerprint="custom",
+    db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP", labels_fingerprint="custom",
                       taxonomy={"taxon_id": BROWED["taxon_id"]})
     row = db.conn.execute("SELECT * FROM predictions").fetchone()
     for resolver in (SpeciesResolver(db=db), SpeciesResolver(taxonomy=taxonomy), SpeciesResolver()):
@@ -758,7 +758,7 @@ def test_pipeline_serialization_keeps_unresolved_source_keys(db, tmp_path, same_
 
     for i, tid in enumerate([900001, 900001 if same_taxon else 900002]):
         _, det = _photo(db, tmp_path, f"unknown-{i}.jpg")
-        db.add_prediction(det, "Unknown parrot", .99, "BioCLIP", labels_fingerprint="custom",
+        db.predictions.add(det, "Unknown parrot", .99, "BioCLIP", labels_fingerprint="custom",
                           taxonomy={"taxon_id": tid})
     photos = load_photo_features(db)
     entries = [p["species_top5"][0] for p in photos]
@@ -798,7 +798,7 @@ def test_culling_groups_unresolved_taxa_by_id(db, tmp_path, same_taxon):
 
     for i, tid in enumerate([900001, 900001 if same_taxon else 900002]):
         pid, det = _photo(db, tmp_path, f"cull-{i}.jpg")
-        db.add_prediction(det, "Unknown parrot", .99, "BioCLIP", labels_fingerprint="custom",
+        db.predictions.add(det, "Unknown parrot", .99, "BioCLIP", labels_fingerprint="custom",
                           taxonomy={"taxon_id": tid})
         db.conn.execute("UPDATE photos SET phash = '0000000000000000' WHERE id = ?", (pid,))
         db.upsert_photo_embedding(pid, "BioCLIP", np.ones(4, dtype=np.float32).tobytes())
@@ -826,7 +826,7 @@ def test_unknown_id_enrichment_does_not_borrow_common_name_taxonomy(db, tmp_path
     evidence = _prediction_taxonomy(taxonomy, "Red-crowned Amazon", {"taxon_id": 900001})
     assert evidence == {"taxon_id": 900001}
     _, det = _photo(db, tmp_path)
-    db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP", labels_fingerprint="custom", taxonomy=evidence)
+    db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP", labels_fingerprint="custom", taxonomy=evidence)
     row = db.conn.execute("SELECT * FROM predictions").fetchone()
     assert row["source_taxon_id"] == 900001
     assert row["scientific_name"] is None
@@ -847,7 +847,7 @@ def test_burst_votes_merge_different_labels_with_same_unknown_id(db, tmp_path):
                     "prediction": name, "confidence": .99, "alternatives": [],
                     "taxonomy": {"taxon_id": 900001}, "timestamp": datetime(2026, 9, 1, 10, 0, i)})
     _store_grouped_predictions(raw, "test-job", "BioCLIP", 10, .99, None, db, "custom")
-    rows = db.get_predictions()
+    rows = db.predictions.get_rows()
     assert {r["species"] for r in rows} == {"Old parrot name", "New parrot name"}
     assert rows[0]["group_id"] == rows[1]["group_id"]
     for row in rows:
@@ -879,7 +879,7 @@ def test_acceptance_binds_source_ids_without_reassigning_same_name_keywords(db, 
         evidence = {"scientific_name": RED["scientific_name"] if tid == 18976 else BROWED["scientific_name"]}
         if source_backed:
             evidence["taxon_id"] = tid
-        db.add_prediction(det, "Shared parrot", .9, "BioCLIP", labels_fingerprint="custom" if source_backed else "tol", taxonomy=evidence)
+        db.predictions.add(det, "Shared parrot", .9, "BioCLIP", labels_fingerprint="custom" if source_backed else "tol", taxonomy=evidence)
         prediction = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
         result = db.accept_prediction(prediction["id"])
         row = db.conn.execute("SELECT k.*, t.inat_id FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id WHERE k.id = ?",
@@ -897,7 +897,7 @@ def test_unknown_accepted_source_id_survives_name_changes_and_taxonomy_import(db
     accepted = []
     for i, name in enumerate(["First name", "Later name"]):
         _, det = _photo(db, tmp_path, f"unknown-accept-{i}.jpg")
-        db.add_prediction(det, name, .9, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": 900001})
+        db.predictions.add(det, name, .9, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": 900001})
         prediction = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
         accepted.append(db.accept_prediction(prediction["id"])["keyword_id"])
     assert accepted[0] == accepted[1]
@@ -929,7 +929,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
     for i, tid in enumerate(tids):
         pid, det = _photo(db, tmp_path, f"homonym-{i}.jpg")
         pids.append(pid)
-        db.add_prediction(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
+        db.predictions.add(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
 
     def payload():
         photos = load_photo_features(db)
@@ -1071,7 +1071,7 @@ def test_group_review_modal_reads_the_same_conflict_as_the_card(db, tmp_path):
     db.conn.execute("UPDATE taxa SET name = ?, common_name = NULL WHERE inat_id IN (18976, 18997)", (display,))
     for i, tid in enumerate((18976, 18997)):
         _, det = _photo(db, tmp_path, f"modal-homonym-{i}.jpg")
-        db.add_prediction(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
+        db.predictions.add(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
     photos = load_photo_features(db)
     data = serialize_results({"photos": photos, "summary": {}, "encounters": [
         {"photos": photos, "species": encounter_species_label(photos), "bursts": [photos]},
@@ -1116,7 +1116,7 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
     for i, tid in enumerate((18976, 18997)):
         pid, det = _photo(db, tmp_path, f"partial-{i}.jpg")
         pids.append(pid)
-        db.add_prediction(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
+        db.predictions.add(det, display, .99, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": tid})
     # Only the first frame is tagged: the encounter is partially confirmed.
     keyword_id = db.conn.execute(
         "INSERT INTO keywords (name, is_species, type, taxon_id, source_taxon_id) "
@@ -1260,9 +1260,9 @@ def test_inspector_and_review_payloads_resolve_guessed_binomials(app_and_db):
     det = database.save_detections(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5}, "confidence": .9,
                                           "category": "animal"}], detector_model="MDV6")[0]
     guess = {"scientific_name": BROWED["scientific_name"], "genus": "Amazona", "family": "Wrongidae"}
-    database.add_prediction(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="custom",
+    database.predictions.add(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="custom",
                             taxonomy=guess)
-    database.add_prediction(det, "Red-browed Parrot", .1, "BioCLIP-2.5", labels_fingerprint="custom",
+    database.predictions.add(det, "Red-browed Parrot", .1, "BioCLIP-2.5", labels_fingerprint="custom",
                             status="alternative", taxonomy={**guess, "scientific_name": LILAC["scientific_name"]})
     client = app.test_client()
 

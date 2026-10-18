@@ -89,7 +89,7 @@ def seed_e2e_data(db, thumb_dir):
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.95, "category": "animal"},
         ], detector_model="test-detector")
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det_ids[0],
             species=species,
             confidence=0.92,

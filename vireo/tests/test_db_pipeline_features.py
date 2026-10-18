@@ -87,10 +87,10 @@ def test_subject_detection_rows_apply_floor_weak_candidates_and_scope(db, catalo
 def test_prediction_rows_latest_or_pinned_label_set_and_continuity(db, catalog):
     ws, photos, dets = catalog
     strong, weak = dets[photos[0]]
-    db.add_prediction(strong, "Old", 0.95, "m", labels_fingerprint="old")
+    db.predictions.add(strong, "Old", 0.95, "m", labels_fingerprint="old")
     db.conn.execute("UPDATE predictions SET created_at='2000-01-01'")
-    db.add_prediction(strong, "Robin", 0.9, "m", labels_fingerprint="new")
-    db.add_prediction(weak, "Wren", 0.5, "m", labels_fingerprint="new")
+    db.predictions.add(strong, "Robin", 0.9, "m", labels_fingerprint="new")
+    db.predictions.add(weak, "Wren", 0.5, "m", labels_fingerprint="new")
     features = db.pipeline_features
 
     def species(**kw):
@@ -122,7 +122,7 @@ def test_readiness_counts(db, catalog):
     assert features.count_subject_embeddings(ws, variant="v", legacy_bytes=16) == 2
     assert features.count_subject_embeddings(ws, variant="v", legacy_bytes=8) == 1
 
-    db.add_prediction(dets[photos[0]][0], "Robin", 0.9, "m")
+    db.predictions.add(dets[photos[0]][0], "Robin", 0.9, "m")
     db.conn.execute("UPDATE photos SET mask_path='/m.png', eye_kp_fingerprint='fp' WHERE id=?",
                     (photos[0],))
     assert features.count_eye_keypoint_attempts(ws, .2, "fp") == 1

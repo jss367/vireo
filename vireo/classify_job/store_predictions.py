@@ -123,7 +123,7 @@ def _store_match_prediction(
     retained_species = [species]
     confidence = item["confidence"] if confidence is None else confidence
     tax_hierarchy = _prediction_taxonomy(tax, species, taxonomy or item.get("taxonomy"))
-    db.add_prediction(
+    db.predictions.add(
         detection_id=item["detection_id"],
         species=species,
         confidence=round(confidence, 4),
@@ -170,7 +170,7 @@ def _store_match_prediction(
             seen_species.add(alt_key)
             retained_species.append(alt["species"])
             alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
-            db.add_prediction(
+            db.predictions.add(
                 detection_id=item["detection_id"],
                 species=alt["species"],
                 confidence=round(alt["confidence"], 4),
@@ -188,12 +188,12 @@ def _store_match_prediction(
     # earlier pass keeps its stale category here. Re-stamp it 'match' so the
     # downgrade in reconcile_match_review_state still fires if this detection
     # later stops being a match.
-    db.reconcile_match_review_state(
+    db.predictions.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
         species, "match",
     )
     if refresh_output:
-        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
+        db.predictions.retain_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _recognized_taxon_keywords(keywords, tax):
@@ -282,7 +282,7 @@ def _reconcile_existing_pending_prediction(
         labels_fingerprint,
         item["prediction"],
     )
-    db.reconcile_match_review_state(
+    db.predictions.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
         item["prediction"], category,
         auto_accept=False,
@@ -290,7 +290,7 @@ def _reconcile_existing_pending_prediction(
     if existing_id is None:
         return False
     if group_id is not None:
-        db.update_prediction_group_info(
+        db.predictions.update_group_info(
             detection_id=item["detection_id"],
             model=model_name,
             group_id=group_id,
@@ -304,7 +304,7 @@ def _reconcile_existing_pending_prediction(
         # earlier grouped burst; if the current run decided this
         # detection is not group-reviewable, drop the stale group_id
         # so ungrouping actually takes effect on reuse.
-        db.clear_prediction_group_info(
+        db.predictions.clear_group_info(
             detection_id=item["detection_id"],
             model=model_name,
             labels_fingerprint=labels_fingerprint,
@@ -333,7 +333,7 @@ def _store_pending_detection_prediction(
 
     refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
     retained_species = [item["prediction"]]
-    db.add_prediction(
+    db.predictions.add(
         detection_id=item["detection_id"],
         species=item["prediction"],
         confidence=round(item["confidence"], 4),
@@ -349,7 +349,7 @@ def _store_pending_detection_prediction(
         from_fresh_inference=True,
         refresh_output=refresh_output,
     )
-    db.reconcile_match_review_state(
+    db.predictions.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
         item["prediction"], category,
         auto_accept=False,
@@ -370,7 +370,7 @@ def _store_pending_detection_prediction(
         seen_species.add(alt_key)
         retained_species.append(alt["species"])
         alt_tax = _prediction_taxonomy(tax, alt["species"], alt.get("taxonomy"))
-        db.add_prediction(
+        db.predictions.add(
             detection_id=item["detection_id"],
             species=alt["species"],
             confidence=round(alt["confidence"], 4),
@@ -384,7 +384,7 @@ def _store_pending_detection_prediction(
             refresh_output=refresh_output,
         )
     if refresh_output:
-        db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
+        db.predictions.retain_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
 def _xmp_review_category(item, tax, comparison_name, read_keywords):

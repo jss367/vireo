@@ -173,10 +173,10 @@ def test_subject_routes_do_not_expose_other_workspaces(app_and_db):
 def test_predictions_stay_attached_to_each_subject_and_respect_review(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
-    db.add_prediction(ids[0], 'American Robin', .9, 'bioclip', labels_fingerprint='old')
-    db.add_prediction(ids[0], 'House Finch', .85, 'bioclip', labels_fingerprint='current')
-    db.add_prediction(ids[1], 'Blue Jay', .95, 'bioclip', status='rejected')
-    db.add_prediction(ids[1], 'Steller’s Jay', .8, 'bioclip')
+    db.predictions.add(ids[0], 'American Robin', .9, 'bioclip', labels_fingerprint='old')
+    db.predictions.add(ids[0], 'House Finch', .85, 'bioclip', labels_fingerprint='current')
+    db.predictions.add(ids[1], 'Blue Jay', .95, 'bioclip', status='rejected')
+    db.predictions.add(ids[1], 'Steller’s Jay', .8, 'bioclip')
     result = payload(db, photo_id)
     by_id = {s['id']: s for s in result['subjects']}
     assert [p['species'] for p in by_id[ids[0]]['predictions']] == ['House Finch']
@@ -241,7 +241,7 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     for index, detection_id in enumerate(ids[:2]):
-        db.add_prediction(detection_id, f'Bird {index}', .9, 'bioclip',
+        db.predictions.add(detection_id, f'Bird {index}', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
     # A production photo has ``mask_path`` set only through
     # ``set_active_mask_variant``, which requires a matching photo_masks
@@ -282,7 +282,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     for detection_id in ids[:2]:
-        db.add_prediction(detection_id, 'Test', .9, 'bioclip',
+        db.predictions.add(detection_id, 'Test', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
     det_hi = next(d for d in db.get_detections(photo_id) if d['id'] == ids[1])
     db.conn.execute(

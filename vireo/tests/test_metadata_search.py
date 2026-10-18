@@ -262,9 +262,9 @@ def test_metadata_search_ignores_guessed_binomials_on_custom_labels(catalog):
     det = db.save_detections(ids["empty"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="test")[0]
-    db.add_prediction(det, "Lilac-crowned Amazon", 0.9, "BioCLIP-2.5", labels_fingerprint="custom",
+    db.predictions.add(det, "Lilac-crowned Amazon", 0.9, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": "Amazona rhodocorytha", "genus": "Amazona"})
-    db.add_prediction(det, "Red-crowned Parrot", 0.8, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
+    db.predictions.add(det, "Red-crowned Parrot", 0.8, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
                       taxonomy={"scientific_name": "Amazona viridigenalis"})
 
     def search(value):

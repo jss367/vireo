@@ -162,7 +162,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
             "confidence": 0.95, "category": "animal",
         }], detector_model="test-detector")[0]
-        db.add_prediction(detection_id=detection, species="Red-tailed Hawk",
+        db.predictions.add(detection_id=detection, species="Red-tailed Hawk",
                           confidence=0.92, model="BioCLIP-2")
 
     if scope == "keyword":

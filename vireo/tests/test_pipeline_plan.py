@@ -236,7 +236,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
     # the classify runtime actually cache-serves; a bare
     # ``classifier_runs`` row with no prediction is a stale marker the
     # runtime would rerun.
-    db.add_prediction(
+    db.predictions.add(
         full_det_id,
         species="Robin",
         confidence=0.9,

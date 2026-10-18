@@ -185,9 +185,9 @@ def prediction_selection_seed(db_path, thumb_dir, photos_root):
         detection_ids = db.save_detections(
             photo_id, boxes, detector_model="MDV6",
         )
-        db.add_prediction(detection_ids[0], "Common Gallinule", 0.97, "bioclip")
+        db.predictions.add(detection_ids[0], "Common Gallinule", 0.97, "bioclip")
         if offset < 2:
-            db.add_prediction(
+            db.predictions.add(
                 detection_ids[1], "Blue-breasted Quail", 0.93, "bioclip",
             )
 

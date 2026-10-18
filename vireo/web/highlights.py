@@ -763,7 +763,7 @@ def create_highlights_blueprint(get_db, json_error):
 
     def _highlights_confirm_under_lock(db, photo_ids):
         try:
-            top_predictions = db.get_top_unrejected_predictions_by_photo(photo_ids)
+            top_predictions = db.predictions.top_unrejected_by_photo(photo_ids)
             accepted_photo_ids = db.get_photo_ids_with_species_rank_keyword(photo_ids)
             processed = set()
             confirmable_photo_ids_by_key = {}
@@ -919,7 +919,7 @@ def create_highlights_blueprint(get_db, json_error):
     def _highlights_relabel_under_lock(db, photo_ids, species):
         relabel = _HighlightsRelabel(
             db, photo_ids, species,
-            db.get_top_unrejected_predictions_by_photo(photo_ids),
+            db.predictions.top_unrejected_by_photo(photo_ids),
         )
         relabel.snapshot_curation()
         try:

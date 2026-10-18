@@ -1073,7 +1073,7 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
         }],
         detector_model="test-detector",
     )[0]
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det_id,
         species="Low-confidence Sparrow",
         confidence=0.55,
@@ -1136,7 +1136,7 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
         }],
         detector_model="test-detector",
     )[0]
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det_id,
         species="Red-tailed Hawk",
         confidence=0.9,

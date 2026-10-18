@@ -54,7 +54,7 @@ def _setup_db(tmp_path):
         det_ids = db.save_detections(pid, [
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
         ], detector_model="megadetector")
-        db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
+        db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
 
     return db
 

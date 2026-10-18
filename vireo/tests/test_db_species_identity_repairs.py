@@ -30,7 +30,7 @@ def det(db, tmp_path):
 
 def _prediction(db, det, species, model, fingerprint, scientific_name=None):
     taxonomy = {"scientific_name": scientific_name} if scientific_name else None
-    db.add_prediction(det, species, .9, model, labels_fingerprint=fingerprint, taxonomy=taxonomy)
+    db.predictions.add(det, species, .9, model, labels_fingerprint=fingerprint, taxonomy=taxonomy)
     return db.conn.execute(
         "SELECT * FROM predictions WHERE species = ? AND classifier_model = ?", (species, model),
     ).fetchone()

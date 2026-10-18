@@ -722,7 +722,7 @@ def create_browse_blueprint(
         threshold = db.get_effective_config(cfg.load()).get(
             "classifier_confidence", 0.0
         ) or 0.0
-        all_pending = db.get_predictions(photo_ids=photo_ids, status="pending")
+        all_pending = db.predictions.get_rows(photo_ids=photo_ids, status="pending")
         pending = [
             row for row in all_pending if (row["confidence"] or 0.0) >= threshold
         ]

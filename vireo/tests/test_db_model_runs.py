@@ -63,7 +63,7 @@ def _det(db, photo_id, detector_model="test-det", conf=0.9,
 
 def _pred(db, detection_id, fingerprint, species="Robin", model=MODEL,
           confidence=0.9):
-    db.add_prediction(
+    db.predictions.add(
         detection_id, species=species, confidence=confidence, model=model,
         labels_fingerprint=fingerprint,
     )

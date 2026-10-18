@@ -67,7 +67,7 @@ def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
-    db.add_prediction(
+    db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=confidence,
         model="bioclip-2.5", category="match", taxonomy=taxonomy,
         status=status,

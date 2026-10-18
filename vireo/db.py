@@ -7131,6 +7131,7 @@ class Database:
             commit_with_retry=commit_with_retry,
             auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
             top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
+            decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )
 
@@ -7141,206 +7142,13 @@ class Database:
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_prediction_repository``, so the connection, the
         lazily resolved workspace and the module's ``commit_with_retry`` are
-        read per use. New simple prediction operations go here. The existing
-        prediction methods keep their ``Database`` wrappers until the domain
-        migrates (the decision mutators last, since ``test_route_contract``
-        looks them up by their ``Database`` names).
+        read per use. Only the prediction-decision writers keep ``Database``
+        wrappers (``update_prediction_status``,
+        ``update_predictions_status_by_photo``, ``ungroup_prediction``,
+        ``set_review_status``, ``accept_subject_species``): ``test_route_contract``
+        finds decision routes by those names.
         """
         return self._prediction_repository()
-
-    def add_prediction(
-        self,
-        detection_id,
-        species,
-        confidence,
-        model,
-        category="new",
-        status="pending",
-        group_id=None,
-        vote_count=None,
-        total_votes=None,
-        individual=None,
-        taxonomy=None,
-        labels_fingerprint="legacy",
-        labels_fingerprint_full=None,
-        preserve_manual_review=False,
-        match_score=None,
-        from_fresh_inference=False,
-        refresh_output=False,
-    ):
-        """Store a classification prediction for a detection.
-
-        Uses INSERT OR IGNORE so re-running classification doesn't destroy
-        existing predictions that the user may have already reviewed.
-        Use clear_predictions() first if you want a fresh start.
-
-        The `predictions` table stores only the raw, workspace-independent
-        classifier output (species, confidence, classifier_model, taxonomy).
-        Per-workspace review state (status, group_id, vote_count, individual)
-        is written to ``prediction_review`` for the active workspace when the
-        caller passes a non-default value.
-
-        Args:
-            detection_id: the detection ID (from detections table)
-            taxonomy: optional dict with keys kingdom, phylum, class, order,
-                      family, genus, scientific_name from taxonomy lookup
-            labels_fingerprint: fingerprint of the label set used to classify
-                (defaults to 'legacy' for backwards-compatible inserts).
-            preserve_manual_review: when True, do not overwrite an existing
-                accepted/rejected review row unless it was auto-created for an
-                XMP taxonomy match.
-            match_score: this species' raw pre-softmax score (cosine or logit,
-                per the model). Optional; ``confidence`` alone cannot say
-                whether the label fits, only that it fit better than the rest
-                of the list.
-            from_fresh_inference: True when ``match_score`` comes from a model
-                that just ran on this detection, so it supersedes whatever is
-                stored. False (the default) when the caller is replaying a
-                value it read back from somewhere else — cache
-                materialization, a backfill — in which case an existing score
-                is left alone and only a NULL is filled.
-            refresh_output: replace the output fields of an existing candidate
-                while retaining its row ID and manual review decisions.
-        """
-        return self._prediction_repository().add(
-            detection_id, species, confidence, model, category=category, status=status, group_id=group_id, vote_count=vote_count, total_votes=total_votes, individual=individual, taxonomy=taxonomy, labels_fingerprint=labels_fingerprint, labels_fingerprint_full=labels_fingerprint_full, preserve_manual_review=preserve_manual_review, match_score=match_score, from_fresh_inference=from_fresh_inference, refresh_output=refresh_output,
-        )
-
-    def retain_prediction_candidates(self, detection_id, model, labels_fingerprint, species):
-        """Remove obsolete candidates after their replacement outputs were stored.
-
-        Matching candidates keep their IDs and reviews in every workspace.
-        Other detections, models, label sets and classifier run keys are untouched.
-        """
-        return self._prediction_repository().retain_candidates(
-            detection_id, model, labels_fingerprint, species,
-        )
-
-    def reconcile_match_review_state(
-        self,
-        detection_id,
-        classifier_model,
-        labels_fingerprint,
-        species,
-        category,
-        auto_accept=True,
-    ):
-        """Re-sync a cached prediction's category and auto-review on reuse.
-
-        Taxonomy ``match`` predictions are auto-accepted and intentionally
-        hidden from the pending review queue (``_store_match_prediction``
-        writes ``status='accepted'`` with ``AUTO_MATCH_REVIEW_MARKER``).  That
-        review row is durable, so when a detection stops being a match — e.g.
-        the photo's XMP keywords were edited — a later non-reclassify run
-        reuses the cached prediction but the stale auto-accepted row would keep
-        it out of the queue until a full reclassify/clear is forced.  Only the
-        marked auto-review row is safe to drop here; explicit user decisions
-        from before a temporary XMP match must remain intact.
-
-        ``auto_accept`` is False when the caller has decided this reuse must
-        stay pending even though ``category`` is still ``match`` — e.g. the
-        XMP later gained a second recognized taxon, so a single-species match
-        is now ambiguous.  Without dropping the marker in that case,
-        ``status='accepted'`` from the earlier unambiguous run would keep the
-        detection hidden from the queue.
-
-        The persisted ``category`` is always refreshed to the current value:
-        ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
-        reuse, and a stale ``match`` marker would defeat the downgrade above
-        on the next flip (and mislead the ``/api/predictions``
-        disagreement/refinement enrichment).
-        """
-        return self._prediction_repository().reconcile_match_review_state(
-            detection_id, classifier_model, labels_fingerprint, species, category, auto_accept=auto_accept,
-        )
-
-    def clear_predictions(self, model=None, collection_photo_ids=None,
-                          labels_fingerprint=None, clear_run_keys=True):
-        """Clear predictions, optionally filtered by model, photo set, and fingerprint.
-
-        The ``predictions`` table is now global (no workspace_id).  This
-        still restricts the delete to photos visible in the active workspace
-        via ``workspace_folders`` so that calling "clear" in one workspace
-        does not nuke another workspace's cached classifier output.
-
-        ``labels_fingerprint`` is strongly recommended for reclassify flows:
-        in shared-folder setups where workspace A and workspace B classify
-        the same photos with different label sets, a reclassify in A keyed
-        only by ``model`` would wipe B's cached predictions under its own
-        fingerprint. And because ``classifier_runs`` keys include
-        fingerprint, B's later non-reclassify runs would skip inference and
-        leave those detections unclassified until forced. With
-        ``labels_fingerprint`` passed, we delete only A's rows AND the
-        matching ``classifier_runs`` rows so A's next pass actually re-runs.
-
-        ``clear_run_keys=False`` is for callers that have just written fresh
-        ``classifier_runs`` rows for these detections and are about to
-        replace the predictions in the same transaction (e.g. the pipeline's
-        deferred reclassify clear that runs after the per-photo
-        ``record_classifier_run`` calls).  Wiping the run keys in that case
-        would force the next non-reclassify pass to re-infer the entire
-        collection.  Default ``True`` matches the long-standing safety
-        behavior — only opt out if the caller guarantees fresh run keys.
-        """
-        return self._prediction_repository().clear(
-            model=model, collection_photo_ids=collection_photo_ids, labels_fingerprint=labels_fingerprint, clear_run_keys=clear_run_keys,
-        )
-
-    def get_prediction_states(self, photo_ids):
-        """Explain, per photo, why it may have no predictions to show.
-
-        An empty prediction list has four completely different meanings and a
-        blank panel implies only the first, so Browse needs them separated:
-        nothing has run yet, the detector ran and found no animals, detections
-        exist but were never classified, or classification ran and produced
-        nothing the user's confidence floor admits.
-
-        ``threshold`` travels with the state so the panel can split the rows
-        it already has into visible and below-the-floor, and say the hidden
-        count out loud rather than dropping those rows silently.
-
-        ``detection_count`` counts only what the rest of this file calls a
-        real detection: ``detector_model = 'full-image'`` rows are the
-        synthetic whole-frame anchor written *because* the detector found
-        nothing, and rows under the workspace's ``detector_confidence`` floor
-        are the noise the classifier never acts on. Counting either would
-        report "detections exist but were never classified" for a photo whose
-        detector plainly found no animal — the exact conflation this method
-        exists to prevent. Same rule as ``count_real_detections_in_scope``.
-        """
-        return self._prediction_repository().get_states(photo_ids)
-
-    def get_predictions(self, photo_ids=None, model=None, status=None,
-                        rules=None):
-        """Get predictions with photo, detection and review info.
-
-        Workspace scoping is enforced by joining ``workspace_folders``; the
-        per-workspace review state (status, group_id, individual, vote_count)
-        is left-joined from ``prediction_review`` so absent rows naturally
-        surface as ``status = 'pending'``.
-
-        Predictions are filtered to the most recent ``labels_fingerprint``
-        per ``(detection_id, classifier_model)`` so stale rows from prior
-        label sets don't contaminate ``/api/predictions`` or
-        ``/api/predictions/compare`` after re-classification.
-
-        Row-level scoping for prediction-field rules: the workspace/rules
-        subquery below is applied at the photo level (``p.id IN (...)``),
-        which correctly limits *which photos* surface but returns every
-        current prediction for those photos. When the rules tree references
-        Review-only fields (``prediction_confidence``, ``prediction_status``,
-        ``classifier_model``, ``taxonomy_*``), a photo with a sibling
-        prediction that matches would still return low-confidence /
-        already-accepted rows that don't satisfy the visible filter — the
-        Review grid and Accept All would then act on rows the filter chip
-        excluded. ``_filter_prediction_rows_by_rules`` re-evaluates those
-        leaves against each returned row so the grid matches the chip. It
-        applies only when the tree can be resolved safely per row — see
-        that method's docstring for when it falls back to the SQL result.
-        """
-        return self._prediction_repository().get_rows(
-            photo_ids=photo_ids, model=model, status=status, rules=rules,
-        )
 
     # Row-level filterable fields: those the row's own values can prove.
     # ``species`` is intentionally excluded — the SQL ``species`` leaf
@@ -7538,17 +7346,6 @@ class Database:
         """
         return self._prediction_repository().update_status(prediction_id, status, _commit=_commit)
 
-    def get_group_predictions(self, group_id):
-        """Get all predictions and photo data for a burst group.
-
-        ``group_id`` lives in the workspace-scoped ``prediction_review``
-        table now, so we join there to find the member predictions.  Each
-        returned row is a dict with an ``alternatives`` list containing the
-        per-detection alternative species predictions (review status
-        ``'alternative'``), sorted by confidence descending.
-        """
-        return self._prediction_repository().get_group(group_id)
-
     def update_predictions_status_by_photo(self, photo_id, status,
                                            _commit=True):
         """Upsert review status for every prediction of a photo in the active workspace.
@@ -7588,88 +7385,6 @@ class Database:
         """
         return self._prediction_repository().ungroup(prediction_id, _commit=_commit)
 
-    def get_existing_prediction_photo_ids(self, model, labels_fingerprint=None):
-        """Return photo_ids with predictions for a (model, fingerprint), scoped to active workspace.
-
-        The cache identity of a prediction is
-        ``(detection_id, classifier_model, labels_fingerprint, species)``, so
-        the photo-level short-circuit in classify_job / pipeline_job must key
-        on both model AND fingerprint. Keying only on model means changing
-        the workspace's label set leaves stale predictions and the classifier
-        is never re-run until the user forces ``reclassify``.
-
-        ``labels_fingerprint=None`` preserves the pre-fingerprint behavior
-        for callers that haven't plumbed the fingerprint through yet.
-        """
-        return self._prediction_repository().get_existing_photo_ids(
-            model, labels_fingerprint=labels_fingerprint,
-        )
-
-    def get_top_prediction_for_photo(self, photo_id, min_detector_confidence=None):
-        """Return the highest-confidence *current* prediction for a photo.
-
-        "Current" means: workspace-scoped via workspace_folders, and for
-        each (detection, classifier_model) only the most recent
-        labels_fingerprint's rows are considered — stale predictions from
-        prior label sets on the same detection are skipped so callers
-        like /api/inat/prepare don't prefill a taxon from an old label set.
-
-        ``min_detector_confidence``: optional read-time threshold applied to
-        the joined detection. With read-time thresholding, predictions tied
-        to detections below the active threshold are visually hidden in the
-        UI; callers like the iNat endpoints should pass the workspace-
-        effective threshold so they don't surface a species from a now-
-        hidden detection.
-
-        Returns a dict with ``species``, ``scientific_name``, ``confidence``,
-        ``detection_id`` or None if no eligible prediction exists.
-        """
-        return self._prediction_repository().get_top_for_photo(
-            photo_id, min_detector_confidence=min_detector_confidence,
-        )
-
-    def get_live_prediction_rows_by_photo(self, photo_ids):
-        """Map photo id → the live prediction rows on each of its detections."""
-        return self._prediction_repository().get_live_rows_by_photo(photo_ids)
-
-    def get_top_prediction_confidences(self, photo_ids):
-        """Map photo id → the confidence the Browse sorts rank on.
-
-        Built from the same ``_TOP_PREDICTION_CONFIDENCE_EXPR`` the
-        ``prediction_confidence`` sorts order by, so the number a card shows
-        is by construction the number that put it where it is — a card badge
-        computed from a second, nearly-identical query is exactly the kind of
-        cheap proxy CORE_PHILOSOPHY's "no black boxes" rule rules out.
-
-        Photos with no current, unrejected species prediction are absent from
-        the mapping rather than present with a 0.0, which would read as "the
-        classifier is certain this is nothing".
-        """
-        return self._prediction_repository().get_top_confidences(photo_ids)
-
-    def get_top_unrejected_predictions_by_photo(self, photo_ids):
-        """``{photo_id: row}``: each photo's highest-confidence prediction
-        from its latest label set that the active workspace has not rejected.
-
-        Rows carry ``photo_id``, ``id``, ``species``, ``confidence``,
-        ``classifier_model``, ``group_id`` and ``status``.
-        """
-        return self._prediction_repository().top_unrejected_by_photo(photo_ids)
-
-    def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):
-        """Return species, confidence, and detection_id for a photo's prediction.
-
-        Detections and predictions are global; the active workspace is
-        enforced through ``workspace_folders``. Since prediction cache
-        identity is (detection, model, fingerprint, species), callers
-        should pass ``labels_fingerprint`` to avoid returning a row
-        written under a different label set. ``labels_fingerprint=None``
-        preserves the pre-refactor behavior (any row for the model).
-        """
-        return self._prediction_repository().get_for_photo(
-            photo_id, model, labels_fingerprint=labels_fingerprint,
-        )
-
     def upsert_photo_embedding(self, photo_id, model, embedding_bytes,
                                variant='', verify_workspace=False):
         """Store an embedding blob for (photo_id, model, variant).
@@ -7688,47 +7403,6 @@ class Database:
             self._verify_photo_in_workspace(photo_id)
         self._masks_features_repository().upsert_embedding(
             photo_id, model, embedding_bytes, variant,
-        )
-
-    def clear_prediction_group_info(self, detection_id, model,
-                                    labels_fingerprint=None):
-        """Drop stale group metadata from the cached prediction's review row.
-
-        Used when a cached prediction that previously belonged to a
-        reviewable burst is reused under a run where the burst is no longer
-        group-reviewable (mixed species, singleton, etc.), so the caller
-        would otherwise pass ``group_id=None`` to
-        ``update_prediction_group_info`` and skip it. Without this, the old
-        ``group_id`` / ``individual`` / vote counts stay attached and group
-        actions retag the whole stale burst together.
-
-        Only updates an existing ``prediction_review`` row — never inserts
-        one — so the "absence == pending" invariant that ``add_prediction``
-        enforces for un-reviewed detections stays intact.
-        """
-        return self._prediction_repository().clear_group_info(
-            detection_id, model, labels_fingerprint=labels_fingerprint,
-        )
-
-    def update_prediction_group_info(self, detection_id, model, group_id,
-                                     vote_count, total_votes, individual,
-                                     labels_fingerprint=None):
-        """Upsert group info for the primary prediction of
-        (detection, classifier_model, labels_fingerprint) in the active
-        workspace's ``prediction_review``.
-
-        Alternative rows (review status ``'alternative'``) are intentionally
-        skipped so they do not inherit grouping metadata that belongs to the
-        primary pick.
-
-        ``labels_fingerprint`` scopes the "primary" pick to one label set;
-        omitting it picks the highest-confidence row across all fingerprints
-        for back-compat with legacy callers, but current callers should
-        always pass the active fingerprint so group metadata doesn't land
-        on a row produced under a stale label set.
-        """
-        return self._prediction_repository().update_group_info(
-            detection_id, model, group_id, vote_count, total_votes, individual, labels_fingerprint=labels_fingerprint,
         )
 
     def is_keyword_species(self, keyword_id):
@@ -7828,100 +7502,6 @@ class Database:
 
     # Reads the prediction-decision routes run under ``BEGIN IMMEDIATE``
     # (see ``services.prediction_decisions``). None of them commits.
-
-    def get_prediction_decision_row(self, prediction_id):
-        """One prediction with its photo, label-set scope and review state, or None.
-
-        Columns: ``id``, ``species``, ``detection_id``, ``model``,
-        ``labels_fingerprint``, ``photo_id``, and the active workspace's
-        ``group_id`` and ``status`` (``pending`` without a review row).
-        """
-        return self._prediction_repository().get_decision_row(prediction_id)
-
-    def get_prediction_status(self, prediction_id):
-        """Active-workspace review status of one prediction; None if the id is unknown."""
-        return self._prediction_repository().current_status(prediction_id)
-
-    def get_predictions_by_id(self, prediction_ids):
-        """The named predictions, any label set or status, with their burst votes."""
-        return self._prediction_repository().get_rows_by_ids(prediction_ids)
-
-    def get_decided_prediction_ids(self, prediction_ids):
-        """Which of ``prediction_ids`` already carry a decision (``DECIDED_PREDICTION_STATUSES``)."""
-        return self._prediction_repository().decided_ids(
-            prediction_ids, self.DECIDED_PREDICTION_STATUSES,
-        )
-
-    def get_superseded_prediction_ids(self, prediction_ids):
-        """Which of ``prediction_ids`` a later label set for their detection replaced."""
-        return self._prediction_repository().superseded_ids(prediction_ids)
-
-    def get_out_of_workspace_prediction_ids(self, prediction_ids):
-        """Which of ``prediction_ids`` sit on a photo the active workspace cannot see."""
-        return self._prediction_repository().out_of_workspace_ids(prediction_ids)
-
-    def get_prediction_photo_ids(self, prediction_ids, stop_after_photos=None):
-        """``{prediction_id: photo_id}`` for the ids that exist, in id order.
-
-        ``stop_after_photos`` stops reading once more than that many distinct
-        photos are found, leaving the overflow visible in the partial result.
-        """
-        return self._prediction_repository().photo_ids_by_prediction(
-            prediction_ids, stop_after_photos=stop_after_photos,
-        )
-
-    def get_non_alternative_predictions_for_photos(self, photo_ids):
-        """Rows (``id``, ``photo_id``, ``in_group``) for each photo's non-``alternative`` predictions."""
-        return self._prediction_repository().non_alternative_rows_for_photos(photo_ids)
-
-    def get_scope_review_statuses(self, prediction_ids):
-        """Rows (``pick_id``, ``prediction_id``, ``status``) for each named row's reviewed scope siblings."""
-        return self._prediction_repository().scope_review_statuses(prediction_ids)
-
-    def get_prediction_scope(self, prediction_id):
-        """``(detection_id, classifier_model, labels_fingerprint)`` of one prediction, or None."""
-        return self._prediction_repository().get_scope(prediction_id)
-
-    def get_open_scope_sibling_ids(self, detection_id, classifier_model,
-                                   labels_fingerprint, exclude_ids):
-        """Ids in one label-set scope still pending, alternative or accepted, minus ``exclude_ids``."""
-        return self._prediction_repository().open_scope_sibling_ids(
-            detection_id, classifier_model, labels_fingerprint, exclude_ids,
-        )
-
-    def get_alternative_sibling_ids(self, detection_id, classifier_model,
-                                    labels_fingerprint, exclude_id):
-        """Ids in one label-set scope marked ``alternative``, minus ``exclude_id``."""
-        return self._prediction_repository().alternative_sibling_ids(
-            detection_id, classifier_model, labels_fingerprint, exclude_id,
-        )
-
-    def get_prediction_statuses_with_supersession(self, prediction_ids):
-        """Rows (``prediction_id``, ``photo_id``, ``status``, ``is_superseded``) per named prediction."""
-        return self._prediction_repository().statuses_with_supersession(prediction_ids)
-
-    def get_inspector_predictions_for_photo(self, photo_id, min_detector_confidence):
-        """The Pipeline inspector's prediction rows for one photo, best first.
-
-        Current-label-set predictions on real detections at or above
-        ``min_detector_confidence``, with the active workspace's review state
-        (``pending`` without a review row; none at all with no active
-        workspace). The stored taxonomy is raw: resolve it with
-        ``species_identity.resolved_prediction_taxonomy`` before showing it.
-        """
-        return self._prediction_repository().inspector_rows_for_photo(
-            photo_id, self._active_workspace_id, min_detector_confidence,
-        )
-
-    def get_burst_group_members(self, group_id, classifier_model, exclude_id):
-        """Rows (``id``, ``photo_id``, ``status``) for a burst group's other visible members."""
-        return self._prediction_repository().burst_group_members(
-            group_id, classifier_model, exclude_id,
-        )
-
-    def count_workspace_predictions(self):
-        """How many predictions sit on photos the active workspace can see (raises without one)."""
-        return self._prediction_repository().count_in_workspace()
 
     # -- Detections --
 
@@ -8181,9 +7761,6 @@ class Database:
             fresh_detections_by_photo=fresh_detections_by_photo,
             fresh_processed_photo_ids=fresh_processed_photo_ids,
         )
-
-    def get_review_status(self, prediction_id, workspace_id):
-        return self._prediction_repository().get_review_status(prediction_id, workspace_id)
 
     def set_review_status(self, prediction_id, workspace_id, status,
                            individual=None, group_id=None):
