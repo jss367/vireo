@@ -242,6 +242,11 @@ function renderImportLocationStatus() {
         + ' of ' + importLocations.total.toLocaleString() + ' files';
     return;
   }
+  const problem = importLocationChoicesProblem();
+  if (problem) {
+    status.textContent = problem;
+    return;
+  }
   const candidates = importLocationCandidatePaths();
   const noGps = new Set(data.no_gps_paths);
   let withGps = 0;
@@ -302,6 +307,8 @@ function renderImportLocationGroup(group) {
   const remember = () => {
     importLocations.choices.set(group.key, { enabled: toggle.checked, value: input.value });
     outcome.textContent = importLocationOutcomeText(importLocationTarget(group));
+    renderImportLocationStatus();
+    updateStartGate();
   };
   input.addEventListener('input', () => {
     if (input.value.trim()) toggle.checked = true;
@@ -368,4 +375,18 @@ function importLocationChoices() {
     choices.push({ ...target, cells: group.cells.slice() });
   });
   return choices;
+}
+
+// Keep these admission limits aligned with services/import_locations.py.
+/** @returns {string | null} */
+function importLocationChoicesProblem() {
+  const choices = importLocationChoices();
+  if (choices.length > 100000) {
+    return 'Select at most 100,000 location groups. Uncheck groups, turn off GPS location suggestions, or import fewer files.';
+  }
+  const cells = new Set(choices.flatMap(choice => choice.cells));
+  if (cells.size > 100000) {
+    return 'Select at most 100,000 GPS cells. Uncheck groups, turn off GPS location suggestions, or import fewer files.';
+  }
+  return null;
 }

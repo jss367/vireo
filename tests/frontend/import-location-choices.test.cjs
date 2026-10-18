@@ -25,6 +25,7 @@ function harness({uniqueKeys = false} = {}) {
   const ctx = vm.createContext({
     document: {getElementById: () => ({checked: true}), createElement: () => new Element()},
     importPreviewedPaths: Object.keys(fixture.file_cells), importSelectionEnabled: () => false,
+    updateStartGate: () => {},
     fetch: () => { throw new Error('HTTP forbidden in fake-DOM control'); },
   });
   vm.runInContext(readFileSync('vireo/static/import/locations.js', 'utf8'), ctx);
@@ -77,4 +78,54 @@ test('an ambiguous bare saved-place name never selects the first keyword', () =>
   const h = harness({uniqueKeys: true});
   h.edit(0, ambiguous[0].name);
   assert.deepEqual(h.choices(), []);
+});
+
+test('location admission counts only selected choices and distinct cells at backend limits', () => {
+  const h = harness();
+  h.ctx.selected = [];
+  h.run('importLocationChoices = () => selected;');
+  const problem = () => h.run('importLocationChoicesProblem()');
+  h.ctx.selected = Array.from({length: 100000}, (_, i) => ({cells: [String(i)]}));
+  assert.equal(problem(), null);
+  h.ctx.selected.push({cells: ['extra']});
+  assert.match(problem(), /100,000.*Uncheck/);
+  h.ctx.selected = [{cells: Array.from({length: 100000}, (_, i) => String(i))}];
+  assert.equal(problem(), null);
+  h.ctx.selected.push({cells: ['0']});
+  assert.equal(problem(), null, 'count distinct cells');
+  h.ctx.selected[1].cells.push('extra');
+  assert.match(problem(), /100,000.*Uncheck/);
+  h.ctx.selected = [];
+  assert.equal(problem(), null);
+  const backend = readFileSync('vireo/services/import_locations.py', 'utf8');
+  assert.match(backend, /MAX_SUGGESTION_PATHS = 100_000\b/);
+  assert.match(backend, /MAX_CHOICES = MAX_SUGGESTION_PATHS\b/);
+  assert.match(backend, /MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS\b/);
+});
+
+test('legacy GPS intent survives both copy retry builders without invented choices', () => {
+  for (const [file, name] of [['jobs/import-retry.js', 'importRetryBody'],
+    ['import/jobs.js', 'retryBodyFromFinishedJob']]) {
+    const ctx = vm.createContext({jobConfig: job => job.config});
+    vm.runInContext(readFileSync('vireo/static/' + file, 'utf8'), ctx);
+    for (const legacy of [true, false, undefined]) {
+      ctx.job = {id: 17, type: 'import', config: {sources: ['/invented'],
+        destination: '/invented-output', location_from_gps: legacy}};
+      const body = vm.runInContext(name + '(job)', ctx);
+      assert.equal(body.location_from_gps, !!legacy, file);
+      assert.equal(body.location_choices.length, 0);
+    }
+  }
+});
+
+test('form admission blocks excessive location selections in both import modes', () => {
+  const ctx = vm.createContext({sources: ['/invented'], newImagesSnapshotId: null,
+    importExiftoolRequired: false, document: {getElementById: () => ({checked: false})},
+    importLocationChoicesProblem: () => 'Select at most 100,000 location groups.',
+    selectedImportMode: () => { throw new Error('must reject before mode-specific admission'); }});
+  vm.runInContext(readFileSync('vireo/static/import/form.js', 'utf8'), ctx);
+  assert.match(vm.runInContext('importFormProblem().message', ctx), /100,000/);
+  ctx.newImagesSnapshotId = 123;
+  ctx.newImagesFileCount = 0;
+  assert.match(vm.runInContext('importFormProblem().message', ctx), /100,000/);
 });

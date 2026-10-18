@@ -19,7 +19,7 @@ interface JobsConfig {
   recover_landed_files?: Record<string, unknown[]>; mode?: string; destination?: string;
   recursive?: boolean; folder_template?: string; file_types?: string; skip_duplicates?: boolean;
   verify_by_hash?: boolean; trust_likely_duplicates?: boolean; after_import?: unknown;
-  tags?: unknown[]; location_choices?: unknown[]; allow_missing_exiftool?: boolean;
+  tags?: unknown[]; location_from_gps?: boolean; location_choices?: unknown[]; allow_missing_exiftool?: boolean;
   include_paths?: string[]; previewed_count?: number; checked_count?: number;
   remote_target_id?: string; remote_subpath?: string;
   after_process_move?: {remote_target_id?: string}; local_processing?: boolean; defer_nas_transfer?: boolean;

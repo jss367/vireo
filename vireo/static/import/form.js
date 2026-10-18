@@ -196,6 +196,13 @@ function importFormProblem() {
       };
     }
   }
+  const locationProblem = importLocationChoicesProblem();
+  if (locationProblem) {
+    return {
+      message: locationProblem,
+      target: /** @type {HTMLElement} */ (document.getElementById('importLocationPanel')),
+    };
+  }
   const copyMode =
     newImagesSnapshotId === null && selectedImportMode() === 'copy';
   if (!copyMode) return null;

@@ -754,6 +754,11 @@ class ImportService:
         self, body: JsonDict,
     ) -> tuple[list[str] | None, list[JsonDict] | None, ImportFailure | None]:
         """Normalize the optional tags and location choices of an import request."""
+        if body.get("location_from_gps"):
+            return None, None, ImportFailure(
+                "This import used legacy automatic GPS locations. Open Import, "
+                "preview the source again, and select location groups before starting."
+            )
         raw_tags = body.get("tags", [])
         if not isinstance(raw_tags, list):
             return None, None, ImportFailure("tags must be a list of names")

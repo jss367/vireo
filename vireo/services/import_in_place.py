@@ -126,7 +126,7 @@ def restart_import_in_place(service: ImportService, db: Database, job_id: str) -
         if not isinstance(config, dict):
             return ImportFailure("The original import settings are no longer available", 409)
         body = {key: config[key] for key in (
-            "recursive", "after_import", "tags", "location_choices", "allow_missing_exiftool",
+            "recursive", "after_import", "tags", "location_choices", "location_from_gps", "allow_missing_exiftool",
         ) if key in config}
         # Snapshot admission accepts the snapshot id OR explicit roots,
         # never both. Replaying roots would broaden a frozen file selection.
