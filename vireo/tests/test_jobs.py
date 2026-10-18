@@ -2107,7 +2107,10 @@ def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
 
     # Simulate a checkpoint that never lands: partial is set but the
     # internal checkpointed_partial is never updated.
+    checkpoint_calls = []
+
     def stuck_checkpoint():
+        checkpoint_calls.append(True)
         return 0
 
     runner.checkpoint_live_jobs = stuck_checkpoint
@@ -2121,6 +2124,7 @@ def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
     assert runner.flush_partial_result(job, cancel_check=cancel_after_two) is False
     # Cancel_check was polled once per attempt; the third poll ended the wait.
     assert calls["n"] == 3
+    assert len(checkpoint_calls) == 2
     assert runner.shutdown(timeout=5)
 
 

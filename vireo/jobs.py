@@ -206,6 +206,7 @@ class JobRunner:
         self._history = JobHistory(db.job_history.catalog_file() if db else None)
         self._checkpoints = JobCheckpointer(
             self._lock, self._jobs, self._history, self._workers,
+            checkpoint=lambda: self.checkpoint_live_jobs(),
         )
         if db:
             # job_history is part of the canonical schema (canonical_schema.
