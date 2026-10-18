@@ -1,15 +1,21 @@
 """Grouping stages for the streaming photo pipeline."""
 
+from __future__ import annotations
+
 import logging
 import os
 import time
+from typing import TYPE_CHECKING
 
 from pipeline_stages.context import PipelineRun
+
+if TYPE_CHECKING:
+    from db import Database
 
 log = logging.getLogger(__name__)
 
 
-def regroup_stage(run: PipelineRun):
+def regroup_stage(run: PipelineRun) -> None:
     """Run pipeline grouping + scoring + triage from cached features."""
     if run.params.skip_regroup:
         _skip_regroup_or_review_species(run)
@@ -45,7 +51,7 @@ def regroup_stage(run: PipelineRun):
     run.update_stages(run.runner, run.job["id"], run.stages)
 
 
-def _skip_regroup_or_review_species(run: PipelineRun):
+def _skip_regroup_or_review_species(run: PipelineRun) -> None:
     """Skip regroup, or run the species-only review the run opted into."""
     # Only take the species-review save path when the caller
     # explicitly asked for it (the identify preset sets
@@ -88,7 +94,7 @@ def _skip_regroup_or_review_species(run: PipelineRun):
     run.update_stages(run.runner, run.job["id"], run.stages)
 
 
-def _run_species_review(run: PipelineRun):
+def _run_species_review(run: PipelineRun) -> None:
     """Save species-review results and mark the regroup step completed."""
     import config as cfg
     from pipeline import (
@@ -164,7 +170,7 @@ def _run_species_review(run: PipelineRun):
     )
 
 
-def _run_full_regroup(run: PipelineRun):
+def _run_full_regroup(run: PipelineRun) -> None:
     """Group, score and triage the collection, then stamp the group state."""
     import config as cfg
     from pipeline import load_photo_features, run_full_pipeline, save_results
@@ -230,7 +236,7 @@ def _run_full_regroup(run: PipelineRun):
         run.result["stages"]["regroup"] = summary_info
 
 
-def _stamp_group_state(run: PipelineRun, thread_db, effective_cfg: dict):
+def _stamp_group_state(run: PipelineRun, thread_db: Database, effective_cfg: dict) -> None:
     """Record the workspace grouping fingerprint, or clear it for a partial run."""
     from pipeline import (
         collection_covers_workspace,
@@ -283,7 +289,7 @@ def _stamp_group_state(run: PipelineRun, thread_db, effective_cfg: dict):
         )
 
 
-def miss_stage(run: PipelineRun):
+def miss_stage(run: PipelineRun) -> None:
     """Compute miss-detection flags for the workspace after regroup.
 
     Runs last so burst_id is available. Uses only per-photo features
@@ -403,7 +409,7 @@ def _misses_prerequisites_missing(run: PipelineRun) -> bool:
     )
 
 
-def _mark_misses_skipped(run: PipelineRun):
+def _mark_misses_skipped(run: PipelineRun) -> None:
     run.stages["misses"]["status"] = "skipped"
     run.runner.update_step(run.job["id"], "misses", status="completed",
                        summary="Skipped")
