@@ -63,7 +63,7 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
     if not flat_keywords and not hier_keywords:
         return False
 
-    offered = db.get_embedded_keyword_offered_keys(photo_id)
+    offered = db.keywords.embedded_offered_keys(photo_id)
     # Candidate suppression keys: flat entries map to their own normalized
     # leaf key; a hierarchy maps to its full normalized pipe-joined path so
     # distinct hierarchies sharing a leaf (``Birds|Robin`` vs
@@ -118,7 +118,7 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
     # as "already offered" so a later removal is not silently undone.
     new_to_record = candidate_keys - offered
     if new_to_record:
-        db.record_embedded_keyword_offered(photo_id, new_to_record)
+        db.keywords.record_embedded_offered_keys(photo_id, new_to_record)
     return bool(fresh_flat or fresh_hier)
 
 
@@ -174,7 +174,7 @@ def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
     # filter as above — a lone smart-quote entry would raise inside
     # add_keyword() and abort the scan.
     existing_keys = {
-        keyword_match_key(k["name"]) for k in db.get_photo_keywords(photo_id)
+        keyword_match_key(k["name"]) for k in db.keywords.get_for_photo(photo_id)
     } | hierarchy_leaf_keys
     for kw in flat_keywords:
         key = keyword_match_key(kw)

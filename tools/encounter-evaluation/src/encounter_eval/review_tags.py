@@ -48,7 +48,7 @@ def _apply_tags(db, photo, answer, marker):
             if taxon is None:
                 raise ValueError(f'Species {key} is no longer in the live catalog; choose its current identity')
             # Keep existing hierarchical tags and aliases for the selected identity.
-            matching = [r for r in rows if db.is_keyword_species(r['id']) and
+            matching = [r for r in rows if db.keywords.is_species(r['id']) and
                         (r['source_taxon_id'] == taxon['inat_id'] if r['source_taxon_id'] is not None
                          else r['taxon_id'] == taxon['id'])]
             if matching:
@@ -66,7 +66,7 @@ def _apply_tags(db, photo, answer, marker):
             desired.add(kid)
 
         existing = {r['id'] for r in rows}
-        removed = [r for r in rows if r['id'] not in desired and db.is_keyword_species(r['id'])] if answer['status'] == 'complete' else []
+        removed = [r for r in rows if r['id'] not in desired and db.keywords.is_species(r['id'])] if answer['status'] == 'complete' else []
         for row in removed:
             db.untag_photo(pid, row['id'], _commit=False)
             queue_keyword_remove(db, pid, row['name'], _commit=False)

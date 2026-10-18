@@ -126,10 +126,10 @@ def test_remove_absent_keyword_has_no_history(app_and_db):
     kid = db.add_keyword("Absent tag")
     response = app.test_client().delete(f"/api/photos/{pid}/keywords/{kid}")
     assert response.status_code == 200
-    assert not any(k["id"] == kid for k in db.get_photo_keywords(pid))
+    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
     assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == 0
     db.undo_last_edit()
-    assert not any(k["id"] == kid for k in db.get_photo_keywords(pid))
+    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
 
 
 def test_deleted_keyword_does_not_block_undo(app_and_db):
@@ -141,7 +141,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
     assert client.delete(f"/api/photos/{pid}/keywords/{kid}").status_code == 200
     assert client.delete(f"/api/keywords/{kid}").status_code == 200
     db.undo_last_edit()
-    assert not any(k["id"] == kid for k in db.get_photo_keywords(pid))
+    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
 
 
 def test_batch_keyword_validates_all_ids_before_mutation(app_and_db):
@@ -150,7 +150,7 @@ def test_batch_keyword_validates_all_ids_before_mutation(app_and_db):
     before = db.conn.execute("SELECT count(*) FROM edit_history").fetchone()[0]
     response = app.test_client().post("/api/batch/keyword", json={"photo_ids": [pid, 99999999], "name": "Partial batch"})
     assert response.status_code == 403
-    assert not any(k["name"] == "Partial batch" for k in db.get_photo_keywords(pid))
+    assert not any(k["name"] == "Partial batch" for k in db.keywords.get_for_photo(pid))
     assert db.conn.execute("SELECT count(*) FROM edit_history").fetchone()[0] == before
 
 

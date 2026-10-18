@@ -887,7 +887,7 @@ def create_pipeline_blueprint(
     def attach_live_pipeline_decisions(db, results):
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
-        species = db.get_species_keywords_for_photos(photo_ids)
+        species = db.keywords.get_species_for_photos(photo_ids)
         live = db.photos.flags_ratings_and_eyes(photo_ids)
         for photo in results.get("photos", []):
             row = live.get(photo["id"])
@@ -1458,7 +1458,7 @@ def create_pipeline_blueprint(
             # other deliberate types (individual, location, genre) so a person
             # tag named like a species doesn't get reported as the species
             # keyword for has_species_keyword / Apply-label purposes.
-            row = db.get_top_level_species_keyword(name)
+            row = db.keywords.top_level_species_keyword(name)
             return row["id"] if row else None
 
         species_kid = _species_kid(species) if species else None
@@ -1482,7 +1482,7 @@ def create_pipeline_blueprint(
             has_kw = False
             has_kws = {}
             if species_kid is not None or list_kids:
-                attached = {k["id"] for k in db.get_photo_keywords(pid)}
+                attached = {k["id"] for k in db.keywords.get_for_photo(pid)}
                 if species_kid is not None:
                     has_kw = species_kid in attached
                 has_kws = {
@@ -1800,7 +1800,7 @@ def create_pipeline_blueprint(
         )
 
         # Get keywords
-        keywords = db.get_photo_keywords(photo_id)
+        keywords = db.keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
         # Compute crop info from primary detection (highest confidence)

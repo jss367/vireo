@@ -54,7 +54,7 @@ def create_photo_location_keywords_blueprint(
         if keyword_id is not None:
             if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
                 return json_error("keyword_id must be an integer")
-            keyword_row = db.get_keyword_row(keyword_id)
+            keyword_row = db.keywords.get_row(keyword_id)
             if keyword_row is None:
                 return json_error("keyword not found", 404)
             kid = keyword_row["id"]
@@ -82,7 +82,7 @@ def create_photo_location_keywords_blueprint(
             # Queue/record the stored spelling: add_keyword normalizes
             # punctuation and applies the species casing convention, so it
             # can differ from the raw request name.
-            stored = db.get_keyword_name(kid)
+            stored = db.keywords.name_of(kid)
             if stored is not None:
                 name = stored
         # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
@@ -92,7 +92,7 @@ def create_photo_location_keywords_blueprint(
         # the pending/history bookkeeping when the row already exists, so
         # the second click is a true no-op (mirrors the batch route's
         # already_tagged precheck).
-        already_tagged = photo_id in db.get_photo_ids_with_keyword(kid, [photo_id])
+        already_tagged = photo_id in db.keywords.photo_ids_tagged_with(kid, [photo_id])
         if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
         # source='manual': a person clicked Add. Stamping the association
@@ -111,7 +111,7 @@ def create_photo_location_keywords_blueprint(
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
-        keywords = db.get_photo_keywords(photo_id)
+        keywords = db.keywords.get_for_photo(photo_id)
         kw_name = ""
         kw_type = ""
         for k in keywords:

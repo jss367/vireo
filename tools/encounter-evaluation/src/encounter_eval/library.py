@@ -73,8 +73,22 @@ class FeatureReader:
         """Support historical feature loaders used in paired comparisons."""
         return self.require_workspace_id()
 
-    def get_species_keywords_for_photos(self, photo_ids, *, include_identities=False):
+    @property
+    def keywords(self):
+        """``db.keywords`` as the current loader reads it.
+
+        The loader asks ``db.keywords.get_species_for_photos(...)``; the reader
+        answers that one read itself. ``get_species_keywords_for_photos`` stays
+        callable on the reader directly for historical loaders, which called
+        the old ``Database`` wrapper of that name.
+        """
+        return self
+
+    def get_species_for_photos(self, photo_ids, *, include_identities=False):
         return {}
+
+    def get_species_keywords_for_photos(self, photo_ids, *, include_identities=False):
+        return self.get_species_for_photos(photo_ids, include_identities=include_identities)
 
     def get_meta(self, key):
         row = self.conn.execute("SELECT value FROM db_meta WHERE key = ?", (key,)).fetchone()

@@ -432,7 +432,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
     row = page.locator(f'tr[data-photo-id="{photo_id}"]')
     expect(row.locator(".keyword-pill.species", has_text="Cooper's Hawk")).to_be_visible()
 
-    keyword_names = {item["name"] for item in db.get_photo_keywords(photo_id)}
+    keyword_names = {item["name"] for item in db.keywords.get_for_photo(photo_id)}
     assert {"Red-tailed Hawk", "Cooper's Hawk"} <= keyword_names
     statuses = {
         pred["model"]: pred["status"]

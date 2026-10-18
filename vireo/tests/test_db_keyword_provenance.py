@@ -385,27 +385,27 @@ def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
 
 
 def test_upsert_one_keyword_leaves_commit_to_caller(db, lib):
-    kid = db._upsert_one_keyword("Paris", None)
+    kid = db.keyword_provenance.upsert_one_keyword("Paris", None)
     assert db.conn.in_transaction
     assert _visible(db, "SELECT COUNT(*) FROM keywords WHERE id = ?", (kid,)) == [(0,)]
-    assert db._upsert_one_keyword("paris", None) == kid
+    assert db.keyword_provenance.upsert_one_keyword("paris", None) == kid
     db.conn.commit()
     assert _visible(db, "SELECT name, type FROM keywords WHERE id = ?", (kid,)) == [
         ("Paris", "location"),
     ]
     with pytest.raises(ValueError, match="empty after normalization"):
-        db._upsert_one_keyword("  ", None)
+        db.keyword_provenance.upsert_one_keyword("  ", None)
 
 
 def test_upsert_one_keyword_place_id_upsert_and_disambiguation(db, lib):
-    state = db._upsert_one_keyword("California", None)
-    park = db._upsert_one_keyword("Park", state, place_id="place-00000001",
+    state = db.keyword_provenance.upsert_one_keyword("California", None)
+    park = db.keyword_provenance.upsert_one_keyword("Park", state, place_id="place-00000001",
                                   latitude=1.0, longitude=2.0)
     # Re-picking the same Google place updates the row in place.
-    assert db._upsert_one_keyword("Park", state, place_id="place-00000001",
+    assert db.keyword_provenance.upsert_one_keyword("Park", state, place_id="place-00000001",
                                   latitude=3.0, longitude=4.0) == park
     # A different place with the same (name, parent) gets a suffixed name.
-    other = db._upsert_one_keyword("Park", state, place_id="place-00000002")
+    other = db.keyword_provenance.upsert_one_keyword("Park", state, place_id="place-00000002")
     names = dict(db.conn.execute(
         "SELECT id, name FROM keywords WHERE id IN (?, ?)", (park, other),
     ).fetchall())
@@ -428,7 +428,7 @@ def test_upsert_one_keyword_merges_suffixed_place_row_through_the_facade(
     db.conn.commit()
     calls = _spy(monkeypatch, db, "_merge_keyword_into")
 
-    got = db._upsert_one_keyword(
+    got = db.keyword_provenance.upsert_one_keyword(
         "California", None, place_id="place-00000042", latitude=5.0,
         longitude=6.0, reuse_location_component=True,
     )
@@ -446,10 +446,10 @@ def test_upsert_one_keyword_merges_suffixed_place_row_through_the_facade(
 
 
 def test_upsert_one_keyword_rejects_cross_type_collision(db, lib):
-    france = db._upsert_one_keyword("France", None)
+    france = db.keyword_provenance.upsert_one_keyword("France", None)
     general = _raw_kw(db, "Paris", france)
     with pytest.raises(RuntimeError, match="can't reuse for location chain"):
-        db._upsert_one_keyword("Paris", france)
+        db.keyword_provenance.upsert_one_keyword("Paris", france)
     assert db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (general,),
     ).fetchone()[0] == "general"
@@ -466,7 +466,7 @@ def test_link_keyword_to_place_commits_and_builds_chain_through_the_facade(
 ):
     kid = db.get_or_create_text_location("Home")
     chain_calls = _spy(monkeypatch, db, "_upsert_location_parent_chain")
-    result = db.link_keyword_to_place(kid, {
+    result = db.keyword_provenance.link_keyword_to_place(kid, {
         "place_id": "place-home", "name": "Home Park", "lat": 1.0, "lng": 2.0,
         "address_components": _COMPONENTS, "types": ["park"],
     })
@@ -490,7 +490,7 @@ def test_link_keyword_to_place_merges_into_canonical_and_folds_provenance(db, li
         "address_components": [],
     })
     kid = db.get_or_create_text_location("Home")
-    child = db._upsert_one_keyword("Garden", kid)
+    child = db.keyword_provenance.upsert_one_keyword("Garden", kid)
     db.conn.commit()
     db.tag_photo(p0, kid)  # manual
     db.tag_photo(p0, canonical, source=KEYWORD_SOURCE_UNKNOWN)
@@ -498,7 +498,7 @@ def test_link_keyword_to_place_merges_into_canonical_and_folds_provenance(db, li
     db.tag_photo(p2, kid, source=KEYWORD_SOURCE_ACCEPT)
     db.tag_photo(p2, canonical)  # manual
 
-    result = db.link_keyword_to_place(kid, {
+    result = db.keyword_provenance.link_keyword_to_place(kid, {
         "place_id": "place-home", "name": "Home Park", "address_components": [],
     })
     assert result == {"keyword_id": canonical, "merged": True}
@@ -524,7 +524,7 @@ def test_link_keyword_to_place_rolls_back_on_failure(db, lib, monkeypatch):
 
     monkeypatch.setattr(db, "_upsert_location_parent_chain", boom)
     with pytest.raises(RuntimeError, match="chain failed"):
-        db.link_keyword_to_place(kid, {"place_id": "place-home", "name": "Home"})
+        db.keyword_provenance.link_keyword_to_place(kid, {"place_id": "place-home", "name": "Home"})
     assert not db.conn.in_transaction
     assert db.conn.execute(
         "SELECT COUNT(*) FROM keywords WHERE name = 'Stray'"
@@ -536,18 +536,18 @@ def test_link_keyword_to_place_rolls_back_on_failure(db, lib, monkeypatch):
 
 def test_link_keyword_to_place_validates_target(db, lib):
     with pytest.raises(ValueError, match="requires details"):
-        db.link_keyword_to_place(1, {})
+        db.keyword_provenance.link_keyword_to_place(1, {})
     with pytest.raises(ValueError, match="does not exist"):
-        db.link_keyword_to_place(999_999, {"place_id": "x"})
+        db.keyword_provenance.link_keyword_to_place(999_999, {"place_id": "x"})
     general = db.add_keyword("Driftwood")
     with pytest.raises(ValueError, match="not 'location'"):
-        db.link_keyword_to_place(general, {"place_id": "x"})
+        db.keyword_provenance.link_keyword_to_place(general, {"place_id": "x"})
 
 
 def test_link_keyword_to_place_returns_keyword_reused_in_its_own_chain(db, lib):
     kid = db.get_or_create_text_location("California")
     db.conn.commit()
-    result = db.link_keyword_to_place(kid, {
+    result = db.keyword_provenance.link_keyword_to_place(kid, {
         "place_id": "place-park", "name": "Park",
         "address_components": _COMPONENTS,
     })
@@ -781,13 +781,21 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
 # -- structure ----------------------------------------------------------------------------
 
 
+# Still forwarders on ``Database``: ``tag_photo`` (the provenance contract's
+# fail-safe default lives on it), ``_merge_keyword_into`` (bound into the
+# repositories by name) and ``accept_prediction`` (a decision writer
+# ``test_route_contract`` finds by name).
 _DELEGATING_PROVENANCE_METHODS = (
     "tag_photo",
     "_merge_keyword_into",
-    "link_keyword_to_place",
-    "_upsert_one_keyword",
     "accept_prediction",
 )
+
+# Reached through ``db.keyword_provenance`` now, under their repository names.
+_REMOVED_PROVENANCE_WRAPPERS = {
+    "link_keyword_to_place": "link_keyword_to_place",
+    "_upsert_one_keyword": "upsert_one_keyword",
+}
 
 
 def _self_attrs(fn):
@@ -814,6 +822,19 @@ def _repository_methods(tree):
         if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
     )
     return {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+
+def test_keyword_provenance_has_no_removed_wrappers_on_database():
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    for name, method in _REMOVED_PROVENANCE_WRAPPERS.items():
+        assert not hasattr(Database, name), (
+            f"Database.{name} came back; call db.keyword_provenance.{method}"
+        )
+        assert callable(getattr(KeywordProvenanceRepository, method))
+    accessor = Database.__dict__["keyword_provenance"]
+    assert isinstance(accessor, property)
+    assert "_keyword_provenance_repository" in _self_attrs(accessor.fget)
 
 
 @pytest.mark.parametrize("name", _DELEGATING_PROVENANCE_METHODS)
@@ -847,8 +868,8 @@ def _facade_exposed_repository_methods(database_class):
 
     ``database_class`` is the ``ast.ClassDef`` of ``Database``. A method is
     façade-exposed when some ``Database`` method calls it on
-    ``self._keyword_provenance_repository()`` -- directly, or through a local
-    name bound to that call.
+    ``self._keyword_provenance_repository()`` or the ``self.keyword_provenance``
+    accessor -- directly, or through a local name bound to either.
     """
 
     def builds_repository(node):
@@ -856,6 +877,11 @@ def _facade_exposed_repository_methods(database_class):
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_keyword_provenance_repository"
+        ) or (
+            isinstance(node, ast.Attribute)
+            and node.attr == "keyword_provenance"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
         )
 
     exposed = set()
@@ -1052,19 +1078,22 @@ def test_keyword_provenance_facade_signatures_unchanged():
     assert sig == {
         "tag_photo": "(self, photo_id, keyword_id, source='manual', _commit=True)",
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
-        "link_keyword_to_place": "(self, keyword_id, details)",
-        "_upsert_one_keyword": (
-            "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
-            "reuse_location_component=False)"
-        ),
         "accept_prediction": (
             "(self, prediction_id, replace_species=False, photo_ids=None, "
             "prediction_ids=None, _commit=True)"
         ),
     }
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    assert str(inspect.signature(KeywordProvenanceRepository.link_keyword_to_place)) == (
+        "(self, keyword_id, details)"
+    )
+    assert str(inspect.signature(KeywordProvenanceRepository.upsert_one_keyword)) == (
+        "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
+        "reuse_location_component=False)"
+    )
     # The repository's ``tag`` has no default to fall back on: the façade's
     # fail-safe ``'manual'`` is the only one.
-    from repositories.keyword_provenance import KeywordProvenanceRepository
 
     params = inspect.signature(KeywordProvenanceRepository.tag).parameters
     assert params["source"].default is inspect.Parameter.empty

@@ -190,7 +190,7 @@ def test_mark_species_keywords_normalizes_smart_apostrophes(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     kid = db.add_keyword("Lincoln’s Sparrow")
 
-    updated = db.mark_species_keywords(tax)
+    updated = db.keywords.mark_species(tax)
     assert updated == 1
 
     row = db.conn.execute(

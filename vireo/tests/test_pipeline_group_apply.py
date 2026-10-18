@@ -33,11 +33,11 @@ def test_apply_flags_picks_rejects_and_ignores_species(app_and_db):
     assert db.photos.get(reject_id)['flag'] == 'rejected'
 
     # No species keyword is tagged on the pick.
-    pick_kws = {k['name'] for k in db.get_photo_keywords(pick_id)}
+    pick_kws = {k['name'] for k in db.keywords.get_for_photo(pick_id)}
     assert 'Coyote' not in pick_kws
 
     # Reject also has no species keyword.
-    reject_kws = {k['name'] for k in db.get_photo_keywords(reject_id)}
+    reject_kws = {k['name'] for k in db.keywords.get_for_photo(reject_id)}
     assert 'Coyote' not in reject_kws
 
     # Returned per-photo state matches what we just wrote.
@@ -69,7 +69,7 @@ def test_group_apply_ignores_species_and_tags_nothing(app_and_db):
     # But NO species keyword was added to the pick.
     assert body['photos'][str(p1)]['has_species_keyword'] is False
     # And the DB has no species keyword on p1.
-    kws = db.get_photo_keywords(p1)
+    kws = db.keywords.get_for_photo(p1)
     assert not any(k['name'] == 'Blue Jay' for k in kws)
 
 

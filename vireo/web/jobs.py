@@ -617,7 +617,7 @@ def create_jobs_blueprint(
                     raise RuntimeError(
                         f"taxonomy unreadable after download: {TAXONOMY_JSON_PATH}"
                     )
-                updated = bg_db.mark_species_keywords(tax)
+                updated = bg_db.keywords.mark_species(tax)
                 log.info("Retyped %d existing keywords as taxonomy after download", updated)
             except Exception:
                 log.error("Post-download keyword retype failed", exc_info=True)

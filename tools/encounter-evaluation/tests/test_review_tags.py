@@ -50,7 +50,7 @@ def save_and_sync(queue, pid, taxa, *, complete=True, revision=0):
 
 
 def keywords(db, pid):
-    return {r['id'] for r in db.get_photo_keywords(pid)}
+    return {r['id'] for r in db.keywords.get_for_photo(pid)}
 
 
 def test_complete_review_replaces_species_preserves_other_tags_and_queues_xmp(writable_queue):

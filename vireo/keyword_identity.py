@@ -111,9 +111,7 @@ def resolve_import_alias(db, name, parent_id, *, kw_type=None):
     seen = set()
     while parent_id is not None and parent_id not in seen:
         seen.add(parent_id)
-        row = db.conn.execute(
-            'SELECT name, parent_id FROM keywords WHERE id = ?', (parent_id,),
-        ).fetchone()
+        row = db.keyword_merges.name_and_parent(parent_id)
         if row is None:
             return None
         parts.append(row['name'])
@@ -123,13 +121,7 @@ def resolve_import_alias(db, name, parent_id, *, kw_type=None):
 
 def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False):
     """Resolve reviewed import paths without overriding an explicit type."""
-    row = db.conn.execute(
-        "SELECT a.keyword_id FROM keyword_import_aliases a "
-        "JOIN keywords k ON k.id = a.keyword_id "
-        "WHERE a.path_key = ? AND (? IS NULL OR k.type = ?) "
-        "AND (? = 0 OR (k.type = 'location' AND k.place_id IS NOT NULL))",
-        (path_key(parts), kw_type, kw_type, linked_locations_only),
-    ).fetchone()
+    row = db.keyword_merges.alias_target(path_key(parts), kw_type, linked_locations_only)
     if row:
         return row['keyword_id']
     if len(parts) != 1:
@@ -138,24 +130,20 @@ def resolve_import_path(db, parts, *, kw_type=None, linked_locations_only=False)
     # leaf only when every matching alias/live identity agrees on its target.
     name = keyword_match_key(parts[0])
     candidates = {
-        row['keyword_id'] for row in db.conn.execute(
-            'SELECT a.keyword_id, a.path_json FROM keyword_import_aliases a '
-            'JOIN keywords k ON k.id = a.keyword_id WHERE (? IS NULL OR k.type = ?)',
-            (kw_type, kw_type),
-        ) if keyword_match_key(json.loads(row['path_json'])[-1]) == name
+        row['keyword_id'] for row in db.keyword_merges.alias_paths_of_type(kw_type)
+        if keyword_match_key(json.loads(row['path_json'])[-1]) == name
     }
     if not candidates:
         return None
     candidates.update(
-        row['id'] for row in db.conn.execute(
-            'SELECT id, name FROM keywords WHERE (? IS NULL OR type = ?)', (kw_type, kw_type),
-        ) if keyword_match_key(row['name']) == name
+        row['id'] for row in db.keyword_merges.ids_and_names_of_type(kw_type)
+        if keyword_match_key(row['name']) == name
     )
     if len(candidates) != 1:
         return None
     target_id = candidates.pop()
     if linked_locations_only:
-        target = db.conn.execute('SELECT type, place_id FROM keywords WHERE id = ?', (target_id,)).fetchone()
+        target = db.keyword_merges.type_and_place(target_id)
         if target['type'] != 'location' or target['place_id'] is None:
             return None
     return target_id
@@ -169,24 +157,19 @@ def resolve_merge_target(db, merge):
 def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keywords,
                                  flat_removals, hierarchical_removals):
     """Do not restore a removed tag through an old, still-unsynced alias."""
-    merges = [json.loads(row['value']) for row in db.conn.execute(
-        "SELECT value FROM pending_changes WHERE photo_id = ? AND change_type = 'keyword_merge'", (photo_id,),
-    )]
+    merges = [json.loads(row['value']) for row in db.keyword_merges.pending_merge_values(photo_id)]
     if not flat_removals and not hierarchical_removals and not merges:
         return flat_keywords, hierarchical_keywords
     aliases = {
         row['path_key']: keyword_match_key(row['name'])
-        for row in db.conn.execute(
-            'SELECT a.path_key, k.name FROM keyword_import_aliases a '
-            'JOIN keywords k ON k.id = a.keyword_id'
-        )
+        for row in db.keyword_merges.alias_keys_and_names()
     }
     blocked_paths, blocked_names = set(), set()
     if merges:
-        tagged = db.get_photo_keywords(photo_id)
+        tagged = db.keywords.get_for_photo(photo_id)
         tagged_ids = {k['id'] for k in tagged}
         tagged_names = {keyword_match_key(k['name']) for k in tagged}
-        paths = keyword_paths(db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall())
+        paths = keyword_paths(db.keyword_merges.tree_rows())
         tagged_paths = {path_key(paths[k['id']]) for k in tagged}
         for merge in merges:
             if resolve_merge_target(db, merge) in tagged_ids:
@@ -271,17 +254,14 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
                 targets.add(target)
     if not targets:
         return
-    for row in db.conn.execute(
-        "SELECT k.id, k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
-        "WHERE pk.photo_id = ? AND k.type = 'location' AND k.place_id IS NOT NULL", (photo_id,),
-    ):
+    for row in db.keyword_merges.linked_locations_on_photo(photo_id):
         if additive or keyword_match_key(row['name']) in flat_keys:
             targets.add(row['id'])
     ancestors = set()
     for target in targets:
         seen = {target}
         while target is not None:
-            row = db.conn.execute('SELECT parent_id FROM keywords WHERE id = ?', (target,)).fetchone()
+            row = db.keyword_merges.parent_of(target)
             target = row['parent_id'] if row else None
             if target is None or target in seen:
                 break
@@ -292,10 +272,8 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
 
 
 def grouped_keywords(db):
-    rows = [dict(r) for r in db.get_all_keywords()]
-    identities = {r['id']: r['identity'] for r in db.conn.execute(
-        f'SELECT k.id, {identity_sql()} AS identity FROM keywords k'
-    )}
+    rows = [dict(r) for r in db.keywords.list_all()]
+    identities = {r['id']: r['identity'] for r in db.keyword_merges.identities()}
     paths = keyword_paths(rows)
     groups = defaultdict(list)
     for row in rows:
@@ -304,24 +282,11 @@ def grouped_keywords(db):
 
     # Count the union of each member's subtree, preserving the management
     # page's existing parent counts without summing overlapping photos.
-    counts = {r['identity']: r for r in db.conn.execute(
-        f"""WITH RECURSIVE descendants(identity, id) AS (
-            SELECT {identity_sql()}, k.id FROM keywords k
-            UNION
-            SELECT d.identity, k.id FROM descendants d
-            JOIN keywords k ON k.parent_id = d.id
-        )
-        SELECT d.identity, COUNT(DISTINCT pk.photo_id) AS photo_count,
-               COUNT(DISTINCT CASE WHEN ({identity_sql()}) = d.identity
-                 THEN pk.photo_id END) AS direct_photo_count
-        FROM descendants d JOIN photo_keywords pk ON pk.keyword_id = d.id
-        JOIN keywords k ON k.id = pk.keyword_id
-        JOIN photos p ON p.id = pk.photo_id
-        JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-        WHERE wf.workspace_id = ? GROUP BY d.identity""", (db.require_workspace_id(),),
+    counts = {r['identity']: r for r in db.keyword_merges.identity_photo_counts(
+        db.require_workspace_id(),
     )}
     aliases = defaultdict(list)
-    for row in db.conn.execute('SELECT keyword_id, path_json FROM keyword_import_aliases'):
+    for row in db.keyword_merges.alias_paths():
         aliases[row['keyword_id']].append(json.loads(row['path_json']))
     result = []
     for identity, members in groups.items():
@@ -340,12 +305,10 @@ def grouped_keywords(db):
 
 def location_candidates(db):
     """Preview global effects for visible leaf keywords, never infer a match."""
-    rows = [dict(r) for r in db.conn.execute(
-        'SELECT id, name, parent_id, type, is_species, place_id FROM keywords'
-    )]
+    rows = [dict(r) for r in db.keyword_merges.candidate_rows()]
     paths = keyword_paths(rows)
     by_id = {r['id']: r for r in rows}
-    visible = {r['id'] for r in db.get_keyword_tree()}
+    visible = {r['id'] for r in db.keywords.get_tree()}
     parents = {r['parent_id'] for r in rows}
     children = defaultdict(list)
     for row in rows:
@@ -372,21 +335,8 @@ def location_candidates(db):
                 if descendant not in same_chain:
                     same_chain.add(descendant)
                     descendants.extend(children[descendant])
-            placeholders = ','.join('?' for _ in same_chain)
-            conflicts = db.conn.execute(
-                f"""SELECT COUNT(DISTINCT source.photo_id) FROM photo_keywords source
-                    JOIN photo_keywords other ON other.photo_id = source.photo_id
-                    JOIN keywords k ON k.id = other.keyword_id
-                    WHERE source.keyword_id = ? AND k.type = 'location'
-                      AND k.place_id IS NOT NULL AND k.id NOT IN ({placeholders})""",
-                (source['id'], *sorted(same_chain)),
-            ).fetchone()[0]
-            counts = db.conn.execute(
-                """SELECT COUNT(DISTINCT CASE WHEN keyword_id = ? THEN photo_id END) AS source_count,
-                          COUNT(DISTINCT photo_id) AS combined_count
-                   FROM photo_keywords WHERE keyword_id IN (?, ?)""",
-                (source['id'], source['id'], target['id']),
-            ).fetchone()
+            conflicts = db.keyword_merges.photos_with_rival_places(source['id'], same_chain)
+            counts = db.keyword_merges.pair_photo_counts(source['id'], target['id'])
             if not counts['source_count']:
                 continue
             result.append({
@@ -401,9 +351,9 @@ def location_candidates(db):
 
 def reconcile_location(db, source_id, target_id):
     """Apply one reviewed pair atomically, retaining its import spelling/path."""
-    with db.conn:
+    with db.transaction():
         # Reserve the writer before validating a preview that may be stale.
-        db.conn.execute('UPDATE db_meta SET value = value WHERE 0')
+        db.keyword_merges.reserve_writer()
         candidate = next((c for c in location_candidates(db)
                           if c['source_id'] == source_id and c['target_id'] == target_id), None)
         if candidate is None:
@@ -411,23 +361,15 @@ def reconcile_location(db, source_id, target_id):
         if candidate['conflicting_photo_count']:
             raise ValueError('Some photos already have a different linked place. Resolve those locations before combining.')
         key = path_key(candidate['source_path'])
-        existing = db.conn.execute(
-            'SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?', (key,),
-        ).fetchone()
+        existing = db.keyword_merges.alias_owner(key)
         if existing and existing['keyword_id'] != target_id:
             raise ValueError('This imported path is already linked to a different place.')
-        db.conn.execute(
-            'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
-            (key, json.dumps(candidate['source_path'], ensure_ascii=False), target_id),
+        db.keyword_merges.set_alias(
+            key, json.dumps(candidate['source_path'], ensure_ascii=False), target_id,
         )
         # No children are eligible, so this cannot move an imported subtree.
         # The shared merger preserves provenance, pending edits and history.
-        affected = db.conn.execute(
-            'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-            'WHERE pk.keyword_id = ?', (source_id,),
-        ).fetchall()
+        affected = db.keywords.photo_workspaces_tagged_with(source_id)
         db._merge_keyword_into(source_id, target_id)
         for row in affected:
             db.remove_pending_changes(row['photo_id'], 'location',
@@ -451,9 +393,7 @@ def taxon_identity(db, row):
         return None
     inat = row['source_taxon_id']
     if inat is None and row['taxon_id'] is not None:
-        found = db.conn.execute(
-            'SELECT inat_id FROM taxa WHERE id = ?', (row['taxon_id'],),
-        ).fetchone()
+        found = db.keyword_merges.inat_id_of_taxon(row['taxon_id'])
         inat = found['inat_id'] if found else None
     if inat is not None:
         return f'inat:{inat}'
@@ -686,18 +626,7 @@ def _photos_left_with_rival_places(db, location_change_ids, landing,
     """
     if not location_change_ids:
         return []
-    placeholders = ','.join('?' for _ in location_change_ids)
-    rows = db.conn.execute(
-        f"""WITH touched AS (
-                SELECT DISTINCT photo_id FROM photo_keywords
-                WHERE keyword_id IN ({placeholders})
-            )
-            SELECT pk.photo_id, pk.keyword_id FROM photo_keywords pk
-            JOIN touched t ON t.photo_id = pk.photo_id
-            JOIN keywords k ON k.id = pk.keyword_id
-            WHERE k.type = 'location' OR pk.keyword_id IN ({placeholders})""",
-        [*location_change_ids, *location_change_ids],
-    ).fetchall()
+    rows = db.keyword_merges.location_tags_of_touched_photos(location_change_ids)
     by_photo = defaultdict(set)
     for row in rows:
         landed = _resolve_landing(row['keyword_id'], landing)
@@ -799,15 +728,9 @@ def _label_species_options(db, species_options):
         # would print the OTHER option's species and make the two choices
         # indistinguishable in the dialog.
         if option['source_taxon_id'] is not None:
-            row = db.conn.execute(
-                'SELECT name, common_name FROM taxa WHERE inat_id = ?',
-                (option['source_taxon_id'],),
-            ).fetchone()
+            row = db.keyword_merges.taxon_names_by_inat_id(option['source_taxon_id'])
         elif option['taxon_id'] is not None:
-            row = db.conn.execute(
-                'SELECT name, common_name FROM taxa WHERE id = ?',
-                (option['taxon_id'],),
-            ).fetchone()
+            row = db.keyword_merges.taxon_names(option['taxon_id'])
         else:
             row = None
         option['taxon_name'] = row['name'] if row else None
@@ -1015,17 +938,7 @@ def _plan_merged_tree(db, rows, children, sources, target_id, resolved, paths):
 
 def _merged_photo_tags(db, keyword_ids):
     """Every ``photo_keywords`` row under the selected keywords' subtrees."""
-    placeholders = ','.join('?' for _ in keyword_ids)
-    return [dict(r) for r in db.conn.execute(
-        f'''WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM keywords WHERE id IN ({placeholders})
-                UNION
-                SELECT k.id FROM keywords k JOIN descendants d ON k.parent_id = d.id
-            )
-            SELECT photo_id, keyword_id, source FROM photo_keywords
-            WHERE keyword_id IN (SELECT id FROM descendants)
-            ORDER BY photo_id, keyword_id''', keyword_ids,
-    )]
+    return [dict(r) for r in db.keyword_merges.subtree_tags(keyword_ids)]
 
 
 def _merge_location_change_ids(by_id, rows, surviving, target_id, resolved,
@@ -1145,8 +1058,7 @@ def _ambiguous_merge_alias_keys(db, paths, sources, target_id, path_changes,
     ambiguous_alias_keys = {key for key, dests in planned.items() if len(dests) > 1}
     survivors = {n['id'] for n in surviving}
     for retired_path, destination_id in retiring:
-        alias = db.conn.execute('SELECT keyword_id FROM keyword_import_aliases WHERE path_key = ?',
-                                (path_key(retired_path),)).fetchone()
+        alias = db.keyword_merges.alias_owner(path_key(retired_path))
         if alias is None or alias['keyword_id'] in selected:
             continue
         # An alias already pointing at the row this path will resolve to is
@@ -1163,10 +1075,7 @@ def _describe_merged_children(db, plan, rows, paths, new_paths):
     for entry in plan['children']:
         kid = entry['id']
         subtree = [kid, *_subtree_ids(_child_index(rows), kid)]
-        subtree_counts[kid] = db.conn.execute(
-            'SELECT COUNT(DISTINCT photo_id) FROM photo_keywords WHERE keyword_id IN '
-            f'({",".join("?" for _ in subtree)})', subtree,
-        ).fetchone()[0]
+        subtree_counts[kid] = db.keyword_merges.distinct_photo_count(subtree)
     for entry in plan['children']:
         entry['photo_count'] = subtree_counts[entry['id']]
         entry['from_path'] = paths[entry['id']]
@@ -1188,10 +1097,10 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     """
     overrides = _validated_merge_overrides(keyword_ids, target_id, overrides)
     selected = set(keyword_ids)
-    visible = {r['id'] for r in db.get_keyword_tree()}
+    visible = {r['id'] for r in db.keywords.get_tree()}
     if not selected <= visible:
         raise ValueError('A selected keyword is no longer available in this workspace. Refresh the list.')
-    rows = [dict(r) for r in db.conn.execute('SELECT * FROM keywords ORDER BY id')]
+    rows = [dict(r) for r in db.keyword_merges.all_rows()]
     by_id = {r['id']: r for r in rows}
     paths = keyword_paths(rows)
     target = by_id[target_id]
@@ -1271,8 +1180,8 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
 
 def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
     """Merge a reviewed selection atomically, including pending sidecar edits."""
-    with db.conn:
-        db.conn.execute('UPDATE db_meta SET value = value WHERE 0')
+    with db.transaction():
+        db.keyword_merges.reserve_writer()
         preview = preview_keyword_merge(db, keyword_ids, target_id, overrides)
         if preview['requires_choice']:
             raise ValueError('Choose which linked place or species the combined keyword keeps.')
@@ -1316,21 +1225,16 @@ def _merge_sources_into_target(db, preview, target_id, ambiguous_keys, live_owne
     """
     affected = []
     for source in preview['sources']:
-        affected.extend((dict(r), source) for r in db.conn.execute(
-            'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id WHERE pk.keyword_id = ?',
-            (source['id'],),
-        ))
+        affected.extend((dict(r), source)
+                        for r in db.keywords.photo_workspaces_tagged_with(source['id']))
         # Remember every merged path, including same-name leaves under
         # different parents. Existing sidecars/catalogs can retain that
         # hierarchy even after a flat keyword_add has been synchronized.
         source_key = path_key(source['path'])
         owner = live_owner.get(source_key)
         if source_key not in ambiguous_keys and owner in (None, target_id):
-            db.conn.execute(
-                'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) VALUES (?, ?, ?)',
-                (path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id),
+            db.keyword_merges.set_alias(
+                path_key(source['path']), json.dumps(source['path'], ensure_ascii=False), target_id,
             )
         db._merge_keyword_into(source['id'], target_id, pending_source_only=True)
     return affected
@@ -1349,10 +1253,7 @@ def _queue_merged_photo_changes(db, affected, target_id, resolved,
         if old_name != resolved['name']:
             # Only remove the old flat name if another surviving keyword
             # on this photo does not still need it.
-            still_used = db.conn.execute(
-                'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
-                'WHERE pk.photo_id = ?', (pid,),
-            )
+            still_used = db.keyword_merges.keyword_names_on_photo(pid)
             if not any(keyword_match_key(r['name']) == keyword_match_key(old_name) for r in still_used):
                 db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws, _commit=False)
         db.remove_pending_changes(pid, 'keyword_remove', resolved['name'], workspace_id=ws, _commit=False)
@@ -1372,12 +1273,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
     # photos, so a photo tagged solely with the retained sibling would
     # otherwise keep stale GPS and location metadata in its sidecar.
     for folded_id in preview.get('metadata_folded_ids', []):
-        for row in db.conn.execute(
-            'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-            'WHERE pk.keyword_id = ?', (folded_id,),
-        ).fetchall():
+        for row in db.keywords.photo_workspaces_tagged_with(folded_id):
             db.remove_pending_changes(row['photo_id'], 'location',
                                       workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective',
@@ -1391,12 +1287,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # survivor) still carry that source's vireo location marker,
         # hierarchy and coordinates in their sidecars, and only a
         # ``location`` resync clears them.
-        for row in db.conn.execute(
-            'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id WHERE pk.keyword_id = ?',
-            (target_id,),
-        ).fetchall():
+        for row in db.keywords.photo_workspaces_tagged_with(target_id):
             db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
     if (target['type'] == 'location' and resolved['type'] != 'location'
@@ -1408,12 +1299,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # keyword. The sidecar would lose a word the database still
         # assigns. Same case `api_update_keyword` handles for a plain
         # location->non-location retype.
-        for row in db.conn.execute(
-            'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-            'WHERE pk.keyword_id = ?', (target_id,),
-        ).fetchall():
+        for row in db.keywords.photo_workspaces_tagged_with(target_id):
             db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
                             workspace_id=row['workspace_id'], _commit=False)
     if (target['type'] == 'location') != (resolved['type'] == 'location'):
@@ -1425,22 +1311,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # ``_queue_moved_subtree_changes`` therefore skipped them. Cover
         # photos tagged directly with any location row in the retained
         # subtree here; the block above already handled ``target_id``.
-        for row in db.conn.execute(
-            '''WITH RECURSIVE subtree(id) AS (
-                       SELECT id FROM keywords WHERE parent_id = ?
-                       UNION
-                       SELECT k.id FROM keywords k
-                       JOIN subtree s ON k.parent_id = s.id
-                   )
-                   SELECT DISTINCT pk.photo_id, wf.workspace_id
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE pk.keyword_id IN (SELECT id FROM subtree)
-                     AND k.type = 'location' ''',
-            (target_id,),
-        ).fetchall():
+        for row in db.keyword_merges.location_subtree_photo_workspaces(target_id):
             db.remove_pending_changes(row['photo_id'], 'location',
                                       workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective',
@@ -1462,10 +1333,7 @@ def _apply_merge_overrides(db, target_id, resolved):
     state on disk: a row with a taxon link that ``is_species = 1 OR type =
     'taxonomy'`` no longer matches.
     """
-    current = db.conn.execute(
-        'SELECT name, parent_id, type, place_id, taxon_id, source_taxon_id, '
-        'latitude, longitude, is_species FROM keywords WHERE id = ?', (target_id,),
-    ).fetchone()
+    current = db.keyword_merges.identity_fields(target_id)
     changed = {field: resolved[field] for field in
                ('name', 'parent_id', 'type', 'place_id', 'taxon_id',
                 'source_taxon_id', 'latitude', 'longitude', 'is_species')
@@ -1476,9 +1344,7 @@ def _apply_merge_overrides(db, target_id, resolved):
         # Keep every dependent name string (pending sidecar edits, species
         # curation) in lockstep with the row, exactly as a rename would.
         db._rename_keyword_dependents(target_id, current['name'], changed['name'])
-    assignments = ', '.join(f'{field} = ?' for field in changed)
-    db.conn.execute(f'UPDATE keywords SET {assignments} WHERE id = ?',
-                    [*changed.values(), target_id])
+    db.keyword_merges.set_fields(target_id, changed)
 
 
 
@@ -1519,18 +1385,10 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
     """
     if old_name == new_name:
         return
-    rows = db.conn.execute(
-        'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-        'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-        'WHERE pk.keyword_id = ?', (target_id,),
-    ).fetchall()
+    rows = db.keywords.photo_workspaces_tagged_with(target_id)
     for row in rows:
         pid, ws = row['photo_id'], row['workspace_id']
-        still_used = db.conn.execute(
-            'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
-            'WHERE pk.photo_id = ? AND pk.keyword_id != ?', (pid, target_id),
-        )
+        still_used = db.keyword_merges.other_keyword_names_on_photo(pid, target_id)
         if not any(keyword_match_key(r['name']) == keyword_match_key(old_name)
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', old_name,
@@ -1547,15 +1405,7 @@ def _collapsing_child_tags(db, preview):
                   if child['outcome'] == 'merge'}
     if not collapsing:
         return []
-    placeholders = ','.join('?' for _ in collapsing)
-    rows = db.conn.execute(
-        'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
-        'FROM photo_keywords pk '
-        'JOIN keywords k ON k.id = pk.keyword_id '
-        'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-        f'WHERE pk.keyword_id IN ({placeholders})', list(collapsing),
-    ).fetchall()
+    rows = db.keyword_merges.tag_workspaces_and_types(list(collapsing))
     return [(dict(row), collapsing[row['keyword_id']]) for row in rows]
 
 
@@ -1566,13 +1416,7 @@ def _renamed_child_tags(db, preview):
                if child['outcome'] == 'rename'}
     if not renamed:
         return []
-    placeholders = ','.join('?' for _ in renamed)
-    rows = db.conn.execute(
-        'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id FROM photo_keywords pk '
-        'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-        f'WHERE pk.keyword_id IN ({placeholders})', list(renamed),
-    ).fetchall()
+    rows = db.keyword_merges.tag_workspaces(list(renamed))
     return [(dict(row), renamed[row['keyword_id']]) for row in rows]
 
 
@@ -1589,17 +1433,12 @@ def _queue_disambiguated_child_renames(db, preview, renamed_tags, settings):
         pid, ws = row['photo_id'], row['workspace_id']
         # Another surviving keyword on the photo -- the twin this row was
         # renamed to avoid, typically -- may still need the old flat word.
-        still_used = db.conn.execute(
-            'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id '
-            'WHERE pk.photo_id = ? AND pk.keyword_id != ?', (pid, child['id']),
-        )
+        still_used = db.keyword_merges.other_keyword_names_on_photo(pid, child['id'])
         if not any(keyword_match_key(r['name']) == keyword_match_key(child['name'])
                    for r in still_used):
             db.queue_change(pid, 'keyword_remove_flat', child['name'],
                             workspace_id=ws, _commit=False)
-        keyword_type = db.conn.execute(
-            'SELECT type FROM keywords WHERE id = ?', (child['id'],),
-        ).fetchone()['type']
+        keyword_type = db.keyword_merges.type_of(child['id'])['type']
         _queue_merge_keyword_add(db, pid, ws, child['id'], child['new_name'], keyword_type, settings)
 
 def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_keys,
@@ -1642,23 +1481,14 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_ke
             continue
         if key in ambiguous_keys:
             continue
-        db.conn.execute(
-            'INSERT OR REPLACE INTO keyword_import_aliases(path_key, path_json, keyword_id) '
-            'VALUES (?, ?, ?)',
-            (key, json.dumps(old_path, ensure_ascii=False), destination_id),
+        db.keyword_merges.set_alias(
+            key, json.dumps(old_path, ensure_ascii=False), destination_id,
         )
     surviving = [kid for kid in rewrites if kid not in {c['id'] for _, c in collapsed}]
     rows = []
     if surviving:
-        placeholders = ','.join('?' for _ in surviving)
-        rows = [(dict(r), r['keyword_id']) for r in db.conn.execute(
-            'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id, k.type '
-            'FROM photo_keywords pk '
-            'JOIN keywords k ON k.id = pk.keyword_id '
-            'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
-            f'WHERE pk.keyword_id IN ({placeholders})', surviving,
-        ).fetchall()]
+        rows = [(dict(r), r['keyword_id'])
+                for r in db.keyword_merges.tag_workspaces_and_types(surviving)]
     rows.extend((row, child['id']) for row, child in collapsed)
     for row, kid in rows:
         old_path, new_path, destination_id = rewrites[kid]

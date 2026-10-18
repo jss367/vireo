@@ -514,7 +514,7 @@ def _delete_companion_row(db, primary, companion, photo_rows):
     # user removal survives this pairing. The FK on
     # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
     # a leftover row would also block the ``DELETE FROM photos`` below.
-    db.transfer_embedded_keyword_offered_for_merge(
+    db.keywords.transfer_embedded_offered_keys(
         companion["id"], primary["id"],
     )
     # Transfer effective visibility before cascade deletion removes the

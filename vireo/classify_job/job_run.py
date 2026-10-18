@@ -112,7 +112,7 @@ class _ClassifyJobRun:
             subject_types = thread_db.get_subject_types()
             if subject_types:
                 pre_count = len(photos)
-                kept_ids = set(thread_db.filter_out_subject_tagged(
+                kept_ids = set(thread_db.keywords.filter_out_subject_tagged(
                     [p["id"] for p in photos], subject_types,
                 ))
                 photos = [p for p in photos if p["id"] in kept_ids]

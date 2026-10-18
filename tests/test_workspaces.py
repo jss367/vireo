@@ -801,10 +801,10 @@ def test_count_keywords_scoped_by_workspace(db):
     db.tag_photo(pid_b, k3)
 
     db.set_active_workspace(ws_a)
-    assert db.count_keywords() == 2
+    assert db.keywords.count() == 2
 
     db.set_active_workspace(ws_b)
-    assert db.count_keywords() == 1
+    assert db.keywords.count() == 1
 
 
 def test_count_keywords_empty_workspace(db):
@@ -812,7 +812,7 @@ def test_count_keywords_empty_workspace(db):
     ws = db.create_workspace("Empty")
     db.add_keyword("Robin")  # global keyword, no photos in this workspace
     db.set_active_workspace(ws)
-    assert db.count_keywords() == 0
+    assert db.keywords.count() == 0
 
 
 def test_dashboard_top_keywords_scoped_by_workspace(db):
@@ -867,14 +867,14 @@ def test_keyword_tree_scoped_by_workspace(db):
     db.tag_photo(pid_b, k3)
 
     db.set_active_workspace(ws_a)
-    tree = db.get_keyword_tree()
+    tree = db.keywords.get_tree()
     names = [kw["name"] for kw in tree]
     assert "Robin" in names
     assert "Jay" in names
     assert "Hawk" not in names
 
     db.set_active_workspace(ws_b)
-    tree = db.get_keyword_tree()
+    tree = db.keywords.get_tree()
     names = [kw["name"] for kw in tree]
     assert "Hawk" in names
     assert "Robin" not in names
@@ -886,7 +886,7 @@ def test_keyword_tree_empty_workspace(db):
     ws = db.create_workspace("Empty")
     db.add_keyword("Robin")
     db.set_active_workspace(ws)
-    tree = db.get_keyword_tree()
+    tree = db.keywords.get_tree()
     assert len(tree) == 0
 
 
@@ -973,7 +973,7 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
 
     # Merge in workspace A — should only merge Cardinal pair
     db.set_active_workspace(ws_a)
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
     assert merged == 1  # only Cardinal/cardinal
 
     # Sparrow/sparrow should still exist as two separate keywords
@@ -1152,7 +1152,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     db.queue_change(pid_b, "keyword_add", "apapane")
     db.queue_change(pid_b, "keyword_add", "\u2018apapane")
 
-    db.merge_duplicate_keywords()
+    db.keywords.merge_duplicates()
 
     add_values = sorted(
         (row["photo_id"], row["value"]) for row in db.conn.execute(
@@ -1205,7 +1205,7 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     db.tag_photo(pid_a, quoted)
     db.tag_photo(pid_b, clean)
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
 
     assert merged == 1
     rows = db.conn.execute(
@@ -1281,7 +1281,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     )
     db.conn.commit()
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
 
     assert merged == 1
     # Surviving keyword row was canonicalized to the clean spelling.
@@ -1383,7 +1383,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     )
     db.conn.commit()
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
 
     assert merged == 1
     # Survivor keeps its clean name; the legacy source row was deleted.
@@ -1520,7 +1520,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     )
     db.conn.commit()
 
-    db.merge_duplicate_keywords()
+    db.keywords.merge_duplicates()
 
     # Workspace A's curation and pending change should be canonicalized.
     a_hl = db.conn.execute(
@@ -1583,7 +1583,7 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     db.tag_photo(pid_a, masse_id)
     db.tag_photo(pid_b, masze_id)
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
 
     assert merged == 0
     remaining = {
@@ -1628,7 +1628,7 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     db.tag_photo(pid_a, upper_id)
     db.tag_photo(pid_b, lower_id)
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
 
     assert merged == 0
     remaining = {
@@ -1678,7 +1678,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
     assert merged == 0
 
     assert db.conn.execute(
@@ -1718,7 +1718,7 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     db.tag_photo(pid_species, species_id)
     db.tag_photo(pid_plain, plain_id)
 
-    assert db.merge_duplicate_keywords() == 0
+    assert db.keywords.merge_duplicates() == 0
     rows = db.conn.execute(
         "SELECT id, is_species FROM keywords WHERE id IN (?, ?) ORDER BY id",
         (species_id, plain_id),
@@ -1762,7 +1762,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
     assert merged == 2  # Birds/birds, then Heron/heron once same-parent
 
     birds = db.conn.execute(
@@ -1810,7 +1810,7 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     db.tag_photo(pid1, h1)
     db.tag_photo(pid2, h2)
 
-    merged = db.merge_duplicate_keywords()
+    merged = db.keywords.merge_duplicates()
     assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
 
     herons = db.conn.execute(
@@ -1872,7 +1872,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     db.conn.commit()
 
     # Must not raise; converges to one Birds with one Heron child.
-    db.merge_duplicate_keywords()
+    db.keywords.merge_duplicates()
 
     birds = db.conn.execute(
         "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
@@ -1934,7 +1934,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     db.tag_photo(pid_general, m_general)
     db.tag_photo(pid_genre, m_genre)
 
-    db.merge_duplicate_keywords()
+    db.keywords.merge_duplicates()
 
     # Birds/birds collapsed to one parent.
     birds = db.conn.execute(
@@ -2003,7 +2003,7 @@ def test_keyword_tree_includes_ancestors(db):
     db.tag_photo(pid, hawk)
 
     db.set_active_workspace(ws)
-    tree = db.get_keyword_tree()
+    tree = db.keywords.get_tree()
     names = {kw["name"] for kw in tree}
     assert "Red-tailed Hawk" in names
     assert "Raptors" in names  # ancestor must be included

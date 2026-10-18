@@ -236,7 +236,7 @@ def _record_place_link(db, keyword_id, details, result):
         [],
     )
 
-    photo_rows = db.get_photo_workspaces_with_keyword(result["keyword_id"])
+    photo_rows = db.keywords.photo_workspaces_tagged_with(result["keyword_id"])
     for row in photo_rows:
         queue_location_sync_if_enabled(
             db, row["photo_id"],
@@ -582,7 +582,7 @@ def create_locations_blueprint(
         ``place`` object from Google Maps JS autocomplete. When the client
         does not provide details, looks up the place via
         :func:`places.place_details` and delegates to
-        :meth:`Database.link_keyword_to_place`, which UPDATEs the target row
+        ``db.keyword_provenance.link_keyword_to_place``, which UPDATEs the target row
         in-place — or, if another keyword already owns this ``place_id``,
         re-points the target's ``photo_keywords`` rows onto the canonical row
         and deletes the now-empty target.
@@ -624,7 +624,7 @@ def create_locations_blueprint(
 
         db = get_db()
         try:
-            result = db.link_keyword_to_place(keyword_id, details)
+            result = db.keyword_provenance.link_keyword_to_place(keyword_id, details)
         except ValueError as err:
             # Database raises ValueError both for "missing id" and "wrong
             # type". Distinguish so callers can tell a 404 from a 400.

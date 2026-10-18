@@ -722,7 +722,7 @@ class FolderRepository:
 
         ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``,
         ``transfer_embedded_offered`` is
-        ``Database.transfer_embedded_keyword_offered_for_merge``, and
+        ``KeywordRepository.transfer_embedded_offered_keys``, and
         ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
         all three run inside this transaction. Commits only when ``commit``.
 

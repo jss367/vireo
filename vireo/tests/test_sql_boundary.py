@@ -46,7 +46,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 # listed here may have none. Lower an entry (or delete it at zero) when you
 # move a module's SQL into a repository; never raise one.
 CONN_USE_LIMITS = {
-    "keyword_identity.py": 48,
     "schema.py": 1,
 }
 

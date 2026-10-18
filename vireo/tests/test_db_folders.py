@@ -851,9 +851,9 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     db.conn.commit()
     survivor = _photo(db, target, "bird.jpg")
     dup = _photo(db, source, "bird.jpg")
-    db.record_embedded_keyword_offered(dup, ["robin"])
-    assert db.get_embedded_keyword_offered_keys(dup) == {"robin"}
-    assert db.get_embedded_keyword_offered_keys(survivor) == set()
+    db.keywords.record_embedded_offered_keys(dup, ["robin"])
+    assert db.keywords.embedded_offered_keys(dup) == {"robin"}
+    assert db.keywords.embedded_offered_keys(survivor) == set()
 
     db._merge_into_existing(source, target, str(target_dir))
 
@@ -883,7 +883,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
     phantom = _photo(db, source, "gone.jpg")
-    db.record_embedded_keyword_offered(phantom, ["robin"])
+    db.keywords.record_embedded_offered_keys(phantom, ["robin"])
 
     db._merge_into_existing(source, target, str(target_dir))
 
@@ -923,7 +923,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
         "VALUES (?, ?, NULL)",
         (dup, robin_id),
     )
-    db.record_embedded_keyword_offered(dup, ["robin"])
+    db.keywords.record_embedded_offered_keys(dup, ["robin"])
     db.conn.commit()
 
     db._merge_into_existing(source, target, str(target_dir))
@@ -969,12 +969,12 @@ def test_folder_merge_respects_embedded_keyword_removals(
     _import_embedded_keywords_for_photo(db, duplicate, metadata)
     if removed_on_survivor:
         _import_embedded_keywords_for_photo(db, survivor, metadata)
-        for keyword in db.get_photo_keywords(survivor):
+        for keyword in db.keywords.get_for_photo(survivor):
             db.untag_photo(survivor, keyword["id"])
 
     db._merge_into_existing(source, target, str(target_dir))
 
-    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
 
@@ -1426,8 +1426,7 @@ _FACADE_CALLBACKS = {
     },
     "_merge_into_existing": {
         "transfer_gps_review": "_transfer_gps_review_for_merge",
-        "transfer_embedded_offered": (
-            "transfer_embedded_keyword_offered_for_merge"),
+        "transfer_embedded_offered": "keywords.transfer_embedded_offered_keys",
         "relink_parents_by_path": "_relink_parents_by_path",
     },
     "delete_folder": {
@@ -1441,14 +1440,14 @@ _FACADE_CALLBACKS = {
 
 @pytest.mark.parametrize("name", sorted(_FACADE_CALLBACKS))
 def test_folder_wrapper_passes_facade_methods_as_callbacks(name):
+    # ``self.<method>``, or ``self.<accessor>.<method>`` for a domain accessor.
     passed = {
-        kw.arg: kw.value.attr
+        kw.arg: ast.unparse(kw.value).removeprefix("self.")
         for node in ast.walk(_method_ast(name))
         if isinstance(node, ast.Call)
         for kw in node.keywords
         if isinstance(kw.value, ast.Attribute)
-        and isinstance(kw.value.value, ast.Name)
-        and kw.value.value.id == "self"
+        and ast.unparse(kw.value).startswith("self.")
     }
     for kwarg, facade in _FACADE_CALLBACKS[name].items():
         assert passed.get(kwarg) == facade, (name, kwarg)

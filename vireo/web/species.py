@@ -26,7 +26,7 @@ def create_species_blueprint(get_db):
     @blueprint.route("/api/species")
     def api_species():
         db = get_db()
-        species = db.get_accepted_species()
+        species = db.keywords.get_accepted_species()
         return jsonify({"species": species})
 
     @blueprint.route("/api/species/search")
@@ -69,7 +69,7 @@ def create_species_blueprint(get_db):
 
         # Also search existing species keywords in the database
         db = get_db()
-        for kw_name in db.search_species_keyword_names(q, match_case, whole_word):
+        for kw_name in db.keywords.species_names_matching(q, match_case, whole_word):
             name_key = kw_name.casefold()
             if name_key not in seen:
                 seen.add(name_key)

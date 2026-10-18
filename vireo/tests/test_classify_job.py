@@ -3290,7 +3290,7 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
         "accepting the row Browse labels 'Sparrow' tagged a different "
         "species"
     )
-    names = {k["name"] for k in db.get_photo_keywords(photo_ids[2])}
+    names = {k["name"] for k in db.keywords.get_for_photo(photo_ids[2])}
     assert "Sparrow" in names
     assert "Robin" not in names
 
@@ -4782,7 +4782,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
     mock_db_instance.model_runs.cache_coverage_counts.return_value = (0, 0, 0)
     # Subject-skip gate: with no subject types configured the gate is a no-op.
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
 
@@ -6553,7 +6553,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     # The classify loop uses these to gate-check; empty returns force
@@ -6676,7 +6676,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
@@ -7072,7 +7072,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()

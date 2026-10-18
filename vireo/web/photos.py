@@ -175,7 +175,7 @@ def _unplottable_map_focus(db, photo_id):
     focus["reason"] = "no_coordinates"
     focus["location_keywords"] = [
         {"id": k["id"], "name": k["name"]}
-        for k in db.get_photo_keywords(photo_id)
+        for k in db.keywords.get_for_photo(photo_id)
         if k["type"] == "location"
     ]
     return focus
@@ -1029,13 +1029,13 @@ def create_photos_blueprint(
         else:
             result["metadata"] = None
 
-        keywords = db.get_photo_keywords(photo_id)
+        keywords = db.keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
         # Export naming uses the species-rank keyword list, which is narrower
         # than the detail payload's life-list identifications (that list can
         # also contain genus/family rows). Expose the exact export metadata so
         # editor filename previews agree with the file the worker will write.
-        result["species"] = db.get_species_keywords_for_photos(
+        result["species"] = db.keywords.get_species_for_photos(
             [photo_id]
         ).get(photo_id, [])
 
