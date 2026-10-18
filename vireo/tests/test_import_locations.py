@@ -6,6 +6,7 @@ second, and after cataloging applies only the choices the page sent.
 """
 
 import json
+from types import SimpleNamespace
 
 import places
 import pytest
@@ -612,3 +613,38 @@ def test_cache_rows_record_the_resolver():
     payload = json.loads(encode_cached_reverse_geocode({"place_id": "p"}, "en"))
     assert payload["_vireo_place_resolver"] == REVERSE_GEOCODE_CACHE_RESOLVER
     assert payload["_vireo_result_language"] == "en"
+
+
+def test_picker_labels_are_globally_unique_stable_and_reserve_literal_names():
+    rows = []
+
+    def add(kid, name, parent=None):
+        rows.append({"id": kid, "name": name, "parent_id": parent})
+
+    # The first distinction is deeper than the old three-parent limit.
+    for offset, root_name in [(0, "North"), (10, "South")]:
+        add(offset + 1, "Lake", offset + 2)
+        add(offset + 2, "Region", offset + 3)
+        add(offset + 3, "County", offset + 4)
+        add(offset + 4, "State", offset + 5)
+        add(offset + 5, root_name)
+    # Identical complete ancestry needs stable IDs, even if a literal name
+    # already occupies the first proposed ID-qualified label.
+    add(20, "Exact", 21)
+    add(21, "Root")
+    add(22, "EXACT", 21)
+    add(23, "Exact · Root [#20]")
+    add(24, "Exact · Root (#20)")
+    # Another option's raw name can collide with a breadcrumb.
+    add(30, "Beach", 31)
+    add(31, "City")
+    add(32, "Beach", 33)
+    add(33, "Other")
+    add(34, "Beach · City")
+    db = SimpleNamespace(locations=SimpleNamespace(location_keyword_rows=lambda: rows))
+    first = {o["id"]: o["label"] for o in location_options(db)}
+    assert len({label.casefold() for label in first.values()}) == len(rows)
+    assert first[1].endswith("North") and first[11].endswith("South")
+    assert "20" in first[20] and "22" in first[22]
+    rows.reverse()
+    assert {o["id"]: o["label"] for o in location_options(db)} == first
