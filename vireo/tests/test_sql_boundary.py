@@ -86,7 +86,6 @@ CONN_USE_LIMITS = {
     "subjects.py": 20,
     "sync.py": 5,
     "taxonomy.py": 31,
-    "thumbnails.py": 11,
     "volume_reachability.py": 8,
     "working_copy_cache.py": 9,
 }

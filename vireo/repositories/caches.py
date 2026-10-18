@@ -1,6 +1,9 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-It also reads the "do not adopt this preview" markers in
+It also reconciles ``photos.thumb_path`` (the thumbnail cache's catalog
+column) with the files on disk, for ``thumbnails.backfill_thumb_paths``.
+
+It reads the "do not adopt this preview" markers in
 ``preview_cache_invalidations``; ``preview_cache`` still creates that table
 lazily and writes it.
 
@@ -300,6 +303,26 @@ class CachesRepository:
     def clear_thumbnail_path(self, pid: int) -> None:
         self.conn.execute(
             "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+        )
+
+    def thumbnail_path_rows(self) -> list[sqlite3.Row]:
+        """``(id, thumb_path)`` of every photo, for the thumb_path reconciliation."""
+        return self.conn.execute(
+            "SELECT id, thumb_path FROM photos"
+        ).fetchall()
+
+    def set_thumbnail_paths(self, pairs: Iterable[tuple[str, int]]) -> None:
+        """Set ``thumb_path`` for ``(thumb_path, photo_id)`` pairs; the caller commits."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=? WHERE id=?",
+            pairs,
+        )
+
+    def clear_thumbnail_paths(self, ids: Iterable[tuple[int]]) -> None:
+        """Clear ``thumb_path`` for ``(photo_id,)`` rows; the caller commits."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=NULL WHERE id=?",
+            ids,
         )
 
     def delete_preview_rows(self, removed_preview_rows: Sequence[tuple[int, int]]) -> None:

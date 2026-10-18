@@ -193,6 +193,24 @@ def test_load_scope_commits_only_the_transaction_it_opened(db, tmp_path):
     db.rollback()
 
 
+def test_mark_raw_decode_failed_stamps_the_source_marker_uncommitted(db, tmp_path):
+    fid = db.add_folder(str(tmp_path), name="p")
+    pid = _photo(db, fid, "a.nef", file_mtime=7.5)
+    db.working_copies.mark_raw_decode_failed(pid, 7.5)
+    assert db.in_transaction
+    assert _committed(
+        db, "SELECT working_copy_failed_source FROM photos WHERE id=?", (pid,),
+    )[0] == (None,)
+    db.commit()
+    row = _committed(
+        db,
+        "SELECT working_copy_failed_at IS NOT NULL, working_copy_failed_mtime,"
+        " working_copy_failed_source FROM photos WHERE id=?",
+        (pid,),
+    )[0]
+    assert row == (1, 7.5, "source")
+
+
 # -- structure -------------------------------------------------------------------
 
 

@@ -636,6 +636,27 @@ def test_preview_invalidated_reads_the_marker(db):
     assert db.caches.preview_invalidated(pid, 2560) is False
 
 
+def test_thumbnail_path_writes_stay_in_the_callers_transaction(db):
+    a = _photo(db, "a.jpg")
+    b = _photo(db, "b.jpg")
+    db.set_photo_thumb_path(b, f"{b}.jpg")
+    assert {r["id"]: r["thumb_path"] for r in db.caches.thumbnail_path_rows()} == {
+        a: None, b: f"{b}.jpg",
+    }
+    db.caches.set_thumbnail_paths([(f"{a}.jpg", a)])
+    db.caches.clear_thumbnail_paths([(b,)])
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        committed = dict(reader.execute("SELECT id, thumb_path FROM photos").fetchall())
+        assert committed == {a: None, b: f"{b}.jpg"}
+        db.commit()
+        committed = dict(reader.execute("SELECT id, thumb_path FROM photos").fetchall())
+        assert committed == {a: f"{a}.jpg", b: None}
+    finally:
+        reader.close()
+
+
 # -- structure ----------------------------------------------------------------
 
 
