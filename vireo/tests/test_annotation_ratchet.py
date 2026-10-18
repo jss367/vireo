@@ -28,7 +28,14 @@ def _first_param_is_implicit(node: ast.FunctionDef | ast.AsyncFunctionDef, in_cl
     if not in_class:
         return False
     return not any(
-        isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list
+        (isinstance(d, ast.Name) and d.id == "staticmethod")
+        or (
+            isinstance(d, ast.Attribute)
+            and d.attr == "staticmethod"
+            and isinstance(d.value, ast.Name)
+            and d.value.id == "builtins"
+        )
+        for d in node.decorator_list
     )
 
 
@@ -103,3 +110,17 @@ class C:
         ("C.helper", ["self"]),
         ("C.untyped_kwargs", ["kw"]),
     ]
+
+
+@pytest.mark.parametrize("decorator", ["staticmethod", "builtins.staticmethod"])
+@pytest.mark.parametrize("kind", ["def", "async def"])
+def test_staticmethod_first_parameter_requires_annotation(decorator, kind):
+    source = f"class C:\n    @{decorator}\n    {kind} helper(self, /, value: int) -> None: ...\n"
+    assert missing_annotations(source) == [("C.helper", ["self"])]
+    source = source.replace("helper(self,", "helper(self: object,")
+    assert missing_annotations(source) == []
+
+
+def test_qualified_classmethod_keeps_bound_parameter_exemption():
+    source = "class C:\n    @builtins.classmethod\n    def build(cls, value: int) -> None: ...\n"
+    assert missing_annotations(source) == []
