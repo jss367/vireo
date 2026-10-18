@@ -30,15 +30,15 @@ What deliberately stays on ``Database``:
   ``Database._ws_id`` at exactly the points the original code called it, so a
   method that returns early (``get_life_list_best_photo_by_taxon`` on no ids)
   or canonicalizes a species name first still raises when it always did.
-- Composition. Every façade method a moved body calls arrives bound, under
-  its ``Database`` name, and the body calls it as ``self.<name>(...)``:
-  ``resolve_species_display_name`` and ``get_folder_subtree_ids`` (other
-  domains), and this domain's own entry points that other
-  methods compose with (``get_class_ancestors_for_taxa``,
-  ``_next_species_representative_order``,
-  ``_set_global_species_representative``,
-  ``rename_species_representatives_species``). Monkeypatches of those
-  ``Database`` methods therefore keep taking effect.
+- Composition with other domains. The two façade methods a moved body
+  calls arrive bound, under their ``Database`` names, and the body calls them
+  as ``self.<name>(...)``: ``resolve_species_display_name`` and
+  ``get_folder_subtree_ids``. Monkeypatches of those ``Database`` methods
+  therefore keep taking effect. This domain's own entry points that other
+  methods compose with (``get_class_ancestors``,
+  ``next_representative_order``, ``set_global_representative``,
+  ``rename_representatives``) are called on the repository itself, so a
+  patch of the ``SpeciesCurationRepository`` method reaches them.
 - The methods with no SQL of their own: ``get_life_list_unmatched_species``,
   ``get_species_representatives`` and ``set_species_representative``.
 
@@ -66,7 +66,7 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # ``Robin`` must not become eligible for a photo whose
 # accepted keyword resolves to ``robin``. The taxon-linked
 # fallback below (mirroring
-# :meth:`get_species_representative_lists`) preserves that
+# :meth:`get_representative_lists`) preserves that
 # boundary: it only matches when a photo keyword's
 # ``taxon_id`` links back to a root species keyword whose
 # name equals ``sh.species``, so a photo carrying only
@@ -92,10 +92,10 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # linked taxon has a top-level row) still matches on
 # reload. ``COALESCE`` falls back to the raw prediction
 # spelling whenever the alias has no linked species-rank
-# root, mirroring ``add_species_highlight`` /
+# root, mirroring ``add_highlight`` /
 # ``collect_highlight_buckets``.
 # The accepted-keyword branch mirrors
-# :meth:`get_species_representative_lists`: restrict to
+# :meth:`get_representative_lists`: restrict to
 # species-rank taxonomy rows so a genus/family keyword named
 # identically to a species curation key (e.g. a genus `Puma`
 # row named `Puma`) does not satisfy a species highlight —
@@ -183,7 +183,7 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                      -- ``resolve_species_display_name``'s
                                      -- case 1 — when a single same-name
                                      -- top-level species row exists,
-                                     -- ``add_species_highlight`` stored
+                                     -- ``add_highlight`` stored
                                      -- the highlight under its stored
                                      -- spelling regardless of the
                                      -- caller's casing. Without this
@@ -221,7 +221,7 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                      -- Ambiguity count and the target-leaf
                                      -- restriction here must mirror
                                      -- ``resolve_species_display_name`` — the
-                                     -- canonicalizer ``add_species_highlight``
+                                     -- canonicalizer ``add_highlight``
                                      -- and ``collect_highlight_buckets`` use
                                      -- when writing ``sh.species``. That
                                      -- helper considers all linked hierarchy
@@ -232,7 +232,7 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                      -- species ``Puma`` and genus ``Puma``)
                                      -- would count as 1 here and canonicalize
                                      -- to the species root while
-                                     -- ``add_species_highlight`` kept the raw
+                                     -- ``add_highlight`` kept the raw
                                      -- ``pr.species`` — the eligibility
                                      -- compare below would then drop the
                                      -- highlight on reload.
@@ -301,10 +301,6 @@ class SpeciesCurationRepository:
         life_list_ancestor_suppression_clause,
         resolve_species_display_name,
         get_folder_subtree_ids,
-        get_class_ancestors_for_taxa,
-        next_species_representative_order,
-        set_global_species_representative,
-        rename_species_representatives_species,
     ):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
@@ -316,10 +312,6 @@ class SpeciesCurationRepository:
         # Bound ``Database`` methods, kept under their façade names.
         self.resolve_species_display_name = resolve_species_display_name
         self.get_folder_subtree_ids = get_folder_subtree_ids
-        self.get_class_ancestors_for_taxa = get_class_ancestors_for_taxa
-        self._next_species_representative_order = next_species_representative_order
-        self._set_global_species_representative = set_global_species_representative
-        self.rename_species_representatives_species = rename_species_representatives_species
 
     @property
     def workspace_id(self):
@@ -651,7 +643,7 @@ class SpeciesCurationRepository:
                ORDER BY k.name""",
             (ws,),
         ).fetchall()
-        class_by_taxon = self.get_class_ancestors_for_taxa(
+        class_by_taxon = self.get_class_ancestors(
             [row["taxon_id"] for row in rows]
         )
 
@@ -1090,7 +1082,7 @@ class SpeciesCurationRepository:
         return result
 
     def set_global_representative(self, species, photo_id):
-        order = self._next_species_representative_order()
+        order = self.next_representative_order()
         self.conn.execute(
             """INSERT INTO species_representatives
                    (species, photo_id, selected_order, created_at, updated_at)
@@ -1108,18 +1100,18 @@ class SpeciesCurationRepository:
 
         When ``selected_order`` is None (legacy edit-history payloads
         recorded before this field was captured), assign a fresh order via
-        :meth:`_set_global_species_representative` — preserving the older
+        :meth:`set_global_representative` — preserving the older
         promote-to-newest behavior for those undos. Otherwise write the
         captured order so undoing a relabel of a secondary representative
         does not push it above the pre-existing primary.
         """
         if selected_order is None:
-            self._set_global_species_representative(species, photo_id)
+            self.set_global_representative(species, photo_id)
             return
         try:
             order = int(selected_order)
         except (TypeError, ValueError):
-            self._set_global_species_representative(species, photo_id)
+            self.set_global_representative(species, photo_id)
             return
         self.conn.execute(
             """INSERT INTO species_representatives
@@ -1154,7 +1146,7 @@ class SpeciesCurationRepository:
             (ws, purpose, species, photo_id),
         )
         if purpose in {"species_representative", "life_list", "highlights"}:
-            self._set_global_species_representative(species, photo_id)
+            self.set_global_representative(species, photo_id)
         if _commit:
             self.conn.commit()
 
@@ -1371,7 +1363,7 @@ class SpeciesCurationRepository:
             global_photo_ids = sorted({
                 photo_id for photo_id, _workspace_id in photo_workspace_pairs
             })
-        self.rename_species_representatives_species(
+        self.rename_representatives(
             old_species, new_species, photo_ids=global_photo_ids, _commit=False
         )
         if photo_workspace_pairs is not None:

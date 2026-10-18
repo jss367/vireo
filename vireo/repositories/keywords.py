@@ -911,8 +911,8 @@ class KeywordRepository:
             # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
             # Life List, Compare, and highlight/preference eligibility.
             # Those readers now accept linked higher-rank identifications
-            # (see :meth:`get_life_list_candidates` and
-            # :meth:`get_life_list_locations`), so clearing here would
+            # (see :meth:`species_curation.get_life_list_candidates` and
+            # :meth:`species_curation.get_life_list_locations`), so clearing here would
             # strip the row's ``taxon_rank`` / ``scientific_name`` /
             # ``taxonomic_class`` metadata and silently break the new
             # genus / family / class Life List filters — mirroring the
@@ -2025,7 +2025,7 @@ class KeywordRepository:
         for candidate in candidates:
             ancestors = set()
             cursor = candidate["parent_id"]
-            # Depth cap mirrors ``get_class_ancestors_for_taxa`` and guards
+            # Depth cap mirrors ``species_curation.get_class_ancestors`` and guards
             # against pathological cyclic parent_id data.
             for _ in range(12):
                 if cursor is None:
@@ -2069,7 +2069,7 @@ class KeywordRepository:
         to a non-species-rank taxon (genus/family) is rebound to the
         species-rank taxon whenever ``taxonomy.lookup`` resolves to one;
         when no species-rank replacement exists, the higher-rank link is
-        preserved so ``get_life_list_candidates`` can keep surfacing the
+        preserved so ``species_curation.get_life_list_candidates`` can keep surfacing the
         row's ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class``
         metadata for genus/family/class Life List filters.
 
@@ -2213,8 +2213,8 @@ class KeywordRepository:
         # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
         # Life List, Compare, and highlight/preference eligibility.
         # Those readers now accept linked higher-rank identifications
-        # (see :meth:`get_life_list_candidates` and
-        # :meth:`get_life_list_locations`), so clearing on startup
+        # (see :meth:`species_curation.get_life_list_candidates` and
+        # :meth:`species_curation.get_life_list_locations`), so clearing on startup
         # would strip the row's ``taxon_rank`` / ``scientific_name`` /
         # ``taxonomic_class`` metadata and silently break the new
         # genus / family / class Life List filters after the first

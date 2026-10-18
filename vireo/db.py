@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
     from repositories.source_cleanup import SourceCleanupRepository
+    from repositories.species_curation import SpeciesCurationRepository
     from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
     from repositories.stats import StatsRepository
     from repositories.subjects import SubjectsRepository
@@ -2246,10 +2247,9 @@ class Database:
         The active workspace is resolved lazily (``Database._ws_id`` is
         passed as a resolver), so methods that return early or canonicalize
         a species name first still raise at the point they always did. The
-        façade methods the moved bodies call (species-name resolution,
-        folder subtrees, ``set_meta``, and this domain's own public methods
-        that other code composes with) are handed over bound, so
-        monkeypatches of ``Database`` keep reaching the moved code.
+        two façade methods from other domains that the moved bodies call
+        (species-name resolution and folder subtrees) are handed over bound,
+        so monkeypatches of ``Database`` keep reaching the moved code.
         """
         from repositories.species_curation import SpeciesCurationRepository
 
@@ -2262,20 +2262,21 @@ class Database:
             ),
             resolve_species_display_name=self.resolve_species_display_name,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            get_class_ancestors_for_taxa=self.get_class_ancestors_for_taxa,
-            next_species_representative_order=(
-                self._next_species_representative_order
-            ),
-            set_global_species_representative=(
-                self._set_global_species_representative
-            ),
-            rename_species_representatives_species=(
-                self.rename_species_representatives_species
-            ),
         )
 
-    def _next_species_representative_order(self):
-        return self._species_curation_repository().next_representative_order()
+    @property
+    def species_curation(self) -> SpeciesCurationRepository:
+        """Species curation: ``db.species_curation.get_highlights(...)`` and friends.
+
+        Highlights ordering, the global representative photos, the
+        per-workspace photo preferences and the Life List / taxonomy-explorer
+        reads. A domain accessor, not a cached attribute: every access builds
+        a fresh repository through ``_species_curation_repository``, exactly
+        as a forwarding wrapper called at that moment would. Accessing it
+        never needs a workspace; the workspace-scoped methods resolve the
+        active one when they run (raising ``RuntimeError`` when none is set).
+        """
+        return self._species_curation_repository()
 
     # -- Reference taxonomy (``taxonomy.py`` loaders own the commits) --
 
@@ -6250,290 +6251,22 @@ class Database:
             photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
         )
 
-    def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
-        """Return photos eligible for highlights selection.
-
-        When ``folder_id`` is an int, returns photos in that folder and its
-        descendant folders. When ``folder_id`` is ``None``, returns photos
-        across every folder visible in the active workspace. When
-        ``photo_id`` is set, the result is additionally restricted to that
-        single photo so the photo-detail endpoint can compute its highlight
-        eligibility without rebuilding every workspace bucket.
-
-        Each row carries:
-          * ``species`` — accepted species keyword (NULL if none accepted)
-          * ``prediction_id`` / ``predicted_species`` /
-            ``predicted_confidence`` — top-confidence non-rejected prediction
-            across the photo's detections (NULL if no usable prediction
-            exists)
-
-        Photos with ``quality_score >= min_quality`` that are not
-        user-rejected are returned. When ``min_quality <= 0`` (the default),
-        photos with no ``quality_score`` yet (not analyzed) are also included
-        so picks and other unscored photos still surface on the Highlights
-        page; raising the quality floor above 0 excludes them, since they have
-        no measured quality to compare. The API layer applies the final
-        highlights ranking because it combines these persisted quality fields
-        with prediction confidence and user ratings.
-        """
-        return self._species_curation_repository().get_highlights_candidates(
-            folder_id, min_quality=min_quality, photo_id=photo_id,
-        )
-
-    def get_life_list_candidates(self, species=None):
-        """Return (photo x accepted-identification-keyword) life-list rows.
-
-        Every non-rejected photo in a workspace-visible folder carrying an
-        accepted identification keyword (``is_species = 1`` or
-        ``type = 'taxonomy'``) produces one row per keyword. Taxonomy names
-        and ranks ride along from ``taxa`` when the keyword is linked. Linked
-        higher-rank identifications are included so the Life List can show and
-        filter genus-, family-, and other non-species-level observations; the
-        Explorer continues to count only species-rank taxa through
-        :meth:`get_life_list_taxon_ids`.
-
-        A linked higher-rank taxonomy keyword is suppressed when the same
-        photo carries another linked taxonomy keyword whose taxon is a
-        strict descendant of it, so a species-tagged robin also carrying
-        Lightroom-imported ``includeParents`` ancestors (``Turdus`` /
-        ``Turdidae`` / ``Aves``) or classifier-added broader labels does
-        not inflate every ancestor rank's Life List bucket. See
-        :data:`_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE` for the shared
-        SQL fragment.
-
-        Unlike :meth:`get_highlights_candidates`, photos without a
-        ``quality_score`` are included — a species the user confirmed but
-        never ran through the pipeline still belongs on the life list. The
-        API layer ranks each species' photos with the highlights scorer,
-        which falls back gracefully when metric columns are NULL.
-
-        When ``species`` is provided, return the bucket for that species.
-        A photo's surviving hierarchy leaf can have a different stored
-        spelling from the canonical root keyword (``verdin`` vs
-        ``Verdin``) after the retired duplicate-species repair detached the
-        redundant root row, but curation stays keyed on the root spelling
-        — so the filter also accepts any keyword whose ``taxon_id`` links
-        back to a root species keyword named ``species``. Otherwise
-        ``/api/life-list/species?species=Verdin`` would 404 for photos
-        whose only remaining tag is the hierarchy leaf.
-        """
-        return self._species_curation_repository().get_life_list_candidates(species=species)
-
-    def get_explorer_root(self, name="Aves", rank="class"):
-        """Return {id,name,common_name,rank} for the default explorer root class,
-        or None when the reference taxonomy has not been downloaded."""
-        return self._species_curation_repository().get_explorer_root(name=name, rank=rank)
-
-    def get_life_list_taxon_ids(self):
-        """Distinct species-rank taxa ids of workspace-scoped tagged species (same
-        eligibility as get_life_list_candidates). Excludes species keywords with no
-        taxon_id AND taxonomy tags that resolve to a taxon above species rank
-        (genus, family, etc.). Higher-rank matches are surfaced via
-        get_life_list_unmatched_species so the explorer's found/total math stays
-        at species rank and non-species tags aren't silently undercounted."""
-        return self._species_curation_repository().get_life_list_taxon_ids()
-
-    def get_life_list_uncounted_identifications(self):
-        """Workspace identifications that cannot contribute a species count.
-
-        Return dictionaries with the stored label, linked rank/taxon (when
-        available), class ancestor, reason, and affected-photo count. The same
-        per-photo ancestor suppression used by the Life List itself is applied
-        here: an imported family/order keyword is not reported when that photo
-        also carries a descendant identification. If at least one photo carries
-        only the broader label, that label remains in the result with a count of
-        the photos for which it is genuinely the most specific identification.
-        """
-        return self._species_curation_repository().get_life_list_uncounted_identifications()
-
     def get_life_list_unmatched_species(self):
         """Backward-compatible list of uncounted identification names."""
         return [
             row["name"]
-            for row in self.get_life_list_uncounted_identifications()
+            for row in self.species_curation.get_life_list_uncounted_identifications()
         ]
-
-    def get_taxon_subtree(self, root_id, max_depth=12):
-        """All taxa in the subtree rooted at root_id (inclusive), as dict rows
-        with id, name, common_name, rank, parent_id. Uses the parent_id index."""
-        return self._species_curation_repository().get_taxon_subtree(root_id, max_depth=max_depth)
-
-    def get_classes_for_taxa(self, taxon_ids):
-        """Distinct class-rank ancestors of the given taxa, for the explorer's
-        class selector. Returns [{id,name,common_name}] ordered by name.
-
-        Callers pass the full life-list `found` set, which can exceed SQLite's
-        bound-parameter limit on large life lists — chunk the seed IDs and
-        merge the distinct classes across chunks so the endpoint doesn't 500.
-        """
-        return self._species_curation_repository().get_classes_for_taxa(taxon_ids)
-
-    def get_class_ancestors_for_taxa(self, taxon_ids):
-        """Map each taxon id to its class-rank ancestor.
-
-        Life List entries can be linked at any major rank, so preserve the
-        starting taxon id while walking toward the root.  The depth cap mirrors
-        :meth:`get_taxon_subtree` and also prevents malformed cyclic taxonomy
-        data from making the recursive query run forever.
-        """
-        return self._species_curation_repository().get_class_ancestors(taxon_ids)
-
-    def get_life_list_best_photo_by_taxon(self, taxon_ids):
-        """Map taxon_id -> {id, filename} of a representative (highest quality_score,
-        newest) workspace-scoped photo for that species. Missing taxa are absent."""
-        return self._species_curation_repository().get_life_list_best_photo_by_taxon(taxon_ids)
-
-    def get_taxon_by_id(self, taxon_id):
-        """Thin getter for a single taxon row (for non-default explorer roots)."""
-        return self._species_curation_repository().get_taxon_by_id(taxon_id)
-
-    def get_photo_life_list_species(self, photo_id):
-        """Return this photo's lifelist-eligible identification names in the
-        active workspace, ordered by name.
-
-        Same eligibility rule as :meth:`get_life_list_candidates`: an accepted
-        identification keyword (``is_species = 1`` or ``type = 'taxonomy'``)
-        on a non-rejected photo in a workspace-visible folder. Returns ``[]``
-        when the photo carries no such identification (or is rejected /
-        outside the workspace), which is exactly when no "Set Representative"
-        affordance should appear. Linked higher-rank taxonomy identifications
-        (genus, family, class, …) are included for the same reason they are
-        in :meth:`get_life_list_candidates` — so a photo tagged only with a
-        higher-rank identification exposes the shared representative row and
-        can complete ``POST /api/photo-preferences`` for the entry it
-        actually appears under on the Life List.
-
-        Ancestor suppression mirrors :meth:`get_life_list_candidates`: a
-        linked higher-rank taxonomy keyword on the photo is hidden when
-        the photo also carries another linked taxonomy keyword whose
-        taxon is a strict descendant of it, so the shared Set
-        Representative row surfaces only under the specific
-        identification the photo actually resolves to.
-
-        Linked-taxon hierarchy leaves are canonicalized to the same-taxon
-        root keyword's stored spelling — mirroring
-        :meth:`get_species_keywords_for_photos` — so ``api_photo_detail`` can
-        still match returned names against
-        ``species_representative_lists``/``species_highlights``, which key on
-        the canonical root. Without this, a photo whose only surviving species
-        tag is a differently-spelled hierarchy leaf (``verdin`` after repair
-        detached the ``Verdin`` root) would fail those lookups and the
-        lightbox/context menu would offer to set it as representative again.
-
-        Attached top-level rows keep their own stored spelling. When a photo
-        carries a root alias such as ``Auriparus flaviceps`` and another root
-        ``Verdin`` exists for the same taxon, curation writes preserve exact
-        root-name matches, so rewriting the attached alias to an arbitrarily
-        first same-taxon root would make representative/highlight state keyed
-        to the actually attached name appear missing.
-
-        Dedup identity mirrors :meth:`get_species_keywords_for_photos`:
-        linked rows collapse by ``taxon_id`` and NULL-taxon rows key on
-        the exact stored name. Two distinct linked homonyms (``Robin`` /
-        ``robin`` pointing at different taxa) or preserved NULL-taxon case
-        variants (root ``Foo`` alongside hierarchy leaf ``foo``) would
-        otherwise collapse under an ASCII case-fold match key and hide
-        one from ``api_photo_detail`` even though its keyword remains
-        attached and its curation is keyed by the exact stored name.
-        """
-        return self._species_curation_repository().get_photo_life_list_species(photo_id)
-
-    def get_life_list_locations(self, species=None):
-        """Return {identification name: [location keyword names]} for the life list.
-
-        A location is attributed to an identification when at least one
-        workspace-visible, non-rejected photo carries both the
-        identification keyword and a ``type = 'location'`` keyword.
-        Higher-rank taxonomy identifications (genus, family, class, …) are
-        eligible here for the same reason they are in
-        :meth:`get_life_list_candidates` — so a genus-level entry rendered
-        on the Life List keeps its location chips and CSV values instead of
-        appearing with an empty ``locations`` list.
-
-        When ``species`` is given, only that identification is scanned —
-        used by the single-identification paging endpoint so incremental
-        loads don't do catalog-wide work. Matching mirrors
-        :meth:`get_life_list_candidates`: raw ``k.name`` first, then a
-        taxon-linked root fallback so a hierarchy leaf surviving repair
-        (``verdin`` vs canonical root ``Verdin``) still contributes its
-        location keywords to the requested bucket.
-
-        Ancestor suppression also mirrors :meth:`get_life_list_candidates`:
-        a linked higher-rank taxonomy keyword's locations are dropped
-        when the same photo carries another linked taxonomy keyword whose
-        taxon is a strict descendant of it, so ``Aves`` doesn't inherit
-        every location where a robin was tagged.
-        """
-        return self._species_curation_repository().get_life_list_locations(species=species)
-
-    def get_photo_preferences(self, purpose):
-        """Return {species: photo_id} preferences for the active workspace."""
-        return self._species_curation_repository().get_photo_preferences(purpose)
-
-    def get_species_representative_lists(self, eligible_only=False, species=None):
-        """Return {species: [photo_id, ...]} representative photos.
-
-        Representative markings are global, but this read is still scoped to
-        the active workspace's folders. Life List callers still apply these
-        rows only to actual species buckets, so a representative row alone
-        does not make an untagged species appear on the list. Lists are
-        newest-selection first, so item 0 is the main representative.
-
-        When ``eligible_only`` is true, omit preferences whose photo is
-        rejected, unavailable, or no longer carries the stored species keyword.
-        The preference row remains intact for undo.
-
-        When ``species`` is given, only return rows for that species — used
-        by the single-species Life List paging endpoint so incremental
-        loads don't scan every species' representatives.
-        """
-        return self._species_curation_repository().get_representative_lists(
-            eligible_only=eligible_only, species=species,
-        )
 
     def get_species_representatives(self, eligible_only=False):
         """Return {species: main_photo_id} for compatibility callers."""
         return {
             species: photo_ids[0]
-            for species, photo_ids in self.get_species_representative_lists(
+            for species, photo_ids in self.species_curation.get_representative_lists(
                 eligible_only=eligible_only
             ).items()
             if photo_ids
         }
-
-    def _set_global_species_representative(self, species, photo_id):
-        return self._species_curation_repository().set_global_representative(species, photo_id)
-
-    def _restore_species_representative(
-        self, species, photo_id, selected_order=None,
-    ):
-        """Restore a global species_representatives row on undo.
-
-        When ``selected_order`` is None (legacy edit-history payloads
-        recorded before this field was captured), assign a fresh order via
-        :meth:`_set_global_species_representative` — preserving the older
-        promote-to-newest behavior for those undos. Otherwise write the
-        captured order so undoing a relabel of a secondary representative
-        does not push it above the pre-existing primary.
-        """
-        return self._species_curation_repository().restore_representative(
-            species, photo_id, selected_order=selected_order,
-        )
-
-    def set_photo_preference(self, purpose, species, photo_id, _commit=True):
-        """Set the preferred photo for a species/purpose in this workspace.
-
-        ``species`` is canonicalized to the spelling ``add_keyword`` would
-        store (existing keyword row first, casing convention otherwise), so
-        curation keys written from prediction-cased bucket labels — e.g.
-        starring a photo in an unconfirmed ``Common Waxbill`` bucket — land
-        on the same key the keyword row will use once the species is
-        accepted. The eligible highlight/life-list queries compare these
-        strings exact against ``keywords.name``.
-        """
-        return self._species_curation_repository().set_photo_preference(
-            purpose, species, photo_id, _commit=_commit,
-        )
 
     def set_species_representative(self, species, photo_id, _commit=True):
         """Mark a photo as a representative for a species globally.
@@ -6543,67 +6276,8 @@ class Database:
         A compatibility ``photo_preferences`` row is kept for older callers
         that still expect one main representative in the active workspace.
         """
-        self.set_photo_preference(
+        self.species_curation.set_photo_preference(
             "species_representative", species, photo_id, _commit=_commit
-        )
-
-    def clear_photo_preference(self, purpose, species, _commit=True):
-        """Clear the preferred photo for a species/purpose in this workspace."""
-        return self._species_curation_repository().clear_photo_preference(
-            purpose, species, _commit=_commit,
-        )
-
-    def clear_species_representative(self, species, _commit=True):
-        """Clear all representative photos for a species globally."""
-        return self._species_curation_repository().clear_representative(species, _commit=_commit)
-
-    def get_species_highlights(self, species=None, eligible_only=False):
-        """Return ordered highlighted photo ids for the active workspace.
-
-        When ``eligible_only`` is true, omit rejected photos and photos that
-        are no longer eligible for the Highlights page. Stored rows are kept
-        intact so un-rejecting a photo restores its selection.
-
-        Eligibility mirrors :meth:`get_highlights_candidates` at the default
-        quality floor: not-yet-analyzed (``quality_score IS NULL``) photos
-        stay eligible, because they now appear on the Highlights page and can
-        be saved as highlights. Filtering them out here would silently drop a
-        highlight the user just chose until analysis ran.
-
-        Result shape is ``{species: {photo_id: rank}}``.
-        """
-        return self._species_curation_repository().get_highlights(
-            species=species, eligible_only=eligible_only,
-        )
-
-    def add_species_highlight(self, species, photo_id, _commit=True):
-        """Add a photo to a species' ordered highlights, appending if new.
-
-        ``species`` is canonicalized to the spelling ``add_keyword`` would
-        store (see :meth:`set_photo_preference`) so highlight rows written
-        from prediction-cased bucket labels key on the same string the
-        keyword row and eligibility queries use.
-        """
-        return self._species_curation_repository().add_highlight(
-            species, photo_id, _commit=_commit,
-        )
-
-    def promote_species_highlight(self, species, photo_id, _commit=True):
-        """Add a photo to a species' ordered highlights at rank 1."""
-        return self._species_curation_repository().promote_highlight(
-            species, photo_id, _commit=_commit,
-        )
-
-    def remove_species_highlight(self, species, photo_id, _commit=True):
-        """Remove a photo from a species' ordered highlights."""
-        return self._species_curation_repository().remove_highlight(
-            species, photo_id, _commit=_commit,
-        )
-
-    def move_species_highlight(self, species, photo_id, direction, _commit=True):
-        """Move a highlighted photo one step up/down within its species."""
-        return self._species_curation_repository().move_highlight(
-            species, photo_id, direction, _commit=_commit,
         )
 
     def rename_photo_preferences_species(
@@ -6612,18 +6286,6 @@ class Database:
         """Rename stored representative-photo preferences across workspaces."""
         return self._species_curation_repository().rename_photo_preferences(
             old_species, new_species, photo_workspace_pairs=photo_workspace_pairs, _commit=_commit,
-        )
-
-    def rename_species_representatives_species(
-        self, old_species, new_species, photo_ids=None, _commit=True,
-    ):
-        """Rename global representative rows for a species.
-
-        ``photo_ids`` limits the rename to selected photos, used by relabel
-        operations that only retag a subset of a species bucket.
-        """
-        return self._species_curation_repository().rename_representatives(
-            old_species, new_species, photo_ids=photo_ids, _commit=_commit,
         )
 
     def rename_species_highlights_species(
@@ -6656,39 +6318,6 @@ class Database:
     # Reads the Highlights relabel snapshots before it moves any curation.
     # None of them commits.
 
-    def get_species_highlight_rows_for_photos(self, photo_ids):
-        """Rows (``species``, ``photo_id``, ``rank``) of the active workspace's
-        ordered highlights on ``photo_ids``."""
-        return self._species_curation_repository().highlight_rows_for_photos(photo_ids)
-
-    def get_photo_preference_purposes_for_species(self, species):
-        """Representative-style purposes the active workspace has a
-        preference row for under ``species``."""
-        return self._species_curation_repository().preference_purposes_for_species(species)
-
-    def get_photo_preference_rows_for_photos(self, photo_ids):
-        """Rows (``species``, ``photo_id``, ``purpose``) of the active
-        workspace's representative-style preferences on ``photo_ids``."""
-        return self._species_curation_repository().preference_rows_for_photos(photo_ids)
-
-    def get_representative_photo_ids_for_species(self, species, photo_ids):
-        """Which of ``photo_ids`` are a representative of ``species``."""
-        return self._species_curation_repository().representative_photo_ids_for_species(
-            species, photo_ids,
-        )
-
-    def get_species_representative_rows_for_photos(self, photo_ids):
-        """Rows (``species``, ``photo_id``, ``selected_order``) of every
-        representative on ``photo_ids``."""
-        return self._species_curation_repository().representative_rows_for_photos(photo_ids)
-
-    def is_photo_life_list_preference_eligible(self, species, photo_id):
-        """Whether ``photo_id`` may hold the life-list representative for
-        ``species`` in the active workspace."""
-        return self._species_curation_repository().photo_is_life_list_preference_eligible(
-            species, photo_id,
-        )
-
     def get_folders_with_quality_data(self):
         """Return folders with at least one scored photo in their subtree.
 
@@ -6696,7 +6325,7 @@ class Database:
         ``photo_count`` is the count of scored photos across the folder and
         all of its descendant folders (restricted to folders whose ``status``
         is ``'ok'``) — matching the subtree scope of
-        :meth:`get_highlights_candidates`.
+        :meth:`species_curation.get_highlights_candidates`.
         """
         return self._folder_repository().with_quality_data()
 
@@ -7987,7 +7616,7 @@ class Database:
         resolve it. ``_NON_UNDOABLE`` is read here, at build time, so the
         undo/redo cursor reads skip the same action types the façade does,
         and the relabel-curation restores receive
-        ``_restore_species_representative`` as their callback.
+        ``species_curation.restore_representative`` as their callback.
         """
         from repositories.edit_history import EditHistoryRepository
 
@@ -7995,7 +7624,7 @@ class Database:
             self.conn,
             self._ws_id,
             non_undoable=self._NON_UNDOABLE,
-            restore_species_representative=self._restore_species_representative,
+            restore_species_representative=self.species_curation.restore_representative,
         )
 
     @property
