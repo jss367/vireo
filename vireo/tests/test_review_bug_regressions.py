@@ -216,14 +216,16 @@ def test_duplicate_keyword_suggestion_keeps_earliest_variant(app_and_db):
 
 def test_collection_update_reports_concurrent_deletion(app_and_db, monkeypatch):
     app, db = app_and_db
-    cid = db.add_collection("Birds", "[]")
-    original = Database.update_collection
+    cid = db.collections.add("Birds", "[]")
+    from repositories.collections import CollectionRepository
+
+    original = CollectionRepository.update
 
     def delete_then_update(self, collection_id, **kwargs):
-        db.delete_collection(collection_id)
+        db.collections.delete(collection_id)
         return original(self, collection_id, **kwargs)
 
-    monkeypatch.setattr(Database, "update_collection", delete_then_update)
+    monkeypatch.setattr(CollectionRepository, "update", delete_then_update)
     response = app.test_client().put(f"/api/collections/{cid}", json={"name": "Wildlife"})
     assert response.status_code == 404
 

@@ -708,7 +708,7 @@ def _skip_when_no_wildlife(
 ) -> bool:
     """Skip the stage when every collection photo is marked not wildlife."""
     candidate_photos = _filter_excluded(
-        thread_db.get_collection_photos(collection_id, per_page=999999)
+        thread_db.collections.get_photos(collection_id, per_page=999999)
     )
     photo_ids = [p["id"] for p in candidate_photos]
     candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)

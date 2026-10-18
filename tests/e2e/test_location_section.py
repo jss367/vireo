@@ -527,10 +527,10 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     db = live_server["db"]
     collection_id = next(
         c["id"]
-        for c in db.get_collections()
+        for c in db.collections.list_all()
         if c["name"] == "GPS Without Location Keyword"
     )
-    assert db.count_collection_photos(collection_id) == 3
+    assert db.collections.count_photos(collection_id) == 3
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
@@ -561,7 +561,7 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
         ).fetchone()
         assert row is not None
         expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
-    assert db.count_collection_photos(collection_id) == 0
+    assert db.collections.count_photos(collection_id) == 0
 
 
 def test_exif_suggestion_clears_when_anchor_leaves_selection(
@@ -1699,10 +1699,10 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     db = live_server["db"]
     collection_id = next(
         c["id"]
-        for c in db.get_collections()
+        for c in db.collections.list_all()
         if c["name"] == "GPS Without Location Keyword"
     )
-    assert db.count_collection_photos(collection_id) == 3
+    assert db.collections.count_photos(collection_id) == 3
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
@@ -1734,7 +1734,7 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
         ).fetchone()
         assert row["name"] == "the meadow"
         expect(page.locator(f".grid-card[data-id='{photo_id}']")).to_have_count(0)
-    assert db.count_collection_photos(collection_id) == 0
+    assert db.collections.count_photos(collection_id) == 0
 
 
 def test_location_applies_to_selection_larger_than_batch_cap(live_server, page):

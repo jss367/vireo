@@ -42,7 +42,7 @@ def test_api_v1_collection_photos(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     photo_id = db.get_photos()[0]["id"]
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Picked", json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     )
     resp = client.get(f"/api/v1/collections/{cid}/photos", headers=_auth(app))
