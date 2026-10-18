@@ -2452,47 +2452,11 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             "developed output path is not a directory: "
             f"{blocked_developed}",
         )
-    total = len(photo_ids)
-    move = _PhotoMove(db, destination, developed_dir, developed_listing_cache)
-    move.keep_visible = keep_visible
-    move.ensure_destination_folder()
-    move.load_destination_stem_origins()
-    move.load_source_stem_counts(photo_ids)
-
-    try:
-        for i, pid in enumerate(photo_ids):
-            if pause_requested and pause_requested():
-                db.update_folder_counts()
-                if pause_callback:
-                    pause_callback()
-            if cancel_check and cancel_check():
-                break
-            item = move.check_photo(pid)
-            if item is None:
-                continue
-            if move.is_already_in_place(item):
-                if progress_cb:
-                    progress_cb(i + 1, total, item.photo["filename"])
-                continue
-            if not move.copy_files(item):
-                continue
-            move.update_catalog(item)
-            move.relocate_developed(item)
-            move.remove_originals(item)
-
-            move.moved += 1
-
-            if progress_cb:
-                progress_cb(i + 1, total, item.photo["filename"])
-    finally:
-        # Always update folder counts so they stay consistent even if an
-        # exception interrupts the move loop after some photos were committed.
-        if move.moved > 0:
-            db.update_folder_counts()
-
-    return {"moved": move.moved, "already_in_place": move.already_in_place,
-            "errors": move.errors,
-            "destination_folder_id": move.dest_folder_id}
+    move = _PhotoMove(db, destination, developed_dir, developed_listing_cache,
+                      keep_visible)
+    move.prepare(photo_ids)
+    return move.run(photo_ids, progress_cb, cancel_check, pause_requested,
+                    pause_callback)
 
 
 # ``destination_stem_origins.get`` default for a stem no destination row holds.
@@ -2516,25 +2480,112 @@ class _PhotoToMove:
 
 
 class _PhotoMove:
-    """Run-wide state for one ``move_photos`` call.
+    """Coordinate one ``move_photos`` call.
 
-    Each pre-copy check records its error and returns None/False so
-    ``move_photos`` skips to the next photo. The phases from the catalog
-    update on never skip.
+    The per-photo phases live on collaborators, each owning only the state
+    it writes:
+
+      stems     (``_StemLedger``) — the destination render-stem provenance
+        and the per-source-folder stem counts;
+      catalog   (``_PhotoCatalogRewrite``) — the destination folder row, the
+        workspace link and repointing each photo's row;
+      preflight (``_PhotoPreflight``) — the photo lookup and every pre-copy
+        refusal; built by ``prepare`` once the destination row exists;
+      files     (``_PhotoFileTransfer``) — copying and verifying each photo
+        and its companions, and deleting the originals;
+      renders   (``_DevelopedRenders``) — rebasing developed outputs.
+
+    Each pre-copy check records its error and returns None/False so ``run``
+    skips to the next photo. The phases from the catalog update on never
+    skip.
     """
 
-    def __init__(self, db, destination, developed_dir, developed_listing_cache):
+    def __init__(self, db, destination, developed_dir, developed_listing_cache,
+                 keep_visible):
         self.db = db
         self.destination = destination
         self.developed_dir = developed_dir
-        self.developed_listing_cache = developed_listing_cache
         self.moved = 0
-        self.already_in_place = 0
-        self.in_place_folders = {}
         self.errors = []
-        self.managed_default_developed = {}
-        self.copied_xmp_companions = set()
+        self.stems = _StemLedger(db, destination, developed_dir)
+        self.catalog = _PhotoCatalogRewrite(db, destination, self.stems,
+                                            keep_visible)
+        self.files = _PhotoFileTransfer(destination, self.errors)
+        self.renders = _DevelopedRenders(
+            db, destination, developed_dir, developed_listing_cache, self.stems,
+        )
+        self.preflight = None
 
+    def prepare(self, photo_ids):
+        """Ensure the destination row, then load the stems and the photos."""
+        db = self.db
+        catalog = self.catalog
+        catalog.ensure_destination_folder()
+        self.stems.load_destination_stem_origins(catalog.dest_folder_id)
+        photos_map = db.photos.get_by_ids(photo_ids)
+        self.stems.load_source_stem_counts(photos_map)
+        self.preflight = _PhotoPreflight(
+            db, self.destination, self.developed_dir, catalog.dest_folder_id,
+            photos_map, self.stems, self.files, self.errors,
+        )
+
+    def run(self, photo_ids, progress_cb, cancel_check, pause_requested,
+            pause_callback):
+        """Move each photo in order; return ``move_photos``' result."""
+        db = self.db
+        total = len(photo_ids)
+        preflight, files = self.preflight, self.files
+        catalog, renders = self.catalog, self.renders
+        try:
+            for i, pid in enumerate(photo_ids):
+                if pause_requested and pause_requested():
+                    db.update_folder_counts()
+                    if pause_callback:
+                        pause_callback()
+                if cancel_check and cancel_check():
+                    break
+                item = preflight.check_photo(pid)
+                if item is None:
+                    continue
+                if preflight.is_already_in_place(item):
+                    if progress_cb:
+                        progress_cb(i + 1, total, item.photo["filename"])
+                    continue
+                if not files.copy_files(item):
+                    continue
+                catalog.update_catalog(item)
+                renders.relocate_developed(item)
+                files.remove_originals(item)
+
+                self.moved += 1
+
+                if progress_cb:
+                    progress_cb(i + 1, total, item.photo["filename"])
+        finally:
+            # Always update folder counts so they stay consistent even if an
+            # exception interrupts the move loop after some photos were committed.
+            if self.moved > 0:
+                db.update_folder_counts()
+
+        return {"moved": self.moved,
+                "already_in_place": preflight.already_in_place,
+                "errors": self.errors,
+                "destination_folder_id": catalog.dest_folder_id}
+
+
+class _StemLedger:
+    """Which stems the destination holds, and from where; and which remain at
+    each source.
+
+    Owns the render-volume case folding (``render_case_insensitive``), the
+    destination stem provenance (``destination_stem_origins``,
+    ``destination_stem_exact``) and the per-source-folder stem counts
+    (``source_stem_counts``). Every write to them happens here; the
+    preflight only reads them.
+    """
+
+    def __init__(self, db, destination, developed_dir):
+        self.db = db
         # Both the photo destination and a separately configured developed-output
         # directory can impose case-folded render names. For example, originals
         # may land on case-sensitive ext4 while renders land on a default macOS
@@ -2546,16 +2597,124 @@ class _PhotoMove:
         if developed_dir:
             self.render_case_insensitive = self.render_case_insensitive or \
                 _is_case_insensitive_path(developed_dir)
-
-        self.dest_folder_id = None
-        self.workspace_linked = False
         self.destination_stem_origins = {}
         self.destination_stem_exact = {}
-        self.photos_map = {}
         self.source_stem_counts = {}
 
     def stem_key(self, raw_stem):
         return raw_stem.casefold() if self.render_case_insensitive else raw_stem
+
+    def load_destination_stem_origins(self, dest_folder_id):
+        """Record which source folder each destination stem came from.
+
+        Provenance is keyed by the source folder's **path** (not folders.id).
+        SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT can reuse a freed
+        rowid after ``Database.delete_folder``; storing the reusable id would
+        let a new unrelated folder that lands on the same rowid compare equal
+        to a stale reference and bypass the collision guard in
+        ``refuse_render_collision``.
+        """
+        destination_stem_origins = self.destination_stem_origins
+        destination_stem_exact = self.destination_stem_exact
+        for row in self.db.moves_merge.move_provenance_in_folder(
+            dest_folder_id,
+        ):
+            exact_stem = os.path.splitext(row["filename"])[0]
+            stem = self.stem_key(exact_stem)
+            origin = row["last_move_source_folder_path"]
+            known_origin = destination_stem_origins.get(
+                stem, _NO_DESTINATION_STEM,
+            )
+            if known_origin is _NO_DESTINATION_STEM:
+                destination_stem_origins[stem] = origin
+                destination_stem_exact[stem] = exact_stem
+            elif known_origin != origin or \
+                    destination_stem_exact[stem] != exact_stem:
+                # Conflicting or partly unknown provenance cannot prove that a
+                # new same-stem photo shares the existing developed render. On a
+                # folding render volume, case-only stems from the same source are
+                # distinct source renders too, so exact spelling is part of the
+                # proof even though the destination lookup key is folded.
+                destination_stem_origins[stem] = None
+
+    def load_source_stem_counts(self, photos_map):
+        """Count same-stem rows in each source folder of ``photos_map``."""
+        db = self.db
+        source_stem_counts = self.source_stem_counts
+        for source_folder_id in {
+            photo["folder_id"] for photo in photos_map.values()
+        }:
+            for row in db.moves_merge.filenames_in_folder(source_folder_id):
+                source_stem = os.path.splitext(row["filename"])[0]
+                key = (source_folder_id, source_stem)
+                source_stem_counts[key] = source_stem_counts.get(key, 0) + 1
+
+    def pin_destination_stem(self, item):
+        """Record that ``item``'s stem now sits at the destination."""
+        # Pin the stem to the proven source folder path so a same-source
+        # sibling can follow in this call while a distinct source is
+        # still rejected. Using the path (not folders.id) survives a
+        # later delete/re-create of the source folder that would reuse
+        # the same rowid.
+        self.destination_stem_origins[item.stem_key] = item.src_dir
+        self.destination_stem_exact[item.stem_key] = item.stem
+
+    def release_source_stem(self, item):
+        """Count the moved row out of its source stem.
+
+        Sets ``item.preserve_source_render``: True while a same-stem sibling
+        is still in the source folder.
+        """
+        db = self.db
+        src_dir = item.src_dir
+        stem = item.stem
+        source_stem_counts = self.source_stem_counts
+        source_stem_key = (item.photo["folder_id"], stem)
+        source_stem_counts[source_stem_key] = max(
+            0, source_stem_counts.get(source_stem_key, 1) - 1,
+        )
+        item.preserve_source_render = source_stem_counts[source_stem_key] > 0
+        if not item.preserve_source_render:
+            # No same-stem sibling remains in the source folder now
+            # that this row moved out. Expire the destination
+            # provenance for the stem so a later rescan/import of an
+            # unrelated ``IMG.*`` back into the same source path
+            # can't slip past the same-stem developed-render
+            # collision guard by matching this row's stale origin.
+            # Developed-output lookup at the destination is keyed by
+            # folder + stem only, so a spoofed provenance would let
+            # the new photo display/export this row's edit. Clear
+            # every destination row (across all destinations, in
+            # case fanout by date sent same-source siblings to
+            # different folders) whose stored provenance is this
+            # drained source; the ``os.path.splitext`` filter in
+            # Python keeps ``foo.bar`` and ``foo`` from
+            # collapsing under a naive ``LIKE 'foo.%'``.
+            stale_ids = [
+                row["id"] for row in db.moves_merge.photos_moved_from(src_dir)
+                if os.path.splitext(row["filename"])[0] == stem
+            ]
+            if stale_ids:
+                db.moves_merge.clear_move_source(stale_ids)
+                db.commit()
+            self.destination_stem_origins[item.stem_key] = None
+
+
+class _PhotoCatalogRewrite:
+    """The destination's folder row and repointing each moved photo at it.
+
+    Owns ``dest_folder_id``, whether this call has linked the destination
+    into the active workspace yet, and ``keep_visible``. ``update_catalog``
+    is each photo's commit point.
+    """
+
+    def __init__(self, db, destination, stems, keep_visible):
+        self.db = db
+        self.destination = destination
+        self.stems = stems
+        self.keep_visible = keep_visible
+        self.dest_folder_id = None
+        self.workspace_linked = False
 
     def ensure_destination_folder(self):
         """Ensure destination folder record exists (workspace link deferred until first successful move)."""
@@ -2580,51 +2739,50 @@ class _PhotoMove:
                     destination
                 )["id"]
 
-    def load_destination_stem_origins(self):
-        """Record which source folder each destination stem came from.
-
-        Provenance is keyed by the source folder's **path** (not folders.id).
-        SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT can reuse a freed
-        rowid after ``Database.delete_folder``; storing the reusable id would
-        let a new unrelated folder that lands on the same rowid compare equal
-        to a stale reference and bypass the collision guard in
-        ``refuse_render_collision``.
-        """
-        destination_stem_origins = self.destination_stem_origins
-        destination_stem_exact = self.destination_stem_exact
-        for row in self.db.moves_merge.move_provenance_in_folder(
-            self.dest_folder_id,
-        ):
-            exact_stem = os.path.splitext(row["filename"])[0]
-            stem = self.stem_key(exact_stem)
-            origin = row["last_move_source_folder_path"]
-            known_origin = destination_stem_origins.get(
-                stem, _NO_DESTINATION_STEM,
-            )
-            if known_origin is _NO_DESTINATION_STEM:
-                destination_stem_origins[stem] = origin
-                destination_stem_exact[stem] = exact_stem
-            elif known_origin != origin or \
-                    destination_stem_exact[stem] != exact_stem:
-                # Conflicting or partly unknown provenance cannot prove that a
-                # new same-stem photo shares the existing developed render. On a
-                # folding render volume, case-only stems from the same source are
-                # distinct source renders too, so exact spelling is part of the
-                # proof even though the destination lookup key is folded.
-                destination_stem_origins[stem] = None
-
-    def load_source_stem_counts(self, photo_ids):
-        """Load the photos and count same-stem rows in each source folder."""
+    def update_catalog(self, item):
+        """Repoint the verified photo's row at the destination folder."""
         db = self.db
-        self.photos_map = db.photos.get_by_ids(photo_ids)
-        source_stem_counts = self.source_stem_counts
-        for source_folder_id in {
-            photo["folder_id"] for photo in self.photos_map.values()
-        }:
-            for row in db.moves_merge.filenames_in_folder(source_folder_id):
-                source_stem = os.path.splitext(row["filename"])[0]
-                key = (source_folder_id, source_stem)
-                source_stem_counts[key] = source_stem_counts.get(key, 0) + 1
+        link_destination = not self.workspace_linked and db.active_workspace_id is not None
+        # Link destination and repoint the photo together, before deleting
+        # originals. A failed visibility write must not leave a folder-wide
+        # link exposing unrelated destination siblings after a failed move.
+        # The savepoint releases and commits on success, and rolls back to
+        # itself on any exception (including one from the release or commit).
+        moves = db.moves_merge
+        with moves.photo_move_savepoint():
+            if link_destination:
+                db._add_workspace_folder_no_commit(
+                    db.active_workspace_id, self.dest_folder_id, restore_removed=True,
+                )
+            db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
+            moves.repoint_moved_photo(item.pid, self.dest_folder_id, item.src_dir)
+        if link_destination:
+            self.workspace_linked = True
+            db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
+        self.stems.pin_destination_stem(item)
+
+
+class _PhotoPreflight:
+    """Look up each photo and run every pre-copy refusal.
+
+    Owns the loaded photo rows (``photos_map``), the per-folder "already the
+    destination" answers and the already-in-place count. Reads the stem
+    ledger and the XMP sidecars this call already copied; writes nothing
+    but ``errors``. Touches no file.
+    """
+
+    def __init__(self, db, destination, developed_dir, dest_folder_id,
+                 photos_map, stems, files, errors):
+        self.db = db
+        self.destination = destination
+        self.developed_dir = developed_dir
+        self.dest_folder_id = dest_folder_id
+        self.photos_map = photos_map
+        self.stems = stems
+        self.files = files
+        self.errors = errors
+        self.already_in_place = 0
+        self.in_place_folders = {}
 
     def check_photo(self, pid):
         """Look up one photo and run every pre-copy refusal.
@@ -2650,11 +2808,11 @@ class _PhotoMove:
         if self.folder_is_destination(photo["folder_id"], src_dir):
             return _PhotoToMove(
                 pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
-                stem=stem, stem_key=self.stem_key(stem),
+                stem=stem, stem_key=self.stems.stem_key(stem),
             )
         item = _PhotoToMove(
             pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
-            stem=stem, stem_key=self.stem_key(stem),
+            stem=stem, stem_key=self.stems.stem_key(stem),
         )
         if self.refuse_render_collision(item):
             return None
@@ -2687,12 +2845,12 @@ class _PhotoMove:
         display/export the other's edit.
         """
         photo = item.photo
-        existing_origin = self.destination_stem_origins.get(
+        existing_origin = self.stems.destination_stem_origins.get(
             item.stem_key, _NO_DESTINATION_STEM,
         )
         if existing_origin is not _NO_DESTINATION_STEM \
                 and (existing_origin != item.src_dir or
-                     self.destination_stem_exact.get(item.stem_key) != item.stem):
+                     self.stems.destination_stem_exact.get(item.stem_key) != item.stem):
             log.warning(
                 "Move skipped for %s: developed render stem collides at "
                 "destination", photo["filename"],
@@ -2716,7 +2874,7 @@ class _PhotoMove:
         if existing_origin is _NO_DESTINATION_STEM and \
                 _has_untracked_destination_developed(
                     self.destination, item.stem, self.developed_dir,
-                    case_insensitive=self.render_case_insensitive,
+                    case_insensitive=self.stems.render_case_insensitive,
                     source_file=item.src_file,
                 ):
             log.warning(
@@ -2757,11 +2915,26 @@ class _PhotoMove:
                 # copy instead of treating the later sibling as a
                 # collision. A pre-existing untracked XMP still blocks.
                 if comp == item.xmp_companion and \
-                        (src_dir, comp) in self.copied_xmp_companions:
+                        (src_dir, comp) in self.files.copied_xmp_companions:
                     continue
                 self.errors.append(f"{comp}: companion file already exists at destination")
                 return True
         return False
+
+
+class _PhotoFileTransfer:
+    """Every file operation on a moved photo's original and companions.
+
+    ``copy_files`` copies and verifies them (removing this photo's partial
+    copies if a companion fails); ``remove_originals`` deletes the source
+    files once the catalog points at the destination. Owns the set of XMP
+    sidecars this call already copied, which the preflight reads.
+    """
+
+    def __init__(self, destination, errors):
+        self.destination = destination
+        self.errors = errors
+        self.copied_xmp_companions = set()
 
     def copy_files(self, item):
         """Copy and verify the photo and its companions; False skips the photo."""
@@ -2810,126 +2983,6 @@ class _PhotoMove:
                 copied_xmp_companions.add((src_dir, comp))
         return True
 
-    def update_catalog(self, item):
-        """Repoint the verified photo's row at the destination folder."""
-        db = self.db
-        link_destination = not self.workspace_linked and db.active_workspace_id is not None
-        # Link destination and repoint the photo together, before deleting
-        # originals. A failed visibility write must not leave a folder-wide
-        # link exposing unrelated destination siblings after a failed move.
-        # The savepoint releases and commits on success, and rolls back to
-        # itself on any exception (including one from the release or commit).
-        moves = db.moves_merge
-        with moves.photo_move_savepoint():
-            if link_destination:
-                db._add_workspace_folder_no_commit(
-                    db.active_workspace_id, self.dest_folder_id, restore_removed=True,
-                )
-            db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
-            moves.repoint_moved_photo(item.pid, self.dest_folder_id, item.src_dir)
-        if link_destination:
-            self.workspace_linked = True
-            db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
-        # Pin the stem to the proven source folder path so a same-source
-        # sibling can follow in this call while a distinct source is
-        # still rejected. Using the path (not folders.id) survives a
-        # later delete/re-create of the source folder that would reuse
-        # the same rowid.
-        self.destination_stem_origins[item.stem_key] = item.src_dir
-        self.destination_stem_exact[item.stem_key] = item.stem
-
-    def relocate_developed(self, item):
-        """Rebase this photo's developed-output file(s) for the new folder.
-
-        Runs BEFORE removing originals. Both develop-job layouts need to
-        move — the configured ``darktable_output_dir`` (hashed under
-        ``developed_folder_key``) and the default ``<folder>/developed/``
-        subdir the job writes to when no output dir is configured. The
-        folder_id update in ``update_catalog`` just invalidated both lookups;
-        without this rebase, ``_iter_developed_outputs`` probes the destination
-        folder and misses renders left under the old source folder, so
-        exports/full-resolution fall back to the RAW. Doing it before
-        cleanup means a subsequent os.remove failure (read-only source
-        dir, locked file on Windows) still leaves catalog and developed
-        renders in agreement at the new location.
-        """
-        try:
-            from .export import (
-                relocate_default_developed_file,
-                relocate_developed_file,
-            )
-        except ImportError:
-            from export import (
-                relocate_default_developed_file,
-                relocate_developed_file,
-            )
-        src_dir = item.src_dir
-        self.release_source_stem(item)
-        if self.developed_dir:
-            relocate_developed_file(
-                self.developed_dir, src_dir, self.destination, item.stem,
-                self.developed_listing_cache, item.preserve_source_render,
-            )
-        default_developed_path = os.path.join(src_dir, "developed")
-        if src_dir not in self.managed_default_developed:
-            # A real catalog folder may legitimately be named
-            # ``developed``. Treating its matching-stem originals as
-            # generated renders would move them before their own folder
-            # group is processed. Skip the default-layout relocation
-            # whenever that directory is managed (or contains another
-            # managed folder); its tracked photos move through the normal
-            # catalog path instead.
-            self.managed_default_developed[src_dir] = bool(
-                _tracked_destination_overlap(
-                    self.db, item.photo["folder_id"], default_developed_path,
-                )
-            )
-        if not self.managed_default_developed[src_dir]:
-            relocate_default_developed_file(
-                src_dir, self.destination, item.stem,
-                self.developed_listing_cache, item.preserve_source_render,
-            )
-
-    def release_source_stem(self, item):
-        """Count the moved row out of its source stem.
-
-        Sets ``item.preserve_source_render``: True while a same-stem sibling
-        is still in the source folder.
-        """
-        db = self.db
-        src_dir = item.src_dir
-        stem = item.stem
-        source_stem_counts = self.source_stem_counts
-        source_stem_key = (item.photo["folder_id"], stem)
-        source_stem_counts[source_stem_key] = max(
-            0, source_stem_counts.get(source_stem_key, 1) - 1,
-        )
-        item.preserve_source_render = source_stem_counts[source_stem_key] > 0
-        if not item.preserve_source_render:
-            # No same-stem sibling remains in the source folder now
-            # that this row moved out. Expire the destination
-            # provenance for the stem so a later rescan/import of an
-            # unrelated ``IMG.*`` back into the same source path
-            # can't slip past the same-stem developed-render
-            # collision guard by matching this row's stale origin.
-            # Developed-output lookup at the destination is keyed by
-            # folder + stem only, so a spoofed provenance would let
-            # the new photo display/export this row's edit. Clear
-            # every destination row (across all destinations, in
-            # case fanout by date sent same-source siblings to
-            # different folders) whose stored provenance is this
-            # drained source; the ``os.path.splitext`` filter in
-            # Python keeps ``foo.bar`` and ``foo`` from
-            # collapsing under a naive ``LIKE 'foo.%'``.
-            stale_ids = [
-                row["id"] for row in db.moves_merge.photos_moved_from(src_dir)
-                if os.path.splitext(row["filename"])[0] == stem
-            ]
-            if stale_ids:
-                db.moves_merge.clear_move_source(stale_ids)
-                db.commit()
-            self.destination_stem_origins[item.stem_key] = None
-
     def remove_originals(self, item):
         """Delete the source original and companions, now that it is safe.
 
@@ -2961,6 +3014,77 @@ class _PhotoMove:
             )
             self.errors.append(
                 f"{item.photo['filename']}: original not deleted ({exc})"
+            )
+
+
+class _DevelopedRenders:
+    """Rebase each moved photo's developed outputs to the destination.
+
+    Owns which source folders have a cataloged ``developed`` subfolder (so
+    their default-layout renders are left alone). Releases the photo's
+    source stem in the ledger first, which decides whether a same-stem
+    sibling still needs the source render.
+    """
+
+    def __init__(self, db, destination, developed_dir, developed_listing_cache,
+                 stems):
+        self.db = db
+        self.destination = destination
+        self.developed_dir = developed_dir
+        self.developed_listing_cache = developed_listing_cache
+        self.stems = stems
+        self.managed_default_developed = {}
+
+    def relocate_developed(self, item):
+        """Rebase this photo's developed-output file(s) for the new folder.
+
+        Runs BEFORE removing originals. Both develop-job layouts need to
+        move — the configured ``darktable_output_dir`` (hashed under
+        ``developed_folder_key``) and the default ``<folder>/developed/``
+        subdir the job writes to when no output dir is configured. The
+        folder_id update in ``update_catalog`` just invalidated both lookups;
+        without this rebase, ``_iter_developed_outputs`` probes the destination
+        folder and misses renders left under the old source folder, so
+        exports/full-resolution fall back to the RAW. Doing it before
+        cleanup means a subsequent os.remove failure (read-only source
+        dir, locked file on Windows) still leaves catalog and developed
+        renders in agreement at the new location.
+        """
+        try:
+            from .export import (
+                relocate_default_developed_file,
+                relocate_developed_file,
+            )
+        except ImportError:
+            from export import (
+                relocate_default_developed_file,
+                relocate_developed_file,
+            )
+        src_dir = item.src_dir
+        self.stems.release_source_stem(item)
+        if self.developed_dir:
+            relocate_developed_file(
+                self.developed_dir, src_dir, self.destination, item.stem,
+                self.developed_listing_cache, item.preserve_source_render,
+            )
+        default_developed_path = os.path.join(src_dir, "developed")
+        if src_dir not in self.managed_default_developed:
+            # A real catalog folder may legitimately be named
+            # ``developed``. Treating its matching-stem originals as
+            # generated renders would move them before their own folder
+            # group is processed. Skip the default-layout relocation
+            # whenever that directory is managed (or contains another
+            # managed folder); its tracked photos move through the normal
+            # catalog path instead.
+            self.managed_default_developed[src_dir] = bool(
+                _tracked_destination_overlap(
+                    self.db, item.photo["folder_id"], default_developed_path,
+                )
+            )
+        if not self.managed_default_developed[src_dir]:
+            relocate_default_developed_file(
+                src_dir, self.destination, item.stem,
+                self.developed_listing_cache, item.preserve_source_render,
             )
 
 
