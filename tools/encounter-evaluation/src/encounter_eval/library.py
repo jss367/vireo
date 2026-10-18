@@ -114,6 +114,19 @@ class FeatureReader:
         return result
 
     @property
+    def pipeline_features(self):
+        """Current loader reads and connection-local TEMP scopes on this reader.
+
+        The repository never writes catalog tables or reads species keywords;
+        the reader's empty keyword method still hides evaluation labels.
+        ``open_library`` keeps the main database read-only and holds the read
+        transaction, so staging TEMP scopes does not commit that snapshot.
+        """
+        from repositories.pipeline_features import PipelineFeaturesRepository
+
+        return PipelineFeaturesRepository(self.conn)
+
+    @property
     def model_runs(self):
         """``db.model_runs`` as the current loader reads it.
 

@@ -24,11 +24,36 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
 from db import Database
 
+if TYPE_CHECKING:
+    from jobs import JobRunner, LogBroadcaster
+    from services.preview_workers import PreviewWorkers
+    from services.service_types import JobDict, JobResult, JsonDict
+
 log = logging.getLogger(__name__)
+
+
+class StartupApp(Protocol):
+    """The members of the Flask app ``StartupTasks`` reads (set by ``create_app``)."""
+
+    # Any: the Flask app config holds heterogeneous settings values.
+    @property
+    def config(self) -> Mapping[str, Any]: ...
+
+    @property
+    def _job_runner(self) -> JobRunner: ...
+
+    @property
+    def _log_broadcaster(self) -> LogBroadcaster: ...
+
+    @property
+    def _preview_workers(self) -> PreviewWorkers: ...
+
 
 class StartupTasks:
     """Startup and maintenance passes bound to one app.
@@ -40,18 +65,18 @@ class StartupTasks:
     short-lived connections background passes need.
     """
 
-    def __init__(self, app, db_path, init_db):
+    def __init__(self, app: StartupApp, db_path: str, init_db: Database) -> None:
         self._app = app
         self._db_path = db_path
         self._init_db = init_db
-        self._retained_cache_timer = None
+        self._retained_cache_timer: threading.Timer | None = None
         self._retained_cache_stopped = threading.Event()
 
-    def schedule_retained_cache_maintenance(self, delay=10.0):
+    def schedule_retained_cache_maintenance(self, delay: float = 10.0) -> None:
         """Visible, periodic maintenance, with work kept off request threads."""
         if self._retained_cache_stopped.is_set():
             return
-        def launch():
+        def launch() -> None:
             if self._retained_cache_stopped.is_set():
                 return
             try:
@@ -71,16 +96,16 @@ class StartupTasks:
             return
         self._retained_cache_timer.start()
 
-    def _maintain_retained_caches(self, job):
+    def _maintain_retained_caches(self, job: JobDict) -> JsonDict:
         import config as cfg
         from services.result_files import delete_workspace_results, result_files
         from services.retained_cache import cleanup, source_verifier
 
         runner = self._app._job_runner
-        def checkpoint():
+        def checkpoint() -> None:
             if runner.is_cancelled(job["id"]):
                 raise RuntimeError("Storage maintenance cancelled")
-        def progress(current, total, path):
+        def progress(current: int, total: int, path: str) -> None:
             runner.push_event(job["id"], "progress", {
                 "current": current, "total": total,
                 "current_file": os.path.basename(path), "phase": "Storage maintenance",
@@ -112,7 +137,7 @@ class StartupTasks:
                     result["ok"] = result["ok"] and not errors
             return result
 
-    def run_catalog_repairs(self):
+    def run_catalog_repairs(self) -> None:
         """Run the ordered startup catalog repairs.
 
         Each pass is idempotent and cheap when there is nothing to repair.
@@ -138,7 +163,7 @@ class StartupTasks:
         init_db.create_default_collections_for_all_workspaces()
         self.prune_collection_ids_of_missing_photos()
 
-    def prune_collection_ids_of_missing_photos(self):
+    def prune_collection_ids_of_missing_photos(self) -> list[JsonDict]:
         """Take photos that no longer exist out of every static collection.
 
         Every boot, not once behind a marker: deletes are covered at the
@@ -175,7 +200,7 @@ class StartupTasks:
         )
         return pruned
 
-    def mark_species_keywords(self, db, log_label):
+    def mark_species_keywords(self, db: Database, log_label: str) -> None:
         """Load taxonomy and type keywords that name a species."""
         from taxonomy import load_local_taxonomy
 
@@ -193,7 +218,7 @@ class StartupTasks:
                 "[%s] species marking failed", log_label, exc_info=True,
             )
 
-    def mark_species(self):
+    def mark_species(self) -> None:
         """Background keyword backfill and species marking on its own connection.
 
         The embedded-keyword backfill runs first so the species leaves it
@@ -211,7 +236,7 @@ class StartupTasks:
         finally:
             bg_db.close()
 
-    def backfill_embedded_keywords(self, db):
+    def backfill_embedded_keywords(self, db: Database) -> int:
         """Import keywords Lightroom wrote inside already-scanned JPEG/DNG files.
 
         One-shot and ``db_meta``-gated (see ``scanner.backfill_embedded_keywords``):
@@ -236,7 +261,7 @@ class StartupTasks:
             )
         return imported
 
-    def cleanup_app_resources(self, job_timeout=10.0):
+    def cleanup_app_resources(self, job_timeout: float = 10.0) -> bool:
         """Stop background jobs, uninstall the log broadcaster, close init_db.
 
         Returns whether the job runner shut down within ``job_timeout``.
@@ -261,7 +286,7 @@ class StartupTasks:
             log.exception("Failed to close database during cleanup")
         return jobs_stopped
 
-    def kickoff_thumb_path_backfill(self):
+    def kickoff_thumb_path_backfill(self) -> None:
         """Start the ephemeral thumb_path backfill job when it has work.
 
         The dashboard's coverage card counts thumbnails by ``thumb_path IS
@@ -300,14 +325,14 @@ class StartupTasks:
         runner = app._job_runner
         cache_dir = app.config["THUMB_CACHE_DIR"]
 
-        def work(job):
+        def work(job: JobDict) -> JobResult:
             thread_db = Database(db_path)
             try:
                 active_ws = init_db.active_workspace_id
                 if active_ws is not None:
                     thread_db.set_active_workspace(active_ws)
 
-                def progress_cb(current, total):
+                def progress_cb(current: int, total: int) -> None:
                     job["progress"]["current"] = current
                     job["progress"]["total"] = total
                     runner.push_event(
@@ -320,14 +345,14 @@ class StartupTasks:
                         },
                     )
 
-                def status_cb(message, **_phase):
+                def status_cb(message: str, **_phase: object) -> None:
                     runner.push_event(job["id"], "progress", {
                         "phase": message,
                         "current": job["progress"].get("current", 0),
                         "total": job["progress"].get("total", 0),
                     })
 
-                def cancel_check():
+                def cancel_check() -> bool:
                     return runner.is_cancelled(job["id"])
 
                 return backfill_thumb_paths(
@@ -348,7 +373,7 @@ class StartupTasks:
         except Exception:
             log.exception("Failed to start thumb_path backfill job")
 
-    def kickoff_label_identity_backfill(self):
+    def kickoff_label_identity_backfill(self) -> None:
         """Recover taxon IDs for predictions made from legacy label lists.
 
         Lists saved before they recorded identities leave BioCLIP predictions
@@ -378,10 +403,10 @@ class StartupTasks:
 
         runner = app._job_runner
 
-        def work(job):
+        def work(job: JobDict) -> JobResult:
             thread_db = Database(db_path)
             try:
-                def progress(current, total, phase):
+                def progress(current: int, total: int, phase: str) -> None:
                     job["progress"]["current"] = current
                     job["progress"]["total"] = total
                     runner.push_event(job["id"], "progress", {
@@ -405,7 +430,7 @@ class StartupTasks:
             log.exception("Failed to start label list species ID job")
 
 
-    def kickoff_exif_search_backfill(self):
+    def kickoff_exif_search_backfill(self) -> None:
         """Store searchable EXIF values for photos written before the triggers.
 
         Metadata search walks a photo's EXIF only when its stored tag values
@@ -432,7 +457,7 @@ class StartupTasks:
 
         runner = self._app._job_runner
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = Database(db_path)
             try:
                 indexed = 0
@@ -468,11 +493,11 @@ class StartupTasks:
             log.exception("Failed to start EXIF search backfill job")
 
 
-def utc_iso_now():
+def utc_iso_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def metadata_repair_count(db, workspace_id, root_paths=None):
+def metadata_repair_count(db: Database, workspace_id: int, root_paths: Sequence[str] | None = None) -> int:
     # Don't filter by ``folders.status``: that column is only refreshed
     # by ``check_folder_health`` (10-minute loop or the manual
     # "check missing folders" flow), so a workspace whose drive was
@@ -503,7 +528,7 @@ def metadata_repair_count(db, workspace_id, root_paths=None):
     # this keeps readiness responsive for large degraded imports.
     from image_loader import is_excluded_scan_path
 
-    folder_files = {}
+    folder_files: dict[int, set[str] | None] = {}
     repairable = 0
     for row in rows:
         folder_id = row["folder_id"]

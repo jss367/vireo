@@ -5,7 +5,10 @@ import os
 import stat
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import dir_listing_cache
 import volume_reachability
@@ -27,14 +30,7 @@ def _known_paths_for_workspace(db, workspace_id):
     ``companion_path`` makes the same walk converge to zero instead of leaving
     a stuck banner.
     """
-    rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename, p.companion_path
-           FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-           WHERE wf.workspace_id = ?""",
-        (workspace_id,),
-    ).fetchall()
+    rows = db.photo_visibility.active_path_rows(workspace_id)
     known = set()
     for row in rows:
         known.add(os.path.join(row["folder_path"], row["filename"]))
@@ -71,10 +67,7 @@ def staged_source_paths(db):
     """
     return [
         row["source_path"]
-        for row in db.conn.execute(
-            "SELECT source_path FROM local_folder_mappings "
-            "WHERE is_root = 1 ORDER BY source_path"
-        ).fetchall()
+        for row in db.local_folders.root_source_paths()
         if row["source_path"]
     ]
 
@@ -157,16 +150,9 @@ def mapped_roots(db, workspace_id, *, include_missing=False):
     one chain are both marked roots (e.g. /A and /A/B/C with /A/B unlinked):
     os.walk'ing both would count files under /A/B/C twice.
     """
-    status_clause = "" if include_missing else (
-        " AND f.status IN ('ok', 'partial')"
+    rows = db.workspace_folders.linked_folder_rows(
+        workspace_id, include_missing=include_missing,
     )
-    rows = db.conn.execute(
-        """SELECT f.id, f.path, f.parent_id, wf.is_root
-           FROM folders f
-           JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ?""" + status_clause,
-        (workspace_id,),
-    ).fetchall()
     root_ids = {r["id"] for r in rows if r["is_root"]}
     if not root_ids:
         return []
@@ -175,7 +161,7 @@ def mapped_roots(db, workspace_id, *, include_missing=False):
     # chains where intermediate folders may not themselves be roots.
     parent_of = {
         r["id"]: r["parent_id"]
-        for r in db.conn.execute("SELECT id, parent_id FROM folders").fetchall()
+        for r in db.workspace_folders.folder_parent_rows()
     }
 
     def has_root_ancestor(folder_id):
@@ -398,10 +384,13 @@ def _count_root_new_images(tally, root, known, reachability, staged_sources,
     listing_pass = dir_listing_cache.ListingPass(listing_cache)
     excluded_hits = []
     outcome = _walk_root_bounded(
-        root, root_path, mount_root, known, tally.seen_new_paths, reachability,
-        tally.files_checked, tally.total, progress_callback, progress_every,
-        tally.last_emitted, stall_timeout,
-        reachability_generation=reachability_generation,
+        _RootWalk(root_path, mount_root, reachability, reachability_generation),
+        known, tally.seen_new_paths,
+        _WalkProgress(
+            progress_callback, progress_every,
+            tally.files_checked, tally.total, tally.last_emitted,
+        ),
+        stall_timeout,
         listing_pass=listing_pass,
         excluded_dirs=excluded_dirs,
         excluded_hits=excluded_hits,
@@ -618,15 +607,52 @@ def _reachability_generation(reachability):
     return getter() if callable(getter) else None
 
 
-def _reserve_root_walk(root_path, mount_root, reachability,
-                       reachability_generation):
-    """Reserve ``root_path``'s slot in the stalled-walk registry.
+@dataclass(frozen=True)
+class _RootWalk:
+    """The root one bounded walk covers and the gate its outage goes to."""
+
+    root_path: str
+    mount_root: str | None
+    """The volume ``root_path`` lives on, as the gate reported it, or None
+    for a local root."""
+    reachability: Any
+    """The reachability gate: ``check(path)`` and ``mark_offline(mount)``."""
+    reachability_generation: int | None = None
+    """The gate generation the walk began under, quoted when it reports an
+    outage; None for a gate that does not track one."""
+
+    def mark_offline(self):
+        _mark_offline(self.reachability, self.mount_root, self.reachability_generation)
+
+
+@dataclass(frozen=True)
+class _WalkProgress:
+    """How one root's walk reports progress, and the counts it continues.
+
+    The counts are the caller's totals before this root; the walk adds its
+    own on top when it reports, and returns the new ``last_emitted``.
+    """
+
+    callback: Callable[[int, int], Any] | None
+    """``callback(files_checked, new_found)``, or None for no reports."""
+    every: int
+    """Report after at least this many more files were checked."""
+    files_checked: int
+    total: int
+    """New images found in earlier roots."""
+    last_emitted: int
+    """``files_checked`` at the last report."""
+
+
+def _reserve_root_walk(walk):
+    """Reserve ``walk.root_path``'s slot in the stalled-walk registry.
 
     Waits out a healthy overlapping walk of the same root. Returns False,
     without reserving, when the root must be reported offline instead: a
     wedged walk from this epoch still holds it, the worker limit is reached,
     or the predecessor found the volume offline.
     """
+    root_path = walk.root_path
     while True:
         wait_for = None
         with _STALLED_WALKS_LOCK:
@@ -649,9 +675,7 @@ def _reserve_root_walk(root_path, mount_root, reachability,
                             "earlier check; reporting offline without walking "
                             "again", root_path,
                         )
-                        _mark_offline(
-                            reachability, mount_root, reachability_generation,
-                        )
+                        walk.mark_offline()
                         return False
                     # Another workspace is walking the same root. Wait outside
                     # the lock, then retry; an active healthy walk is not
@@ -689,16 +713,15 @@ def _reserve_root_walk(root_path, mount_root, reachability,
                 # our initial gate check. Re-read it before reserving a fresh
                 # worker so overlapping workspace polls do not immediately
                 # walk into the same disconnected share again.
-                _checked_root, still_reachable = reachability.check(root_path)
+                _checked_root, still_reachable = walk.reachability.check(root_path)
                 if not still_reachable:
                     return False
 
 
-def _root_walk_worker(state, root_path, mount_root, known, local_seen,
-                      reachability, reachability_generation, files_checked,
-                      total, progress_callback, progress_every, listing_pass,
+def _root_walk_worker(state, walk, known, local_seen, progress, listing_pass,
                       excluded_dirs):
     """Build the worker that walks one root, recording into ``state``."""
+    root_path = walk.root_path
 
     def _beat():
         if state["abandoned"]:
@@ -719,18 +742,18 @@ def _root_walk_worker(state, root_path, mount_root, known, local_seen,
             == os.path.normcase(os.path.normpath(root_path))
         )
         if volume_reachability.is_offline_error(exc) or root_disappeared:
-            _mark_offline(reachability, mount_root, reachability_generation)
+            walk.mark_offline()
             raise _RootOffline(exc)
         log.debug("new-images: skipping unreadable path: %s", exc)
 
     def _on_file(is_new):
         _beat()
         state["checked"] += 1
-        if progress_callback is None:
+        if progress.callback is None:
             return
-        checked_now = files_checked + state["checked"]
-        if checked_now - state["emitted"] >= progress_every:
-            progress_callback(checked_now, total + len(state["paths"]))
+        checked_now = progress.files_checked + state["checked"]
+        if checked_now - state["emitted"] >= progress.every:
+            progress.callback(checked_now, progress.total + len(state["paths"]))
             state["emitted"] = checked_now
 
     def worker():
@@ -763,12 +786,9 @@ def _root_walk_worker(state, root_path, mount_root, known, local_seen,
     return worker
 
 
-def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
-                       reachability, files_checked, total, progress_callback,
-                       progress_every, last_emitted, stall_timeout,
-                       reachability_generation=None, listing_pass=None,
-                       excluded_dirs=None, excluded_hits=None):
-    """Walk one root on a worker thread under a stall watchdog.
+def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
+                       listing_pass=None, excluded_dirs=None, excluded_hits=None):
+    """Walk ``walk.root_path`` on a worker thread under a stall watchdog.
 
     Returns ``(root_new_paths, files_checked_in_root, last_emitted)`` on
     success, or ``None`` when the root is offline — either an offline-class
@@ -787,20 +807,17 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
     # world this walk started in, so a later recheck can tell it apart from
     # one observed after the user asked us to look again.
     walk_epoch = _current_walk_epoch()
-    if not _reserve_root_walk(
-        root_path, mount_root, reachability, reachability_generation,
-    ):
+    if not _reserve_root_walk(walk):
         return None
+    root_path = walk.root_path
     state = {
         "checked": 0, "paths": [], "last": time.monotonic(),
-        "emitted": last_emitted, "abandoned": False, "offline": None,
+        "emitted": progress.last_emitted, "abandoned": False, "offline": None,
         "excluded": [],
     }
     local_seen = set(seen_new_paths)
     worker = _root_walk_worker(
-        state, root_path, mount_root, known, local_seen, reachability,
-        reachability_generation, files_checked, total, progress_callback,
-        progress_every, listing_pass, excluded_dirs,
+        state, walk, known, local_seen, progress, listing_pass, excluded_dirs,
     )
     thread = threading.Thread(
         target=worker, daemon=True, name="new-images-walk-root",
@@ -828,9 +845,9 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
             log.warning(
                 "new-images: walk of %s made no progress for %.0fs; "
                 "treating volume %s as offline and abandoning the walk",
-                root_path, stall_timeout, mount_root or root_path,
+                root_path, stall_timeout, walk.mount_root or root_path,
             )
-            _mark_offline(reachability, mount_root, reachability_generation)
+            walk.mark_offline()
             return None
 
     failure = state["offline"]
@@ -1310,8 +1327,7 @@ def invalidate_new_images_after_scan(db, root):
     # over-invalidation that triggers a re-walk. The descendant pattern uses
     # os.sep so it matches what the scanner stores via str(Path(...)) on both
     # POSIX and Windows.
-    touched_ids = [r["id"] for r in db.conn.execute(
-        "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
-        (root, root.rstrip("/\\") + os.sep + "%"),
-    ).fetchall()]
+    touched_ids = [r["id"] for r in db.workspace_folders.folder_ids_at_or_like(
+        root, root.rstrip("/\\") + os.sep + "%",
+    )]
     db.invalidate_new_images_cache_for_folders(touched_ids)

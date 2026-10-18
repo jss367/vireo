@@ -239,6 +239,18 @@ def test_photo_edit_recipe_history_requires_active_workspace(db, pids):
         db.edit_history.recipe_history_for_photo(pids[0], 50)
 
 
+def test_item_values_with_local_adjustments_spans_workspaces_old_then_new(db, pids):
+    other = db.create_workspace("Other")
+    _raw_edit(db, "edit_recipe", items=[(pids[0], '{"local": [1]}', '{"exposure": 1}')])
+    _raw_edit(db, "edit_recipe", workspace_id=other,
+              items=[(pids[1], None, '{"local": [2]}'), (pids[2], '{"local": [3]}', None)])
+    _raw_edit(db, "rating", items=[(pids[2], "0", "1")])
+    db.set_active_workspace(None)
+    assert db.edit_history.item_values_with_local_adjustments() == [
+        '{"local": [1]}', '{"local": [3]}', '{"local": [2]}',
+    ]
+
+
 # -- undo / redo cursor ---------------------------------------------------
 
 

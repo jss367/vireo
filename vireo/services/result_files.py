@@ -4,16 +4,22 @@ These are disposable, workspace-owned snapshots, unlike original photos or
 exports. Enumerate only exact Vireo filenames, never arbitrary JSON siblings.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Container, Iterable
 
 log = logging.getLogger(__name__)
 RESULT_NAME = re.compile(r"^(pipeline|culling)_results_ws([1-9][0-9]*)\.json$")
 
 
-def result_files(catalog_dir):
+def result_files(catalog_dir: str) -> list[tuple[str, str, int]]:
     try:
         with os.scandir(catalog_dir or os.curdir) as entries:
             return [
@@ -27,11 +33,11 @@ def result_files(catalog_dir):
         return []
 
 
-def highest_workspace_id(catalog_dir):
+def highest_workspace_id(catalog_dir: str) -> int:
     return max((ws for _path, _kind, ws in result_files(catalog_dir)), default=0)
 
 
-def delete_workspace_results(catalog_dir, workspace_id):
+def delete_workspace_results(catalog_dir: str, workspace_id: int | str) -> list[str]:
     errors = []
     workspace_id = int(workspace_id)
     for kind in ("pipeline", "culling"):
@@ -47,7 +53,7 @@ def delete_workspace_results(catalog_dir, workspace_id):
     return errors
 
 
-def prune_photo_results(catalog_dir, photo_ids, workspace_ids=()):
+def prune_photo_results(catalog_dir: str, photo_ids: Iterable[int], workspace_ids: Iterable[int] = ()) -> None:
     """Prune global photo deletions from every workspace after SQL commits."""
     from pipeline import prune_results
     from pipeline_locks import acquire_workspace_regroup
@@ -68,7 +74,10 @@ def prune_photo_results(catalog_dir, photo_ids, workspace_ids=()):
                     _prune_file(path, kind, catalog_dir, workspace_id, deleted, prune_results)
 
 
-def _prune_file(path, kind, catalog_dir, workspace_id, deleted, prune_results):
+def _prune_file(
+    path: str, kind: str, catalog_dir: str, workspace_id: int, deleted: set[int],
+    prune_results: Callable[[str, int, set[int]], object],
+) -> None:
     try:
         if kind == "pipeline":
             prune_results(catalog_dir, workspace_id, deleted)
@@ -93,7 +102,7 @@ def _prune_file(path, kind, catalog_dir, workspace_id, deleted, prune_results):
             log.warning("Could not remove stale results %s", path, exc_info=True)
 
 
-def _contains_photo(value, photo_ids):
+def _contains_photo(value: object, photo_ids: Container[object]) -> bool:
     if isinstance(value, dict):
         if value.get("photo_id") in photo_ids:
             return True

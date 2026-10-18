@@ -505,7 +505,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
     """Apply durable merge work only to its recorded photo and keyword identity."""
     if not any(plan.keyword_merges for plan in plans.values()):
         return
-    rows = db.conn.execute('SELECT id, name, parent_id FROM keywords').fetchall()
+    rows = db.keywords.parent_rows()
     paths = keyword_paths(rows)
     location_leaves = db.get_photo_location_keyword_ids([
         pid for pid, plan in plans.items() if plan.sync_location_keywords
@@ -1154,7 +1154,7 @@ def sync_from_xmp(db, photo_ids):
         # one writer transaction. Background migrations use the same SQLite
         # writer lock, so they cannot act on a pre-reconciliation association
         # snapshot between this read and the final xmp_mtime update.
-        db.conn.execute("BEGIN IMMEDIATE")
+        db.begin_immediate()
         try:
             (
                 xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
@@ -1202,13 +1202,10 @@ def sync_from_xmp(db, photo_ids):
 
             # Update xmp_mtime in the same transaction as reconciliation.
             xmp_mtime = os.path.getmtime(xmp_path)
-            db.conn.execute(
-                "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
-                (xmp_mtime, photo_id),
-            )
-            db.conn.commit()
+            db.scanning.set_xmp_mtime(photo_id, xmp_mtime)
+            db.commit()
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
         log.info(

@@ -3259,11 +3259,11 @@ def _seed_workspace_with_masks(db_path):
     p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
     db.masks_features.upsert_mask(p1, "sam2-small", "/m/a.small.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p2, "sam2-small", "/m/b.small.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p1, "sam2-large", "/m/a.large.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     db.set_active_mask_variant(p1, "sam2-small")
     db.set_active_mask_variant(p2, "sam2-small")
     db.close()
@@ -3289,7 +3289,7 @@ def _seed_workspace_with_large_only_masks(db_path):
         db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
-            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+            prompt=(0.1, 0.1, 0.5, 0.5),
         )
         db.set_active_mask_variant(pid, "sam2-large")
         photo_ids.append(pid)
@@ -3595,11 +3595,11 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
         # Seed the same variant in both workspaces so the only thing
         # keeping ws_b out of the update is the workspace join.
         db.masks_features.upsert_mask(p_a, "sam2-small", "/m/a.small.png",
-            detector_model="md", prompt_x=0, prompt_y=0,
-            prompt_w=0, prompt_h=0)
+            detector_model="md", prompt=(0, 0, 0, 0),
+            )
         db.masks_features.upsert_mask(p_b, "sam2-small", "/m/b.small.png",
-            detector_model="md", prompt_x=0, prompt_y=0,
-            prompt_w=0, prompt_h=0)
+            detector_model="md", prompt=(0, 0, 0, 0),
+            )
 
         # Mark ws_a as the most-recently-opened so a fresh Database()
         # inside _get_db() picks it as the active workspace.

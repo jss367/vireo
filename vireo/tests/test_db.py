@@ -3,6 +3,7 @@ import os
 import sys
 
 import pytest
+from repositories.masks_features import MaskQuality, PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -6406,10 +6407,12 @@ def test_update_photo_eye_fields_roundtrip(tmp_path):
     )
     db.masks_features.update_pipeline_features(
         pid,
-        eye_x=123.4,
-        eye_y=56.7,
-        eye_conf=0.82,
-        eye_tenengrad=18450.2,
+        PipelineFeatures(
+            eye_x=123.4,
+            eye_y=56.7,
+            eye_conf=0.82,
+            eye_tenengrad=18450.2,
+        ),
     )
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
@@ -6433,11 +6436,21 @@ def test_update_photo_eye_fields_accept_null(tmp_path):
     )
     # First set some values
     db.masks_features.update_pipeline_features(
-        pid, eye_x=1.0, eye_y=2.0, eye_conf=0.5, eye_tenengrad=9.0
+        pid, PipelineFeatures(
+            eye_x=1.0,
+            eye_y=2.0,
+            eye_conf=0.5,
+            eye_tenengrad=9.0,
+        ),
     )
     # Then clear them
     db.masks_features.update_pipeline_features(
-        pid, eye_x=None, eye_y=None, eye_conf=None, eye_tenengrad=None
+        pid, PipelineFeatures(
+            eye_x=None,
+            eye_y=None,
+            eye_conf=None,
+            eye_tenengrad=None,
+        ),
     )
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
@@ -6477,7 +6490,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
     db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(pid, "test")
     # Top-confidence prediction has species but no taxonomy_class/scientific_name.
@@ -6537,7 +6550,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
     db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(pid, "test")
     db.predictions.add(
@@ -6582,7 +6595,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0, prompt_y=0, prompt_w=1, prompt_h=1,
+        prompt=(0, 0, 1, 1),
     )
     db.set_active_mask_variant(pid, "test")
     # Stale fingerprint — high confidence + bird taxonomy.
@@ -6642,7 +6655,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
             photo_id=pid, variant="test",
             path=str(tmp_path / "mask.png"),
             detector_model="MegaDetector",
-            prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+            prompt=(0.1, 0.1, 0.8, 0.8),
         )
         db.set_active_mask_variant(pid, "test")
         db.predictions.add(
@@ -21397,9 +21410,13 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
         detector_model="megadetector-v6",
-        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
-        subject_size=20000, subject_tenengrad=1.5,
-        bg_tenengrad=0.3, crop_complete=1.0,
+        prompt=(10, 20, 100, 200),
+        quality=MaskQuality(
+            subject_size=20000,
+            subject_tenengrad=1.5,
+            bg_tenengrad=0.3,
+            crop_complete=1.0,
+        ),
     )
     row = db.conn.execute(
         "SELECT path, prompt_x FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
@@ -21411,9 +21428,13 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
         detector_model="megadetector-v6",
-        prompt_x=11, prompt_y=20, prompt_w=100, prompt_h=200,
-        subject_size=21000, subject_tenengrad=1.5,
-        bg_tenengrad=0.3, crop_complete=1.0,
+        prompt=(11, 20, 100, 200),
+        quality=MaskQuality(
+            subject_size=21000,
+            subject_tenengrad=1.5,
+            bg_tenengrad=0.3,
+            crop_complete=1.0,
+        ),
     )
     row = db.conn.execute(
         "SELECT prompt_x, subject_size FROM photo_masks WHERE photo_id=1 AND variant='sam2-small'"
@@ -21438,7 +21459,7 @@ def test_get_photo_mask_returns_row_or_none(tmp_path):
 
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/p", detector_model="md",
-        prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        prompt=(1, 2, 3, 4),
     )
     m = db.masks_features.get_mask(1, "sam2-small")
     assert m["path"] == "/p"
@@ -21455,11 +21476,11 @@ def test_list_masks_for_photo(tmp_path):
     )
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/a",
-        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        detector_model="md", prompt=(1, 2, 3, 4),
     )
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/b",
-        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        detector_model="md", prompt=(1, 2, 3, 4),
     )
     variants = sorted(m["variant"] for m in db.masks_features.list_masks_for_photo(1))
     assert variants == ["sam2-large", "sam2-small"]
@@ -21474,9 +21495,13 @@ def test_set_active_mask_variant_denormalizes(tmp_path):
     )
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
-        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
-        subject_size=12345, subject_tenengrad=2.0,
-        bg_tenengrad=0.5, crop_complete=0.9,
+        detector_model="md", prompt=(1, 2, 3, 4),
+        quality=MaskQuality(
+            subject_size=12345,
+            subject_tenengrad=2.0,
+            bg_tenengrad=0.5,
+            crop_complete=0.9,
+        ),
     )
     db.set_active_mask_variant(1, "sam2-large")
     row = db.conn.execute(
@@ -21524,9 +21549,13 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
-        subject_size=999, subject_tenengrad=1.0,
-        bg_tenengrad=0.2, crop_complete=0.9,
+        prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(
+            subject_size=999,
+            subject_tenengrad=1.0,
+            bg_tenengrad=0.2,
+            crop_complete=0.9,
+        ),
     )
     # An unrelated detection remains (e.g. reclassify swapped the box):
     # the mask's prompt no longer matches any real detection, so the
@@ -21565,8 +21594,8 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
-        subject_size=42, subject_tenengrad=1.0,
+        prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_size=42, subject_tenengrad=1.0),
     )
     db.conn.execute(
         "INSERT INTO detections(photo_id, detector_model, box_x, box_y, "
@@ -21608,7 +21637,7 @@ def test_set_active_mask_variant_allows_migration_without_detections(
     )
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
-        detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
+        detector_model="md", prompt=(1, 2, 3, 4),
     )
     db.set_active_mask_variant(1, "sam2-large")
     row = db.conn.execute(
@@ -21640,8 +21669,8 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
     db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
-        subject_size=999, subject_tenengrad=1.0,
+        prompt=(0.1, 0.1, 0.5, 0.5),
+        quality=MaskQuality(subject_size=999, subject_tenengrad=1.0),
     )
     # Reclassify ran (produced zero detections) — detector_runs.box_count=0.
     db.conn.execute(
@@ -21677,11 +21706,11 @@ def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
     p2.write_bytes(b"y")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(p1),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     db.masks_features.upsert_mask(
         2, "sam2-small", str(p2),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     deleted = db.masks_features.delete_for_variant("sam2-small")
@@ -21706,7 +21735,7 @@ def test_delete_masks_for_variant_refuses_active(tmp_path):
     p.write_bytes(b"x")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     db.set_active_mask_variant(1, "sam2-small")
     with pytest.raises(ValueError):
@@ -21728,11 +21757,11 @@ def test_delete_inactive_masks(tmp_path):
     pb.write_bytes(b"b")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(pa),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     db.masks_features.upsert_mask(
         1, "sam2-large", str(pb),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     db.set_active_mask_variant(1, "sam2-large")
     n = db.masks_features.delete_inactive()
@@ -21761,7 +21790,7 @@ def test_delete_inactive_masks_skips_photos_with_no_active(tmp_path):
     p.write_bytes(b"x")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     # Note: NO set_active_mask_variant call — leaves active NULL.
     n = db.masks_features.delete_inactive()
@@ -21786,7 +21815,7 @@ def test_find_stale_masks(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+        prompt=(10, 20, 100, 200),
     )
     assert db.masks_features.find_stale() == []
 
@@ -21794,7 +21823,7 @@ def test_find_stale_masks(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
-        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+        prompt=(99, 20, 100, 200),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
@@ -21831,7 +21860,7 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+        prompt=(10, 20, 100, 200),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
@@ -21844,7 +21873,7 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
-        prompt_x=200, prompt_y=200, prompt_w=50, prompt_h=50,
+        prompt=(200, 200, 50, 50),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
@@ -21876,7 +21905,7 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=0.123, prompt_y=0.456, prompt_w=0.300, prompt_h=0.400,
+        prompt=(0.123, 0.456, 0.300, 0.400),
     )
     assert db.masks_features.find_stale() == []
 
@@ -21886,7 +21915,7 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
-        prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        prompt=(0, 0, 0, 0),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
@@ -21917,7 +21946,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=0.10, prompt_y=0.20, prompt_w=0.30, prompt_h=0.40,
+        prompt=(0.10, 0.20, 0.30, 0.40),
     )
     # Photo 2 has a fresh, above-floor detection that matches its mask.
     db.conn.execute(
@@ -21931,7 +21960,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
     db.masks_features.upsert_mask(
         2, "sam2-small", "/q",
         detector_model="megadetector-v6",
-        prompt_x=0.50, prompt_y=0.50, prompt_w=0.20, prompt_h=0.20,
+        prompt=(0.50, 0.50, 0.20, 0.20),
     )
 
     # No floor: photo 1's mask matches its (low-confidence) detection,
@@ -21977,7 +22006,7 @@ def test_find_stale_masks_floor_drops_below_threshold_match(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+        prompt=(0.10, 0.10, 0.10, 0.10),
     )
     # Without floor: the 0.40 box is the primary, its prompt equals
     # the cached one → fresh.
@@ -22013,7 +22042,7 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
         detector_model="megadetector-v6",
-        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+        prompt=(0.10, 0.10, 0.10, 0.10),
     )
     # Without a floor the (matching, low-confidence) detection keeps
     # the mask fresh.
@@ -22104,12 +22133,12 @@ def test_delete_stale_masks(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", str(fresh),
         detector_model="megadetector-v6",
-        prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
+        prompt=(10, 20, 100, 200),
     )
     db.masks_features.upsert_mask(
         1, "sam2-large", str(stale_path),
         detector_model="megadetector-v6",
-        prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
+        prompt=(99, 20, 100, 200),
     )
     deleted = db.delete_stale_masks()
     assert deleted == 1
@@ -22151,7 +22180,7 @@ def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
-        prompt_x=0.20, prompt_y=0.20, prompt_w=0.20, prompt_h=0.20,
+        prompt=(0.20, 0.20, 0.20, 0.20),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
@@ -22163,7 +22192,7 @@ def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
     db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
-        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+        prompt=(0.10, 0.10, 0.10, 0.10),
     )
     stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
@@ -22193,7 +22222,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     outside.write_bytes(b"important")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(outside),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     db.masks_features.delete_for_variant("sam2-small")
@@ -22202,13 +22231,13 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     # Same protection on delete_inactive_masks.
     db.masks_features.upsert_mask(
         1, "sam2-small", str(outside),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     inside = masks_dir / "1.sam2-large.png"
     inside.write_bytes(b"in")
     db.masks_features.upsert_mask(
         1, "sam2-large", str(inside),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     db.set_active_mask_variant(1, "sam2-large")
     db.masks_features.delete_inactive()
@@ -22227,7 +22256,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     stale_outside.write_bytes(b"stale")
     db.masks_features.upsert_mask(
         1, "sam2-small", str(stale_outside),
-        detector_model="md", prompt_x=1, prompt_y=1, prompt_w=1, prompt_h=1,
+        detector_model="md", prompt=(1, 1, 1, 1),
     )
     db.delete_stale_masks()
     assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
@@ -22254,7 +22283,7 @@ def test_mask_variants_summary(tmp_path):
         p.write_bytes(b"x" * size)
         db.masks_features.upsert_mask(
             pid, var, str(p),
-            detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+            detector_model="md", prompt=(0, 0, 0, 0),
         )
     db.set_active_mask_variant(1, "sam2-large")
 
@@ -22289,14 +22318,14 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
                       file_size=1, file_mtime=1.0)
 
     db.masks_features.upsert_mask(p1, "sam2-small", "/p/a.small.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p1, "sam2-large", "/p/a.large.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p2, "sam2-small", "/p/b.small.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
     # p3 lives outside ws_in — its sam2-large row must NOT be counted.
     db.masks_features.upsert_mask(p3, "sam2-large", "/p/c.large.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
+        detector_model="md", prompt=(0, 0, 0, 0))
 
     db.set_active_mask_variant(p1, "sam2-large")
 
@@ -22350,8 +22379,13 @@ def test_update_photo_pipeline_features_stamps_eye_kp_fingerprint(tmp_path):
     )
     db.conn.commit()
     db.masks_features.update_pipeline_features(
-        1, eye_x=0.5, eye_y=0.5, eye_conf=0.9, eye_tenengrad=12.0,
-        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        1, PipelineFeatures(
+            eye_x=0.5,
+            eye_y=0.5,
+            eye_conf=0.9,
+            eye_tenengrad=12.0,
+            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        ),
     )
     fp = db.conn.execute(
         "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
@@ -22369,7 +22403,7 @@ def test_update_photo_pipeline_features_skips_eye_kp_fingerprint_when_unset(tmp_
         "VALUES (1, 1, 'a.jpg', 'preexisting')"
     )
     db.conn.commit()
-    db.masks_features.update_pipeline_features(1, eye_x=0.5, eye_y=0.5)
+    db.masks_features.update_pipeline_features(1, PipelineFeatures(eye_x=0.5, eye_y=0.5))
     fp = db.conn.execute(
         "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
     ).fetchone()[0]
@@ -22633,7 +22667,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
             photo_id=pid, variant="test",
             path=str(tmp_path / "mask.png"),
             detector_model="MegaDetector",
-            prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+            prompt=(0.1, 0.1, 0.8, 0.8),
         )
         db.set_active_mask_variant(pid, "test")
         db.predictions.add(

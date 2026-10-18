@@ -10,6 +10,7 @@ import pytest
 from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
+from repositories.masks_features import MaskQuality
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2814,8 +2815,14 @@ def test_extract_masks_route_writes_photo_masks_row(
     mask_row = db.masks_features.get_mask(pid, "sam2-small")
     for field, value in expected_quality.items():
         assert mask_row[field] == value
-    db.masks_features.upsert_mask(pid, "sam2-large", row["path"], "MegaDetector", 10, 20, 100, 200,
-                         noise_estimate=999)
+    db.masks_features.upsert_mask(
+        pid,
+        "sam2-large",
+        row["path"],
+        "MegaDetector",
+        (10, 20, 100, 200),
+        quality=MaskQuality(noise_estimate=999),
+    )
     db.set_active_mask_variant(pid, "sam2-large")
     db.set_active_mask_variant(pid, "sam2-small")
     restored = db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()

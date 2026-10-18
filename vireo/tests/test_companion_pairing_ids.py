@@ -86,7 +86,7 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
 
     import scanner
     from db import Database
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     first, unrelated, second = (tmp_path / name for name in ("first", "unrelated", "second"))
     for folder in (first, unrelated, second):
@@ -107,12 +107,15 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
         abort=SimpleNamespace(set=lambda: None, is_set=lambda: False),
     )
     stage = _ScanPass(
-        run, sentinel=object(), filter_excluded=None,
-        find_broken_metadata_folders=None, missing_archive_mount_root=None,
-        put_scan_item=lambda item: None, collected_photo_ids=collected,
-        effective_thumb_cache_dir=None, effective_vireo_dir=None,
-        final_destination=None, missing_originals_invalidator=None,
-        remote_archive=None, skip_scan=False, snapshot_paths=None,
+        run,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=None,
+            find_broken_metadata_folders=None,
+            missing_archive_mount_root=None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=lambda item: None),
+        collected_photo_ids=collected,
     )
     stage.thread_db, stage.do_scan = db, scanner.scan
     stage.pipeline_cfg = {"extract_full_metadata": False}
@@ -1214,7 +1217,7 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
     import scanner as scanner_mod
     from db import Database
     from pipeline_job import _StageState
-    from pipeline_stages.scanning import _ScannedPhotoCallback, _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, _ScannedPhotoCallback, _ScanPass
 
     card = tmp_path / "card"
     _shoot_pairs(card, ["IMG_001"])
@@ -1252,8 +1255,11 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
             receiver._collected_ids = set()
             receiver.collected_photo_ids = collected
             receiver._canonical_photo_path = lambda pid, path: str(raw)
-            receiver.prepare_scan_item = shared.prepare_scan_item
-            receiver.put_scan_item = shared.put_scan_item
+            receiver.handoff = ScanHandoff(
+                put_scan_item=shared.put_scan_item,
+                sentinel=None,
+                prepare_scan_item=shared.prepare_scan_item,
+            )
             receiver.run = SimpleNamespace(
                 stages={"scan": {}}, job={"id": "test"},
                 runner=SimpleNamespace(update_step=lambda *a, **kw: None),

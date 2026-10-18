@@ -981,6 +981,32 @@ def test_get_duplicate_loser_disk_summary(db, folder):
     assert (row["n"], row["total_bytes"]) == (2, 40)
 
 
+def test_photo_rows_with_folder_chunks_by_the_callers_cap(db, folder):
+    """The duplicate scan's row read: caller columns and filter, caller chunk size."""
+    fid, path = folder
+    a = _photo(db, fid, "a.jpg", "H")
+    b = _photo(db, fid, "b.jpg", "H", flag="rejected")
+    homeless = _photo(db, fid, "c.jpg", "H")
+    _orphan_folder(db, homeless)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    rows = db.duplicates.photo_rows_with_folder(
+        [a, b, homeless, 999_999], "p.id, p.filename, f.path AS folder_path",
+        chunk_size=2,
+    )
+    db.conn.set_trace_callback(None)
+    assert len([s for s in statements if "LEFT JOIN folders" in s]) == 2
+    assert sorted(tuple(r) for r in rows) == sorted([
+        (a, "a.jpg", path), (b, "b.jpg", path), (homeless, "c.jpg", None),
+    ])
+    live = db.duplicates.photo_rows_with_folder(
+        [a, b], "p.id",
+        " AND (p.flag IS NULL OR p.flag != 'rejected')", chunk_size=900,
+    )
+    assert [r["id"] for r in live] == [a]
+    assert db.duplicates.photo_rows_with_folder([], "p.id", chunk_size=900) == []
+
+
 # -- structure: the SQL lives in DuplicatesRepository ---------------------------
 #
 # ``_apply_winner_loser_merge`` keeps its provenance fold (keyword_source_max)

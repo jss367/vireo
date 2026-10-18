@@ -28,17 +28,9 @@ def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
     """Run ``SELECT {columns} FROM photos p LEFT JOIN folders f WHERE p.id IN (...) {where_extra}``
     in chunks below the SQLite parameter cap. Returns a flat list of rows.
     """
-    rows = []
-    for i in range(0, len(photo_ids), _SQL_PARAM_CHUNK):
-        chunk = photo_ids[i:i + _SQL_PARAM_CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        sql = (
-            f"SELECT {columns} "
-            f"FROM photos p LEFT JOIN folders f ON f.id = p.folder_id "
-            f"WHERE p.id IN ({placeholders}){where_extra}"
-        )
-        rows.extend(db.conn.execute(sql, chunk).fetchall())
-    return rows
+    return db.duplicates.photo_rows_with_folder(
+        photo_ids, columns, where_extra, chunk_size=_SQL_PARAM_CHUNK,
+    )
 
 
 def revalidate_scan_result(db, result):
