@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
+    from repositories.source_cleanup import SourceCleanupRepository
     from repositories.stats import StatsRepository
     from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
@@ -1934,6 +1935,26 @@ class Database:
         on ``Database``.
         """
         return self._workspace_folder_repository()
+
+    # -- Move source cleanup (``move_cleanup`` owns the transaction) --
+
+    def _source_cleanup_repository(self):
+        """Build the (catalog-wide) move-source-cleanup repository on this connection."""
+        from repositories.source_cleanup import SourceCleanupRepository
+
+        return SourceCleanupRepository(self.conn)
+
+    @property
+    def source_cleanup(self) -> SourceCleanupRepository:
+        """Move-source cleanup SQL: ``db.source_cleanup.folder_has_photos(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_source_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to the active workspace, so accessing it never needs one, and
+        nothing in it commits: ``move_cleanup`` opens and ends the transaction.
+        """
+        return self._source_cleanup_repository()
 
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
