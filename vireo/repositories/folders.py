@@ -607,7 +607,7 @@ class FolderRepository:
         cascaded = self._cascade_missing_children(old_path, new_path)
 
         # Cascade the rebase into ``photos.last_move_source_folder_path``.
-        # ``move_folder_path`` already does this for the whole-folder move
+        # ``moves_merge.move_folder_path`` already does this for the whole-folder move
         # flow; ``relocate`` runs when a missing folder is remapped
         # to a new location (or a cascaded missing child is rediscovered
         # under the new root), which frees each old path for reuse the same

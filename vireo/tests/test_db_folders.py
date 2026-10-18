@@ -7,7 +7,7 @@ trees, parent repair, folder health and missing originals, relocation and
 merge into an existing folder, ``delete_folder``, counts, and the
 quality-data folder list. Where a method composes other ``Database``
 methods (``add_workspace_folder``, ``delete_photos``,
-``folders.merge_into_existing``, ``_transfer_gps_review_for_merge``,
+``folders.merge_into_existing``, ``moves_merge.transfer_gps_review``,
 ``folders.nearest_ancestor_id``), the tests patch the façade method to pin
 that the call still routes through it.
 """
@@ -26,6 +26,7 @@ import db as db_module
 import pytest
 from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
+from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
 
 
@@ -753,7 +754,7 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
 
     transfers = []
     monkeypatch.setattr(
-        Database, "_transfer_gps_review_for_merge",
+        MovesMergeRepository, "transfer_gps_review",
         lambda self, losing, surviving: transfers.append((losing, surviving)),
     )
     relinked = []
@@ -1454,7 +1455,7 @@ def test_folders_accessor_builds_a_fresh_repository_and_resolves_the_workspace_l
 # SQL.
 _FACADE_CALLBACKS = {
     "_folder_repository": {
-        "transfer_gps_review": "_transfer_gps_review_for_merge",
+        "transfer_gps_review": "moves_merge.transfer_gps_review",
         "transfer_embedded_offered": "keywords.transfer_embedded_offered_keys",
     },
     "delete_folder": {

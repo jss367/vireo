@@ -463,7 +463,7 @@ def test_gps_review_merge_prefers_newest_decision(discrepancy_catalog, loser_dat
         'INSERT INTO location_gps_reviews(photo_id, fingerprint, reviewed_at) VALUES (?, ?, ?)',
         [(losing, 'loser', loser_date), (survivor, 'survivor', '2026-09-12 12:00:00')],
     )
-    db._transfer_gps_review_for_merge(losing, survivor)
+    db.moves_merge.transfer_gps_review(losing, survivor)
     assert db.conn.execute('SELECT fingerprint FROM location_gps_reviews WHERE photo_id=?', (survivor,)).fetchone()[0] == expected
 
 

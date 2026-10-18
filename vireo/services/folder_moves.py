@@ -243,7 +243,7 @@ class FolderMoves:
         # its folders.path rebased into that workspace's managed copy; a
         # concurrent workspace-membership guard would refuse to touch the
         # folders row for exactly this reason. Moving it here (via
-        # db.move_folder_path) would move or delete the managed copy and
+        # db.moves_merge.move_folder_path) would move or delete the managed copy and
         # rewrite the catalog while local_workspace_folders and the manifest
         # still expect the pre-move layout, so the owning workspace's next
         # status falls into missing-local recovery and sync/discard can no

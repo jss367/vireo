@@ -1511,7 +1511,7 @@ def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     def cleanup_failing_move_folder(db, folder_id, destination, **kwargs):
         # Run the real move (it commits) but inject a cleanup error via
         # rmtree. We do this by patching shutil.rmtree only for the
-        # duration of this call, so the real verify/move_folder_path runs
+        # duration of this call, so the real verify/moves_merge.move_folder_path runs
         # but the final src delete raises.
         import shutil
         orig_rmtree = shutil.rmtree

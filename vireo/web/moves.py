@@ -107,7 +107,7 @@ def create_moves_blueprint(get_db, json_error):
     @blueprint.route("/api/move-rules", methods=["GET"])
     def api_list_move_rules():
         db = get_db()
-        rules = db.list_move_rules()
+        rules = db.moves_merge.list_rules()
         return jsonify([dict(r) for r in rules])
 
     @blueprint.route("/api/move-rules", methods=["POST"])
@@ -119,7 +119,7 @@ def create_moves_blueprint(get_db, json_error):
         criteria = body.get("criteria", {})
         if not name or not destination:
             return json_error("name and destination required")
-        rule_id = db.create_move_rule(name, destination, criteria)
+        rule_id = db.moves_merge.create_rule(name, destination, criteria)
         return jsonify({"ok": True, "id": rule_id})
 
     @blueprint.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
@@ -133,13 +133,13 @@ def create_moves_blueprint(get_db, json_error):
             kwargs["destination"] = body["destination"]
         if "criteria" in body:
             kwargs["criteria"] = body["criteria"]
-        db.update_move_rule(rule_id, **kwargs)
+        db.moves_merge.update_rule(rule_id, **kwargs)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
     def api_delete_move_rule(rule_id):
         db = get_db()
-        db.delete_move_rule(rule_id)
+        db.moves_merge.delete_rule(rule_id)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/move-rules/preview", methods=["POST"])

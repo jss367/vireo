@@ -2289,7 +2289,7 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            transfer_gps_review=self._transfer_gps_review_for_merge,
+            transfer_gps_review=self.moves_merge.transfer_gps_review,
             transfer_embedded_offered=self.keywords.transfer_embedded_offered_keys,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
@@ -2509,7 +2509,10 @@ class Database:
         no workspace id: the few workspace-scoped wrappers resolve
         ``self._ws_id()`` themselves (``merge_staged_tree_into_archive`` passes
         it as a callable, after its staged-root lookup). The subtree path
-        helpers are ``db`` module functions and are passed in.
+        helpers are ``db`` module functions and are passed in, and so are the
+        two methods of other domains every move or merge runs mid-transaction:
+        the folder parent relink and the keyword-association carry, which
+        re-tags through ``tag_photo`` on the façade.
         """
         from repositories.moves_merge import MovesMergeRepository
 
@@ -2518,6 +2521,11 @@ class Database:
             subtree_prefix=_subtree_prefix,
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
+            # Late-bound: ``db.folders`` binds this repository's GPS-review
+            # carry, so building it here would recurse.
+            relink_parents_by_path=lambda folder_ids: (
+                self.folders.relink_parents_by_path(folder_ids)),
+            carry_keyword_associations=self._carry_keyword_associations_for_merge,
         )
 
     @property
@@ -2530,48 +2538,6 @@ class Database:
         use. ``move.py``'s file-move jobs reach their SQL through it.
         """
         return self._moves_merge_repository()
-
-    def create_move_rule(self, name, destination, criteria):
-        """Create a saved move rule. Returns the rule id."""
-        return self._moves_merge_repository().create_rule(name, destination, criteria)
-
-    def get_move_rule(self, rule_id):
-        """Return a single move rule by id."""
-        return self._moves_merge_repository().get_rule(rule_id)
-
-    def list_move_rules(self):
-        """Return all saved move rules ordered by name."""
-        return self._moves_merge_repository().list_rules()
-
-    def update_move_rule(self, rule_id, name=_UNSET, destination=_UNSET, criteria=_UNSET):
-        """Update fields on a move rule."""
-        self._moves_merge_repository().update_rule(
-            rule_id, name=name, destination=destination, criteria=criteria)
-
-    def delete_move_rule(self, rule_id):
-        """Delete a move rule."""
-        self._moves_merge_repository().delete_rule(rule_id)
-
-    def touch_move_rule(self, rule_id):
-        """Update last_run_at timestamp on a move rule."""
-        self._moves_merge_repository().touch_rule(rule_id)
-
-    def batch_update_photo_folder(self, photo_ids, target_folder_id):
-        """Move photos to target folder in a single transaction."""
-        self._moves_merge_repository().batch_update_photo_folder(photo_ids, target_folder_id)
-
-    def move_folder_path(self, folder_id, new_path, new_name=None):
-        """Update a folder's path and cascade to all children.
-
-        Unlike folders.relocate (which only updates missing children),
-        this updates ALL child folders regardless of status. ``new_name`` is
-        used when the root folder is renamed as part of the move; descendants
-        keep their existing names.
-        """
-        self._moves_merge_repository().move_folder_path(
-            folder_id, new_path, new_name,
-            relink_parents_by_path=self.folders.relink_parents_by_path,
-        )
 
     def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
         """Drop non-root links that could re-materialize ``path``'s subtree.
@@ -2591,20 +2557,6 @@ class Database:
         if prune_ids:
             self._new_images_cache.invalidate_workspaces(
                 self._db_path, [workspace_id])
-
-    def _newest_location_change_key(self, photo_id):
-        """Sort key of the newest queued ``location`` change on ``photo_id``.
-
-        ``None`` when the photo has no queued location change. The key is
-        ``(created_at, id)`` so two changes queued inside the same
-        ``datetime('now')`` second still order by insertion — the merge
-        below decides which of two competing assignments is the user's
-        latest intent, and a same-second tie must not fall back to
-        "whichever row happens to be getting deleted". A NULL
-        ``created_at`` (possible on rows written before the column had a
-        default) sorts as the empty string, i.e. oldest.
-        """
-        return self._moves_merge_repository().newest_location_change_key(photo_id)
 
     def _move_location_state_for_merge(self, losing_id, surviving_id):
         """Move ``losing_id``'s location tags onto ``surviving_id`` if newer.
@@ -2631,12 +2583,12 @@ class Database:
 
         Returns ``True`` when the survivor's tags were replaced.
         """
-        loser_key = self._newest_location_change_key(losing_id)
+        loser_key = self.moves_merge.newest_location_change_key(losing_id)
         if loser_key is None:
             # Nothing queued on the row being deleted: its tags carry no
             # pending intent, and the survivor keeps whatever it has.
             return False
-        survivor_key = self._newest_location_change_key(surviving_id)
+        survivor_key = self.moves_merge.newest_location_change_key(surviving_id)
         if survivor_key is not None and survivor_key > loser_key:
             # The survivor's own queued assignment is the newer one. This is
             # the replacement-import shape: a stale archive row still holds
@@ -2657,65 +2609,12 @@ class Database:
             self.tag_photo(surviving_id, kw_id, _commit=False)
         return True
 
-    def _reconcile_conflicting_keyword_edits(self, losing_id, surviving_id):
-        """Drop the older of two opposing keyword edits before a remap.
-
-        The remap lands both rows' queued keyword changes on one photo, and
-        ``sync._plan_photo_sync`` folds a photo's changes into sets. An
-        ``keyword_add`` and a ``keyword_remove`` that share a normalized
-        match key then look exactly like a normalization rename:
-        ``_remove_planned_keywords`` strips the flat entry and
-        ``add_keywords`` writes it straight back, so the keyword survives
-        and BOTH queue rows are cleared as successfully written. A newer
-        removal queued on one row would be silently reversed by an older
-        addition queued on the other.
-
-        Resolved the same way as the location state: the newest opposing
-        intent wins, by ``(created_at, id)``, and every older opposing row
-        is deleted. Resolved across every workspace AND across both
-        photos, not per workspace or per photo: ``photo_keywords`` and the
-        sidecar are both global, so once the remap lands both rows on one
-        photo an add in workspace A and a remove in workspace B are two
-        intents for one file and only the newer can be honored -- keeping
-        both would just hand the outcome to whichever workspace syncs
-        last. A photo that already holds an add in one workspace and a
-        remove in another before the merge is the same shape once the
-        merge collapses them onto the survivor, so the older row has to
-        go too, not just the losing photo's row for that key.
-
-        A photo that holds BOTH directions for a key in ONE workspace's
-        queue is the deliberate rename pair ``_remove_planned_keywords``
-        exists to handle, so its two rows travel as one presence-asserting
-        atom -- the pair's net effect is "keep the tag with the canonical
-        spelling" -- rather than as opposing halves the merge is creating.
-        The pair reconciles or survives as one unit against every other
-        opposing intent, by the pair's newest row. The exemption stays
-        workspace-scoped -- an add in workspace A and a remove in
-        workspace B on the same photo are two intents competing across
-        workspaces, not a rename pair.
-
-        The winning side's catalog state travels too. A ``keyword_add`` has
-        already inserted the ``photo_keywords`` row on its photo and a
-        ``keyword_remove`` has already deleted it -- the queue row only
-        records what the sidecar still owes. Remapping the row alone would
-        delete that association with the losing photo and leave the
-        survivor reporting the opposite of what the next sync writes to
-        XMP. ``keyword_remove_flat`` is deliberately excluded: it asks for
-        the stale flat ``dc:subject`` line to go, not the association.
-
-        Returns the number of queue rows dropped.
-        """
-        return self._moves_merge_repository().reconcile_conflicting_keyword_edits(
-            losing_id, surviving_id,
-            carry_keyword_associations=self._carry_keyword_associations_for_merge,
-        )
-
     def _carry_keyword_associations_for_merge(
             self, losing_id, surviving_id, by_key):
         """Apply the losing row's winning keyword ops to the survivor's tags.
 
         ``by_key`` is the grouping built by
-        ``_reconcile_conflicting_keyword_edits``; rows it has already
+        ``moves_merge.reconcile_conflicting_keyword_edits``; rows it has already
         deleted are skipped by id. Only keys whose newest surviving change
         sits on the losing photo are applied -- when the survivor holds the
         newer change its own association already reflects it.
@@ -2748,122 +2647,13 @@ class Database:
                 # survivor. If it is somehow absent the catalog is already
                 # inconsistent and there is no id to carry -- leave it to
                 # the sync rather than guessing a keyword by name.
-                for kw_id in self._photo_keyword_ids_matching(
+                for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         losing_id, match_key):
                     self.tag_photo(surviving_id, kw_id, _commit=False)
             elif newest_loser["change_type"] == "keyword_remove":
-                for kw_id in self._photo_keyword_ids_matching(
+                for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
                     self.untag_photo(surviving_id, kw_id, _commit=False)
-
-    def _photo_keyword_ids_matching(self, photo_id, match_key):
-        """Keyword ids on ``photo_id`` whose name shares ``match_key``.
-
-        Matched in Python rather than SQL: SQLite's ``LOWER`` is ASCII-only,
-        so a case or diacritic variant would slip past a SQL comparison the
-        same way it does in the collision tracker above.
-        """
-        return self._moves_merge_repository().photo_keyword_ids_matching(photo_id, match_key)
-
-    def _transfer_gps_review_for_merge(self, losing_id, surviving_id):
-        """Carry the newest GPS keep decision across an identity merge.
-
-        Prefer the survivor on timestamp ties. The fingerprint still has to
-        match its coordinates, assigned place and sidecar before review will
-        suppress a discrepancy; moving the decision cannot bless new data.
-        The caller owns the transaction and deletion of the losing row.
-        """
-        self._moves_merge_repository().transfer_gps_review(losing_id, surviving_id)
-
-    def _transfer_review_state_for_merge(self, losing_id, surviving_id):
-        """Carry queued rating / flag state onto the survivor by chronology.
-
-        ``photos.rating`` and ``photos.flag`` are written at edit time and
-        the queue row only records what the sidecar still owes. Remapping
-        the row alone would leave the survivor's catalog columns untouched:
-        the next sync writes the queued value into the sidecar and clears
-        the row, and the catalog is left permanently disagreeing with the
-        file on disk.
-
-        Two rows of the same type on one photo are also a problem in their
-        own right -- ``sync._plan_photo_sync`` keeps whichever it folds
-        last -- so every row but the newest is dropped. The catalog column
-        then takes that row's value, which is exactly what the sync will
-        write.
-
-        Only queued state is compared. A rating set on the survivor and
-        already synced has no row left to date it, so it loses to a
-        still-queued older edit; the queue is the only evidence of intent
-        that survives a sync.
-
-        Returns the number of queue rows dropped.
-        """
-        return self._moves_merge_repository().transfer_review_state(
-            losing_id, surviving_id,
-            transfer_gps_review=self._transfer_gps_review_for_merge,
-            transfer_edit_recipe=self._transfer_edit_recipe_for_merge,
-        )
-
-    def _transfer_edit_recipe_for_merge(self, losing_id, surviving_id):
-        """Carry a queued edit recipe's catalog row onto the survivor.
-
-        ``photo_edit_recipes`` is written when the edit is made and the
-        queue row carries the same JSON for the sidecar. The row cascades
-        away with the losing photo, so remapping the queue row alone leaves
-        ``get_photo_edit_recipe`` on the survivor reporting its older
-        recipe -- or none -- while the sync writes the queued one to XMP
-        and clears the row. The UI and any future render then disagree with
-        the sidecar.
-
-        The queue row's ``value`` is the recipe JSON itself, so the catalog
-        row is rebuilt from the newest queued change rather than copied
-        across; an empty value is the "recipe cleared" edit and deletes the
-        survivor's row. Duplicates within one workspace are dropped as
-        elsewhere -- ``_plan_photo_sync`` keeps whichever it folds last.
-
-        Returns the number of queue rows dropped.
-        """
-        return self._moves_merge_repository().transfer_edit_recipe(losing_id, surviving_id)
-
-    def _link_survivor_for_sibling_edits(self, workspace_id, photo_id):
-        """Grant a sibling workspace sync-only access to a remapped photo's folder.
-
-        The collision loop remaps ``pending_changes`` by ``photo_id``, which
-        also moves rows owned by workspaces other than the one running the
-        merge. The merge links the destination subtree into the active
-        workspace only, so without this a sibling workspace would be left
-        holding a queued edit on a photo it cannot resolve:
-        ``sync._resolve_xmp_paths`` builds its folder map from that
-        workspace's ``folders.tree``, and a missing folder resolves to an
-        empty path and fails every future sync as inaccessible — queued
-        forever, with nothing saying why.
-
-        Recorded in ``workspace_sync_only_photos`` rather than
-        ``workspace_folders``. A ``workspace_folders`` link is library
-        membership: every browse/library query joins on it by folder id
-        alone, so any link -- root or not -- would make every photo sharing
-        the survivor's folder visible in the sibling workspace, and the
-        link would remain after the queued edit was synced. One queued
-        edit on a colliding staged photo would permanently import an
-        archive folder of unrelated photos into a workspace that never
-        asked for it.
-
-        Keyed by photo so the grant survives a later move: ``move_photos``
-        rewrites ``photos.folder_id`` and knows nothing about this table, so
-        a folder-keyed grant would stop applying the moment the active
-        workspace moved the survivor -- the sibling's preserved edit would
-        be unresolvable again, with nothing saying why.
-
-        ``workspace_sync_only_photos`` is read only by
-        ``get_sync_only_photo_paths``, which the sync engine consults
-        one photo at a time (never as a folder-wide union) when building
-        its sidecar-path map, and by ``_photo_syncable_in_workspace``.
-        Every browse/library query stays folder-scoped through
-        ``workspace_folders`` and sees no change.
-
-        Returns ``True`` when a new grant was written.
-        """
-        return self._moves_merge_repository().link_survivor_for_sibling_edits(workspace_id, photo_id)
 
     def get_sync_only_photo_paths(self, workspace_id=None):
         """Return ``{photo_id: folders.path}`` for the workspace's sync-only grants.
@@ -2955,12 +2745,12 @@ class Database:
         * ``location`` -> the photo's ``type='location'`` keyword links
           (``_move_location_state_for_merge``)
         * ``keyword_add`` / ``keyword_remove`` -> the ``photo_keywords``
-          association (``_reconcile_conflicting_keyword_edits``);
+          association (``moves_merge.reconcile_conflicting_keyword_edits``);
           ``keyword_remove_flat`` is sidecar-only and has none
         * ``rating`` / ``flag`` -> the ``photos`` columns
-          (``_transfer_review_state_for_merge``)
+          (``moves_merge.transfer_review_state``)
         * ``edit_recipe`` -> the ``photo_edit_recipes`` row
-          (``_transfer_edit_recipe_for_merge``)
+          (``moves_merge.transfer_edit_recipe``)
 
         Each resolves a competing change on the two rows by queue
         chronology, ``(created_at, id)``, and drops the older row so
@@ -2977,7 +2767,7 @@ class Database:
         ``workspace_folders`` is not touched -- a real library link would
         make every other photo in the survivor's folder visible in the
         sibling workspace and persist past the sync. See
-        ``_link_survivor_for_sibling_edits``.
+        ``moves_merge.link_survivor_for_sibling_edits``.
         """
         def case_insensitive_root(path):
             # Late-bound so a patched ``move._case_insensitive_root`` applies,
@@ -2996,22 +2786,12 @@ class Database:
             add_workspace_folder_no_commit=self._add_workspace_folder_no_commit,
             case_insensitive_root=case_insensitive_root,
             move_location_state=self._move_location_state_for_merge,
-            reconcile_keyword_edits=self._reconcile_conflicting_keyword_edits,
-            transfer_review_state=self._transfer_review_state_for_merge,
-            link_survivor_for_sibling_edits=self._link_survivor_for_sibling_edits,
             invalidate_new_images=lambda workspace_ids: (
                 self._new_images_cache.invalidate_workspaces(
                     self._db_path, workspace_ids)),
             update_folder_counts=self.folders.update_counts,
             KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
-
-    def check_filename_collisions(self, photo_ids, target_folder_id):
-        """Check if any photo filenames already exist in the target folder.
-
-        Returns list of dicts with photo_id and filename for conflicts.
-        """
-        return self._moves_merge_repository().filename_collisions(photo_ids, target_folder_id)
 
     def query_move_rule_matches(self, criteria):
         """Return photo IDs matching move rule criteria.
