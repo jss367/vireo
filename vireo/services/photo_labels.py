@@ -1,20 +1,29 @@
 """Photo color-label workflow coordination."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Iterable
+
+    from db import Database
+
 
 class PhotoLabelService:
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         self.db = db
 
-    def labels_for_photos(self, photo_ids):
+    def labels_for_photos(self, photo_ids: Collection[int]) -> dict[int, str]:
         return self.db.photo_labels.get_for_photos(photo_ids)
 
-    def descriptions(self):
+    def descriptions(self) -> dict[str, str]:
         return self.db.photo_labels.get_descriptions()
 
-    def set_description(self, color, description):
+    def set_description(self, color: str, description: str) -> str:
         return self.db.photo_labels.set_description(color, description)
 
-    def set_label(self, photo_id, color):
+    def set_label(self, photo_id: int, color: str | None) -> None:
         photo = self.db.photos.get(photo_id)
         if photo is None:
             raise LookupError("not found")
@@ -37,7 +46,7 @@ class PhotoLabelService:
             }],
         )
 
-    def set_labels(self, photo_ids, color):
+    def set_labels(self, photo_ids: Iterable[int], color: str | None) -> int:
         valid_ids = self.db.photo_visibility.visible_photo_ids(photo_ids)
         old_labels = self.db.photo_labels.get_for_photos(valid_ids)
         new_color = color or ""

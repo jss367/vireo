@@ -108,7 +108,7 @@ def test_has_stale_primary_state_sees_state_row_or_legacy_columns(db, photo):
 def test_active_mask_reads_the_active_variant_row(db, photo):
     photo_id, _ids = photo
     db.masks_features.upsert_mask(photo_id, "sam2-small", "/m.png", "megadetector-v6",
-                                  .1, .1, .3, .3)
+                                  (.1, .1, .3, .3))
     assert db.subjects.active_mask(photo_id) is None
     db.conn.execute("UPDATE photos SET active_mask_variant='sam2-small' WHERE id=?", (photo_id,))
     mask = db.subjects.active_mask(photo_id)

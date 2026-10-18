@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
+from repositories.masks_features import PipelineFeatures
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -16198,7 +16199,7 @@ def _seed_masks(db, tmp_path):
         db.masks_features.upsert_mask(
             photo_id=pid, variant=var, path=str(f),
             detector_model="megadetector-v6",
-            prompt_x=0, prompt_y=0, prompt_w=10, prompt_h=10,
+            prompt=(0, 0, 10, 10),
         )
     # Both photos get an active variant set: this mirrors what the
     # pipeline always does after upsert_photo_mask, so the seed reflects
@@ -16316,7 +16317,7 @@ def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
     db.masks_features.upsert_mask(
         photo_id=p1, variant="sam3-small", path=str(f),
         detector_model="megadetector-v6",
-        prompt_x=999, prompt_y=999, prompt_w=10, prompt_h=10,
+        prompt=(999, 999, 10, 10),
     )
     client = app.test_client()
     r = client.post("/api/storage/masks/delete-stale")
@@ -16363,7 +16364,7 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path=str(f),
         detector_model="megadetector-v6",
-        prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
+        prompt=(0.10, 0.10, 0.10, 0.10),
     )
     db.conn.commit()
     permissive = db.create_workspace(
@@ -16447,15 +16448,17 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
             emb = emb / np.linalg.norm(emb)
             db.masks_features.update_pipeline_features(
                 pid,
-                mask_path=f"/masks/{pid}.png",
-                subject_tenengrad=200 + i * 50,
-                bg_tenengrad=30 + i * 5,
-                crop_complete=0.85 + i * 0.03,
-                bg_separation=50.0 - i * 10,
-                subject_clip_high=0.01,
-                subject_clip_low=0.01,
-                subject_y_median=120.0,
-                phash_crop=f"{pid:016x}",
+                PipelineFeatures(
+                    mask_path=f"/masks/{pid}.png",
+                    subject_tenengrad=200 + i * 50,
+                    bg_tenengrad=30 + i * 5,
+                    crop_complete=0.85 + i * 0.03,
+                    bg_separation=50.0 - i * 10,
+                    subject_clip_high=0.01,
+                    subject_clip_low=0.01,
+                    subject_y_median=120.0,
+                    phash_crop=f"{pid:016x}",
+                ),
             )
             db.masks_features.update_embeddings(
                 pid,
@@ -16545,15 +16548,17 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             emb = emb / np.linalg.norm(emb)
             db.masks_features.update_pipeline_features(
                 pid,
-                mask_path=f"/masks/{pid}.png",
-                subject_tenengrad=200 + i * 50,
-                bg_tenengrad=30 + i * 5,
-                crop_complete=0.85 + i * 0.03,
-                bg_separation=50.0 - i * 10,
-                subject_clip_high=0.01,
-                subject_clip_low=0.01,
-                subject_y_median=120.0,
-                phash_crop=f"{pid:016x}",
+                PipelineFeatures(
+                    mask_path=f"/masks/{pid}.png",
+                    subject_tenengrad=200 + i * 50,
+                    bg_tenengrad=30 + i * 5,
+                    crop_complete=0.85 + i * 0.03,
+                    bg_separation=50.0 - i * 10,
+                    subject_clip_high=0.01,
+                    subject_clip_low=0.01,
+                    subject_y_median=120.0,
+                    phash_crop=f"{pid:016x}",
+                ),
             )
             db.masks_features.update_embeddings(
                 pid,

@@ -9,7 +9,6 @@ from image_loader import (
     is_excluded_scan_path,
     safe_scan_walk,
 )
-from repositories.photo_row_deletion import photo_row_deletion
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
@@ -447,7 +446,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
         # Commit the completed prefix before a cooperative pause. Otherwise
         # the sleeping verifier retains SQLite's writer lock.
         if pause_requested and pause_requested():
-            db.conn.commit()
+            db.commit()
             if pause_callback:
                 pause_callback()
         if should_cancel and should_cancel():
@@ -474,9 +473,9 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
         _record_hash_verdict(db, photo, path, actual, stats)
 
         if (i + 1) % 100 == 0:
-            db.conn.commit()
+            db.commit()
 
-    db.conn.commit()
+    db.commit()
 
     # A cancelled run verified only a prefix of the library — recording it
     # would let the summary banner claim coverage that doesn't exist.
@@ -652,15 +651,8 @@ def remove_orphans(db, photo_ids):
         db: Database instance
         photo_ids: list of photo ids to remove
     """
-    with photo_row_deletion(db.conn) as photo_rows:
-        for pid in photo_ids:
-            db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
-            db.conn.execute(
-                "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?", (pid,),
-            )
-            db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
-        photo_rows.delete(dict.fromkeys(photo_ids))
-    db.conn.commit()
+    db.audit.remove_orphan_rows(photo_ids)
+    db.commit()
     db.update_folder_counts()
     log.info("Removed %d orphan entries", len(photo_ids))
 
@@ -694,12 +686,7 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
     def selected_catalog_files(directory, files):
         folder_path = catalog_folder_path(db, directory)
         names = {os.path.basename(p) for p in files}
-        rows = db.conn.execute(
-            "SELECT p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE f.path=? "
-            "UNION SELECT p.companion_path FROM photos p JOIN folders f ON f.id=p.folder_id "
-            "WHERE f.path=? AND p.companion_path IS NOT NULL",
-            (folder_path, folder_path),
-        ).fetchall()
+        rows = db.audit.cataloged_names_in_folder(folder_path)
         return names.intersection(os.path.basename(row[0]) for row in rows)
 
     imported = 0
@@ -733,10 +720,7 @@ def confirmed_orphan_ids(db, photo_ids):
 
     confirmed = []
     for pid in db.photo_visibility.visible_photo_ids(photo_ids):
-        row = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
-            (pid,),
-        ).fetchone()
+        row = db.audit.photo_location(pid)
         if not row:
             continue
         try:

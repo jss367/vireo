@@ -16,11 +16,32 @@ routes that decide predictions do that through ``services.prediction_decisions``
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable, Mapping, Sequence
+
+    from db import Database
+    from services.service_types import JsonDict
+    from species_identity import SpeciesIdentity, SpeciesResolver
+    from taxonomy import Taxonomy
+
+    # A prediction row: a ``sqlite3.Row`` from the predictions queries, or the
+    # dict a route built from one. Any: its columns are mixed SQLite values.
+    PredictionRow = sqlite3.Row | Mapping[str, Any]
+
+    # ``(photo_id, species, identity, detection_id) -> category``, the
+    # closure ``effective_category_resolver`` returns.
+    CategoryOf = Callable[[int | None, str | None, SpeciesIdentity | None, int | None], str | None]
+
+    # ``compare.compare_prediction_to_keywords``.
+    CompareToKeywords = Callable[[str, list[str], Taxonomy | None], object]
 
 log = logging.getLogger(__name__)
 
 
-def effective_category_resolver(db, photo_ids):
+def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -> CategoryOf | None:
     """Build ``(photo_id, species) -> category`` against *current* keywords.
 
     ``predictions.category`` is a snapshot of how the prediction compared
@@ -102,18 +123,20 @@ def effective_category_resolver(db, photo_ids):
 
 
 def _category_resolver(
-    db, resolver, photo_ids, species_by_photo, compare_prediction_to_keywords, taxonomy,
-):
+    db: Database, resolver: SpeciesResolver, photo_ids: Sequence[int],
+    species_by_photo: Mapping[int, list[JsonDict]],
+    compare_prediction_to_keywords: CompareToKeywords, taxonomy: Taxonomy | None,
+) -> CategoryOf:
     """Build the ``_category`` closure ``effective_category_resolver`` returns.
 
     ``species_by_photo`` is the photos' current species keywords; the
     keyword comparison names and the per-detection holder index are built
     here, in that order, before the closure is returned.
     """
-    resolved = {}
-    cache = {}
+    resolved: dict[str, str] = {}
+    cache: dict[tuple[int, str, int | None], str | None] = {}
 
-    def comparison_name(species, identity=None):
+    def comparison_name(species: str, identity: SpeciesIdentity | None = None) -> str:
         identity = identity or resolver.display(species)
         if identity.scientific_name:
             return identity.scientific_name
@@ -121,7 +144,7 @@ def _category_resolver(
             resolved[species] = db.resolve_species_display_name(identity.display_name)
         return resolved[species]
 
-    keyword_names = {}
+    keyword_names: dict[int, list[tuple[str, str]]] = {}
     for photo_id, entries in species_by_photo.items():
         names = []
         for entry in entries:
@@ -134,11 +157,14 @@ def _category_resolver(
         db, resolver, photo_ids, species_by_photo,
     )
 
-    def _held_by_other_subject(photo_id, keyword_key, detection_id):
+    def _held_by_other_subject(photo_id: int, keyword_key: str, detection_id: int) -> bool:
         holders = detections_by_key.get(photo_id, {}).get(keyword_key)
         return bool(holders) and detection_id not in holders
 
-    def _category(photo_id, species, identity=None, detection_id=None):
+    def _category(
+        photo_id: int | None, species: str | None, identity: SpeciesIdentity | None = None,
+        detection_id: int | None = None,
+    ) -> str | None:
         if not species or photo_id is None:
             return None
         identity = identity or resolver.display(species)
@@ -165,7 +191,10 @@ def _category_resolver(
     return _category
 
 
-def _detections_by_consensus_key(db, resolver, photo_ids, species_by_photo):
+def _detections_by_consensus_key(
+    db: Database, resolver: SpeciesResolver, photo_ids: Iterable[int],
+    species_by_photo: Mapping[int, object],
+) -> dict[int, dict[str, set[int]]]:
     """Map each photo to ``{species identity key: {detection ids}}``."""
     # Which detections on each photo name each species identity. Keyed by
     # ``consensus`` so a mixed-label burst's minority frame is attributed
@@ -173,7 +202,7 @@ def _detections_by_consensus_key(db, resolver, photo_ids, species_by_photo):
     # not the row's own raw label — otherwise accepting the minority frame
     # adds a keyword this index has no holder for and a neighbouring
     # detection's prediction reads it as another subject's conflict.
-    detections_by_key = {}
+    detections_by_key: dict[int, dict[str, set[int]]] = {}
     for photo_id, rows in db.predictions.get_live_rows_by_photo(
         [pid for pid in photo_ids if pid in species_by_photo]
     ).items():
@@ -192,7 +221,7 @@ EFFECTIVE_AMBIGUOUS_CATEGORIES = frozenset(
 STORED_AMBIGUOUS_CATEGORIES = frozenset({"disagreement", "refinement"})
 
 
-def prediction_is_ambiguous(effective_category, stored_category):
+def prediction_is_ambiguous(effective_category: str | None, stored_category: str | None) -> bool:
     """Would a bare Accept here be dishonest?
 
     The fresh comparison wins outright when there is one. ORing it with
@@ -207,7 +236,7 @@ def prediction_is_ambiguous(effective_category, stored_category):
     return stored_category in STORED_AMBIGUOUS_CATEGORIES
 
 
-def ambiguous_prediction_ids(db, rows):
+def ambiguous_prediction_ids(db: Database, rows: Iterable[PredictionRow]) -> set[int]:
     """Which of ``rows`` a bare Accept must not act on.
 
     The one definition of "ambiguous" for the pair of endpoints that

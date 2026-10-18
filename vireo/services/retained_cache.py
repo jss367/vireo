@@ -5,6 +5,8 @@ and user exports are never candidates. Cleanup unlinks individual verified
 files, never directory trees or symlinks. Failed unlinks remain measurable.
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 import re
@@ -12,6 +14,18 @@ import stat
 import threading
 import time
 from functools import wraps
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping
+
+    from db import Database
+    from services.service_types import JsonDict
+
+    # Any: config values are heterogeneous settings (paths, limits, flags).
+    _Config = Mapping[str, Any]
+    # ``(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)``.
+    _Identity = tuple[int, int, int, int, int]
 
 FAMILIES = {
     "full-resolution": ("Full-resolution renders", "originals",
@@ -28,7 +42,7 @@ PRESERVED_FAMILIES = frozenset({"external-editor", "external-dng"})
 _READ_GUARDS = {family: threading.RLock() for family in FAMILIES}
 
 
-def reader_guard(family):
+def reader_guard(family: str) -> threading.RLock:
     """Pin a family's paths through validation, publication and file open.
 
     Acquire after source/preparation locks, never around artifact-flight
@@ -39,10 +53,10 @@ def reader_guard(family):
     return _READ_GUARDS[family]
 
 
-def guarded_reader(family):
-    def decorate(function):
+def guarded_reader[**P, R](family: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorate(function: Callable[P, R]) -> Callable[P, R]:
         @wraps(function)
-        def read(*args, **kwargs):
+        def read(*args: P.args, **kwargs: P.kwargs) -> R:
             with reader_guard(family):
                 return function(*args, **kwargs)
         return read
@@ -56,16 +70,18 @@ class SourceVerifier:
     it is empty after successful verification.
     """
 
-    def __init__(self, verify, recheck, failure=None):
+    def __init__(
+        self, verify: Callable[[str], bool], recheck: Callable[[str], bool], failure: JsonDict | None = None,
+    ) -> None:
         self._verify = verify
         self.recheck = recheck
         self.verification_failure = {} if failure is None else failure
 
-    def __call__(self, path):
+    def __call__(self, path: str) -> bool:
         return self._verify(path)
 
 
-def source_verifier(db, config, checkpoint=lambda: None):
+def source_verifier(db: Database, config: _Config, checkpoint: Callable[[], object] = lambda: None) -> SourceVerifier:
     """Fail closed unless independent catalog sources can be read in full."""
     generated = os.path.dirname(config["THUMB_CACHE_DIR"])
     excluded = [*roots(config).values(), *[os.path.join(generated, name) for name in (
@@ -75,11 +91,11 @@ def source_verifier(db, config, checkpoint=lambda: None):
     verified = {}
     failure = {}
 
-    def reject(reason, **details):
+    def reject(reason: str, **details: object) -> bool:
         failure.update(reason=reason, **details)
         return False
 
-    def path_identity(path):
+    def path_identity(path: str) -> _Identity:
         # Windows path stat exposes creation time as ctime, while fstat
         # can expose ChangeTime. Keep every identity field, including the
         # change-time guard, by querying the named path through fstat too.
@@ -88,7 +104,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
                 return _identity(os.fstat(handle.fileno()))
         return _identity(os.stat(path))
 
-    def verify(path):
+    def verify(path: str) -> bool:
         failure.clear()
         verified.pop(path, None)
         match = re.match(r"([0-9]+)[._]", os.path.basename(path))
@@ -141,7 +157,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
         except (OSError, ValueError, TypeError) as exc:
             return reject("source-verification-error", error_type=type(exc).__name__, error=str(exc))
 
-    def recheck(path):
+    def recheck(path: str) -> bool:
         proof = verified.pop(path, None)
         if not proof:
             return False
@@ -163,21 +179,23 @@ def source_verifier(db, config, checkpoint=lambda: None):
     return SourceVerifier(verify, recheck, failure)
 
 
-def roots(config):
+def roots(config: _Config) -> dict[str, str]:
     generated = os.path.dirname(config["THUMB_CACHE_DIR"])
     return {key: os.path.join(generated, subdir) if subdir else
             os.path.join(config["COMPUTATION_CACHE_DIR"], "objects")
             for key, (_label, subdir, _pattern) in FAMILIES.items()}
 
 
-def files(root, family, *, onerror=None):
+def files(
+    root: str, family: str, *, onerror: Callable[[OSError], object] | None = None,
+) -> Iterator[tuple[str, os.stat_result]]:
     """Yield exact generated payload files without following symlink trees."""
     if os.path.islink(root):
         if onerror:
             onerror(PermissionError(f"Symbolic-link cache directory is excluded: {root}"))
         return
     pattern = re.compile(FAMILIES[family][2])
-    def walk_error(exc):
+    def walk_error(exc: OSError) -> None:
         if not isinstance(exc, FileNotFoundError) and onerror:
             onerror(exc)
 
@@ -199,7 +217,7 @@ def files(root, family, *, onerror=None):
                 yield path, info
 
 
-def summary(config, *, limit=100):
+def summary(config: _Config, *, limit: int = 100) -> list[JsonDict]:
     result = []
     for family, root in roots(config).items():
         count = size = 0
@@ -218,8 +236,10 @@ def summary(config, *, limit=100):
     return result
 
 
-def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lambda: None,
-            progress=lambda current, total, path: None, now=None, source_is_readable=None):
+def cleanup(config: _Config, source_folders: Iterable[str], *, family: str | None = None, clear: bool = False,
+            checkpoint: Callable[[], object] = lambda: None,
+            progress: Callable[[int, int, str], object] = lambda current, total, path: None,
+            now: float | None = None, source_is_readable: Callable[[str], bool] | None = None) -> JsonDict:
     """Enforce a shared payload budget/age, or explicitly clear one family.
 
     Automatic maintenance gives publications an hour of grace. Policies
@@ -238,7 +258,7 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
     candidates = []
     errors = []
     errors_total = 0
-    def add_error(message):
+    def add_error(message: object) -> None:
         nonlocal errors_total
         errors_total += 1
         if len(errors) < 50:
@@ -316,12 +336,12 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             "errors": errors, "errors_total": errors_total, "ok": not errors_total}
 
 
-def _within(path, root):
+def _within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath([path, root]) == root
     except ValueError:
         return False
 
 
-def _identity(info):
+def _identity(info: os.stat_result) -> _Identity:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns

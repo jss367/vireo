@@ -5,6 +5,8 @@ import pytest
 from image_edits import RecipeError, apply_recipe, normalize_recipe, recipe_to_json
 from PIL import Image
 from tone import (
+    LocalAdjustments,
+    ToneAdjustments,
     _hsl_to_rgb,
     apply_adjustments,
     apply_point_color,
@@ -56,8 +58,11 @@ def test_new_controls_run_in_local_branch_and_tiled_rgba_exports(monkeypatch):
     adjustments = {"point_curves": {"red": [[0, 0], [35, 55], [100, 95]]},
                    "point_color": [{"sample": [0, 80, 50], "hue": 40, "luminance": -10}]}
     rgb = np.random.default_rng(14).random((13, 17, 3), dtype=np.float32)
-    expected = apply_adjustments(rgb, exposure=.4, **adjustments)
-    actual = apply_adjustments(rgb, local_weight=np.ones((13, 17)), local_subject={"exposure": .4}, **adjustments)
+    expected = apply_adjustments(rgb, ToneAdjustments(exposure=.4, **adjustments))
+    actual = apply_adjustments(
+        rgb, ToneAdjustments(**adjustments),
+        local=LocalAdjustments(weight=np.ones((13, 17)), subject={"exposure": .4}),
+    )
     np.testing.assert_allclose(actual, expected, atol=1e-6)
     rgba = np.random.default_rng(15).integers(0, 256, (13, 17, 4), dtype=np.uint8)
     image = Image.fromarray(rgba)
@@ -109,9 +114,11 @@ def test_rejects_invalid_samples(value):
 def test_point_color_selects_after_other_color_adjustments(local):
     rgb = np.array([[[.8, .2, .1], [.15, .55, .1]]], dtype=np.float32)
     base = {'vibrance': 30, 'saturation': -25, 'color_grading': {'midtones': {'hue': 180, 'saturation': 30}}}
-    if local:
-        base.update(local_weight=np.array([[1, .5]], dtype=np.float32), local_subject={'saturation': -20})
-    source = apply_adjustments(rgb, **base)
+    deltas = (
+        LocalAdjustments(weight=np.array([[1, .5]], dtype=np.float32), subject={'saturation': -20})
+        if local else None
+    )
+    source = apply_adjustments(rgb, ToneAdjustments(**base), local=deltas)
     samples = [{'sample': [15, 50, 40], 'hue_range': 90, 'hue': 80, 'saturation': 30}]
-    np.testing.assert_allclose(apply_adjustments(rgb, point_color=samples, **base),
+    np.testing.assert_allclose(apply_adjustments(rgb, ToneAdjustments(point_color=samples, **base), local=deltas),
                                apply_point_color(source, samples), atol=1e-6)

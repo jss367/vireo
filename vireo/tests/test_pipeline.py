@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
+from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,15 +58,17 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
 
             db.masks_features.update_pipeline_features(
                 pid,
-                mask_path=f"/masks/{pid}.png",
-                subject_tenengrad=200 + i * 50 + enc_idx * 10,
-                bg_tenengrad=30 + i * 5,
-                crop_complete=0.85 + i * 0.03,
-                bg_separation=50.0 - i * 10,
-                subject_clip_high=0.01,
-                subject_clip_low=0.01,
-                subject_y_median=120.0,
-                phash_crop=f"{pid:016x}",
+                PipelineFeatures(
+                    mask_path=f"/masks/{pid}.png",
+                    subject_tenengrad=200 + i * 50 + enc_idx * 10,
+                    bg_tenengrad=30 + i * 5,
+                    crop_complete=0.85 + i * 0.03,
+                    bg_separation=50.0 - i * 10,
+                    subject_clip_high=0.01,
+                    subject_clip_low=0.01,
+                    subject_y_median=120.0,
+                    phash_crop=f"{pid:016x}",
+                ),
             )
             db.masks_features.update_embeddings(
                 pid,
@@ -94,7 +97,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             db.masks_features.upsert_mask(
                 pid, "sam2-small", f"/masks/{pid}.png",
                 detector_model="megadetector",
-                prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+                prompt=(0.2, 0.2, 0.4, 0.4),
             )
             db.conn.execute(
                 "UPDATE photos SET active_mask_variant=? WHERE id=?",
@@ -1081,10 +1084,12 @@ def test_compute_review_readiness_full_features(tmp_path):
         for pid in enc_ids:
             db.masks_features.update_pipeline_features(
                 pid,
-                eye_x=0.5,
-                eye_y=0.5,
-                eye_conf=0.9,
-                eye_tenengrad=200.0,
+                PipelineFeatures(
+                    eye_x=0.5,
+                    eye_y=0.5,
+                    eye_conf=0.9,
+                    eye_tenengrad=200.0,
+                ),
             )
 
     out = compute_review_readiness(db)
@@ -1118,7 +1123,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
         pids.append(pid)
 
     # Exactly one mask out of four → 25% coverage, at the threshold.
-    db.masks_features.update_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+    db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=f"/masks/{pids[0]}.png"))
 
     out = compute_review_readiness(db)
     assert out["state"] == "computable"
@@ -1131,7 +1136,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
     assert "masks_partial" in out["enhancing_missing"]
 
     # Asymmetric companion: drop the only mask → 0/4, below threshold.
-    db.masks_features.update_pipeline_features(pids[0], mask_path=None)
+    db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=None))
     out_below = compute_review_readiness(db)
     assert out_below["state"] == "insufficient"
     assert out_below["with_masks"] == 0
@@ -1167,7 +1172,7 @@ def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
         pids.append(pid)
 
     # 1 mask out of 5 → 20% coverage, strictly below the 25% threshold.
-    db.masks_features.update_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+    db.masks_features.update_pipeline_features(pids[0], PipelineFeatures(mask_path=f"/masks/{pids[0]}.png"))
 
     out = compute_review_readiness(db)
     assert out["state"] == "insufficient"
@@ -1251,7 +1256,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
         ])
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
-        db.masks_features.update_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+        db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=f"/masks/{pid}.png"))
         db.masks_features.update_embeddings(
             pid,
             dino_subject_embedding=embedding_to_blob(emb),
@@ -1297,12 +1302,14 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     emb = emb / np.linalg.norm(emb)
     db.masks_features.update_pipeline_features(
         pid,
-        mask_path=f"/masks/{pid}.png",
-        eye_x=None,
-        eye_y=None,
-        eye_conf=None,
-        eye_tenengrad=None,
-        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        PipelineFeatures(
+            mask_path=f"/masks/{pid}.png",
+            eye_x=None,
+            eye_y=None,
+            eye_conf=None,
+            eye_tenengrad=None,
+            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        ),
     )
     # Seed an active photo_masks row aligned with the primary detection
     # so the tightened readiness counts (count_eye_keypoint_eligible /
@@ -1311,7 +1318,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     db.masks_features.upsert_mask(
         pid, "sam2-small", f"/masks/{pid}.png",
         detector_model="megadetector-v6",
-        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+        prompt=(0.2, 0.2, 0.4, 0.4),
     )
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
@@ -1345,7 +1352,7 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         det_ids[0], "subject", species_conf, "bioclip", category="match",
         taxonomy={"class": taxonomy_class} if taxonomy_class else None,
     )
-    db.masks_features.update_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=f"/masks/{pid}.png"))
     # The eye-stage readiness counts (count_eye_keypoint_eligible /
     # _attemptable) require an active photo_masks row whose prompt
     # matches the selected primary detection. Seed it so eligible photos
@@ -1353,7 +1360,7 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
     db.masks_features.upsert_mask(
         pid, "sam2-small", f"/masks/{pid}.png",
         detector_model="megadetector-v6",
-        prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
+        prompt=(0.2, 0.2, 0.4, 0.4),
     )
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
@@ -2448,7 +2455,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
     db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(pid, "test")
     return db, pid
@@ -2569,7 +2576,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(other_pid, "test")
     db.predictions.add(
@@ -2652,7 +2659,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(other_pid, "test")
 
@@ -2742,7 +2749,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
+        prompt=(0.1, 0.1, 0.8, 0.8),
     )
     db.set_active_mask_variant(other_pid, "test")
     db.predictions.add(
@@ -2840,7 +2847,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
     db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
-        prompt_x=0.125, prompt_y=0.167, prompt_w=0.75, prompt_h=0.667,
+        prompt=(0.125, 0.167, 0.75, 0.667),
     )
     db.set_active_mask_variant(pid, "test")
     db.predictions.add(

@@ -1,54 +1,63 @@
 // Loading misses: applying a payload to page state, loadMisses() with its
 // request sequence guard, and the navbar's undo/redo hook.
-// Classic page script; load boot.js after all definitions.
+// ES module.
 
-/** @param {MissPayload} data */ function applyMissesPayload(data) {
-  activeMissFloor = (data.config && data.config.detector_confidence != null)
+import { state, CATEGORY_ORDER } from './state.js';
+import { VireoFilter } from './shared.js';
+import { getSinceParam, sortPhotos } from './helpers.js';
+import { addFilterPayloadToBody, cloneMissFilterPayload, missFilterPayload } from './filters.js';
+import { renderMissScopeBanner } from './scope.js';
+import { previewMisses, setMissTuningDisabled } from './tuning.js';
+import { render } from './render.js';
+
+/** @param {MissPayload} data */ export function applyMissesPayload(data) {
+  state.activeMissFloor = (data.config && data.config.detector_confidence != null)
     ? Number(data.config.detector_confidence)
     : null;
-  missesData = {
+  state.missesData = {
     no_subject: sortPhotos(data.no_subject || []),
     clipped:    sortPhotos(data.clipped || []),
     oof:        sortPhotos(data.oof || []),
   };
   var present = new Set();
   CATEGORY_ORDER.forEach(function(cat) {
-    (missesData[cat] || []).forEach(function(p) { present.add(p.id); });
+    (state.missesData[cat] || []).forEach(function(p) { present.add(p.id); });
   });
-  selection.forEach(function(id) {
-    if (!present.has(id)) selection.delete(id);
+  state.selection.forEach(function(id) {
+    if (!present.has(id)) state.selection.delete(id);
   });
-  if (window.VireoFilter && VireoFilter.setResultTotal) {
+  if (VireoFilter && VireoFilter.setResultTotal) {
     VireoFilter.setResultTotal(present.size);
   }
-  if (window.VireoFilter && VireoFilter.setVisualInfo) {
+  if (VireoFilter && VireoFilter.setVisualInfo) {
     VireoFilter.setVisualInfo(data.visual || null);
   }
   render();
 }
 
 /* ---------- Fetch + render ---------- */
-window.afterHistoryChange = async function() {
+// The navbar's undo/redo hook; boot.js exposes it as window.afterHistoryChange.
+export async function afterHistoryChange() {
   await loadMisses();
-};
+}
 
-async function loadMisses() {
-  var requestId = ++missLoadRequestId;
+export async function loadMisses() {
+  var requestId = ++state.missLoadRequestId;
   var since = getSinceParam();
   renderMissScopeBanner();
-  if (legacyScopeError) {
+  if (state.legacyScopeError) {
     // Deep link couldn't be resolved: render an empty grid so bulk reject
     // and recompute have nothing to accidentally widen to. The applied
     // filter snapshot stays empty; a subsequent user filter edit calls
     // clearLegacyScopeError() and loadMisses() again with the new scope.
-    missesData = { no_subject: [], clipped: [], oof: [] };
-    appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
+    state.missesData = { no_subject: [], clipped: [], oof: [] };
+    state.appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
     render();
     var recomputeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missRecomputeBtn'));
     if (recomputeBtn) recomputeBtn.disabled = true;
     return;
   }
-  if (previewActive) {
+  if (state.previewActive) {
     // Re-derive from the preview endpoint with the live slider values
     // instead of replaying a cached payload that a mutating action may
     // have made stale.
@@ -63,18 +72,18 @@ async function loadMisses() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (requestId !== missLoadRequestId) return;
+  if (requestId !== state.missLoadRequestId) return;
   if (!r.ok) {
     /** @type {HTMLElement} */ (document.getElementById('missesRoot')).innerHTML =
       '<div class="misses-empty-page">Failed to load misses.</div>';
     return;
   }
   var data = await r.json();
-  if (requestId !== missLoadRequestId) return;
-  appliedMissFilters = cloneMissFilterPayload(requestedFilters);
+  if (requestId !== state.missLoadRequestId) return;
+  state.appliedMissFilters = cloneMissFilterPayload(requestedFilters);
   applyMissesPayload(data);
-  if (legacyScopeRecoveryPending) {
-    legacyScopeRecoveryPending = false;
-    if (missConfigLoaded) setMissTuningDisabled(false);
+  if (state.legacyScopeRecoveryPending) {
+    state.legacyScopeRecoveryPending = false;
+    if (state.missConfigLoaded) setMissTuningDisabled(false);
   }
 }

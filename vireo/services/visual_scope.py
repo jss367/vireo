@@ -18,8 +18,29 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterable, Sequence
+
+    import numpy as np
+    from db import Database
+    from services.service_types import JsonDict
 
 log = logging.getLogger(__name__)
+
+# Any: a rule tree is client JSON — a group dict, a list of rules, or (when
+# malformed) any JSON value, left for ``Database`` validation to reject.
+RuleTree = Any
+
+
+class VisualClause(TypedDict):
+    """A validated visual clause, as ``validate_visual_arg`` returns it."""
+
+    prompt: str
+    strength: str
+
 
 VISUAL_STRENGTH_THRESHOLDS = {"broad": 0.10, "balanced": 0.15, "strict": 0.22}
 
@@ -38,7 +59,7 @@ _NO_ACTIVE_VISUAL_MODEL = "__no_active_visual_model__"
 _TEXT_QUERY_CACHE_LIMIT = 64
 
 
-def validate_visual_arg(visual):
+def validate_visual_arg(visual: object) -> VisualClause | None:
     """Normalize a visual clause payload or raise ValueError."""
     if visual is None:
         return None
@@ -59,7 +80,7 @@ def validate_visual_arg(visual):
     return {"prompt": prompt.strip(), "strength": strength}
 
 
-def inject_active_visual_model(rules):
+def inject_active_visual_model(rules: RuleTree) -> RuleTree:
     """Fill in the active visual model on ``has_visual_index`` leaves
     that don't name one.
 
@@ -98,7 +119,7 @@ def inject_active_visual_model(rules):
     model_name = active.get("name") if active else None
     injected_model = model_name or _NO_ACTIVE_VISUAL_MODEL
 
-    def _walk(node):
+    def _walk(node: RuleTree) -> RuleTree:
         if isinstance(node, dict):
             if "rules" in node and "field" not in node:
                 inner = node.get("rules")
@@ -120,7 +141,7 @@ def inject_active_visual_model(rules):
     return _walk(rules)
 
 
-def coerce_collection_id(raw):
+def coerce_collection_id(raw: object) -> int | Literal[False] | None:
     """Parse an optional collection_id from a request body.
 
     Returns ``None`` if absent/blank, an ``int`` if valid, or the
@@ -142,15 +163,17 @@ def coerce_collection_id(raw):
     return False
 
 
-def collection_row(db, collection_id):
+def collection_row(db: Database, collection_id: int) -> sqlite3.Row | None:
     """Return the (workspace-scoped) collection row or None."""
     return db.collections.get(collection_id)
 
 
-def collection_rules_state(db, rules_json):
+def collection_rules_state(db: Database, rules_json: str | None) -> tuple[RuleTree, bool]:
     """Return parsed collection rules and whether they are degraded."""
     try:
-        parsed_rules = json.loads(rules_json)
+        # A NULL ``rules`` column raises TypeError here, which is the
+        # degraded answer below; the cast only tells the checker so.
+        parsed_rules = json.loads(cast("str", rules_json))
     except (TypeError, ValueError):
         return None, True
     return parsed_rules, not db.rules_resolvable(parsed_rules)
@@ -167,14 +190,15 @@ class VisualScope:
     resolves collection clauses off the request thread).
     """
 
-    def __init__(self):
-        self._text_query_cache = {}
+    def __init__(self) -> None:
+        self._text_query_cache: dict[tuple[str, str], np.ndarray] = {}
 
     def resolve(
-        self, db, rules, visual, collection_id=None, folder_id=None,
-        candidate_photo_ids=None,
-        include_offline_folders=False,
-    ):
+        self, db: Database, rules: JsonDict | Sequence[JsonDict], visual: VisualClause,
+        collection_id: int | None = None, folder_id: int | None = None,
+        candidate_photo_ids: Iterable[int] | None = None,
+        include_offline_folders: bool = False,
+    ) -> tuple[JsonDict, list[int] | None, dict[int, float] | None]:
         """Run a visual clause over the rule tree's candidate photos.
 
         Returns ``(info, ordered_ids, sims_by_pid)``. ``info["status"]`` is
@@ -257,9 +281,10 @@ class VisualScope:
         return info, ordered_ids, sims_by_pid
 
     def apply_to_rules(
-        self, db, rules, visual, collection_id=None, folder_id=None,
-        candidate_photo_ids=None,
-    ):
+        self, db: Database, rules: JsonDict | Sequence[JsonDict] | None, visual: VisualClause | None,
+        collection_id: int | None = None, folder_id: int | None = None,
+        candidate_photo_ids: Iterable[int] | None = None,
+    ) -> tuple[JsonDict | Sequence[JsonDict] | None, JsonDict | None]:
         """For GET consumers (summary/calendar/values/geo/predictions):
         when the visual clause is healthy, restrict the rules to the
         matched ids (inlined photo_ids — no bound-parameter cap) so

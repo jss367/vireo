@@ -108,7 +108,7 @@ def test_on_scanned_photo_dedupes_companion_from_raw():
     carries duplicate ids."""
     from types import SimpleNamespace
 
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     enqueued = []
     collected = []
@@ -127,19 +127,14 @@ def test_on_scanned_photo_dedupes_companion_from_raw():
 
     scan = _ScanPass(
         run,
-        sentinel=object(),
-        filter_excluded=lambda *_a, **_k: None,
-        find_broken_metadata_folders=lambda *_a, **_k: [],
-        missing_archive_mount_root=lambda *_a, **_k: None,
-        put_scan_item=enqueued.append,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=lambda *_a, **_k: None,
+            find_broken_metadata_folders=lambda *_a, **_k: [],
+            missing_archive_mount_root=lambda *_a, **_k: None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=enqueued.append),
         collected_photo_ids=collected,
-        effective_thumb_cache_dir=None,
-        effective_vireo_dir=None,
-        final_destination=None,
-        missing_originals_invalidator=None,
-        remote_archive=None,
-        skip_scan=False,
-        snapshot_paths=None,
     )
 
     scan._on_scanned_photo(42, "/photos/IMG_001.cr3")
@@ -164,7 +159,7 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path(tmp_pa
     RAW's path when the given callback path's basename differs."""
     from types import SimpleNamespace
 
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     enqueued = []
     collected = []
@@ -178,19 +173,14 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path(tmp_pa
 
     scan = _ScanPass(
         run,
-        sentinel=object(),
-        filter_excluded=lambda *_a, **_k: None,
-        find_broken_metadata_folders=lambda *_a, **_k: [],
-        missing_archive_mount_root=lambda *_a, **_k: None,
-        put_scan_item=enqueued.append,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=lambda *_a, **_k: None,
+            find_broken_metadata_folders=lambda *_a, **_k: [],
+            missing_archive_mount_root=lambda *_a, **_k: None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=enqueued.append),
         collected_photo_ids=collected,
-        effective_thumb_cache_dir=None,
-        effective_vireo_dir=None,
-        final_destination=None,
-        missing_originals_invalidator=None,
-        remote_archive=None,
-        skip_scan=False,
-        snapshot_paths=None,
     )
 
     # Give the pair real paths so the canonical-RAW existence check
@@ -232,7 +222,7 @@ def test_on_scanned_photo_keeps_companion_path_when_canonical_raw_missing(tmp_pa
     would be reported as a failed thumbnail despite the available JPEG."""
     from types import SimpleNamespace
 
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     enqueued = []
     collected = []
@@ -246,19 +236,14 @@ def test_on_scanned_photo_keeps_companion_path_when_canonical_raw_missing(tmp_pa
 
     scan = _ScanPass(
         run,
-        sentinel=object(),
-        filter_excluded=lambda *_a, **_k: None,
-        find_broken_metadata_folders=lambda *_a, **_k: [],
-        missing_archive_mount_root=lambda *_a, **_k: None,
-        put_scan_item=enqueued.append,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=lambda *_a, **_k: None,
+            find_broken_metadata_folders=lambda *_a, **_k: [],
+            missing_archive_mount_root=lambda *_a, **_k: None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=enqueued.append),
         collected_photo_ids=collected,
-        effective_thumb_cache_dir=None,
-        effective_vireo_dir=None,
-        final_destination=None,
-        missing_originals_invalidator=None,
-        remote_archive=None,
-        skip_scan=False,
-        snapshot_paths=None,
     )
 
     # The companion JPEG is on disk, the catalog's RAW is not.
@@ -288,7 +273,7 @@ def test_on_scanned_photo_leaves_matching_basename_alone():
     slashes or OS-specific separators untouched."""
     from types import SimpleNamespace
 
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     enqueued = []
     collected = []
@@ -303,19 +288,14 @@ def test_on_scanned_photo_leaves_matching_basename_alone():
 
     scan = _ScanPass(
         run,
-        sentinel=object(),
-        filter_excluded=lambda *_a, **_k: None,
-        find_broken_metadata_folders=lambda *_a, **_k: [],
-        missing_archive_mount_root=lambda *_a, **_k: None,
-        put_scan_item=enqueued.append,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=lambda *_a, **_k: None,
+            find_broken_metadata_folders=lambda *_a, **_k: [],
+            missing_archive_mount_root=lambda *_a, **_k: None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=enqueued.append),
         collected_photo_ids=collected,
-        effective_thumb_cache_dir=None,
-        effective_vireo_dir=None,
-        final_destination=None,
-        missing_originals_invalidator=None,
-        remote_archive=None,
-        skip_scan=False,
-        snapshot_paths=None,
     )
 
     def record_folder(folder_id):
@@ -347,7 +327,7 @@ def test_scan_resets_dedup_set_between_invocations():
     queue. ``_scan`` resets the dedup set per scanner invocation."""
     from types import SimpleNamespace
 
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
 
     enqueued = []
     collected = []
@@ -366,19 +346,14 @@ def test_scan_resets_dedup_set_between_invocations():
 
     scan = _ScanPass(
         run,
-        sentinel=object(),
-        filter_excluded=lambda *_a, **_k: None,
-        find_broken_metadata_folders=lambda *_a, **_k: [],
-        missing_archive_mount_root=lambda *_a, **_k: None,
-        put_scan_item=enqueued.append,
+        settings=ScanStageSettings(),
+        hooks=ScanStageHooks(
+            filter_excluded=lambda *_a, **_k: None,
+            find_broken_metadata_folders=lambda *_a, **_k: [],
+            missing_archive_mount_root=lambda *_a, **_k: None,
+        ),
+        handoff=ScanHandoff(sentinel=object(), put_scan_item=enqueued.append),
         collected_photo_ids=collected,
-        effective_thumb_cache_dir=None,
-        effective_vireo_dir=None,
-        final_destination=None,
-        missing_originals_invalidator=None,
-        remote_archive=None,
-        skip_scan=False,
-        snapshot_paths=None,
     )
     scan.pipeline_cfg = {}
     scan.thread_db = SimpleNamespace(
@@ -814,7 +789,7 @@ def test_scanned_raw_thumbnail_renders_available_companion(
 ):
     """The real queue/consumer must publish JPEG pixels for an unusable RAW."""
     from pipeline_stages.media import _ThumbPhoto
-    from pipeline_stages.scanning import _ScanPass
+    from pipeline_stages.scanning import ScanHandoff, ScanStageHooks, ScanStageSettings, _ScanPass
     from thumbnails import (
         _is_working_copy_source,
         _retry_thumbnail_after_working_copy_eviction,
@@ -850,13 +825,15 @@ def test_scanned_raw_thumbnail_renders_available_companion(
         thumbs = _make_thumb_pass(tmp_path / "thumbnails")
         thumbs.run.stages["scan"] = {"count": 0}
         scan = _ScanPass(
-            thumbs.run, sentinel=object(), filter_excluded=None,
-            find_broken_metadata_folders=None, missing_archive_mount_root=None,
-            put_scan_item=queued.append, collected_photo_ids=[],
-            effective_thumb_cache_dir=thumbs.cache_dir,
-            effective_vireo_dir=str(tmp_path), final_destination=None,
-            missing_originals_invalidator=None, remote_archive=None,
-            skip_scan=False, snapshot_paths=None,
+            thumbs.run,
+            settings=ScanStageSettings(effective_thumb_cache_dir=thumbs.cache_dir, effective_vireo_dir=str(tmp_path)),
+            hooks=ScanStageHooks(
+                filter_excluded=None,
+                find_broken_metadata_folders=None,
+                missing_archive_mount_root=None,
+            ),
+            handoff=ScanHandoff(sentinel=object(), put_scan_item=queued.append),
+            collected_photo_ids=[],
         )
         scan.thread_db = db
         scan._on_scanned_photo(photo_id, str(companion))
