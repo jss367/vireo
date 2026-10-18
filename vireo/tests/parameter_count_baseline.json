@@ -27,7 +27,6 @@
   "repositories/photos.py:PhotoRepository.get_ids": 16,
   "repositories/photos.py:PhotoRepository.list_page": 18,
   "repositories/predictions.py:PredictionRepository.add": 17,
-  "scanner/scan_run.py:_ScanRun.__init__": 15,
   "services/folder_moves.py:FolderMoves._run_move_job": 18,
   "services/folder_moves.py:FolderMoves.start_job": 20,
   "services/import_in_place.py:_admit_in_place_job": 17,
