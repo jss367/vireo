@@ -111,7 +111,7 @@ def _shutdown_created_job_runners(monkeypatch):
         shutdown_failures += 1
         leaked.extend(
             thread.name
-            for thread in runner._worker_threads
+            for thread in runner._workers.threads
             if thread.is_alive()
         )
     if shutdown_failures:

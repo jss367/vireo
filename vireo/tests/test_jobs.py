@@ -102,7 +102,7 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
         release.set()
         thread.join(timeout=synchronization_timeout(10))
     assert errors == ["database unavailable"]
-    assert not runner._pipeline_admissions
+    assert not runner._queue.admissions
     transfer, _, _ = runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
                                             workspace_id=1, exclusive_workspace=True)
     assert wait_for_job_via_runner(runner, transfer)["status"] == "completed"
@@ -191,8 +191,8 @@ def test_exclusive_workspace_mutation_blocks_job_admission_and_releases():
                 pytest.fail("Mutation entered a workspace being deleted")
     job_id = runner.start("import", lambda job: None, workspace_id=1)
     assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
-    assert not runner._exclusive_workspace_mutations
-    assert not runner._workspace_mutations
+    assert not runner._reservations.exclusive
+    assert not runner._reservations.mutations
     runner.shutdown()
 
 
@@ -216,7 +216,7 @@ def test_busy_rejection_names_the_request_holding_the_workspace():
 
 
 def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatch, caplog):
-    import jobs
+    import job_runner.reservations as reservations_module
     from jobs import JobRunner, WorkspaceBusyError
 
     runner = JobRunner()
@@ -231,7 +231,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
     thread.start()
     try:
         assert holder_entered.wait(10)
-        monkeypatch.setattr(jobs, "STALE_WORKSPACE_MUTATION_SECS", 0)
+        monkeypatch.setattr(reservations_module, "STALE_WORKSPACE_MUTATION_SECS", 0)
         with caplog.at_level("WARNING", logger="jobs"):
             with pytest.raises(WorkspaceBusyError, match="taking longer than usual") as excinfo:
                 runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
@@ -243,7 +243,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
     assert "restart" not in str(excinfo.value)
     # The holder's current stack remains available for diagnosis.
     assert any("in hold" in r.getMessage() and "/api/hung" in r.getMessage() for r in caplog.records)
-    assert not runner._workspace_mutations
+    assert not runner._reservations.mutations
     runner.shutdown()
 
 
@@ -294,12 +294,12 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
     job_id = runner.start("test", work)
     assert started.wait(timeout=synchronization_timeout(2))
     with runner._lock:
-        runner._schedule_promotion_retry_locked()
+        runner._queue.schedule_retry_locked()
 
     assert runner.shutdown(timeout=2) is True
     assert stopped.is_set()
     assert runner.get(job_id)["status"] == "cancelled"
-    assert not runner._worker_threads
+    assert not runner._workers.threads
 
     with pytest.raises(RuntimeError, match="shut down"):
         runner.start("late", lambda _job: {})
@@ -318,7 +318,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
         stopped.set()
 
     runner.start("test", work)
-    runner._queued_pipelines["queued"] = {}
+    runner._queue.queued["queued"] = {}
     observed_timeouts = []
 
     def fail_cancel(_job_id, *, promote_after_cancel, db_timeout):
@@ -330,9 +330,9 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
     assert runner.shutdown(timeout=2) is False
     assert stopped.is_set()
     assert observed_timeouts and 0 < observed_timeouts[0] <= 2
-    assert not runner._worker_threads
+    assert not runner._workers.threads
     with runner._lock:
-        runner._queued_pipelines.clear()
+        runner._queue.queued.clear()
 
 
 def _wait_for_status(runner, job_id, status, timeout=3.0):
@@ -504,7 +504,7 @@ def test_pause_status_events_stay_ordered_through_completion():
     checkpoint_reached = threading.Event()
     pausing_published = threading.Event()
     release_pausing = threading.Event()
-    original_publish = runner._publish_status_locked
+    original_publish = runner._streams.publish_status_locked
 
     def controlled_publish(job, status):
         original_publish(job, status)
@@ -512,7 +512,7 @@ def test_pause_status_events_stay_ordered_through_completion():
             pausing_published.set()
             assert release_pausing.wait(timeout=synchronization_timeout(2))
 
-    runner._publish_status_locked = controlled_publish
+    runner._streams.publish_status_locked = controlled_publish
 
     def work(job):
         work_started.set()
@@ -713,6 +713,7 @@ def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
     the job is 'failed'. The history row keeps the counts as the summary,
     with how many failed beside them and the first error in the details."""
     from db import Database
+    from job_runner.outcome import attach_result_text
     from jobs import JobRunner
 
     db = Database(str(tmp_path / "test.db"))
@@ -738,7 +739,7 @@ def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
     assert row["summary"].endswith("· 2 errors")
 
     live = runner.get(job_id)
-    JobRunner._attach_result_text(live)
+    attach_result_text(live)
     assert live["summary"] == row["summary"]
     assert live["result_details"][0] == "a.jpg: unreadable"
 
@@ -932,7 +933,8 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
     the serialized result, and the startup-sweep +1 compounds the
     mismatch on an interrupted row.
     """
-    from jobs import JobRunner
+    from job_runner.outcome import error_total
+    from job_runner.views import snapshot_job
 
     live_result = {
         "failed": 50,
@@ -950,7 +952,7 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
         "result": live_result,
     }
 
-    snap = JobRunner._snapshot_job(job)
+    snap = snapshot_job(job)
 
     # The snapshot's result must be a distinct dict so later worker
     # mutations cannot bleed into subsequent reads by callers (checkpoint
@@ -967,7 +969,7 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
     assert snap["result"]["errors_total"] == 50
     # ``_error_total`` reading from the snapshot must agree with the
     # ``errors_total`` the same snapshot's result would serialize.
-    assert JobRunner._error_total(snap) == snap["result"]["errors_total"] == 50
+    assert error_total(snap) == snap["result"]["errors_total"] == 50
 
 
 def test_snapshot_job_freezes_nested_result_sample_lists():
@@ -982,7 +984,7 @@ def test_snapshot_job_freezes_nested_result_sample_lists():
     and the serialized result must therefore read a single immutable
     snapshot of the sample.
     """
-    from jobs import JobRunner
+    from job_runner.views import snapshot_job
 
     live_errors = ["file_0.jpg: boom"]
     live_kept = ["file_1.jpg: source busy"]
@@ -1003,7 +1005,7 @@ def test_snapshot_job_freezes_nested_result_sample_lists():
         "result": live_result,
     }
 
-    snap = JobRunner._snapshot_job(job)
+    snap = snapshot_job(job)
 
     # Simulate the worker appending more sample entries after the snapshot.
     live_errors.append("file_2.jpg: boom")
@@ -1914,7 +1916,7 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
     # A late checkpoint racing the final write must not resurrect the row.
     snapshot = runner.get(job_id)
     snapshot["status"] = "running"
-    assert runner._write_checkpoints([snapshot]) == 0
+    assert runner._history.write_checkpoints([snapshot]) == 0
     assert _history_row(db, job_id)["status"] == "completed"
     assert runner.shutdown(timeout=5)
 
@@ -2037,7 +2039,7 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
         entered.set()
         result_holder["written"] = runner.checkpoint_live_jobs()
 
-    with runner._checkpoint_write_lock:
+    with runner._checkpoints.write_lock:
         # The second caller starts trying to take the write lock while
         # the first (this thread) still holds it.
         t = threading.Thread(target=concurrent_checkpoint)
@@ -2105,7 +2107,10 @@ def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
 
     # Simulate a checkpoint that never lands: partial is set but the
     # internal checkpointed_partial is never updated.
+    checkpoint_calls = []
+
     def stuck_checkpoint():
+        checkpoint_calls.append(True)
         return 0
 
     runner.checkpoint_live_jobs = stuck_checkpoint
@@ -2119,6 +2124,7 @@ def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
     assert runner.flush_partial_result(job, cancel_check=cancel_after_two) is False
     # Cancel_check was polled once per attempt; the third poll ended the wait.
     assert calls["n"] == 3
+    assert len(checkpoint_calls) == 2
     assert runner.shutdown(timeout=5)
 
 
@@ -2148,14 +2154,14 @@ def test_ephemeral_job_is_never_checkpointed(tmp_path):
 def test_checkpoint_thread_runs_on_timer_and_exits_when_idle(tmp_path, monkeypatch):
     import json
 
-    import jobs as jobs_module
+    import job_runner.checkpoints as checkpoints_module
     from db import Database
     from jobs import JobRunner
 
-    monkeypatch.setattr(jobs_module, "CHECKPOINT_INTERVAL_SECS", 0.05)
+    monkeypatch.setattr(checkpoints_module, "CHECKPOINT_INTERVAL_SECS", 0.05)
     db = Database(str(tmp_path / "test.db"))
     runner = JobRunner(db=db)
-    assert runner._checkpoint_thread is None
+    assert runner._checkpoints.thread is None
     release = threading.Event()
 
     def work(job):
@@ -2176,15 +2182,15 @@ def test_checkpoint_thread_runs_on_timer_and_exits_when_idle(tmp_path, monkeypat
         time.sleep(0.02)
     else:
         pytest.fail("checkpoint thread never wrote progress")
-    thread = runner._checkpoint_thread
+    thread = runner._checkpoints.thread
     assert thread is not None and thread.is_alive()
 
     release.set()
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     deadline = time.time() + 5
-    while runner._checkpoint_thread is not None and time.time() < deadline:
+    while runner._checkpoints.thread is not None and time.time() < deadline:
         time.sleep(0.02)
-    assert runner._checkpoint_thread is None, (
+    assert runner._checkpoints.thread is None, (
         "checkpoint thread should exit once no persisted job is live"
     )
 
