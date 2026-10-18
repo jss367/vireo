@@ -118,12 +118,12 @@ def test_active_mask_reads_the_active_variant_row(db, photo):
 def test_visible_predictions_filters_floor_rejection_and_stale_labels(db, photo):
     photo_id, ids = photo
     ws = db.require_workspace_id()
-    db.add_prediction(ids[0], "Old Label", 0.95, "m", labels_fingerprint="old")
+    db.predictions.add(ids[0], "Old Label", 0.95, "m", labels_fingerprint="old")
     db.conn.execute("UPDATE predictions SET created_at='2000-01-01'")
-    db.add_prediction(ids[0], "Robin", 0.9, "m", labels_fingerprint="new")
-    db.add_prediction(ids[0], "Wren", 0.2, "m", labels_fingerprint="new")
-    db.add_prediction(ids[1], "Jay", 0.7, "m", labels_fingerprint="new")
-    db.add_prediction(ids[1], "Crow", 0.8, "m", labels_fingerprint="new")
+    db.predictions.add(ids[0], "Robin", 0.9, "m", labels_fingerprint="new")
+    db.predictions.add(ids[0], "Wren", 0.2, "m", labels_fingerprint="new")
+    db.predictions.add(ids[1], "Jay", 0.7, "m", labels_fingerprint="new")
+    db.predictions.add(ids[1], "Crow", 0.8, "m", labels_fingerprint="new")
     crow = db.conn.execute("SELECT id FROM predictions WHERE species='Crow'").fetchone()["id"]
     db.update_prediction_status(crow, "rejected")
 
