@@ -1,7 +1,5 @@
 {
   "classify_job/cached_only.py:_finalize_cached_only": 13,
-  "classify_job/classify_pass.py:_ClassifyPhotosPass.__init__": 13,
-  "classify_job/classify_pass.py:_classify_photos": 15,
   "db.py:Database.add_prediction": 17,
   "db.py:Database.get_photos": 14,
   "highlights_payload.py:build_highlights_payload": 15,

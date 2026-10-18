@@ -6,6 +6,7 @@ import time
 from classify_job.cache_coverage import _all_photos_cache_satisfied
 from classify_job.cached_only import _finalize_cached_only, _finalize_remaining_steps, _finalize_summary
 from classify_job.classify_pass import (
+    ClassifierModel,
     _classify_photos,
     _classify_summary_parts,
     _publish_classifier_runs_for_raw_results,
@@ -950,7 +951,6 @@ class _ClassifyJobRun:
         detections after the user lowers detector_confidence).
         """
         job, runner, thread_db = self.job, self.runner, self.db
-        existing_preds = set()
 
         job["_start_time"] = time.time()  # reset rate timer for classification phase
 
@@ -979,16 +979,17 @@ class _ClassifyJobRun:
                 photos=self.photos,
                 folders=self.folders,
                 detection_map=self.detection_map,
-                existing_preds=existing_preds,
-                clf=self.clf,
-                model_type=self.model_type,
-                model_name=self.model_name,
+                model=ClassifierModel(
+                    clf=self.clf,
+                    model_type=self.model_type,
+                    model_name=self.model_name,
+                    labels_fingerprint=self.fp,
+                    top_k=top_k,
+                ),
                 runner=runner,
                 job=job,
                 db=thread_db,
-                top_k=top_k,
                 vireo_dir=self.vireo_dir,
-                labels_fingerprint=self.fp,
                 reclassify=self.params.reclassify,
                 finish_cleared_only=self.finish_cleared_only,
             )
