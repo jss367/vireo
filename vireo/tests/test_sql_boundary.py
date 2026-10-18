@@ -47,7 +47,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 # move a module's SQL into a repository; never raise one.
 CONN_USE_LIMITS = {
     "app.py": 8,
-    "audit.py": 10,
     "capture_time.py": 7,
     "card_cleanup.py": 4,
     "culling.py": 6,
