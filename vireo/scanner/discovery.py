@@ -6,10 +6,13 @@
 scopes itself to what was actually visited.
 """
 
+from __future__ import annotations
+
 import errno
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from image_loader import (
     SUPPORTED_EXTENSIONS,
@@ -18,6 +21,12 @@ from image_loader import (
     safe_scan_walk,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable
+
+    from scanner.run_state import _ScanSignals
+    from scanner.scan_types import StrPath, WorkingCopyScopeEntry
+
 log = logging.getLogger(__name__)
 
 
@@ -25,10 +34,11 @@ class _Discovery:
     """Enumerates the scan's image files; owns what the walk found."""
 
     def __init__(
-        self, root, root_path, frozen_files, *, signals,
-        restrict_dirs, restrict_files, skip_paths, recursive,
-        permission_error_callback,
-    ):
+        self, root: StrPath, root_path: Path, frozen_files: list[StrPath] | None, *,
+        signals: _ScanSignals, restrict_dirs: Iterable[StrPath] | None,
+        restrict_files: Iterable[StrPath] | None, skip_paths: Collection[StrPath] | None,
+        recursive: bool, permission_error_callback: Callable[[str], object] | None,
+    ) -> None:
         self.root = root
         self.root_path = root_path
         self.frozen_files = frozen_files
@@ -42,7 +52,7 @@ class _Discovery:
         self.excluded_frozen = 0
         self.effective_restrict_dirs = []
 
-    def discover_files(self):
+    def discover_files(self) -> None:
         # Discover all image files (incremental enumeration for progress reporting)
         # unless the caller already froze an all-source manifest. Copy the input:
         # scan sorts its work queue and callers may retain their source mapping.
@@ -81,7 +91,7 @@ class _Discovery:
         self.image_files.sort()
         self.signals.check_cancelled()
 
-    def _filter_frozen_manifest(self):
+    def _filter_frozen_manifest(self) -> None:
         # A frozen manifest was captured before any per-source scan began, so
         # a later source can wait minutes behind earlier ones. In that window
         # a nested child dir, mount, or symlink under this source may be
@@ -93,7 +103,8 @@ class _Discovery:
         # excluded bundle) and re-trip the TCC prompt this guard exists to
         # avoid — or catalog files from a substituted subtree.
         self.image_files = []
-        for path in self.frozen_files:
+        # Called by ``discover_files`` only when a manifest was supplied.
+        for path in cast("list[StrPath]", self.frozen_files):
             candidate = Path(path)
             if is_excluded_scan_path(candidate):
                 self.excluded_frozen += 1
@@ -125,7 +136,7 @@ class _Discovery:
     # repaired. Callers that want to continue past denials must pass
     # the callback to acknowledge they've taken responsibility for
     # streaming the denial somewhere actionable.
-    def _on_walk_error(self, err):
+    def _on_walk_error(self, err: OSError) -> None:
         if err.errno in (errno.EPERM, errno.EACCES):
             denied = err.filename or str(self.root_path)
             log.warning(
@@ -141,7 +152,7 @@ class _Discovery:
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
-    def _discover_restricted(self):
+    def _discover_restricted(self) -> None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for ``_ScanFolders.ensure_folder``.
         restrict_files_set = set(self.restrict_files) if self.restrict_files is not None else None
@@ -155,7 +166,8 @@ class _Discovery:
         # has nothing to show between "Discovering files..." and the
         # finished count.
         checked = 0
-        for d in self.restrict_dirs:
+        # Called by ``discover_files`` only when ``restrict_dirs`` is set.
+        for d in cast("Iterable[StrPath]", self.restrict_dirs):
             self.signals.check_cancelled()
             dp = Path(d)
             # The outer ``is_excluded_scan_path(root_path)`` guard above only
@@ -214,7 +226,7 @@ class _Discovery:
                             and f.is_file()):
                         image_files.append(f)
 
-    def _discover_recursive(self):
+    def _discover_recursive(self) -> None:
         skip_paths = self.skip_paths
         image_files = self.image_files
         checked = 0
@@ -261,7 +273,7 @@ class _Discovery:
                         continue
                     image_files.append(Path(full))
 
-    def _discover_flat(self):
+    def _discover_flat(self) -> None:
         skip_paths = self.skip_paths
         image_files = self.image_files
         # safe_iter_dir mirrors iterdir() but drops excluded bundle
@@ -289,7 +301,7 @@ class _Discovery:
                     and (skip_paths is None or str(f) not in skip_paths)):
                 image_files.append(f)
 
-    def working_copy_scope(self):
+    def working_copy_scope(self) -> list[WorkingCopyScopeEntry]:
         if self.restrict_dirs is not None:
             # Use the bundle-filtered list — see ``effective_restrict_dirs``
             # above. Reusing the raw ``restrict_dirs`` here would let a

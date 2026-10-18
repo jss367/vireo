@@ -7,8 +7,11 @@ RAW: the RAW's re-read consumes them in its own UPDATE, and the end of the
 scan replays any that are left.
 """
 
+from __future__ import annotations
+
 import json
 import logging
+from typing import TYPE_CHECKING, Any
 
 from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns
 from scanner.companions import (
@@ -18,10 +21,20 @@ from scanner.companions import (
 )
 from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
 
+if TYPE_CHECKING:
+    import sqlite3
+    from pathlib import Path
+
+    from db import Database
+    from scanner.companions import _KnownCompanions
+    from scanner.indexing import _FileMetadata
+    from scanner.run_state import _ScanTally
+    from scanner.scan_types import ColumnRow, CompanionOwnership
+
 log = logging.getLogger(__name__)
 
 
-def _lock_companion_owner(db, owner_id, ownership):
+def _lock_companion_owner(db: Database, owner_id: int, ownership: CompanionOwnership) -> bool:
     """Revalidate ownership while acquiring the transaction's writer lock.
 
     Photo IDs can be recycled between commits. The guarded no-op write
@@ -34,7 +47,9 @@ def _lock_companion_owner(db, owner_id, ownership):
     )
 
 
-def _apply_companion_gap_fill(db, owner_id, companion_columns, ownership):
+def _apply_companion_gap_fill(
+    db: Database, owner_id: int, companion_columns: dict[str, Any], ownership: CompanionOwnership,
+) -> None:
     """Fill the owner's gaps from the companion in the current transaction.
 
     Reads the owner's columns as they stand right now (so a prior
@@ -57,7 +72,7 @@ def _apply_companion_gap_fill(db, owner_id, companion_columns, ownership):
     )
 
 
-def _companion_columns(meta, extract_full_metadata):
+def _companion_columns(meta: _FileMetadata, extract_full_metadata: bool) -> dict[str, Any]:
     """The columns pairing reads from a companion row, from fresh metadata.
 
     Shaped like ``_read_metadata_transfer_rows``'s companion row, so
@@ -94,14 +109,14 @@ class _CompanionFills:
     end-of-scan safety net ``refill_owners_from_companions``.
     """
 
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         self.db = db
         self.pending = {}
 
-    def queue(self, owner_id, ownership, companion_columns):
+    def queue(self, owner_id: int, ownership: CompanionOwnership, companion_columns: dict[str, Any]) -> None:
         self.pending[owner_id] = (ownership, companion_columns)
 
-    def take_pending_companion_fill(self, photo_id, row_already_existed):
+    def take_pending_companion_fill(self, photo_id: int, row_already_existed: bool) -> dict[str, Any] | None:
         """The companion fill queued for this owner, if it still owns it."""
         pending_companion = (
             self.pending.pop(photo_id, None)
@@ -114,7 +129,7 @@ class _CompanionFills:
             return columns
         return None
 
-    def refill_owners_from_companions(self):
+    def refill_owners_from_companions(self) -> None:
         """Safety-net fill for companions whose owner wasn't re-read.
 
         The primary paths — inline fill in ``_keep_known_companion`` when
@@ -138,9 +153,10 @@ class _KnownCompanionKeeper:
     """Leaves companions the catalog already pairs on their RAW's row."""
 
     def __init__(
-        self, db, *, tally, fills, known_companions, reprocessed_row_ids,
-        extract_full_metadata,
-    ):
+        self, db: Database, *, tally: _ScanTally, fills: _CompanionFills,
+        known_companions: _KnownCompanions, reprocessed_row_ids: set[int],
+        extract_full_metadata: bool,
+    ) -> None:
         self.db = db
         self.tally = tally
         self.fills = fills
@@ -150,7 +166,7 @@ class _KnownCompanionKeeper:
         self.reprocessed_row_ids = reprocessed_row_ids
         self.extract_full_metadata = extract_full_metadata
 
-    def finish_known_companion(self, image_path, known):
+    def finish_known_companion(self, image_path: Path, known: sqlite3.Row) -> bool:
         """Import sidecar and report the path while its owner stays locked.
 
         Keyword creation/tagging and the sidecar helper ordinarily commit
@@ -171,7 +187,7 @@ class _KnownCompanionKeeper:
             )
         return True
 
-    def import_companion_sidecar(self, image_path, known):
+    def import_companion_sidecar(self, image_path: Path, known: ColumnRow) -> None:
         """Import the validated companion's additive sidecar keywords.
 
         Import shared-stem XMP too: the RAW can vanish after the JPEG is
@@ -195,8 +211,9 @@ class _KnownCompanionKeeper:
         self.db.commit_with_retry()
 
     def keep_known_companion(
-        self, image_path, folder_id, file_size, file_mtime, file_hash, meta,
-    ):
+        self, image_path: Path, folder_id: int, file_size: int, file_mtime: float,
+        file_hash: str | None, meta: _FileMetadata,
+    ) -> bool:
         """Leave an unchanged companion JPEG in its RAW's row; True if it was.
 
         A companion whose bytes changed (or that has no stored identity to
@@ -218,8 +235,9 @@ class _KnownCompanionKeeper:
             )
 
     def _keep_locked_companion(
-        self, image_path, known, file_size, file_mtime, file_hash, meta,
-    ):
+        self, image_path: Path, known: sqlite3.Row, file_size: int, file_mtime: float,
+        file_hash: str | None, meta: _FileMetadata,
+    ) -> bool:
         """Keep metadata, identity, sidecar and credit under the owner's lock."""
         if file_hash is None and file_size > 0:
             # Unreadable right now. Re-merging would replace a verified

@@ -5,11 +5,14 @@ copy while keeping the cache under its quota. The SQL lives in
 ``repositories/working_copies.py`` (``db.working_copies``).
 """
 
+from __future__ import annotations
+
 import functools
 import logging
 import os
 import sqlite3
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from image_loader import (
     RAW_EXTENSIONS,
@@ -20,6 +23,24 @@ from PIL import Image
 from render_source import is_undersized
 from scanner.exif_fields import _oriented_dimensions, _scaled_dimensions
 from scanner.status import _call_status_callback, _status_callback_supports_phase
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
+
+    from db import Database
+    from scanner.scan_types import (
+        CheckCallback,
+        ProgressCallback,
+        SourcePaths,
+        StatusCallback,
+        StrPath,
+        WorkingCopyScopeEntry,
+    )
+
+    # What ``working_copy_cache._file_identity`` records for a published file.
+    FileIdentity = tuple[int, ...]
+    # ``(photo_id, row snapshot)`` for a working copy the post-loop trim removed.
+    _TrimmedRow = tuple[int, dict[str, Any] | None]
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +55,7 @@ _FAILURE_RETRY_AFTER = "-24 hours"
 
 
 def _override_identity_matches(
-        override_path, expected_size, expected_mtime_ns):
+        override_path: str, expected_size: int | None, expected_mtime_ns: int | None) -> bool:
     """True when ``source_paths`` override is safe to substitute for the archive.
 
     The card-side override is trusted iff BOTH size and mtime match the
@@ -68,7 +89,7 @@ def _override_identity_matches(
     )
 
 
-def _snapshot_row_still_current(db, row):
+def _snapshot_row_still_current(db: Database, row: sqlite3.Row) -> bool:
     """Return True if the candidate snapshot's identity still matches the DB.
 
     ``_extract_working_copies`` reads its rows up front and then processes
@@ -112,7 +133,7 @@ def _snapshot_row_still_current(db, row):
     )
 
 
-def _working_copy_quota_mb(load_config):
+def _working_copy_quota_mb(load_config: Callable[[], Mapping[str, Any]]) -> int:
     """The working-copy cache ceiling in MB from ``load_config()``."""
     try:
         return int(
@@ -122,14 +143,14 @@ def _working_copy_quota_mb(load_config):
         return 20480
 
 
-def _configured_working_copy_quota_mb():
+def _configured_working_copy_quota_mb() -> int:
     """Re-read the saved ceiling; a settings write can change it mid-batch."""
     import config as cfg
 
     return _working_copy_quota_mb(cfg.load)
 
 
-def _working_copy_enforce_threshold(limit_bytes):
+def _working_copy_enforce_threshold(limit_bytes: int) -> int:
     """New bytes a batch may write between mid-batch quota enforcements.
 
     Enforce roughly every quarter of the configured quota, capped at 512 MB
@@ -142,7 +163,7 @@ def _working_copy_enforce_threshold(limit_bytes):
     )
 
 
-def _working_copy_id_from_path(path):
+def _working_copy_id_from_path(path: str) -> int:
     """The photo id in a ``working/<id>.jpg`` path, or -1."""
     try:
         stem, _ = os.path.splitext(os.path.basename(path))
@@ -151,7 +172,7 @@ def _working_copy_id_from_path(path):
         return -1
 
 
-def _record_published_identity(sink, published_path):
+def _record_published_identity(sink: list[FileIdentity | None], published_path: str) -> None:
     """``on_publish`` hook: fingerprint the file extract just published.
 
     Runs WHILE ``extract_working_copy`` still holds the publication guard;
@@ -191,7 +212,7 @@ class _RowExtraction:
     raw_failed_then_companion: bool
     # Fingerprints ``_record_published_identity`` captured under extract's
     # guard, one per publish.
-    published_identities: list
+    published_identities: list[FileIdentity | None]
 
 
 @dataclass
@@ -202,7 +223,7 @@ class _RowPublication:
     # The identity-guarded UPDATE matched no row; the output was discarded.
     orphaned: bool = False
     quota_lowered: bool = False
-    retained_before_quota_lowering: set = field(default_factory=set)
+    retained_before_quota_lowering: set[str] = field(default_factory=set)
 
 
 class _WorkingCopyBatch:
@@ -215,10 +236,11 @@ class _WorkingCopyBatch:
     """
 
     def __init__(
-        self, db, vireo_dir, rows, *,
-        wc_max_size, wc_quality, quota_mb, scope, source_paths,
-        cancel_check, progress_callback, status_callback,
-    ):
+        self, db: Database, vireo_dir: StrPath, rows: list[sqlite3.Row], *, wc_max_size: int,
+        wc_quality: int, quota_mb: int, scope: Iterable[WorkingCopyScopeEntry] | None,
+        source_paths: SourcePaths | None, cancel_check: CheckCallback | None,
+        progress_callback: ProgressCallback | None, status_callback: StatusCallback | None,
+    ) -> None:
         self.db = db
         self.vireo_dir = vireo_dir
         self.rows = rows
@@ -256,14 +278,14 @@ class _WorkingCopyBatch:
         self.retained_new_snapshots = {}
         self.stop_after_current = False
 
-    def _adopt_quota(self, quota_mb):
+    def _adopt_quota(self, quota_mb: int) -> None:
         self.quota_mb = quota_mb
         self.quota_bytes = max(0, quota_mb) * 1024 * 1024
         self.incremental_threshold = _working_copy_enforce_threshold(
             self.quota_bytes
         )
 
-    def _emit_progress(self, current):
+    def _emit_progress(self, current: int) -> None:
         """Publish the secondary working-copy phase without replacing scan progress."""
         total = self.total
         unit = "working copy" if total == 1 else "working copies"
@@ -284,7 +306,7 @@ class _WorkingCopyBatch:
         if self.progress_callback is not None and current:
             self.progress_callback(current, total)
 
-    def run(self):
+    def run(self) -> None:
         self._emit_progress(0)
 
         # Bound the transient overshoot while a large batch is running. A
@@ -326,7 +348,7 @@ class _WorkingCopyBatch:
 
     # -- one row -----------------------------------------------------
 
-    def _process_row(self, i, row):
+    def _process_row(self, i: int, row: sqlite3.Row) -> bool:
         """Extract and publish one row; ``False`` when it ended early."""
         # ``cancel_check`` parks the worker on a pause request via
         # ``wait_if_paused``, so this snapshot row may have been picked up
@@ -407,7 +429,7 @@ class _WorkingCopyBatch:
             )
         return True
 
-    def _resolve_sources(self, row):
+    def _resolve_sources(self, row: sqlite3.Row) -> _RowSources:
         """Find the row's primary and companion files, preferring verified card copies.
 
         Working copies are the edit-quality source. For non-RAW primaries
@@ -454,7 +476,7 @@ class _WorkingCopyBatch:
             companion_override_used=companion_override_used,
         )
 
-    def _card_override(self, catalog_path):
+    def _card_override(self, catalog_path: str) -> tuple[str, bool]:
         """Return ``(path, used_override)`` for reading ``catalog_path``.
 
         ``source_paths`` overrides the catalog path with the card-side
@@ -482,7 +504,7 @@ class _WorkingCopyBatch:
                     return override_path, True
         return catalog_path, False
 
-    def _extract_row(self, row, wc_abs):
+    def _extract_row(self, row: sqlite3.Row, wc_abs: str) -> _RowExtraction:
         """Write the row's working copy, falling back across its sources."""
         src = self._resolve_sources(row)
         if not src.primary_is_raw and src.companion_path:
@@ -512,7 +534,7 @@ class _WorkingCopyBatch:
 
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
-        def extract(path):
+        def extract(path: str) -> bool:
             return extract_working_copy(
                 path, wc_abs, max_size=self.wc_max_size,
                 quality=self.wc_quality,
@@ -579,7 +601,9 @@ class _WorkingCopyBatch:
             published_identities=published_identities,
         )
 
-    def _retry_from_archive(self, row, src, source, extract):
+    def _retry_from_archive(
+        self, row: sqlite3.Row, src: _RowSources, source: str, extract: Callable[[str], bool],
+    ) -> tuple[str, bool]:
         """Retry a failed card-side read from the archive; ``(source, ok)``.
 
         Points ``src`` at the archive copy it switches to. Without an
@@ -606,7 +630,7 @@ class _WorkingCopyBatch:
             return source, extract(source)
         return source, False
 
-    def _raw_result_is_full_size(self, row, wc_abs, companion_path):
+    def _raw_result_is_full_size(self, row: sqlite3.Row, wc_abs: str, companion_path: str) -> bool:
         """Whether a RAW extraction is worth keeping over the companion.
 
         libraw returns an embedded JPEG when it can't demosaic a RAW; that
@@ -658,7 +682,7 @@ class _WorkingCopyBatch:
             return False
         return True
 
-    def _publish_row(self, row, wc_rel, wc_abs, extraction):
+    def _publish_row(self, row: sqlite3.Row, wc_rel: str, wc_abs: str, extraction: _RowExtraction) -> _RowPublication:
         """Commit a successful extraction to the catalog under the guard.
 
         ``extract_working_copy`` guards its atomic replace, but its guard
@@ -727,7 +751,7 @@ class _WorkingCopyBatch:
                     )
         return publication
 
-    def _publication_lost(self, wc_abs, published_identities):
+    def _publication_lost(self, wc_abs: str, published_identities: list[FileIdentity | None]) -> tuple[bool, bool]:
         """Return ``(lost, fingerprint_mismatched)`` for the published file.
 
         Existence check first, then a fingerprint check against the
@@ -764,7 +788,7 @@ class _WorkingCopyBatch:
                 return True, True
         return False, False
 
-    def _set_row_working_copy(self, row, wc_rel, raw_failed_then_companion):
+    def _set_row_working_copy(self, row: sqlite3.Row, wc_rel: str, raw_failed_then_companion: bool) -> sqlite3.Cursor:
         """Point the row at its new working copy; returns the UPDATE cursor.
 
         Extraction takes seconds per RAW; carry the snapshot's identity
@@ -789,8 +813,8 @@ class _WorkingCopyBatch:
         )
 
     def _discard_orphaned_publication(
-        self, row, wc_rel, wc_abs, published_identities,
-    ):
+        self, row: sqlite3.Row, wc_rel: str, wc_abs: str, published_identities: list[FileIdentity | None],
+    ) -> None:
         """Remove output whose row changed identity during extraction.
 
         The just-published bytes at ``working/<id>.jpg`` don't belong to
@@ -879,7 +903,7 @@ class _WorkingCopyBatch:
                 "failed", exc_info=True,
             )
 
-    def _still_holds_published_bytes(self, wc_abs, published_identities):
+    def _still_holds_published_bytes(self, wc_abs: str, published_identities: list[FileIdentity | None]) -> bool:
         """Whether ``wc_abs`` still holds the bytes this batch last published.
 
         False without a fingerprint captured under extract's guard, or when
@@ -896,7 +920,7 @@ class _WorkingCopyBatch:
             current_identity = None
         return current_identity == published_identity
 
-    def _mark_extraction_failed(self, row, extraction):
+    def _mark_extraction_failed(self, row: sqlite3.Row, extraction: _RowExtraction) -> None:
         """Record the failure so the row is not retried every pass.
 
         Gated on current file_mtime so a future content change (mtime bump)
@@ -924,7 +948,7 @@ class _WorkingCopyBatch:
 
     # -- staying under the quota -------------------------------------
 
-    def _drop_unverifiable_retained(self):
+    def _drop_unverifiable_retained(self) -> None:
         """Forget retained files that are gone or have no fingerprint.
 
         Without a fingerprint we cannot prove the bytes are ours, so we
@@ -950,7 +974,7 @@ class _WorkingCopyBatch:
             if path in self.retained_new_files
         }
 
-    def _after_quota_lowered(self, retained_before_quota_lowering):
+    def _after_quota_lowered(self, retained_before_quota_lowering: set[str]) -> None:
         self.new_bytes_since_enforce = 0
         self._drop_unverifiable_retained()
         removed_batch_files = (
@@ -959,7 +983,9 @@ class _WorkingCopyBatch:
         if self.quota_bytes <= 0 or removed_batch_files:
             self.stop_after_current = True
 
-    def _track_published_bytes(self, row, wc_abs, published_identities):
+    def _track_published_bytes(
+        self, row: sqlite3.Row, wc_abs: str, published_identities: list[FileIdentity | None],
+    ) -> None:
         """Account for a published file and stop before overshooting.
 
         Track newly-generated bytes so the loop doesn't overshoot the
@@ -1018,7 +1044,7 @@ class _WorkingCopyBatch:
         ):
             self.stop_after_current = True
 
-    def _enforce_mid_batch(self, wc_abs):
+    def _enforce_mid_batch(self, wc_abs: str) -> None:
         """Enforce the quota mid-batch; stop the batch if it starts rotating."""
         retained_before_enforce = set(self.retained_new_files)
         enforcement = None
@@ -1097,7 +1123,7 @@ class _WorkingCopyBatch:
 
         self._stop_if_sweep_stalls(enforcement, retained_before_enforce)
 
-    def _stop_if_sweep_stalls(self, enforcement, retained_before_enforce):
+    def _stop_if_sweep_stalls(self, enforcement: dict[str, Any] | None, retained_before_enforce: set[str]) -> None:
         """Stop the library-wide sweep once enforcement stops adding coverage."""
         # The same rotation, one step earlier: enforcement can stay under
         # the ceiling by reclaiming working copies this batch did not write
@@ -1163,7 +1189,7 @@ class _WorkingCopyBatch:
                 )
                 self.stop_after_current = True
 
-    def _resume_after_stop(self, i):
+    def _resume_after_stop(self, i: int) -> bool:
         """Defer the rows the batch will not reach; ``True`` to keep going instead."""
         # A settings write may raise the ceiling while this slow batch is
         # decoding. Adopt the latest value before marking the remaining
@@ -1212,7 +1238,7 @@ class _WorkingCopyBatch:
 
         return self._undo_deferral_if_quota_raised(remaining)
 
-    def _undo_deferral_if_quota_raised(self, remaining):
+    def _undo_deferral_if_quota_raised(self, remaining: list[sqlite3.Row]) -> bool:
         """Clear this pass's deferred markers if the ceiling rose meanwhile.
 
         ``True`` when it did and the batch keeps going.
@@ -1245,7 +1271,7 @@ class _WorkingCopyBatch:
 
     # -- after the loop ----------------------------------------------
 
-    def _trim_overshoot(self):
+    def _trim_overshoot(self) -> None:
         """Trim the batch's own overshoot, lowest-priority output first.
 
         The ``sum(retained_new_files.values()) >= quota_bytes`` stop fires
@@ -1302,7 +1328,7 @@ class _WorkingCopyBatch:
                 if trimmed:
                     self._mark_trimmed_deferred(trimmed)
 
-    def _revalidate_retained(self):
+    def _revalidate_retained(self) -> None:
         """Drop retained entries whose file is gone, replaced or unproven.
 
         Between publish and this trim, a competing publisher (on-demand
@@ -1343,7 +1369,7 @@ class _WorkingCopyBatch:
                 self.retained_new_identities.pop(stale_path, None)
                 self.retained_new_snapshots.pop(stale_path, None)
 
-    def _cache_bytes_outside_batch(self, batch_bytes):
+    def _cache_bytes_outside_batch(self, batch_bytes: int) -> int:
         """Measure what was already cached before this batch.
 
         Comparing only the batch against the whole ceiling reports no
@@ -1376,7 +1402,7 @@ class _WorkingCopyBatch:
             )
             return 0
 
-    def _remove_lowest_priority(self, batch_over):
+    def _remove_lowest_priority(self, batch_over: int) -> list[_TrimmedRow]:
         """Unlink batch output in ascending id order until under the ceiling.
 
         Returns ``[(photo_id, snapshot)]`` for the files removed.
@@ -1443,7 +1469,7 @@ class _WorkingCopyBatch:
             )
         return trimmed
 
-    def _mark_trimmed_deferred(self, trimmed):
+    def _mark_trimmed_deferred(self, trimmed: list[_TrimmedRow]) -> None:
         """Mark trimmed rows capacity-deferred, like rows the batch never reached.
 
         Without this the rows come back as ``working_copy_path IS NULL``
@@ -1478,7 +1504,7 @@ class _WorkingCopyBatch:
         self.db.working_copies.defer_trimmed(trimmed)
         self.db.commit_with_retry()
 
-    def _enforce_final_quota(self):
+    def _enforce_final_quota(self) -> None:
         """Enforce the quota once after the batch.
 
         A scan/import may add a large batch at once. Enforce once after the

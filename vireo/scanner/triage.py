@@ -6,18 +6,31 @@ and settles companion JPEGs the catalog already holds — returning only
 the files the metadata, hashing and per-file passes must handle.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from image_loader import RAW_EXTENSIONS
 from scanner.companions import _companion_stat_unchanged
 from scanner.hashing import EMPTY_FILE_SHA256
 from scanner.keywords import _import_keywords_for_photo
 
+if TYPE_CHECKING:
+    import sqlite3
+    from pathlib import Path
+
+    from db import Database
+    from scanner.companion_keep import _KnownCompanionKeeper
+    from scanner.companions import _KnownCompanions
+    from scanner.folders import _ScanFolders
+    from scanner.run_state import _ScanSignals, _ScanTally
+
 log = logging.getLogger(__name__)
 
 
-def _incremental_photo_index(db, image_files):
+def _incremental_photo_index(db: Database, image_files: list[Path]) -> dict[str, sqlite3.Row]:
     """Load scan baselines for the requested paths across all workspaces.
 
     Indexed folder/filename lookups avoid repeatedly reading the entire
@@ -39,10 +52,11 @@ class _IncrementalTriage:
     """The pre-pass between discovery and metadata extraction."""
 
     def __init__(
-        self, db, image_files, *, tally, signals, folders, keeper,
-        existing_by_path, known_companions, reprocessed_row_ids,
-        incremental, repair_missing_metadata,
-    ):
+        self, db: Database, image_files: list[Path], *, tally: _ScanTally, signals: _ScanSignals,
+        folders: _ScanFolders, keeper: _KnownCompanionKeeper,
+        existing_by_path: dict[str, sqlite3.Row], known_companions: _KnownCompanions,
+        reprocessed_row_ids: set[int], incremental: bool, repair_missing_metadata: bool,
+    ) -> None:
         self.db = db
         self.image_files = image_files
         self.tally = tally
@@ -60,7 +74,7 @@ class _IncrementalTriage:
         # which RAW rows it is re-reading (see ``_settle_stat_unchanged_companions``).
         self.stat_unchanged_companions = []
 
-    def triage_files(self):
+    def triage_files(self) -> list[Path]:
         """Return the files that need full processing."""
         # First pass: determine which files need full processing (for incremental mode).
         # Handle XMP-only changes inline; collect files needing metadata extraction.
@@ -88,7 +102,7 @@ class _IncrementalTriage:
             raise
         return files_to_process
 
-    def _needs_processing(self, image_path):
+    def _needs_processing(self, image_path: Path) -> bool:
         """``False`` when the pre-pass already disposed of ``image_path``."""
         try:
             stat = image_path.stat()
@@ -125,7 +139,7 @@ class _IncrementalTriage:
                     return False
         return True
 
-    def _settle_stat_unchanged_companions(self, files_to_process):
+    def _settle_stat_unchanged_companions(self, files_to_process: list[Path]) -> bool:
         """Credit unchanged companions, or re-read them beside a re-read RAW.
 
         Re-reading a RAW rewrites its EXIF summary columns from the RAW
@@ -160,7 +174,10 @@ class _IncrementalTriage:
         self.stat_unchanged_companions = []
         return added
 
-    def _reuse_existing_row(self, existing, full_path_str, stat, xmp_path, xmp_mtime):
+    def _reuse_existing_row(
+        self, existing: sqlite3.Row, full_path_str: str, stat: os.stat_result, xmp_path: Path,
+        xmp_mtime: float | None,
+    ) -> bool:
         """``True`` when the cataloged row still vouches for the file."""
         db = self.db
         file_mtime = stat.st_mtime

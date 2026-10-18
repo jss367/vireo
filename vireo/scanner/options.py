@@ -6,7 +6,7 @@ pause probes). Each field documents itself.
 """
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +32,7 @@ class ScanOptions:
     extract_full_metadata: bool = True
     """If True, store full ExifTool JSON in exif_data column."""
 
-    skip_paths: Iterable | None = None
+    skip_paths: Collection[str] | None = None
     """Optional set of absolute path strings to exclude from scanning."""
 
     recursive: bool = True

@@ -9,11 +9,14 @@ Metadata extraction and the end-of-scan pairing and working-copy pass
 run here. The SQL lives in ``repositories/scanning.py`` (``db.scanning``).
 """
 
+from __future__ import annotations
+
 import errno
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from image_loader import is_excluded_scan_path
 from metadata import extract_metadata
@@ -31,6 +34,12 @@ from scanner.status import _status_callback_supports_phase
 from scanner.triage import _incremental_photo_index, _IncrementalTriage
 from scanner.working_copies import _extract_working_copies
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable
+
+    from db import Database
+    from scanner.scan_types import CatalogFolderPath, ExifMetadata, FolderAliases, PhotoIdentity, StrPath
+
 log = logging.getLogger(__name__)
 
 
@@ -45,10 +54,10 @@ class _ResolvedScanRoot:
     """
 
     root_path: Path
-    restrict_dirs: list | None
-    restrict_files: list | None
-    skip_paths: set | None
-    frozen_files: list | None
+    restrict_dirs: Iterable[StrPath] | None
+    restrict_files: Iterable[StrPath] | None
+    skip_paths: Collection[StrPath] | None
+    frozen_files: list[StrPath] | None
 
 
 _EMPTY_SCAN_COUNTS = {
@@ -57,8 +66,12 @@ _EMPTY_SCAN_COUNTS = {
 }
 
 
-def scan(root, db, *, options=None, hooks=None, control=None, counts=None,
-         reported_photo_identities=None):
+def scan(
+    root: StrPath, db: Database, *, options: ScanOptions | None = None,
+    hooks: ScanHooks | None = None, control: ScanControl | None = None,
+    counts: dict[str, int] | None = None,
+    reported_photo_identities: dict[int, PhotoIdentity] | None = None,
+) -> dict[str, int]:
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -122,8 +135,11 @@ def scan(root, db, *, options=None, hooks=None, control=None, counts=None,
     return counts
 
 
-def _resolve_scan_root(root, db, restrict_dirs, restrict_files, skip_paths,
-                       discovered_files):
+def _resolve_scan_root(
+    root: StrPath, db: Database, restrict_dirs: Iterable[StrPath] | None,
+    restrict_files: Iterable[StrPath] | None, skip_paths: Collection[StrPath] | None,
+    discovered_files: Iterable[StrPath] | None,
+) -> _ResolvedScanRoot | None:
     """The cataloged root and the caller's inputs rebased under it.
 
     Returns a ``_ResolvedScanRoot``, or ``None`` when the root must not be
@@ -192,10 +208,13 @@ def _resolve_scan_root(root, db, restrict_dirs, restrict_files, skip_paths,
     )
 
 
-def _rebase_scan_inputs(original_root, root_path, restrict_dirs,
-                        restrict_files, skip_paths, discovered_files):
+def _rebase_scan_inputs(
+    original_root: str, root_path: Path, restrict_dirs: Iterable[StrPath] | None,
+    restrict_files: Iterable[StrPath] | None, skip_paths: Iterable[StrPath] | None,
+    discovered_files: Iterable[StrPath] | None,
+) -> tuple[list[str] | None, list[str] | None, set[str] | None, list[Path] | None]:
     """Re-express the caller's paths under the cataloged root spelling."""
-    def rebase_scan_path(path):
+    def rebase_scan_path(path: StrPath) -> str:
         path = os.path.abspath(path)
         try:
             if os.path.commonpath([original_root, path]) == original_root:
@@ -224,11 +243,11 @@ class _ScanRun:
     """
 
     def __init__(
-        self, root, resolved, db, counts, *,
-        catalog_folder_path, catalog_folder_aliases,
-        options, hooks, control,
-        reported_photo_identities=None,
-    ):
+        self, root: StrPath, resolved: _ResolvedScanRoot, db: Database, counts: dict[str, int], *,
+        catalog_folder_path: CatalogFolderPath, catalog_folder_aliases: Callable[[Database], FolderAliases],
+        options: ScanOptions, hooks: ScanHooks, control: ScanControl,
+        reported_photo_identities: dict[int, PhotoIdentity] | None = None,
+    ) -> None:
         self.root = root
         self.root_path = resolved.root_path
         self.db = db
@@ -264,7 +283,7 @@ class _ScanRun:
             cancel_only_check=control.cancel_only_check,
         )
 
-    def run(self):
+    def run(self) -> None:
         self.discovery.discover_files()
         self._count_discovered()
         self._load_catalog_state()
@@ -276,7 +295,7 @@ class _ScanRun:
         self._finish_catalog(indexer.invalidated_photo_ids)
         self.tally.log_summary()
 
-    def _count_discovered(self):
+    def _count_discovered(self) -> None:
         excluded_frozen = self.discovery.excluded_frozen
         # Excluded frozen paths were part of the caller's promised manifest.
         # Account for them as vanished work so progress still reaches that
@@ -288,7 +307,7 @@ class _ScanRun:
         log.info("Found %d images in %s", self.tally.total, self.root)
         self.tally.report_progress()
 
-    def _load_catalog_state(self):
+    def _load_catalog_state(self) -> None:
         """Read what the pre-pass compares against and build its collaborators.
 
         The catalog reads run in a fixed order: the incremental baselines,
@@ -338,7 +357,7 @@ class _ScanRun:
 
     # -- metadata ----------------------------------------------------
 
-    def _extract_metadata(self, files_to_process):
+    def _extract_metadata(self, files_to_process: list[Path]) -> tuple[list[str], dict[str, ExifMetadata]]:
         """Batch-read ExifTool metadata.
 
         Returns the paths it was asked for and the metadata map.
@@ -366,7 +385,7 @@ class _ScanRun:
         self.signals.check_cancelled()
         return paths_to_extract, metadata_map
 
-    def _metadata_progress(self, current, total):
+    def _metadata_progress(self, current: int, total: int) -> None:
         self.signals.emit_status(
             f"Extracting metadata ({current} / {total} files)...",
             phase_current=current,
@@ -376,7 +395,10 @@ class _ScanRun:
 
     # -- main loop ---------------------------------------------------
 
-    def _index_files(self, files_to_process, paths_to_extract, metadata_map):
+    def _index_files(
+        self, files_to_process: list[Path], paths_to_extract: list[str],
+        metadata_map: dict[str, ExifMetadata],
+    ) -> _FileIndexer:
         """Hash and catalog every file; returns the ``_FileIndexer`` that did."""
         options = self.options
         indexer = _FileIndexer(
@@ -444,7 +466,7 @@ class _ScanRun:
 
     # -- post-processing ---------------------------------------------
 
-    def _finish_catalog(self, invalidated_photo_ids):
+    def _finish_catalog(self, invalidated_photo_ids: set[int]) -> None:
         db = self.db
         vireo_dir = self.options.vireo_dir
         # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
