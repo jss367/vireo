@@ -44,7 +44,7 @@ def resolver(conn):
     def meta(key):
         row = conn.execute('SELECT value FROM db_meta WHERE key=?', (key,)).fetchone()
         return row[0] if row else None
-    return SpeciesResolver(db=SimpleNamespace(conn=conn, get_meta=meta, taxa=TaxaRepository(conn)))
+    return SpeciesResolver(db=SimpleNamespace(conn=conn, meta=SimpleNamespace(get=meta), taxa=TaxaRepository(conn)))
 
 
 def test_refresh_unifies_legacy_and_native_predictions_preserving_references(catalog):

@@ -543,7 +543,7 @@ def create_batch_blueprint(
             return json_error("keyword not found", 404)
 
         for pid in clean_ids:
-            if not db._photo_in_workspace(pid):
+            if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
                 return json_error(
                     f"Photo {pid} does not belong to the active workspace", 403
                 )

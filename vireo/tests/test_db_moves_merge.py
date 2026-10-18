@@ -21,6 +21,7 @@ import sqlite3
 import pytest
 from db import Database
 from repositories.folders import FolderRepository
+from repositories.workspace_folders import WorkspaceFolderRepository
 
 
 @pytest.fixture
@@ -1424,7 +1425,8 @@ def test_photo_syncable_in_workspace_checks_membership_through_the_facade(
     other = _folder(db, "/other", link=False)
     pid = _photo(db, other, "a.jpg")
     assert db._photo_syncable_in_workspace(pid) is False
-    monkeypatch.setattr(Database, "_photo_in_workspace", lambda self, photo_id: True)
+    monkeypatch.setattr(WorkspaceFolderRepository, "photo_in_workspace",
+                        lambda self, photo_id, workspace_id: True)
     statements = _trace(db)
     try:
         assert db._photo_syncable_in_workspace(pid) is True
@@ -1709,8 +1711,6 @@ def test_merge_wires_every_callback_to_the_facade():
 
     expected = {
         "workspace_id_fn": "_ws_id",
-        "root_ancestor_exists": "_active_ws_root_ancestor_exists",
-        "root_descendant_exists": "_active_ws_root_descendant_exists",
         "prune_nonroot_links_outside_roots": "_prune_ws_nonroot_links_outside_roots",
         "materialize_workspace_descendants": "_materialize_workspace_descendants",
         "add_workspace_folder": "add_workspace_folder",
@@ -1733,9 +1733,16 @@ def test_merge_wires_every_callback_to_the_facade():
     assert wired == expected
     others = {kw.arg for kw in call.keywords} - set(expected)
     assert others == {"case_insensitive_root", "invalidate_new_images", "KEYWORD_SOURCE_CONFLICT_SQL",
-                      "update_folder_counts"}
-    counts = next(kw.value for kw in call.keywords if kw.arg == "update_folder_counts")
-    assert ast.unparse(counts) == "self.folders.update_counts"
+                      "update_folder_counts", "root_ancestor_exists", "root_descendant_exists"}
+    through_accessors = {
+        kw.arg: ast.unparse(kw.value) for kw in call.keywords
+        if kw.arg in {"update_folder_counts", "root_ancestor_exists", "root_descendant_exists"}
+    }
+    assert through_accessors == {
+        "update_folder_counts": "self.folders.update_counts",
+        "root_ancestor_exists": "self.workspace_folders.root_ancestor_exists",
+        "root_descendant_exists": "self.workspace_folders.root_descendant_exists",
+    }
     fold = next(kw.value for kw in call.keywords if kw.arg == "KEYWORD_SOURCE_CONFLICT_SQL")
     assert isinstance(fold, ast.Name) and fold.id == "KEYWORD_SOURCE_CONFLICT_SQL"
 

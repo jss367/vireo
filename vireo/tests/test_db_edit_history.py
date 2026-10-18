@@ -608,8 +608,8 @@ def test_keyword_name_and_prediction_scope(db, pids):
     assert db.edit_history.keyword_name(kid + 1000) is None
 
     preds = _predictions(db, pids[0])
-    assert db._prediction_scope(preds["a_top"]) == (preds["det"], "m1", "fpA")
-    assert db._prediction_scope(999999) is None
+    assert db.edit_history.prediction_scope(preds["a_top"]) == (preds["det"], "m1", "fpA")
+    assert db.edit_history.prediction_scope(999999) is None
 
 
 def test_undo_keyword_remove_of_deleted_keyword_is_noop(db, pids):
@@ -1333,7 +1333,7 @@ _REMOVED_WRAPPERS = (
 )
 
 _DELEGATING = (
-    "record_edit", "undo_last_edit", "redo_last_undo", "_prediction_scope",
+    "record_edit", "undo_last_edit", "redo_last_undo",
     "_undo_keyword_add", "_redo_keyword_add", "_undo_species_replace",
     "_redo_species_replace", "_undo_prediction_accept_statuses",
     "_redo_prediction_accept_statuses", "_prune_edit_history",
@@ -1379,7 +1379,6 @@ def test_edit_history_method_has_no_sql(name):
 
 
 @pytest.mark.parametrize("name,callback", [
-    ("_undo_prediction_accept_statuses", "_prediction_scope"),
     ("_edit_history_repository", "_ws_id"),
 ])
 def test_mid_statement_facade_calls_are_passed_as_bound_callbacks(name, callback):
@@ -1410,12 +1409,26 @@ def test_relabel_curation_restores_get_the_representative_restore_from_the_facto
     assert "self.species_curation.restore_representative" in passed
 
 
+def test_undo_prediction_accept_gets_the_scope_lookup_from_the_accessor():
+    """The undo resets call ``prediction_scope`` mid-loop; it is passed bound."""
+    fn, _ = _self_attrs("_undo_prediction_accept_statuses")
+    passed = {
+        ast.unparse(arg)
+        for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        for arg in [*call.args, *(kw.value for kw in call.keywords)]
+    }
+    assert "self.edit_history.prediction_scope" in passed
+    assert not hasattr(Database, "_prediction_scope")
+
+
 def test_undo_prediction_accept_scope_lookup_is_patchable(db, pids, monkeypatch):
     p = _predictions(db, pids[0])
     seen = []
-    real = db._prediction_scope
+    real = EditHistoryRepository.prediction_scope
     monkeypatch.setattr(
-        db, "_prediction_scope", lambda pid: seen.append(pid) or real(pid),
+        EditHistoryRepository, "prediction_scope",
+        lambda self, pid: seen.append(pid) or real(self, pid),
     )
     db._undo_prediction_accept_statuses({"prediction_ids": [p["a_mid"]]}, None)
     assert seen == [p["a_mid"]]

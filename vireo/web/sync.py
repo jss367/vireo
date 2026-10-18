@@ -650,7 +650,7 @@ def _sync_preview_pending_fingerprint(db, ws_id):
     ``change_type``, or ``photo_id`` differ, and the cached snapshot
     would then be served to a client that had never seen the new row.
     """
-    value = db.get_meta(f"pending_changes_version:{ws_id}")
+    value = db.meta.get(f"pending_changes_version:{ws_id}")
     return int(value) if value is not None else 0
 
 

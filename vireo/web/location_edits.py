@@ -286,7 +286,7 @@ class LocationErrors:
         """Return an error response when a photo cannot be edited in this workspace."""
         if photo_id not in db.photos.existing_ids([photo_id]):
             return self._photo_not_found_error()
-        if not db._photo_in_workspace(photo_id):
+        if not db.workspace_folders.photo_in_workspace(photo_id, db.require_workspace_id()):
             return self._json_error(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )

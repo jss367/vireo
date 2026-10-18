@@ -55,6 +55,17 @@ class Taxonomy:
         return "name:" + normalize(name)
 
 
+class _MetaReader:
+    """The ``db_meta`` read the loader makes through ``db.meta``."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def get(self, key):
+        row = self.conn.execute("SELECT value FROM db_meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+
 class FeatureReader:
     """Minimal read interface for the real pipeline loader; no app initialization.
 
@@ -90,9 +101,14 @@ class FeatureReader:
     def get_species_keywords_for_photos(self, photo_ids, *, include_identities=False):
         return self.get_species_for_photos(photo_ids, include_identities=include_identities)
 
+    @property
+    def meta(self):
+        """``db.meta`` as the current loader reads it: ``meta.get(key)``."""
+        return _MetaReader(self.conn)
+
     def get_meta(self, key):
-        row = self.conn.execute("SELECT value FROM db_meta WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
+        """Support historical loaders, which called the old ``Database`` wrapper."""
+        return self.meta.get(key)
 
     def get_detections_for_photos(self, photo_ids, min_conf, detector_model=None):
         result = defaultdict(list)

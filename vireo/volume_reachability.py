@@ -881,7 +881,7 @@ KNOWN_MOUNT_ROOTS_KEY = "known_archive_mount_roots"
 def load_known_mount_roots(db) -> set[str]:
     """Return mount roots previously observed live in this catalog."""
     try:
-        value = db.get_meta(KNOWN_MOUNT_ROOTS_KEY)
+        value = db.meta.get(KNOWN_MOUNT_ROOTS_KEY)
     except Exception:
         log.warning(
             "Could not read known mount roots; detached-stub detection "
@@ -923,7 +923,7 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
         if merged == existing:
             db.commit()
             return
-        db.set_meta(
+        db.meta.set(
             KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)), _commit=False,
         )
         db.commit()

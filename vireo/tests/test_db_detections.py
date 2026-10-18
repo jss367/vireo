@@ -21,6 +21,7 @@ import pytest
 from db import Database
 from detection_id import detection_id
 from repositories.detections import DetectionsRepository
+from repositories.model_runs import ModelRunsRepository
 
 MODEL = "megadetector-v6"
 
@@ -371,11 +372,11 @@ def test_pinned_identity_change_returns_existing_ids_untouched(db, monkeypatch):
     tie = _raw_det(db, pid, conf=0.5, runtime_fingerprint="rt", x=0.3)
     calls = []
 
-    def pinned(photo_id, detector_model):
+    def pinned(self, photo_id, detector_model):
         calls.append((photo_id, detector_model))
         return True
 
-    monkeypatch.setattr(db, "detector_run_is_pinned", pinned)
+    monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned", pinned)
     before = [tuple(r) for r in _det_rows(db, pid)]
     ids = db.write_detection_batch(pid, MODEL, [_d(0.7, x=0.6)],
                                    runtime_fingerprint="rt-2")
@@ -412,7 +413,7 @@ def test_force_runtime_replace_skips_the_pin_check(db, monkeypatch):
     def boom(*args):
         raise AssertionError("pin check must be skipped")
 
-    monkeypatch.setattr(db, "detector_run_is_pinned", boom)
+    monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned", boom)
     ids = db.write_detection_batch(pid, MODEL, [_d(x=0.5)],
                                    runtime_fingerprint="rt-2",
                                    force_runtime_replace=True)
@@ -423,7 +424,7 @@ def test_force_runtime_replace_skips_the_pin_check(db, monkeypatch):
 
 def test_first_run_never_consults_the_pin(db, monkeypatch):
     pid = _photo(db)
-    monkeypatch.setattr(db, "detector_run_is_pinned",
+    monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned",
                         lambda *a: pytest.fail("no previous run"))
     assert len(db.write_detection_batch(pid, MODEL, [_d()])) == 1
 
@@ -1105,9 +1106,9 @@ def test_existing_detection_photo_ids_composes_through_the_facade():
     assert "model_runs" in attrs
 
 
-def test_pin_check_stays_on_the_facade():
+def test_pin_check_comes_from_the_model_runs_domain():
     """``detector_run_is_pinned`` belongs to the model-runs domain."""
-    assert "detector_run_is_pinned" in _self_attrs(Database.write_detection_batch)
+    assert "model_runs" in _self_attrs(Database.write_detection_batch)
 
 
 @pytest.mark.parametrize("name", [

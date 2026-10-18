@@ -8334,7 +8334,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         (f"{pid_plain}.jpg", pid_plain),
     )
-    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.meta.set("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
 
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
@@ -8361,7 +8361,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     assert plain_row["thumb_path"] == f"{pid_plain}.jpg"
 
     # Version is bumped, so a second create_app is a no-op.
-    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    assert db.meta.get("edit_math_version") == str(EDIT_MATH_VERSION)
     new_preview = preview_dir / f"{pid_edited}_1920.jpg"
     new_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
     db.caches.preview_insert(pid_edited, 1920, new_preview.stat().st_size)
@@ -8422,7 +8422,7 @@ def test_edit_math_version_migration_leaves_version_on_failed_purge(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         (f"{pid_edited}.jpg", pid_edited),
     )
-    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.meta.set("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
 
     original_remove = app_module.os.remove
@@ -8437,13 +8437,13 @@ def test_edit_math_version_migration_leaves_version_on_failed_purge(
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
 
     # The unlink failed, so the version must stay behind for a retry.
-    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+    assert db.meta.get("edit_math_version") == str(EDIT_MATH_VERSION - 1)
 
     # Once the file is unlockable, a later boot completes the migration.
     monkeypatch.setattr(app_module.os, "remove", original_remove)
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
     assert not edited_thumb.exists()
-    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    assert db.meta.get("edit_math_version") == str(EDIT_MATH_VERSION)
 
 
 def test_edit_math_version_migration_survives_unreadable_preview_dir(
@@ -8476,7 +8476,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         file_size=100, file_mtime=0.0, width=40, height=30,
     )
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
-    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.meta.set("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
     db.close()
 
@@ -8498,7 +8498,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
     db2 = Database(db_path)
     try:
         # Version stays old so the next boot retries the scan.
-        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+        assert db2.meta.get("edit_math_version") == str(EDIT_MATH_VERSION - 1)
     finally:
         db2.close()
 
@@ -8507,7 +8507,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
     app_module._migrate_edit_math_render_caches(fake_app)
     db3 = Database(db_path)
     try:
-        assert db3.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+        assert db3.meta.get("edit_math_version") == str(EDIT_MATH_VERSION)
     finally:
         db3.close()
 
@@ -8591,7 +8591,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
         # actually exercises the listdir-driven orphan sweep.
         (preview_dir / f"{pid}_640.jpg").write_bytes(b"\xff\xd8\xff\xe0junk")
 
-    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.meta.set("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
     db.close()
 
@@ -8617,7 +8617,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
         assert not (preview_dir / f"{pid}_640.jpg").exists()
     db2 = Database(db_path)
     try:
-        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+        assert db2.meta.get("edit_math_version") == str(EDIT_MATH_VERSION)
     finally:
         db2.close()
 
@@ -8642,7 +8642,7 @@ def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
 
     db = Database(db_path)
-    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    assert db.meta.get("edit_math_version") == str(EDIT_MATH_VERSION)
 
 
 def test_storage_clear_previews_resets_preview_cache(client_with_photo):

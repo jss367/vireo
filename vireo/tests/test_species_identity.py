@@ -68,7 +68,7 @@ def db(tmp_path):
             "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
             (entry["taxon_id"], entry["scientific_name"], entry["common_name"], entry["rank"]),
         )
-    database.set_meta("common_name_identity_version", "1")
+    database.meta.set("common_name_identity_version", "1")
     database.conn.commit()
     yield database
     database.close()
@@ -479,7 +479,7 @@ def test_upgrade_repairs_existing_database_once(db, tmp_path):
     db.predictions.add(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", status="rejected",
                       labels_fingerprint="custom", taxonomy={"scientific_name": BROWED["scientific_name"]})
     from species_identity import resolution_identity
-    db.set_meta("species_identity_repair:" + resolution_identity(), "0")
+    db.meta.set("species_identity_repair:" + resolution_identity(), "0")
     path = db._db_path
     db.close()
     for _ in range(2):
@@ -607,7 +607,7 @@ def test_legacy_dwca_requires_refresh_before_common_name_inference(tmp_path):
 def test_unversioned_database_does_not_trust_discarded_alias_collisions(db):
     db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name, locale) "
                     "SELECT id, 'Parrot', 'en' FROM taxa WHERE inat_id = ?", (LILAC["taxon_id"],))
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     resolver = SpeciesResolver(db=db)
     assert resolver.resolve("Parrot").key == "name:parrot"
     assert resolver.resolve(LILAC["scientific_name"]).taxon_id == LILAC["taxon_id"]
@@ -624,7 +624,7 @@ def test_unversioned_database_identifies_a_preferred_name_only_one_taxon_carries
     prediction under ``taxon:``, the second one wearing a "(Amazona finschi)"
     suffix because its own common name no longer resolved back to it.
     """
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     resolver = SpeciesResolver(db=db)
     bare = resolver.prediction({
         "species": LILAC["common_name"], "classifier_model": "BioCLIP-2.5",
@@ -643,14 +643,14 @@ def test_unversioned_database_identifies_a_preferred_name_only_one_taxon_carries
 def test_unversioned_database_refuses_a_preferred_name_two_taxa_share(db):
     db.conn.execute("UPDATE taxa SET common_name = ? WHERE inat_id = ?",
                     (LILAC["common_name"], RED["taxon_id"]))
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     resolver = SpeciesResolver(db=db)
     assert resolver.resolve(LILAC["common_name"]).key == "name:" + keyword_match_key(LILAC["common_name"])
     assert resolver.resolve(LILAC["scientific_name"]).taxon_id == LILAC["taxon_id"]
 
 
 def test_verified_database_still_refuses_a_name_the_index_called_ambiguous(db):
-    db.set_meta("ambiguous_common_names", json.dumps([LILAC["common_name"].lower()]))
+    db.meta.set("ambiguous_common_names", json.dumps([LILAC["common_name"].lower()]))
     resolver = SpeciesResolver(db=db)
     assert resolver.resolve(LILAC["common_name"]).taxon_id is None
 
@@ -713,7 +713,7 @@ def test_id_only_taxonomy_controls_matching_and_enrichment(db, tmp_path, taxonom
 def test_api_common_names_verify_only_complete_refresh(db, complete):
     from taxonomy import fetch_common_names
 
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name, locale) "
                     "SELECT id, 'Stale alias', 'en' FROM taxa WHERE inat_id = ?", (RED["taxon_id"],))
     entries = [RED, BROWED, LILAC] if complete else [RED]
@@ -723,7 +723,7 @@ def test_api_common_names_verify_only_complete_refresh(db, complete):
         request.return_value.status_code = 200
         request.return_value.json.return_value = {"results": results}
         fetch_common_names(db)
-    assert db.get_meta("common_name_identity_version") == ("1" if complete else "")
+    assert db.meta.get("common_name_identity_version") == ("1" if complete else "")
     assert SpeciesResolver(db=db).resolve("Shared alias").taxon_id is None
     assert not db.conn.execute("SELECT 1 FROM taxa_common_names WHERE name = 'Stale alias'").fetchone()
     if complete:
@@ -1011,7 +1011,7 @@ def test_unstamped_catalog_does_not_flag_a_species_against_itself(db, tmp_path):
         pytest.skip("Node is required to execute the review comparison")
     # No stamp, and a second taxon carries the same preferred name: neither
     # the index nor the catalog itself can say which species the label means.
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     db.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
                     (18994, "Amazona autumnalis", LILAC["common_name"], "species"))
     pid = _confirmed_species_photo(db, tmp_path, LILAC)
@@ -1041,7 +1041,7 @@ def test_same_name_fold_does_not_hide_a_different_species(db, tmp_path):
 
     if not shutil.which("node"):
         pytest.skip("Node is required to execute the review comparison")
-    db.set_meta("common_name_identity_version", "")
+    db.meta.set("common_name_identity_version", "")
     pid = _confirmed_species_photo(db, tmp_path, LILAC)
     data = {"photos": [{"id": pid, "species_top5": [
         [BROWED["common_name"], .9995, "BioCLIP-2.5"],

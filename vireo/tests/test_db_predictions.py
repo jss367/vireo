@@ -727,7 +727,7 @@ def test_accept_subject_species_rolls_back(db, cat, monkeypatch):
     with pytest.raises(RuntimeError, match="accept failed"):
         db.accept_subject_species(pid)
     assert not db.conn.in_transaction
-    assert db.get_meta("probe") is None
+    assert db.meta.get("probe") is None
     with pytest.raises(RuntimeError, match="accept failed"):
         db.accept_subject_species(pid, _commit=False)
     assert db.conn.in_transaction

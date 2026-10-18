@@ -343,7 +343,7 @@ class EditHistoryRepository:
         """Reset each recorded prediction's scope to its pre-accept state.
 
         ``pred_ids`` is non-empty; ``prediction_scope`` is the façade's
-        ``_prediction_scope``. See ``Database._undo_prediction_accept_statuses``.
+        ``prediction_scope``. See ``Database._undo_prediction_accept_statuses``.
         """
         ws = self.workspace_id
         seen_scopes = set()

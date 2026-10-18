@@ -141,28 +141,28 @@ def test_get_global_detection_stats_counts_distinct_photos_and_models(db):
 
 def test_detector_run_is_pinned_only_by_real_manual_reviews(db):
     pid = _photo(db, "a.jpg")
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is False
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is False
 
     det = _det(db, pid, "megadetector-v6")
     pred = _pred(db, det, "fp-a")
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is False
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is False
 
     _review(db, pred, "pending")
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is False
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is False
 
     _review(db, pred, "accepted", individual=AUTO_MATCH_REVIEW_MARKER)
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is False
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is False
 
     db.conn.execute(
         "UPDATE prediction_review SET individual = NULL WHERE prediction_id = ?",
         (pred,),
     )
     db.conn.commit()
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is True
-    assert db.detector_run_is_pinned(pid, "megadetector-v5") is False
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is True
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v5") is False
 
     _review(db, pred, "rejected", individual="Robin")
-    assert db.detector_run_is_pinned(pid, "megadetector-v6") is True
+    assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is True
 
 
 def test_get_detector_run_photo_ids_excludes_torn_runs(db):
@@ -1145,11 +1145,9 @@ _REMOVED_MODEL_RUN_WRAPPERS = (
     "upsert_labels_fingerprint",
 )
 
-# Still on ``Database``: ``detector_run_is_pinned`` is bound into the
-# detection writes as their ``is_pinned`` callback, and the classify
-# preflight reads resolve the workspace's detector floor first.
+# Still on ``Database``: the classify preflight reads resolve the workspace's
+# detector floor first.
 _FACADE_MODEL_RUN_METHODS = (
-    "detector_run_is_pinned",
     "get_classifier_run_cache_hits",
     "get_unclassifiable_photos",
 )
@@ -1221,9 +1219,10 @@ def test_facade_model_run_method_delegates_to_repository(name):
 
 
 def test_pin_check_is_bound_into_the_detection_writes():
-    """Why ``detector_run_is_pinned`` stays: the detection writes take it as a callback."""
+    """The detection writes take the pin check from ``db.model_runs`` as a callback."""
     source = textwrap.dedent(inspect.getsource(Database.write_detection_batch))
-    assert "is_pinned=self.detector_run_is_pinned" in source
+    assert "is_pinned=self.model_runs.detector_run_is_pinned" in source
+    assert not hasattr(Database, "detector_run_is_pinned")
 
 
 def test_count_classifier_runs_composes_through_the_facade():
