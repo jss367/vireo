@@ -6,6 +6,16 @@ card, mirroring the bulk-reject button at a single-photo granularity.
 """
 import time
 
+from e2e.module_pages import import_page_modules
+
+
+def _expose_miss_modules(page):
+    """The Misses page is ES modules: its state and functions are not globals.
+    Hand the test the page's own instances as ``missState`` (the state object)
+    and ``pageModules.<file>`` (each module's exports)."""
+    import_page_modules(page, "misses", ["state", "tuning", "flagging", "keyboard"])
+    page.evaluate("window.missState = pageModules.state.state")
+
 
 def _seed_miss(db, photo_id, category="no_subject"):
     """Mark a photo as a miss in the given category so /misses returns it."""
@@ -165,6 +175,7 @@ def test_misses_keyboard_focus_honors_live_motion_preference(live_server, page):
     pid = live_server['data']['photos'][0]
     _seed_miss(live_server['db'], pid)
     page.goto(f"{live_server['url']}/misses")
+    _expose_miss_modules(page)
     card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
     card.wait_for(state='visible')
     page.evaluate('''() => {
@@ -178,7 +189,7 @@ def test_misses_keyboard_focus_honors_live_motion_preference(live_server, page):
     # Re-evaluate the preference on each focus change; do not cache it at load.
     for preference, behavior in [('no-preference', 'smooth'), ('reduce', 'auto'), ('no-preference', 'smooth')]:
         page.emulate_media(reduced_motion=preference)
-        page.evaluate('setFocused(null, -1)')
+        page.evaluate('pageModules.keyboard.setFocused(null, -1)')
         page.keyboard.press('j')
         assert card.evaluate("el => el.classList.contains('focused')")
         assert page.evaluate('focusScrollCalls.at(-1)') == {'block': 'nearest', 'behavior': behavior}

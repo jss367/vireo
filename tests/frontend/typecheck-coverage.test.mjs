@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
@@ -62,4 +62,20 @@ for (const directive of ['@ts-nocheck', '@ts-ignore', '@ts-expect-error']) {
     const root = fixture(t, {source: `// ${directive}\nconst count = 1;`});
     assert.throws(() => checkFrontendTypes(root), /must not suppress/);
   });
+
+  test(`coverage gate rejects implementation suppression ${directive} in an ES module`, t => {
+    const root = fixture(t, {source: `// ${directive}\nexport const count = 1;`});
+    assert.throws(() => checkFrontendTypes(root), /must not suppress/);
+  });
 }
+
+test('coverage gate checks ES module pages, including types across imports', t => {
+  const root = fixture(t, {source: 'import {count} from "./state.js";\n/** @type {number} */ export const total = count;'});
+  writeFileSync(path.join(root, 'vireo/static/state.js'), 'export const count = 1;');
+  const project = path.join(root, 'tsconfig.frontend.json');
+  const config = JSON.parse(readFileSync(project, 'utf8'));
+  writeFileSync(project, JSON.stringify({...config, files: [...config.files, 'vireo/static/state.js']}));
+  assert.deepEqual(checkFrontendTypes(root), {projects: 1, scripts: 2});
+  writeFileSync(path.join(root, 'vireo/static/state.js'), 'export const count = "one";');
+  assert.throws(() => checkFrontendTypes(root), /Command failed/);
+});

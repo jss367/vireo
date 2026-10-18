@@ -21,6 +21,7 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
+    from repositories.card_cleanup import CardCleanupRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
     from repositories.computation_cache import ComputationCacheRepository
@@ -44,9 +45,11 @@ if TYPE_CHECKING:
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
+    from repositories.pipeline_features import PipelineFeaturesRepository
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
+    from repositories.source_cleanup import SourceCleanupRepository
     from repositories.stats import StatsRepository
     from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
@@ -1928,6 +1931,26 @@ class Database:
         """
         return self._workspace_folder_repository()
 
+    # -- Move source cleanup (``move_cleanup`` owns the transaction) --
+
+    def _source_cleanup_repository(self):
+        """Build the (catalog-wide) move-source-cleanup repository on this connection."""
+        from repositories.source_cleanup import SourceCleanupRepository
+
+        return SourceCleanupRepository(self.conn)
+
+    @property
+    def source_cleanup(self) -> SourceCleanupRepository:
+        """Move-source cleanup SQL: ``db.source_cleanup.folder_has_photos(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_source_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to the active workspace, so accessing it never needs one, and
+        nothing in it commits: ``move_cleanup`` opens and ends the transaction.
+        """
+        return self._source_cleanup_repository()
+
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
         """Link a folder + descendants to a workspace WITHOUT committing.
@@ -2444,6 +2467,26 @@ class Database:
         works by photo id with none active.
         """
         return self._audit_repository()
+
+    # -- Card cleanup (``card_cleanup`` owns the gates and the commits) --
+
+    def _card_cleanup_repository(self):
+        """Build the (catalog-wide) card-cleanup repository on this connection."""
+        from repositories.card_cleanup import CardCleanupRepository
+
+        return CardCleanupRepository(self.conn)
+
+    @property
+    def card_cleanup(self) -> CardCleanupRepository:
+        """Card cleanup's catalog SQL: ``db.card_cleanup.rows_by_hash(hash)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_card_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to a workspace, and its verdict write runs in the caller's
+        transaction (``card_cleanup`` commits through ``db.commit()``).
+        """
+        return self._card_cleanup_repository()
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
@@ -8109,6 +8152,30 @@ class Database:
         re-sync). Call those, not the repository methods behind them.
         """
         return self._detections_repository()
+
+    def _pipeline_features_repository(self):
+        """Build the pipeline feature-load repository on this connection.
+
+        Its workspace-scoped reads take the workspace id from the caller,
+        which resolves it before reading config, so the repository takes no
+        workspace callable.
+        """
+        from repositories.pipeline_features import PipelineFeaturesRepository
+
+        return PipelineFeaturesRepository(self.conn)
+
+    @property
+    def pipeline_features(self) -> PipelineFeaturesRepository:
+        """Grouping-pipeline reads: ``db.pipeline_features.feature_rows(ws, scoped=False)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_pipeline_features_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it needs no
+        active workspace; the workspace-scoped reads take the workspace id as
+        an argument. The confidence floors, scopes and decisions stay in
+        ``pipeline``.
+        """
+        return self._pipeline_features_repository()
 
     def save_detections(
         self,

@@ -168,17 +168,10 @@ def _retry_thumbnail_with_companion(
         photo_id,
     )
     file_mtime = _photo_value(photo, "file_mtime")
-    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+    if file_mtime is not None and photo_id is not None and not getattr(db, "closed", True):
         try:
-            db.conn.execute(
-                "UPDATE photos SET"
-                " working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?,"
-                " working_copy_failed_source='source'"
-                " WHERE id=?",
-                (file_mtime, photo_id),
-            )
-            db.conn.commit()
+            db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
+            db.commit()
         except Exception:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
@@ -217,17 +210,10 @@ def _retry_thumbnail_with_working_copy(
         photo_id,
     )
     file_mtime = _photo_value(photo, "file_mtime")
-    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+    if file_mtime is not None and photo_id is not None and not getattr(db, "closed", True):
         try:
-            db.conn.execute(
-                "UPDATE photos SET"
-                " working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?,"
-                " working_copy_failed_source='source'"
-                " WHERE id=?",
-                (file_mtime, photo_id),
-            )
-            db.conn.commit()
+            db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
+            db.commit()
         except Exception:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
@@ -524,11 +510,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             # coverage query (`thumb_path IS NOT NULL`) reflects this run.
             # Stored value is the bare filename ({id}.jpg) so the column
             # stays correct even if the thumbnail cache dir is later moved.
-            db.conn.execute(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                (f"{photo['id']}.jpg", photo["id"]),
-            )
-            db.conn.commit()
+            db.photos.set_thumb_path(photo["id"], f"{photo['id']}.jpg")
         else:
             failed += 1
 
@@ -556,9 +538,7 @@ def thumb_path_backfill_candidate_count(db, cache_dir):
     when nothing needs work, and after a backfill run for "remaining"
     reporting.
     """
-    rows = db.conn.execute(
-        "SELECT id, thumb_path FROM photos"
-    ).fetchall()
+    rows = db.caches.thumbnail_path_rows()
     candidates = 0
     for row in rows:
         photo_id = row["id"]
@@ -589,9 +569,7 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
     UPDATE, so single-threaded throughput is fine even on tens of
     thousands of photos.
     """
-    rows = db.conn.execute(
-        "SELECT id, thumb_path FROM photos"
-    ).fetchall()
+    rows = db.caches.thumbnail_path_rows()
     total = len(rows)
     if status_callback:
         status_callback(f"Reconciling thumb_path for {total:,} photos")
@@ -604,18 +582,12 @@ def backfill_thumb_paths(db, cache_dir, progress_callback=None,
 
     def _flush():
         if pending_set:
-            db.conn.executemany(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                pending_set,
-            )
+            db.caches.set_thumbnail_paths(pending_set)
             pending_set.clear()
         if pending_clear:
-            db.conn.executemany(
-                "UPDATE photos SET thumb_path=NULL WHERE id=?",
-                pending_clear,
-            )
+            db.caches.clear_thumbnail_paths(pending_clear)
             pending_clear.clear()
-        db.conn.commit()
+        db.commit()
 
     for i, row in enumerate(rows):
         if cancel_check is not None and cancel_check():

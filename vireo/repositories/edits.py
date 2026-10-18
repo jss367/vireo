@@ -5,7 +5,8 @@ a look that is the same in every workspace), so the repository takes no
 workspace id. The optional active-workspace check on recipe writes stays on
 ``Database``, which runs it before delegating here.
 
-Callers reach the batch recipe read and the presets as ``db.edits`` (a fresh
+Callers reach the batch recipe read, the edit-mask sweep's
+local-adjustment read and the presets as ``db.edits`` (a fresh
 repository per access, see ``Database.edits``); there are no forwarding
 wrappers on ``Database``. The single-photo recipe read, write and clear stay
 on ``Database`` (``get_photo_edit_recipe``, ``set_photo_edit_recipe``,
@@ -51,6 +52,13 @@ class EditsRepository:
         except Exception:
             log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
             return None
+
+    def edited_photo_ids(self) -> list[int]:
+        """The id of every photo with a stored edit recipe (catalog-wide)."""
+        rows = self.conn.execute(
+            "SELECT photo_id FROM photo_edit_recipes"
+        ).fetchall()
+        return [row["photo_id"] for row in rows]
 
     def get_photo_recipes(self, photo_ids: Collection[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: normalized recipe dict} for the given photos."""
@@ -114,6 +122,19 @@ class EditsRepository:
         return cur.rowcount > 0
 
     # -- edit presets (global reusable development settings) -------------------
+
+    def recipes_with_local_adjustments(self) -> list[str | None]:
+        """``recipe_json`` of every recipe that may hold a local adjustment.
+
+        A ``LIKE '%"local"%'`` prefilter, for the edit-mask snapshot sweep
+        (``local_masks.gc_edit_masks``), which parses the mask refs itself.
+        """
+        return [
+            row["v"] for row in self.conn.execute(
+                "SELECT recipe_json AS v FROM photo_edit_recipes "
+                "WHERE recipe_json LIKE '%\"local\"%'"
+            ).fetchall()
+        ]
 
     def list_presets(self) -> list[dict[str, Any]]:
         """Return all edit presets, sorted case-insensitively by name.

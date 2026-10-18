@@ -12,11 +12,11 @@ def library(tmp_path):
     """A real small SQLite library; no application initialization or ML models."""
     import sqlite3
 
-    from pipeline import _PIPELINE_PHOTO_COLS
+    from repositories.pipeline_features import PIPELINE_PHOTO_COLS
 
     path = tmp_path / "library.db"
     conn = sqlite3.connect(path)
-    cols = [part.strip().removeprefix("p.") for part in _PIPELINE_PHOTO_COLS.split(",")]
+    cols = [part.strip().removeprefix("p.") for part in PIPELINE_PHOTO_COLS.split(",")]
     conn.execute("CREATE TABLE photos (" + ",".join("id INTEGER PRIMARY KEY" if c == "id" else c for c in cols)
                  + ",file_hash,thumb_path)")
     conn.executescript("""

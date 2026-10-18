@@ -521,3 +521,57 @@ def test_capture_date_selects_whole_sessions_without_changing_splits(library, tm
     assert empty['sessions'] == []
     with pytest.raises(ValueError):
         prepare(library, tmp_path/'invalid-date', capture_date='2026-99-99')
+
+
+def test_feature_reader_pipeline_repository_preserves_read_only_label_boundary():
+    from repositories.pipeline_features import PIPELINE_PHOTO_COLS
+
+    columns = [part.strip().removeprefix("p.") for part in PIPELINE_PHOTO_COLS.split(",")]
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("CREATE TABLE photos (" + ",".join(
+            "id INTEGER PRIMARY KEY" if column == "id" else column for column in columns
+        ) + ")")
+        conn.executescript("""
+            CREATE TABLE photo_workspace_visibility(photo_id INTEGER, workspace_id INTEGER);
+            CREATE TABLE keywords(id INTEGER, name TEXT);
+            CREATE TABLE photo_keywords(photo_id INTEGER, keyword_id INTEGER);
+            INSERT INTO photos(id, filename) VALUES(1, 'invented.jpg'), (2, 'other.jpg');
+            INSERT INTO photo_workspace_visibility VALUES(1, 1), (2, 2);
+            INSERT INTO keywords VALUES(1, 'held-out label');
+            INSERT INTO photo_keywords VALUES(1, 1);
+        """)
+        conn.execute("BEGIN")
+        reads = set()
+        writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                  sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE}
+
+        def authorize(action, table, _column, database, _trigger):
+            if action == sqlite3.SQLITE_READ:
+                reads.add(table)
+                if table in {"keywords", "photo_keywords"}:
+                    return sqlite3.SQLITE_DENY
+            if action in writes and database == "main":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+        reader = FeatureReader(conn, 1)
+        features = reader.pipeline_features
+        assert features is not reader.pipeline_features
+        assert features.conn is conn
+        features.stage_scope_photo_ids([1, 1, 2])
+        assert [row["id"] for row in features.feature_rows(1, scoped=True)] == [1]
+        features.stage_scope_photo_ids([2])
+        assert features.feature_rows(1, scoped=True) == []
+        assert [row["id"] for row in features.feature_rows(1, scoped=False)] == [1]
+        assert reader.get_species_keywords_for_photos([1], include_identities=True) == {}
+        assert not reads.intersection({"keywords", "photo_keywords"})
+        assert conn.in_transaction  # TEMP staging did not commit the read snapshot.
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("UPDATE photos SET filename='forbidden' WHERE id=1")
+        conn.set_authorizer(None)
+        assert conn.execute("SELECT filename FROM photos WHERE id=1").fetchone()[0] == "invented.jpg"
+    finally:
+        conn.close()

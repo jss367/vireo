@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Protocol
 
 from db import Database
 
@@ -19,10 +21,31 @@ from db import Database
 # module global so tests can swap it for the scan job alone.
 from new_images import invalidate_new_images_after_scan as _invalidate_new_images_after_scan
 
+if TYPE_CHECKING:
+    from jobs import JobRunner
+    from scanner import ScanControl, ScanHooks, ScanOptions
+    from services.service_types import JobDict, JobWork, JsonDict
+
 log = logging.getLogger(__name__)
 
 
-def _scan_metadata_warning():
+class ScanFunction(Protocol):
+    """``scanner.scan``, as the scan job calls it."""
+
+    def __call__(
+        self, root: str, db: Database, *, options: ScanOptions | None = None,
+        hooks: ScanHooks | None = None, control: ScanControl | None = None,
+        counts: dict[str, int] | None = None,
+    ) -> object: ...
+
+
+class ConfigLoader(Protocol):
+    """The ``config`` module, read for the global settings."""
+
+    def load(self) -> JsonDict: ...
+
+
+def _scan_metadata_warning() -> str | None:
     """Thin wrapper over ``metadata.scan_metadata_warning`` for the scan paths.
 
     The implementation lives in ``metadata`` so the pipeline-job module can
@@ -39,11 +62,13 @@ class _ScanJobRun:
     progress events the job publishes around each phase.
     """
 
+    # Any: the Flask app config holds heterogeneous settings values.
     def __init__(
-        self, job, *, runner, thread_db, roots_list, incremental,
-        repair_missing_metadata, config, invalidate_missing_originals,
-        do_scan, scan_cancelled,
-    ):
+        self, job: JobDict, *, runner: JobRunner, thread_db: Database, roots_list: list[str],
+        incremental: bool, repair_missing_metadata: bool, config: Mapping[str, Any],
+        invalidate_missing_originals: Callable[[], None], do_scan: ScanFunction,
+        scan_cancelled: type[BaseException],
+    ) -> None:
         self.job = job
         self.runner = runner
         self.thread_db = thread_db
@@ -86,11 +111,11 @@ class _ScanJobRun:
         # thumbnails must still run). Using len(root_errors) alone
         # double-counts roots that hit both failure classes and
         # misclassifies cache-only failures as scan failures.
-        self.root_errors = []
-        self.scan_failed_roots = set()
-        self.cache_failed_roots = set()
+        self.root_errors: list[str] = []
+        self.scan_failed_roots: set[str] = set()
+        self.cache_failed_roots: set[str] = set()
 
-    def progress_cb(self, current, total):
+    def progress_cb(self, current: int, total: int) -> None:
         job = self.job
         scan_acc = self.scan_acc
         scan_acc["last_current"] = current
@@ -117,7 +142,7 @@ class _ScanJobRun:
             },
         )
 
-    def advance_scan_acc(self):
+    def advance_scan_acc(self) -> None:
         # Use processed count, not planned total — a root that
         # raised mid-scan will have last_current < last_total,
         # and starting the next root above the actual processed
@@ -126,7 +151,10 @@ class _ScanJobRun:
         self.scan_acc["last_current"] = 0
         self.scan_acc["last_total"] = 0
 
-    def status_cb(self, message, phase_current=None, phase_total=None, phase_label=None):
+    def status_cb(
+        self, message: str, phase_current: int | None = None, phase_total: int | None = None,
+        phase_label: str | None = None,
+    ) -> None:
         job = self.job
         progress_payload = {
             "phase": phase_label or message,
@@ -141,16 +169,16 @@ class _ScanJobRun:
         self.runner.update_step(job["id"], "scan", current_file=message)
         self.runner.push_event(job["id"], "progress", progress_payload)
 
-    def cancel_check(self):
+    def cancel_check(self) -> bool:
         return self.runner.is_cancelled(self.job["id"])
 
-    def pause_check(self):
+    def pause_check(self) -> bool:
         return self.runner.pause_requested(self.job["id"])
 
-    def cancel_only_check(self):
+    def cancel_only_check(self) -> bool:
         return self.runner.cancellation_requested(self.job["id"])
 
-    def begin(self, cfg):
+    def begin(self, cfg: ConfigLoader) -> None:
         """Declare the job's steps and read the scan settings."""
         job = self.job
         job["_start_time"] = time.time()
@@ -163,7 +191,7 @@ class _ScanJobRun:
         self.pipeline_cfg = effective_cfg.get("pipeline", {})
         self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
 
-    def announce_root(self, idx, root):
+    def announce_root(self, idx: int, root: str) -> None:
         job = self.job
         phase = (
             f"Scanning root {idx} of {len(self.roots_list)}: {root}"
@@ -178,7 +206,7 @@ class _ScanJobRun:
             "rate": 0,
         })
 
-    def scan_root(self, root):
+    def scan_root(self, root: str) -> bool:
         """Scan one root, recording any failure; return True when cancelled."""
         from scanner import ScanControl, ScanHooks, ScanOptions
 
@@ -188,7 +216,7 @@ class _ScanJobRun:
         # thousands have landed. Reading the sink in `finally`
         # credits that work on every exit path — a root that dies
         # late would otherwise report zero photos indexed.
-        root_counts = {}
+        root_counts: dict[str, int] = {}
         try:
             self.do_scan(
                 root, self.thread_db,
@@ -221,7 +249,7 @@ class _ScanJobRun:
             self._finish_root(root, root_counts)
         return False
 
-    def _finish_root(self, root, root_counts):
+    def _finish_root(self, root: str, root_counts: Mapping[str, int]) -> None:
         """Credit the root's photos and drop the caches its scan made stale."""
         job = self.job
         # Credit whatever this root indexed regardless of how
@@ -271,7 +299,7 @@ class _ScanJobRun:
             )
         self.advance_scan_acc()
 
-    def finish_cancelled(self):
+    def finish_cancelled(self) -> JsonDict:
         # Same indexed count as the completed path, not the
         # progress counter. Otherwise "N photos" would mean two
         # different things depending on which branch produced it,
@@ -288,7 +316,7 @@ class _ScanJobRun:
         )
         return {"photos_indexed": photo_count, "cancelled": True}
 
-    def record_scan_step(self, photo_count):
+    def record_scan_step(self, photo_count: int) -> None:
         """Close the scan step as completed or failed, with its summary."""
         # Unique roots that hit any failure class. Counting unique
         # roots (not error entries) avoids inflating the "N of M"
@@ -317,7 +345,7 @@ class _ScanJobRun:
                 summary=scan_summary,
             )
 
-    def finish(self, photo_count):
+    def finish(self, photo_count: int) -> JsonDict:
         """Close a scan that ran to the end: its step, thumbnails, rollup."""
         self.record_scan_step(photo_count)
         # Skip the thumbnail phase when EVERY requested root's scan
@@ -351,7 +379,7 @@ class _ScanJobRun:
 
         return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
-    def skip_thumbnails(self):
+    def skip_thumbnails(self) -> None:
         log.info(
             "All %d scan root(s) failed; skipping thumbnail phase",
             len(self.roots_list),
@@ -361,7 +389,7 @@ class _ScanJobRun:
             summary="skipped (all scan roots failed)",
         )
 
-    def generate_thumbnails(self):
+    def generate_thumbnails(self) -> JsonDict:
         job = self.job
         self.runner.update_step(job["id"], "thumbnails", status="running")
 
@@ -390,7 +418,7 @@ class _ScanJobRun:
                                 summary=thumb_summary(thumb_result))
         return thumb_result
 
-    def thumb_cb(self, current, total):
+    def thumb_cb(self, current: int, total: int) -> None:
         job = self.job
         job["progress"]["current"] = current
         job["progress"]["total"] = total
@@ -410,9 +438,11 @@ class _ScanJobRun:
 
 
 def build_scan_work(
-    roots, incremental, active_ws, repair_missing_metadata=False, *,
-    get_runner, db_path, config, invalidate_missing_originals,
-):
+    roots: str | Iterable[str], incremental: bool, active_ws: int | None,
+    repair_missing_metadata: bool = False, *,
+    get_runner: Callable[[], JobRunner], db_path: str, config: Mapping[str, Any],
+    invalidate_missing_originals: Callable[[], None],
+) -> JobWork:
     """Build the background work function for a scan job.
 
     Shared by ``POST /api/jobs/scan`` and
@@ -442,7 +472,7 @@ def build_scan_work(
     else:
         roots_list = list(roots)
 
-    def work(job):
+    def work(job: JobDict) -> JsonDict:
         from scanner import ScanCancelled
         from scanner import scan as do_scan
 

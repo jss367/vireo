@@ -564,14 +564,8 @@ def record_working_copy_failure(db, photo, source_path=None):
         return
 
     try:
-        db.conn.execute(
-            "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-            " working_copy_failed_mtime=?,"
-            " working_copy_failed_source='source'"
-            " WHERE id=?",
-            (file_mtime, photo_id),
-        )
-        db.conn.commit()
+        db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
+        db.commit()
     except Exception:
         log.debug(
             "Could not refresh working_copy_failed marker for photo %s",
