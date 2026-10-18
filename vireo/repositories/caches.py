@@ -10,6 +10,9 @@ repository takes no workspace id. The lock-retry helpers
 passes them in so this module imports no ``db`` code and a monkeypatch of
 ``db.commit_with_retry`` still reaches the offline-original writes.
 
+The thumbnail cache's catalog column, ``photos.thumb_path``, is reconciled
+with the files on disk here too, for ``thumbnails.backfill_thumb_paths``.
+
 Callers reach it as ``db.caches`` (a fresh repository per access, see
 ``Database.caches``); there are no forwarding wrappers on ``Database``.
 """
@@ -305,9 +308,39 @@ class CachesRepository:
             (photo_id, size),
         )
 
+    def photo_exists(self, photo_id: int) -> bool:
+        """True when the catalog still has this photo.
+
+        ``preview_cache`` rows reference ``photos``; the startup preview
+        adoption checks this before tracking (or instead unlinks) a file.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone() is not None
+
     def clear_thumbnail_path(self, pid: int) -> None:
         self.conn.execute(
             "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+        )
+
+    def thumbnail_path_rows(self) -> list[sqlite3.Row]:
+        """``(id, thumb_path)`` of every photo, for the thumb_path reconciliation."""
+        return self.conn.execute(
+            "SELECT id, thumb_path FROM photos"
+        ).fetchall()
+
+    def set_thumbnail_paths(self, pairs: Iterable[tuple[str, int]]) -> None:
+        """Set ``thumb_path`` for ``(thumb_path, photo_id)`` pairs; the caller commits."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=? WHERE id=?",
+            pairs,
+        )
+
+    def clear_thumbnail_paths(self, ids: Iterable[tuple[int]]) -> None:
+        """Clear ``thumb_path`` for ``(photo_id,)`` rows; the caller commits."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=NULL WHERE id=?",
+            ids,
         )
 
     def delete_preview_rows(self, removed_preview_rows: Sequence[tuple[int, int]]) -> None:

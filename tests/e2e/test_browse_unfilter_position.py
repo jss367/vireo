@@ -326,7 +326,7 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
     with db.conn:
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?",
                         (live_server["data"]["folders"][0],))
-    collection_id = next(c['id'] for c in db.get_collections() if c['name'] == 'All Photos')
+    collection_id = next(c['id'] for c in db.collections.list_all() if c['name'] == 'All Photos')
     page.goto(f"{live_server['url']}/browse?collection_id={collection_id}&dashboard_scope=1&rating_min=5")
     page.wait_for_function("VireoFilter.isReady() && !loading && browseDatasetReady")
     page.click('#offlineCollectionToggle')

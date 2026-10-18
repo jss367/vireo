@@ -20,7 +20,7 @@ def _seed_collection(live_server, name="Test Pick"):
     # adding the row directly via the bound db handle, since that matches what
     # other e2e helpers do.
     db = live_server["db"]
-    return db.add_collection(name, _json.dumps([]))
+    return db.collections.add(name, _json.dumps([]))
 
 
 def test_collection_right_click_shows_menu(live_server, page):
@@ -52,7 +52,7 @@ def test_collection_filter_fires_filter(live_server, page):
     """Clicking 'Filter by this Collection' opens its rules into the bar."""
     import json as _json
     db = live_server["db"]
-    db.add_collection(
+    db.collections.add(
         "Picks A", _json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}]),
     )
     url = live_server["url"]
@@ -90,7 +90,7 @@ def test_collection_click_preserves_selected_member_position(live_server, page):
 
     db = live_server["db"]
     target_id = live_server["data"]["photos"][3]
-    cid = db.add_collection(
+    cid = db.collections.add(
         "All Test Photos",
         _json.dumps([{"field": "all"}]),
     )

@@ -138,7 +138,7 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
     from grouping import group_by_timestamp, refine_groups_by_similarity
 
     if collection_id:
-        photos = db.get_collection_photos(collection_id, per_page=999999)
+        photos = db.collections.get_photos(collection_id, per_page=999999)
     else:
         photos = db.get_photos(per_page=999999)
 

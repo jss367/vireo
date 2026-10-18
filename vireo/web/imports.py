@@ -1022,7 +1022,7 @@ class _ImportFullRun:
         if photo_ids:
             from datetime import datetime as dt
             collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
-            collection_id = self.thread_db.add_collection(
+            collection_id = self.thread_db.collections.add(
                 collection_name,
                 json.dumps([{"field": "photo_ids", "value": photo_ids}]),
             )
@@ -1803,7 +1803,7 @@ def create_imports_blueprint(
         if err is not None:
             return err
         try:
-            photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+            photos = db.collections.get_photos(collection_id, page=1, per_page=100000)
         except ValueError as e:
             log.exception(
                 "Collection %s has unresolvable rules", collection_id

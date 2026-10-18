@@ -7,6 +7,8 @@ cached classifier runs, and records and publishes the batch's classifier runs.
 import contextlib
 import os
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from classify_job.common import _photo_timestamp, load_image, load_working_image, log
 from classify_job.store_predictions import _cached_prediction_taxonomy
@@ -20,6 +22,24 @@ from resource_ledger import ResourceWaitCancelled
 
 
 _BATCH_SIZE = 16
+
+
+@dataclass(frozen=True)
+class ClassifierModel:
+    """The loaded classifier a classify pass runs, and how its runs are keyed."""
+
+    clf: Any
+    """The loaded classifier (``Classifier`` or ``TimmClassifier``)."""
+    model_type: str
+    """``"timm"`` for a timm classifier, else an embedding model such as
+    BioCLIP; picks the batch API and whether cached embeddings are reused."""
+    model_name: str
+    """The name predictions and classifier runs are recorded under."""
+    labels_fingerprint: str | None = None
+    """Keys the per-detection classifier-runs gate with ``model_name``;
+    None records the legacy sentinel."""
+    top_k: int = 1
+    """Predictions kept per detection."""
 
 
 def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
@@ -307,20 +327,19 @@ class _ClassifyPhotosPass:
     """
 
     def __init__(
-        self, photos, folders, detection_map, clf, model_type, model_name,
-        runner, job, db, top_k, vireo_dir, fp, reclassify,
+        self, photos, folders, detection_map, model, runner, job, db,
+        vireo_dir, reclassify,
     ):
         self.folders = folders
         self.detection_map = detection_map
-        self.clf = clf
-        self.model_type = model_type
-        self.model_name = model_name
+        self.model = model
         self.runner = runner
         self.job = job
         self.db = db
-        self.top_k = top_k
         self.vireo_dir = vireo_dir
-        self.fp = fp
+        # Fall back to the legacy sentinel when the caller didn't compute a
+        # fingerprint — matches the default used by classifier_runs.
+        self.fp = model.labels_fingerprint or "legacy"
         self.reclassify = reclassify
 
         self.raw_results = []
@@ -374,16 +393,16 @@ class _ClassifyPhotosPass:
         try:
             with self._flush_preserving_cleared():
                 self.failed += _flush_batch(
-                    pending, self.clf, self.model_type, self.model_name,
+                    pending, self.model.clf, self.model.model_type, self.model.model_name,
                     self.db, self.raw_results,
-                    top_k=self.top_k, propagate_cancel=True,
+                    top_k=self.model.top_k, propagate_cancel=True,
                 )
         except ResourceWaitCancelled:
             log.info("Classify job cancelled during batch inference")
             self.job["_classify_cancelled"] = True
             return False
         _record_batch_classifier_runs(
-            self.db, pending, self.model_name, self.fp, self.raw_results,
+            self.db, pending, self.model.model_name, self.fp, self.raw_results,
             pre_len,
             labels_fingerprint_full=self.job.get("_labels_fingerprint_full"),
             model_identity=self.job.get("_classifier_model_identity"),
@@ -430,19 +449,19 @@ class _ClassifyPhotosPass:
 
     def _cached_embedding(self, photo, detection_id, photo_level_fallback):
         embedding = None
-        if self.model_type != "timm":
+        if self.model.model_type != "timm":
             # Prefer per-detection variant so multi-subject photos don't
             # reuse the last-detection-wins photo-level vector (see
             # _flush_batch). Fall back to the photo-level entry only when
             # this photo has a single qualifying detection so legacy data
             # still refines correctly.
             emb_blob = self.db.masks_features.get_embedding(
-                photo["id"], self.model_name,
+                photo["id"], self.model.model_name,
                 variant=f"det:{detection_id}",
             )
             if not emb_blob and photo_level_fallback:
                 emb_blob = self.db.masks_features.get_embedding(
-                    photo["id"], self.model_name,
+                    photo["id"], self.model.model_name,
                 )
             if emb_blob:
                 import numpy as np
@@ -474,11 +493,11 @@ class _ClassifyPhotosPass:
         top-1 to surface — just skip inference for this detection.
         """
         run_keys = self._runtime_aware_run_keys(detection_id)
-        if (self.model_name, self.fp) not in run_keys:
+        if (self.model.model_name, self.fp) not in run_keys:
             return False
         cached = self.db.get_predictions_for_detection(
             detection_id,
-            classifier_model=self.model_name,
+            classifier_model=self.model.model_name,
             labels_fingerprint=self.fp,
             min_classifier_conf=0,
         )
@@ -508,7 +527,7 @@ class _ClassifyPhotosPass:
         # exists for the same triple the run legitimately produced zero
         # candidates — honor that outcome instead of re-running.
         if self.db.model_runs.has_classifier_match_score(
-            detection_id, self.model_name, self.fp,
+            detection_id, self.model.model_name, self.fp,
         ):
             self.skipped_existing += 1
             return True
@@ -551,7 +570,7 @@ class _ClassifyPhotosPass:
         # detections and surface alongside the fallback output.
         if self.reclassify:
             self.db.clear_predictions(
-                model=self.model_name,
+                model=self.model.model_name,
                 collection_photo_ids=[photo["id"]],
                 labels_fingerprint=(
                     self.fp if self.detection_map.get(photo["id"]) else None
@@ -728,10 +747,8 @@ class _ClassifyPhotosPass:
 
 
 def _classify_photos(
-    photos, folders, detection_map, existing_preds, clf, model_type,
-    model_name, runner, job, db, top_k=1, vireo_dir=None,
-    labels_fingerprint=None, reclassify=False,
-    finish_cleared_only=False,
+    photos, folders, detection_map, model, runner, job, db, *,
+    vireo_dir=None, reclassify=False, finish_cleared_only=False,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -742,9 +759,10 @@ def _classify_photos(
     Images are passed directly to classifiers as PIL objects (no temp file I/O).
     Multiple images are batched into a single forward pass for throughput.
 
-    A per-detection classifier_runs gate keyed on (detection_id, model_name,
-    labels_fingerprint) short-circuits re-work when the same triple already
-    ran. reclassify=True bypasses the gate.
+    ``model`` is the ``ClassifierModel`` to run. A per-detection
+    classifier_runs gate keyed on (detection_id, model.model_name,
+    model.labels_fingerprint) short-circuits re-work when the same triple
+    already ran. reclassify=True bypasses the gate.
 
     ``finish_cleared_only`` is set by ``run_classify_job`` when a post-detect
     cancel landed in reclassify mode. The processed subset of ``photos``
@@ -760,16 +778,12 @@ def _classify_photos(
     Returns:
         (raw_results, failed_count, skipped_existing_count)
     """
-    # Fall back to the legacy sentinel when the caller didn't compute a
-    # fingerprint — matches the default used by classifier_runs.
-    fp = labels_fingerprint or "legacy"
-
     if load_image is None:
         raise ImportError("image_loader module is required for classification")
 
     run = _ClassifyPhotosPass(
-        photos, folders, detection_map, clf, model_type, model_name,
-        runner, job, db, top_k, vireo_dir, fp, reclassify,
+        photos, folders, detection_map, model, runner, job, db,
+        vireo_dir, reclassify,
     )
 
     for i, photo in enumerate(photos):

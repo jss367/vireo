@@ -632,7 +632,7 @@ def test_analyze_for_culling_collection_scope(tmp_path):
 
     # Create a static collection with only 2 photos via rules
     rules = _json.dumps([{"field": "photo_ids", "value": [photo_ids[0], photo_ids[1]]}])
-    cid = db.add_collection("test collection", rules)
+    cid = db.collections.add("test collection", rules)
 
     result = analyze_for_culling(db, collection_id=cid)
     assert result["total_photos"] == 2
