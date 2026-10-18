@@ -686,7 +686,9 @@ def test_forced_working_source_cannot_decode_original():
                    load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}
     helper_ns["__builtins__"] = {**vars(builtins), "__import__": lambda name, *a, **kw: modules[name]}
     nested("web/media.py", helper_ns, {"_focus_source_image"})
-    assert helper_ns["_focus_source_image"]({"folder_id": 1, "filename": "invented.raw"}, {"path": "/invented"}, "working") == (None, "original")
+    assert helper_ns["_focus_source_image"](
+        helper_ns["config"], {"folder_id": 1, "filename": "invented.raw"}, {"path": "/invented"}, "working",
+    ) == (None, "original")
     assert events[0]["folders"] is None
     print("PASS forced working copy never resolves or decodes original on missing-copy fallback")
 
