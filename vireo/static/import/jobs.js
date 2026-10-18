@@ -41,9 +41,8 @@ async function startImport() {
     };
   if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
-  if (/** @type {HTMLInputElement} */ (document.getElementById('chkLocationFromGps')).checked) {
-    body.location_from_gps = true;
-  }
+  const locationChoices = importLocationChoices();
+  if (locationChoices.length) body.location_choices = locationChoices;
   if (/** @type {HTMLInputElement} */ (document.getElementById('workspaceNew')).checked) {
     const name = (/** @type {HTMLInputElement} */ (document.getElementById('newWorkspaceName')).value || '').trim();
     if (!name) { showError('Name the new workspace.'); return; }
@@ -309,7 +308,7 @@ function retryBodyFromFinishedJob(job) {
     trust_likely_duplicates: !!cfg.trust_likely_duplicates,
     after_import: cfg.after_import == null ? null : cfg.after_import,
     tags: Array.isArray(cfg.tags) ? cfg.tags.slice() : [],
-    location_from_gps: !!cfg.location_from_gps,
+    location_choices: Array.isArray(cfg.location_choices) ? cfg.location_choices.slice() : [],
     allow_missing_exiftool: !!cfg.allow_missing_exiftool,
     parent_import_job_id: job.id,
   };

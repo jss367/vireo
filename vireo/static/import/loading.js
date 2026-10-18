@@ -72,12 +72,11 @@ async function initImportPage() {
   const pipelineCfg = Object.assign(
     {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
   );
-  const gpsCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('chkLocationFromGps'));
   const gpsHint = /** @type {HTMLElement} */ (document.getElementById('locationGpsHint'));
   if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
-    gpsCheckbox.disabled = true;
-    gpsHint.textContent =
-      'Add a Google Maps API key in Settings to resolve GPS coordinates into location tags.';
+    // Suggestions from the user's own tagged places need no key.
+    gpsHint.textContent = 'Without a Google Maps API key (Settings), suggestions come only from'
+      + ' places you have tagged before. Nothing is tagged until you choose.';
   }
 
   const recents = Array.isArray(ingestCfg.recent_destinations)

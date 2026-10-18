@@ -195,13 +195,19 @@ function renderTaggingInfo(res) {
     );
   }
   if (tagging.location_requested) {
-    parts.push((tagging.locations_added || 0) + ' GPS location' +
-      ((tagging.locations_added || 0) === 1 ? '' : 's') + ' added');
-    if (tagging.locations_unresolved) {
-      parts.push(tagging.locations_unresolved + ' could not be resolved');
+    const added = tagging.locations_added || 0;
+    parts.push('Locations added to ' + added + ' photo' + (added === 1 ? '' : 's'));
+    if (tagging.locations_kept) {
+      parts.push(tagging.locations_kept + ' already had a location and kept it');
     }
-    if (tagging.locations_skipped) {
-      parts.push(tagging.locations_skipped + ' already had a location');
+    if (tagging.locations_unchosen) {
+      parts.push(tagging.locations_unchosen + ' with GPS were in groups you skipped');
+    }
+    if (tagging.locations_no_gps) {
+      parts.push(tagging.locations_no_gps + ' had no GPS');
+    }
+    if (tagging.locations_unresolved) {
+      parts.push(tagging.locations_unresolved + ' could not be tagged');
     }
   }
   if ((tagging.errors || []).length) {

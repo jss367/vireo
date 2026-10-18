@@ -8283,7 +8283,7 @@ def test_cancelled_import_does_not_apply_requested_tags(
         "destination": str(tmp_path / "archive"),
         "after_import": None,
         "tags": ["Must not be added"],
-        "location_from_gps": True,
+        "location_choices": [{"cells": ["1,1"], "kind": "new", "name": "Must not be added either"}],
     })
     assert resp.status_code == 200, resp.get_json()
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
@@ -8298,7 +8298,7 @@ def test_cancelled_import_does_not_apply_requested_tags(
     ).fetchone() is None
 
 
-def test_import_gps_tagging_stops_when_cancelled_during_resolution(
+def test_import_location_choices_stop_when_cancelled_during_planning(
     app_and_db, tmp_path, monkeypatch,
 ):
     import import_job
@@ -8329,7 +8329,7 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
 
     original_get = PhotoRepository.get_by_ids
 
-    def cancel_during_resolution(self, photo_ids):
+    def cancel_during_planning(self, photo_ids):
         running_ids = [
             job_id for job_id, job in runner._jobs.items()
             if job["type"] == "import" and job["status"] == "running"
@@ -8339,13 +8339,13 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
         return original_get(self, photo_ids)
 
     monkeypatch.setattr(import_job, "run_import_job", imported_result)
-    monkeypatch.setattr(PhotoRepository, "get_by_ids", cancel_during_resolution)
+    monkeypatch.setattr(PhotoRepository, "get_by_ids", cancel_during_planning)
     quick_look_id = _process_id(db, "Quick look")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
         "after_import": quick_look_id,
-        "location_from_gps": True,
+        "location_choices": [{"cells": ["1,1"], "kind": "new", "name": "Planned"}],
     })
     assert resp.status_code == 200, resp.get_json()
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
@@ -8361,7 +8361,15 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
     ("tags", "Trip", "tags must be a list"),
     ("tags", ["Trip", 4], "only strings"),
     ("tags", ["   "], "must not be empty"),
-    ("location_from_gps", "yes", "must be a boolean"),
+    ("location_choices", "yes", "must be a list"),
+    ("location_choices", [{"kind": "new", "name": "Spot"}], "needs its GPS cells"),
+    ("location_choices", [{"cells": ["a,b"], "kind": "new", "name": "Spot"}], "needs its GPS cells"),
+    ("location_choices", [{"cells": ["1,1"], "kind": "new", "name": "A | B"}], 'cannot contain "|"'),
+    ("location_choices", [{"cells": ["1,1"], "kind": "keyword"}], "needs a keyword_id"),
+    ("location_choices", [{"cells": ["1,1"], "kind": "google", "name": "Park"}], "needs a place_id"),
+    ("location_choices", [{"cells": ["1,1"], "kind": "auto", "name": "Park"}], "kind must be"),
+    ("location_choices", [{"cells": ["1,1"], "kind": "new", "name": "A"},
+                          {"cells": ["1,1"], "kind": "new", "name": "B"}], "only one location"),
 ])
 def test_import_tag_options_are_validated_before_starting_job(
     app_and_db, tmp_path, field, value, error,
@@ -8378,9 +8386,12 @@ def test_import_tag_options_are_validated_before_starting_job(
     assert error in resp.get_json()["error"]
 
 
-def test_import_can_add_structured_locations_from_each_photos_gps(
+def test_import_applies_the_location_chosen_for_each_photos_gps_cell(
     app_and_db, tmp_path, monkeypatch,
 ):
+    """The import tags exactly what the page chose, matched by GPS cell."""
+    import places
+    from services.import_locations import cell_key
 
     app, db = app_and_db
     client = app.test_client()
@@ -8399,41 +8410,55 @@ def test_import_can_add_structured_locations_from_each_photos_gps(
             {"name": "United States", "types": ["country"]},
         ],
     }
+    looked_up = []
 
-    def photos_with_gps(self, photo_ids):
-        rows = original_get(self, photo_ids)
+    def fake_details(place_id, api_key, language):
+        looked_up.append(place_id)
+        return details
+
+    def photos_with_gps(self, photo_ids, **kwargs):
+        rows = original_get(self, photo_ids, **kwargs)
         enriched = {}
         for photo_id, row in rows.items():
             photo = dict(row)
             photo["latitude"] = details["lat"]
             photo["longitude"] = details["lng"]
             enriched[photo_id] = photo
-        db.reverse_geocode_cache_put(
-            details["lat"], details["lng"], details["place_id"],
-            json.dumps(details),
-        )
         return enriched
 
     monkeypatch.setattr(PhotoRepository, "get_by_ids", photos_with_gps)
+    monkeypatch.setattr(places, "place_details_for_language", fake_details)
+    import config as cfg
+    original_load = cfg.load
+    monkeypatch.setattr(cfg, "load", lambda *a, **k: {
+        **original_load(*a, **k), "google_maps_api_key": "KEY"})
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
         "after_import": None,
-        "location_from_gps": True,
+        "location_choices": [
+            {"cells": [cell_key(details["lat"], details["lng"])],
+             "kind": "google", "place_id": "import-gps-place", "name": "Central Park"},
+            {"cells": ["1,1"], "kind": "new", "name": "Somewhere else"},
+        ],
     })
     assert resp.status_code == 200, resp.get_json()
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed", job
     result = job["result"]
     assert result["tagging"]["locations_added"] == 1
+    assert looked_up == ["import-gps-place"]
     photo_id = result["photo_ids"][0]
     location = db.get_assigned_photo_location(photo_id)
     assert location["keyword_location_name"] == "Central Park"
+    # The choice nobody's GPS fell in created nothing.
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?", ("Somewhere else",),
+    ).fetchone() is None
     assert client.post("/api/undo").status_code == 200
     assert db.get_assigned_photo_location(photo_id) is None
     assert client.post("/api/redo").status_code == 200
     assert db.get_assigned_photo_location(photo_id)["keyword_location_name"] == "Central Park"
-
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
@@ -12158,7 +12183,7 @@ def test_tag_pass_cut_short_is_not_marked_applied(
     from services.imports import ImportService
 
     def stopped_tag_pass(self, workspace_id, photo_ids, tags,
-                         location_from_gps, result, **kw):
+                         location_choices, result, **kw):
         result["cancelled"] = True
 
     monkeypatch.setattr(ImportService, "_apply_import_tags", stopped_tag_pass)
@@ -12187,7 +12212,7 @@ def test_tag_pass_with_failures_is_not_marked_applied(
     from services.imports import ImportService
 
     def failing_tag_pass(self, workspace_id, photo_ids, tags,
-                         location_from_gps, result, **kw):
+                         location_choices, result, **kw):
         result["tagging"] = {"errors": ["Kenya trip: database is locked"]}
 
     monkeypatch.setattr(ImportService, "_apply_import_tags", failing_tag_pass)
@@ -12817,14 +12842,14 @@ def test_resume_replays_tags_when_chain_ran_but_tags_owed(
     first_call = {"done": False}
 
     def flaky_tag_pass(self, workspace_id, photo_ids, tags,
-                       location_from_gps, result, **kw):
+                       location_choices, result, **kw):
         if not first_call["done"]:
             first_call["done"] = True
             result["tagging"] = {"errors": ["Kenya trip: transient DB lock"]}
             return
         # The resume replays the pass — apply for real this time.
         real_apply(self, workspace_id, photo_ids, tags,
-                   location_from_gps, result, **kw)
+                   location_choices, result, **kw)
 
     real_apply = ImportService._apply_import_tags
     monkeypatch.setattr(ImportService, "_apply_import_tags", flaky_tag_pass)
@@ -13727,7 +13752,7 @@ def test_failed_import_with_tag_errors_does_not_mark_chain_paid(app_and_db, tmp_
         "ok": False, "failed": 1, "photo_ids": [], "errors": ["copy failed"],
     })
 
-    def failed_tags(self, workspace_id, photo_ids, tags, location_from_gps, result, **kw):
+    def failed_tags(self, workspace_id, photo_ids, tags, location_choices, result, **kw):
         result["tagging"] = {"errors": ["tag write failed"]}
 
     monkeypatch.setattr(ImportService, "_apply_import_tags", failed_tags)

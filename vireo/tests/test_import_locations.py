@@ -1,0 +1,439 @@
+"""Import location suggestions and the choices an import applies.
+
+``services.import_locations`` suggests one place per GPS cell before the
+import runs, from the user's own tagged photos and places first and Google
+second, and after cataloging applies only the choices the page sent.
+"""
+
+import json
+
+import places
+import pytest
+from services import import_locations
+from services.gps_locations import (
+    REVERSE_GEOCODE_CACHE_RESOLVER,
+    encode_cached_reverse_geocode,
+)
+from services.import_locations import (
+    LocationChoiceError,
+    apply_location_choices,
+    cell_key,
+    gps_point,
+    location_options,
+    parse_location_choices,
+    suggest_import_locations,
+)
+
+# A walk along the San Diego River's south bank, about 100 m per step.
+RIVER = [(32.7549, -117.2404), (32.7547, -117.2415), (32.7545, -117.2426)]
+FAR_AWAY = (40.7851, -73.9683)
+
+
+@pytest.fixture
+def fid(db):
+    return db.add_folder("/photos", name="photos")
+
+
+def _photo(db, fid, name, point=None):
+    pid = db.add_photo(
+        folder_id=fid, filename=name, extension=".jpg", file_size=10, file_mtime=1.0,
+    )
+    if point is not None:
+        db.conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?", (*point, pid),
+        )
+        db.conn.commit()
+    return pid
+
+
+def _kw(db, name, parent_id=None, point=(None, None), place_id=None):
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, latitude, longitude, place_id) "
+        "VALUES (?, ?, 'location', ?, ?, ?)",
+        (name, parent_id, *point, place_id),
+    )
+    db.conn.commit()
+    return cur.lastrowid
+
+
+def _tag(db, pid, kid):
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, 'manual')",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+
+def _location(db, pid):
+    """The name of the photo's location keyword, or None."""
+    row = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'", (pid,),
+    ).fetchone()
+    return row["name"] if row else None
+
+
+@pytest.fixture
+def no_google(monkeypatch):
+    """Fail the test if a suggestion reaches Google."""
+    def refuse(*args, **kwargs):
+        raise AssertionError("Google was asked for a place the catalog already names")
+    monkeypatch.setattr(places, "reverse_geocode", refuse)
+
+
+def _files(points):
+    return {f"/card/DSC_{i:04d}.NEF": point for i, point in enumerate(points)}
+
+
+# -- reading GPS ----------------------------------------------------------------
+
+
+def test_gps_point_reads_composite_first_like_the_scanner():
+    assert gps_point({"Composite": {"GPSLatitude": 32.75, "GPSLongitude": -117.24},
+                      "EXIF": {"GPSLatitude": 32.75, "GPSLongitude": 117.24}}) == (32.75, -117.24)
+    assert gps_point({"EXIF": {"GPSLatitude": 1.5, "GPSLongitude": 2.5}}) == (1.5, 2.5)
+    assert gps_point({"EXIF": {"GPSLatitude": 1.5}}) is None
+    assert gps_point({"Composite": {"GPSLatitude": "nan", "GPSLongitude": 2}}) is None
+    assert gps_point({"Composite": {"GPSLatitude": 91, "GPSLongitude": 2}}) is None
+
+
+# -- suggestions -----------------------------------------------------------------
+
+
+def test_photos_you_tagged_nearby_name_the_spot_without_asking_google(db, fid, no_google):
+    river = _kw(db, "San Diego River")
+    other = _kw(db, "Robb Field")
+    # Three tagged photos along the bank, one stray elsewhere-tag among them.
+    for i, point in enumerate(RIVER):
+        _tag(db, _photo(db, fid, f"old{i}.jpg", point), river)
+    _tag(db, _photo(db, fid, "odd.jpg", RIVER[0]), other)
+
+    files = _files(RIVER * 2)
+    result = suggest_import_locations(db, files, api_key="KEY", language="en")
+
+    [group] = result["groups"]
+    assert group["file_count"] == 6
+    assert sorted(group["cells"]) == sorted({cell_key(*p) for p in RIVER})
+    suggestion = group["suggestion"]
+    assert suggestion["kind"] == "keyword"
+    assert suggestion["keyword_id"] == river
+    assert suggestion["source"] == "your_photos"
+    assert suggestion["name"] == "San Diego River"
+    # Distinct photos, though every cell sees the same three.
+    assert suggestion["photo_count"] == 3
+    assert result["file_cells"] == {path: cell_key(*p) for path, p in files.items()}
+
+
+def test_tagged_photos_out_of_reach_do_not_name_the_spot(db, fid, monkeypatch):
+    river = _kw(db, "San Diego River")
+    _tag(db, _photo(db, fid, "old.jpg", (32.7600, -117.2115)), river)  # 3 km upstream
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: None)
+
+    result = suggest_import_locations(db, _files(RIVER[:1]), api_key="KEY", language="en")
+
+    [group] = result["groups"]
+    assert group["suggestion"] is None
+    assert group["unresolved_reasons"] == {"no_match": 1}
+
+
+def test_your_saved_place_point_names_a_spot_with_no_tagged_photos(db, no_google):
+    parent = _kw(db, "San Diego")
+    slough = _kw(db, "Famosa Slough", parent_id=parent, point=(32.7530, -117.2400))
+
+    result = suggest_import_locations(db, _files(RIVER[:1]), api_key="KEY", language="en")
+
+    suggestion = result["groups"][0]["suggestion"]
+    assert suggestion["keyword_id"] == slough
+    assert suggestion["source"] == "your_place"
+    assert suggestion["parents"] == ["San Diego"]
+    assert 0 < suggestion["distance_m"] <= import_locations.PLACE_RADIUS_M
+
+
+def test_google_names_new_spots_and_the_answer_is_cached(db, monkeypatch):
+    calls = []
+
+    def fake_reverse_geocode(lat, lng, api_key, *, language="en"):
+        calls.append((lat, lng))
+        return {"place_id": "robb-field", "name": "Robb Field", "types": ["park"],
+                "lat": 32.7549, "lng": -117.2404, "source": "park",
+                "address_components": [{"name": "San Diego", "types": ["locality"]}]}
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+    files = _files(RIVER[:2])
+    first = suggest_import_locations(db, files, api_key="KEY", language="en")
+    second = suggest_import_locations(db, files, api_key="KEY", language="en")
+
+    [group] = first["groups"]
+    assert group["file_count"] == 2
+    assert group["suggestion"] == {
+        "kind": "google", "place_id": "robb-field", "name": "Robb Field",
+        "summary": "Robb Field · San Diego", "source": "google_park",
+    }
+    assert second["groups"] == first["groups"]
+    assert len(calls) == 2  # one per cell, and none the second time
+
+
+def test_a_google_place_you_already_have_is_suggested_as_your_keyword(db, monkeypatch):
+    robb = _kw(db, "Robb Field", place_id="robb-field")
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: {
+        "place_id": "robb-field", "name": "Robb Field", "types": ["park"],
+        "lat": 1.0, "lng": 2.0, "source": "park", "address_components": []})
+
+    result = suggest_import_locations(db, _files(RIVER[:1]), api_key="KEY", language="en")
+
+    suggestion = result["groups"][0]["suggestion"]
+    assert (suggestion["kind"], suggestion["keyword_id"]) == ("keyword", robb)
+    assert suggestion["source"] == "your_place"
+
+
+def test_street_addresses_cached_by_the_old_resolver_are_looked_up_again(db, monkeypatch):
+    lat, lng = RIVER[0]
+    db.reverse_geocode_cache_put(lat, lng, place_id="street", response_json=json.dumps({
+        "place_id": "street", "name": "2525 Bacon St, San Diego, CA 92107, USA",
+        "_vireo_result_language": "en",
+    }))
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: {
+        "place_id": "ocean-beach", "name": "Ocean Beach", "types": ["neighborhood"],
+        "lat": lat, "lng": lng, "source": "area", "address_components": []})
+
+    result = suggest_import_locations(db, _files([RIVER[0]]), api_key="KEY", language="en")
+
+    assert result["groups"][0]["suggestion"]["name"] == "Ocean Beach"
+    cached = db.reverse_geocode_cache_get(lat, lng)
+    assert cached["place_id"] == "ocean-beach"
+
+
+def test_without_an_api_key_unknown_spots_are_offered_unnamed(db, fid, no_google):
+    river = _kw(db, "San Diego River")
+    _tag(db, _photo(db, fid, "old.jpg", RIVER[0]), river)
+
+    files = _files([RIVER[0], FAR_AWAY, FAR_AWAY])
+    result = suggest_import_locations(db, files, api_key="", language="en")
+
+    named, unnamed = result["groups"]
+    assert named["suggestion"]["keyword_id"] == river
+    assert unnamed["suggestion"] is None
+    assert unnamed["file_count"] == 2
+    assert unnamed["unresolved_reasons"] == {"no_api_key": 1}
+
+
+def test_location_options_tell_same_named_places_apart(db):
+    slo = _kw(db, "San Luis Obispo")
+    sd = _kw(db, "San Diego")
+    _kw(db, "Laguna Lake", parent_id=slo)
+    _kw(db, "Laguna Lake", parent_id=sd)
+    _kw(db, "Famosa Slough", parent_id=sd)
+
+    labels = [o["label"] for o in location_options(db)]
+
+    assert "Famosa Slough" in labels
+    assert "Laguna Lake · San Diego" in labels
+    assert "Laguna Lake · San Luis Obispo" in labels
+    assert len(labels) == len(set(labels))
+
+
+# -- choices ------------------------------------------------------------------------
+
+
+def test_parse_location_choices_keeps_the_request_shape():
+    raw = [
+        {"cells": ["32755,-117240", "32755,-117240"], "kind": "keyword", "keyword_id": 7},
+        {"cells": ["1,1"], "kind": "google", "place_id": " robb ", "name": " Robb Field "},
+        {"cells": ["2,2"], "kind": "new", "name": "Dog Beach", "latitude": 32.75, "longitude": -117.25},
+        {"cells": ["3,3"], "kind": "new", "name": "Somewhere", "latitude": "x"},
+    ]
+    parsed = parse_location_choices(raw)
+    assert parsed == [
+        {"kind": "keyword", "keyword_id": 7, "cells": ["32755,-117240"]},
+        {"kind": "google", "place_id": "robb", "name": "Robb Field", "cells": ["1,1"]},
+        {"kind": "new", "name": "Dog Beach", "latitude": 32.75, "longitude": -117.25, "cells": ["2,2"]},
+        {"kind": "new", "name": "Somewhere", "latitude": None, "longitude": None, "cells": ["3,3"]},
+    ]
+    assert parse_location_choices(parsed) == parsed
+    assert parse_location_choices(None) == []
+
+
+@pytest.mark.parametrize("raw", [
+    "x",
+    [{"cells": [], "kind": "new", "name": "A"}],
+    [{"cells": ["1,1"], "kind": "keyword", "keyword_id": True}],
+    [{"cells": ["1,1"], "kind": "new", "name": "x" * 201}],
+])
+def test_parse_location_choices_rejects_malformed_entries(raw):
+    with pytest.raises(LocationChoiceError):
+        parse_location_choices(raw)
+
+
+def _summary():
+    return {"errors": []}
+
+
+def _never(**kwargs):
+    return False
+
+
+def test_apply_tags_only_the_chosen_cells_and_keeps_existing_locations(db, fid):
+    river = _kw(db, "San Diego River")
+    elsewhere = _kw(db, "Elsewhere")
+    chosen = [_photo(db, fid, f"new{i}.jpg", p) for i, p in enumerate(RIVER)]
+    already = _photo(db, fid, "placed.jpg", RIVER[0])
+    _tag(db, already, elsewhere)
+    skipped_spot = _photo(db, fid, "far.jpg", FAR_AWAY)
+    no_gps = _photo(db, fid, "nogps.jpg")
+    choices = parse_location_choices([{
+        "cells": sorted({cell_key(*p) for p in RIVER}), "kind": "keyword", "keyword_id": river,
+    }])
+    summary = _summary()
+
+    apply_location_choices(
+        db, [*chosen, already, skipped_spot, no_gps], choices,
+        api_key="", language="en", summary=summary, cancel_check=_never,
+    )
+
+    assert summary["locations_added"] == 3
+    assert summary["locations_kept"] == 1
+    assert summary["locations_unchosen"] == 1
+    assert summary["locations_no_gps"] == 1
+    assert summary["errors"] == []
+    for pid in chosen:
+        assert _location(db, pid) == "San Diego River"
+    assert _location(db, already) == "Elsewhere"
+    assert _location(db, skipped_spot) is None
+    history = db.conn.execute(
+        "SELECT description FROM edit_history ORDER BY id DESC LIMIT 1").fetchone()
+    assert history["description"] == 'Added location "San Diego River" during import to 3 photos'
+
+
+def test_apply_creates_a_typed_location_at_the_groups_point(db, fid):
+    pid = _photo(db, fid, "new.jpg", RIVER[0])
+    choices = parse_location_choices([{
+        "cells": [cell_key(*RIVER[0])], "kind": "new", "name": "Dog Beach",
+        "latitude": 32.7545, "longitude": -117.2500,
+    }])
+
+    apply_location_choices(db, [pid], choices, api_key="", language="en",
+                           summary=_summary(), cancel_check=_never)
+
+    row = db.conn.execute(
+        "SELECT type, latitude, longitude FROM keywords WHERE name = 'Dog Beach'").fetchone()
+    assert (row["type"], row["latitude"], row["longitude"]) == ("location", 32.7545, -117.25)
+    assert _location(db, pid) == "Dog Beach"
+
+
+def test_apply_reuses_a_google_place_already_in_the_catalog(db, fid, monkeypatch):
+    robb = _kw(db, "Robb Field", place_id="robb-field")
+    pid = _photo(db, fid, "new.jpg", RIVER[0])
+    monkeypatch.setattr(places, "place_details_for_language",
+                        lambda *a: pytest.fail("looked up a place the catalog has"))
+    choices = parse_location_choices([{
+        "cells": [cell_key(*RIVER[0])], "kind": "google", "place_id": "robb-field",
+        "name": "Robb Field",
+    }])
+
+    apply_location_choices(db, [pid], choices, api_key="KEY", language="en",
+                           summary=_summary(), cancel_check=_never)
+
+    linked = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)).fetchone()
+    assert linked["keyword_id"] == robb
+
+
+def test_a_failed_choice_leaves_its_photos_untagged_and_says_so(db, fid, monkeypatch):
+    lost = _photo(db, fid, "lost.jpg", RIVER[0])
+    kept = _photo(db, fid, "kept.jpg", FAR_AWAY)
+    monkeypatch.setattr(places, "place_details_for_language", lambda *a: None)
+    choices = parse_location_choices([
+        {"cells": [cell_key(*RIVER[0])], "kind": "google", "place_id": "gone", "name": "Gone Park"},
+        {"cells": [cell_key(*FAR_AWAY)], "kind": "new", "name": "Central Park"},
+    ])
+    summary = _summary()
+
+    apply_location_choices(db, [lost, kept], choices, api_key="KEY", language="en",
+                           summary=summary, cancel_check=_never)
+
+    assert summary["locations_unresolved"] == 1
+    assert summary["locations_added"] == 1
+    assert summary["errors"] == [
+        'Could not look up "Gone Park" on Google Maps; 1 photos were left untagged']
+    assert _location(db, lost) is None
+    assert _location(db, kept) == "Central Park"
+
+
+def test_a_deleted_keyword_choice_is_reported_not_applied(db, fid):
+    pid = _photo(db, fid, "new.jpg", RIVER[0])
+    summary = _summary()
+    apply_location_choices(
+        db, [pid],
+        parse_location_choices([{"cells": [cell_key(*RIVER[0])], "kind": "keyword", "keyword_id": 999}]),
+        api_key="", language="en", summary=summary, cancel_check=_never,
+    )
+    assert summary["locations_unresolved"] == 1
+    assert "no longer exists" in summary["errors"][0]
+
+
+# -- the stream and route ----------------------------------------------------------------
+
+
+@pytest.fixture
+def exiftool_present(monkeypatch):
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
+
+
+def test_stream_reports_progress_then_the_suggestions(db, monkeypatch, exiftool_present):
+    monkeypatch.setattr(import_locations, "_GPS_READ_CHUNK", 2)
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: {p: RIVER[0] for p in paths if "nogps" not in p})
+    monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: None)
+    paths = ["/card/a.NEF", "/card/b.NEF", "/card/nogps.NEF", "/card/a.NEF"]
+
+    frames = [json.loads(f[len("data: "):]) for f in
+              import_locations.stream_location_suggestions(db._db_path, paths, {})]
+
+    assert frames[:3] == [{"reading": 0, "total": 3}, {"reading": 2, "total": 3},
+                          {"reading": 3, "total": 3}]
+    done = frames[-1]
+    assert done["done"] is True
+    assert done["no_gps_paths"] == ["/card/nogps.NEF"]
+    assert done["file_cells"] == {"/card/a.NEF": cell_key(*RIVER[0]),
+                                  "/card/b.NEF": cell_key(*RIVER[0])}
+    assert done["groups"][0]["unresolved_reasons"] == {"no_api_key": 1}
+    assert "location_options" in done
+
+
+def test_stream_says_when_exiftool_is_missing(db, monkeypatch):
+    """A missing ExifTool returns no metadata; that must not read as "no GPS"."""
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: False)
+
+    frames = [json.loads(f[len("data: "):]) for f in
+              import_locations.stream_location_suggestions(db._db_path, ["/card/a.NEF"], {})]
+
+    assert frames == [{"done": True,
+                       "error": "ExifTool isn't installed, so Vireo can't read the photos' GPS."}]
+
+
+@pytest.mark.parametrize("body", [{}, {"paths": []}, {"paths": ["ok", 3]}, {"paths": "x"}])
+def test_location_suggestions_route_rejects_bad_paths(app_and_db, body):
+    app, _ = app_and_db
+    resp = app.test_client().post("/api/import/location-suggestions", json=body)
+    assert resp.status_code == 400
+
+
+def test_location_suggestions_route_streams(app_and_db, monkeypatch, exiftool_present):
+    app, _ = app_and_db
+    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths: {})
+    resp = app.test_client().post("/api/import/location-suggestions",
+                                  json={"paths": ["/card/a.NEF"]})
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/event-stream"
+    frames = [json.loads(line[len("data: "):]) for line in
+              resp.get_data(as_text=True).split("\n\n") if line]
+    assert frames[-1]["no_gps_paths"] == ["/card/a.NEF"]
+    assert frames[-1]["groups"] == []
+
+
+def test_cache_rows_record_the_resolver():
+    payload = json.loads(encode_cached_reverse_geocode({"place_id": "p"}, "en"))
+    assert payload["_vireo_place_resolver"] == REVERSE_GEOCODE_CACHE_RESOLVER
+    assert payload["_vireo_result_language"] == "en"

@@ -166,65 +166,171 @@ def test_place_details_returns_none_on_zero_results(monkeypatch):
     assert places.place_details("ChIJ_does_not_exist", "FAKE_KEY") is None
 
 
-def test_reverse_geocode_parses_response(monkeypatch):
-    """Geocoding OK response is normalized into the wrapper's dict shape."""
+def _routing_urlopen(routes: dict, captured: list | None = None):
+    """A fake urlopen answering each Google endpoint with its own payload."""
+    def fake_urlopen(url, *args, **kwargs):
+        if captured is not None:
+            captured.append(url)
+        for fragment, payload in routes.items():
+            if fragment in url:
+                return _FakeResponse(payload)
+        raise AssertionError(f"unexpected Google request {url}")
+    return fake_urlopen
+
+
+def _component(name, *types):
+    return {"long_name": name, "short_name": name, "types": list(types)}
+
+
+_OCEAN_BEACH_GEOCODE = {
+    "status": "OK",
+    "results": [
+        {
+            # Geocoding's first answer on land: the nearest street address.
+            "place_id": "street",
+            "formatted_address": "2525 Bacon St, San Diego, CA 92107, USA",
+            "types": ["establishment", "point_of_interest"],
+            "geometry": {"location": {"lat": 32.7543, "lng": -117.2414}},
+            "address_components": [_component("2525", "street_number"),
+                                   _component("Bacon Street", "route")],
+        },
+        {
+            "place_id": "plus",
+            "formatted_address": "QQ35+XR San Diego, CA, USA",
+            "types": ["plus_code"],
+            "geometry": {"location": {"lat": 32.7549, "lng": -117.2404}},
+            "address_components": [_component("QQ35+XR", "plus_code")],
+        },
+        {
+            "place_id": "city",
+            "formatted_address": "San Diego, CA, USA",
+            "types": ["locality", "political"],
+            "geometry": {"location": {"lat": 32.7157, "lng": -117.1611}},
+            "address_components": [_component("San Diego", "locality", "political")],
+        },
+        {
+            "place_id": "ocean-beach",
+            "formatted_address": "Ocean Beach, San Diego, CA, USA",
+            "types": ["neighborhood", "political"],
+            "geometry": {"location": {"lat": 32.7495, "lng": -117.2470}},
+            "address_components": [
+                _component("Ocean Beach", "neighborhood", "political"),
+                _component("San Diego", "locality", "political"),
+                _component("California", "administrative_area_level_1", "political"),
+                _component("United States", "country", "political"),
+            ],
+        },
+    ],
+}
+
+
+def test_reverse_geocode_names_the_area_never_a_street_address(monkeypatch):
+    """With no park nearby, the most specific named area wins, named by
+    the area itself rather than its formatted address."""
     from vireo import places
 
-    canned = {
-        "status": "OK",
-        "results": [
-            {
-                "place_id": "ChIJOwg_06VPwokRYv534QaPC8g",
-                "formatted_address": "New York, NY, USA",
-                "geometry": {"location": {"lat": 40.7127753, "lng": -74.0059728}},
-                "address_components": [
-                    {
-                        "long_name": "New York",
-                        "short_name": "New York",
-                        "types": ["locality", "political"],
-                    },
-                    {
-                        "long_name": "New York",
-                        "short_name": "NY",
-                        "types": ["administrative_area_level_1", "political"],
-                    },
-                    {
-                        "long_name": "United States",
-                        "short_name": "US",
-                        "types": ["country", "political"],
-                    },
-                ],
-            }
-        ],
-    }
-
     captured = []
-    monkeypatch.setattr(
-        "vireo.places.urllib.request.urlopen",
-        _make_fake_urlopen(canned, captured),
-    )
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", _routing_urlopen({
+        "nearbysearch": {"status": "ZERO_RESULTS"},
+        "geocode": _OCEAN_BEACH_GEOCODE,
+    }, captured))
 
-    out = places.reverse_geocode(40.7127753, -74.0059728, "FAKE_KEY")
+    out = places.reverse_geocode(32.7549808, -117.2404343, "FAKE_KEY")
 
-    assert out is not None
-    assert out["place_id"] == "ChIJOwg_06VPwokRYv534QaPC8g"
-    assert out["name"] == "New York, NY, USA"
-    assert isinstance(out["lat"], float)
-    assert isinstance(out["lng"], float)
-    assert out["lat"] == pytest.approx(40.7127753)
-    assert out["lng"] == pytest.approx(-74.0059728)
-    assert isinstance(out["address_components"], list)
-    assert len(out["address_components"]) == 3
+    assert out["place_id"] == "ocean-beach"
+    assert out["name"] == "Ocean Beach"
+    assert out["source"] == "area"
+    assert out["lat"] == pytest.approx(32.7495)
+    assert [c["name"] for c in out["address_components"]][-1] == "United States"
+    assert len(captured) == 2
+    nearby = urllib.parse.parse_qs(urllib.parse.urlparse(captured[0]).query)
+    assert nearby["type"] == ["park"]
+    assert nearby["rankby"] == ["distance"]
+    assert nearby["location"] == ["32.7549808,-117.2404343"]
+    geocode = urllib.parse.parse_qs(urllib.parse.urlparse(captured[1]).query)
+    assert geocode["latlng"] == ["32.7549808,-117.2404343"]
+    assert geocode["key"] == ["FAKE_KEY"]
+    assert nearby["language"] == geocode["language"] == ["en"]
 
-    # latlng=lat,lng should be in the URL — comma may be percent-encoded.
-    assert len(captured) == 1
-    url = captured[0]
-    assert ("latlng=40.7127753%2C-74.0059728" in url) or (
-        "latlng=40.7127753,-74.0059728" in url
-    )
-    assert "key=FAKE_KEY" in url
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    assert query["language"] == ["en"]
+
+def test_reverse_geocode_prefers_a_well_known_park_nearby(monkeypatch):
+    """A reviewed park within reach names the spot; a "|" in its Google
+    name, Lightroom's hierarchy delimiter, becomes a dash."""
+    from vireo import places
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", _routing_urlopen({
+        "nearbysearch": {"status": "OK", "results": [{
+            "place_id": "dog-beach",
+            "name": "Ocean Beach | Dog Beach",
+            "types": ["park"],
+            "user_ratings_total": 1026,
+            "geometry": {"location": {"lat": 32.7545, "lng": -117.2500}},
+        }]},
+        "details": {"status": "OK", "result": {
+            "place_id": "dog-beach",
+            "name": "Ocean Beach | Dog Beach",
+            "types": ["park", "point_of_interest"],
+            "geometry": {"location": {"lat": 32.7545, "lng": -117.2500}},
+            "address_components": [_component("San Diego", "locality")],
+        }},
+    }))
+
+    out = places.reverse_geocode(32.7541, -117.2504, "FAKE_KEY")
+
+    assert out["place_id"] == "dog-beach"
+    assert out["name"] == "Ocean Beach - Dog Beach"
+    assert out["source"] == "park"
+
+
+def test_reverse_geocode_ignores_unreviewed_and_distant_parks(monkeypatch):
+    """Anyone can add a "park"; an unreviewed one nearby and a famous one
+    out of reach both fall through to the named area."""
+    from vireo import places
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", _routing_urlopen({
+        "nearbysearch": {"status": "OK", "results": [
+            {"place_id": "bench", "name": "Bench", "user_ratings_total": 2,
+             "geometry": {"location": {"lat": 32.75500, "lng": -117.24040}}},
+            {"place_id": "far", "name": "Fiesta Island", "user_ratings_total": 1996,
+             "geometry": {"location": {"lat": 32.7700, "lng": -117.2200}}},
+        ]},
+        "geocode": _OCEAN_BEACH_GEOCODE,
+    }))
+
+    out = places.reverse_geocode(32.7549808, -117.2404343, "FAKE_KEY")
+
+    assert out["name"] == "Ocean Beach"
+
+
+def test_reverse_geocode_treats_a_missing_park_record_as_transient(monkeypatch):
+    """Nearby Search just returned the park, so a failed details lookup must
+    not be cached as the area fallback."""
+    from vireo import places
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", _routing_urlopen({
+        "nearbysearch": {"status": "OK", "results": [{
+            "place_id": "robb-field", "name": "Robb Field", "user_ratings_total": 1121,
+            "geometry": {"location": {"lat": 32.7549, "lng": -117.2404}},
+        }]},
+        "details": {"status": "UNKNOWN_ERROR"},
+        "geocode": _OCEAN_BEACH_GEOCODE,
+    }))
+
+    with pytest.raises(places.PlacesTransientError):
+        places.reverse_geocode(32.7549808, -117.2404343, "FAKE_KEY")
+
+
+def test_reverse_geocode_returns_none_without_a_named_area(monkeypatch):
+    """Only addresses and plus codes (open water, say) is a no-match."""
+    from vireo import places
+
+    geocode = {"status": "OK", "results": _OCEAN_BEACH_GEOCODE["results"][:2]}
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", _routing_urlopen({
+        "nearbysearch": {"status": "ZERO_RESULTS"},
+        "geocode": geocode,
+    }))
+
+    assert places.reverse_geocode(32.7549808, -117.2404343, "FAKE_KEY") is None
 
 
 @pytest.mark.parametrize(
@@ -277,10 +383,9 @@ def test_reverse_geocode_omits_language_when_disabled(monkeypatch):
     )
 
     assert places.reverse_geocode(1.0, 2.0, "FAKE_KEY", language=None) is None
-    query = urllib.parse.parse_qs(
-        urllib.parse.urlparse(captured[0]).query,
-    )
-    assert "language" not in query
+    assert len(captured) == 2
+    for url in captured:
+        assert "language" not in urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
 
 
 def test_reverse_geocode_returns_none_on_zero_results(monkeypatch):

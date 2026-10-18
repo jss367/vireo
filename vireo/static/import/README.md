@@ -30,6 +30,7 @@ eligibility, refreshes when the tab regains focus, and is checked again on click
 | `jobs.js` | Import submission, progress, completion, and failed-file retries |
 | `results.js` | Result presentation and the card-cleanup handoff |
 | `new-images.js` | Captured new-image lists and their import deep links |
+| `locations.js` | GPS location suggestions and the choices sent as `location_choices` |
 | `loading.js` | Initial configuration, form wiring, workspace defaults, and deep links |
 | `boot.js` | Folder-browser construction, return/mode listeners, and page startup |
 
@@ -51,6 +52,11 @@ Keep the lifecycle boundaries intact when changing this code:
 - `after-import.js` distinguishes workspace defaults from explicit choices
   and coordinates target refreshes with `destinations.js`. Preserve its
   response sequencing and selection checks.
+- `locations.js` reads suggestions only for a settled preview, keyed by its
+  signature, and `updateStartGate()` refreshes it and holds Start while GPS
+  is read, so the import applies exactly the choices on screen. Choices are
+  keyed by GPS cell, not path: after cataloging, each new photo takes the
+  choice for its own cell.
 - `loading.js` binds invalidation and selection handlers before its first
   await. Remote targets and metadata readiness start independently; slow
   readiness must not block the rest of the form or snapshot deep links.

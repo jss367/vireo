@@ -105,7 +105,7 @@
   "services/hf_cache_tree.py": 3,
   "services/import_in_place.py": 7,
   "services/import_photos.py": 4,
-  "services/imports.py": 8,
+  "services/imports.py": 7,
   "services/local_folder.py": 4,
   "services/local_workspace.py": 7,
   "services/missing_originals.py": 3,

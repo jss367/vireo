@@ -280,6 +280,8 @@ function showError(msg, target) {
 function updateStartGate() {
   const btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStart'));
   if (!btn) return;
+  // Every change that can move the gate can move the location suggestions.
+  refreshImportLocations();
   // Same predicate as the boxes themselves — see importSelectionEnabled().
   // The label counts the selection, so it must not outlive the controls
   // that produce one: "Start import (3 files)" in in-place mode would be a
@@ -310,7 +312,7 @@ function updateStartGate() {
     // user's, and blocking Start there would remove the only way to get the
     // safe-to-format verdict on it.
     reason = 'No files selected';
-  }
+  } else if (importLocationsPending()) reason = 'Reading GPS for locations…';
   // Form validity, from #1387's importFormProblem(). That PR landed its own
   // single owner of this button (updateStartAvailability()) on main while
   // this branch was landing updateStartGate() here; both assigned
