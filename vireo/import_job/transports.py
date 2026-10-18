@@ -269,7 +269,7 @@ class _RsyncTransport:
     ``batch_st.to_transfer``; ``flush_batch`` moves the queued bytes with
     the per-batch rsync (flat batch + per-file renamed transfers +
     optional ``remote_verify_files``) and books the outcomes. Transfers
-    go to ``remote_path/subpath/<rel>`` over SSH (``move.py`` plumbing);
+    go to ``remote_path/subpath/<rel>`` over SSH (``move.remote`` plumbing);
     photos are cataloged at ``mount_path/subpath/<rel>`` —
     ``params.destination`` is the local mount base, so ``scan()`` walks
     the just-rsynced files exactly as it would a local copy. The mount
@@ -297,9 +297,9 @@ class _RsyncTransport:
     stamping flipped ``safe_to_format`` green over storage this run
     never touched. See PR #1113 review.
 
-    All ``move.py`` seams are resolved at call time as
-    ``move_mod.<name>(...)`` so the tests' monkeypatch surface on the
-    ``move`` module keeps working unchanged.
+    All ``move`` seams are resolved at call time as
+    ``move_mod.<name>(...)`` (the package's re-exports) so the tests'
+    monkeypatch surface on the ``move`` package keeps working unchanged.
     """
 
     dest_noun = "mount"

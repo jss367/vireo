@@ -1,7 +1,7 @@
 """Discovery + one-time setup helpers behind the NAS setup wizard.
 
-Pure logic with an injectable command-runner seam (the ``move.py``
-pattern): production passes nothing and gets ``subprocess``; tests pass
+Pure logic with an injectable command-runner seam (the ``move``
+package's pattern): production passes nothing and gets ``subprocess``; tests pass
 fakes. Nothing here imports Flask or touches the database.
 """
 

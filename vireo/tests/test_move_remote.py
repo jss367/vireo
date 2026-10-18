@@ -80,8 +80,8 @@ _EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 
 
 def test_resolve_rsync_bin(tmp_path, monkeypatch):
-    monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
-    monkeypatch.setattr(move_mod, "_platform_rsync_candidates", lambda: ())
+    monkeypatch.setattr(move_mod.remote, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.setattr(move_mod.remote, "_platform_rsync_candidates", lambda: ())
     monkeypatch.delenv("VIREO_RSYNC_BIN", raising=False)
     # Nothing available -> None.
     assert move_mod.resolve_rsync_bin("") is None
@@ -98,8 +98,8 @@ def test_resolve_rsync_bin(tmp_path, monkeypatch):
 
 
 def test_resolve_rsync_bin_env_override(tmp_path, monkeypatch):
-    monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
-    monkeypatch.setattr(move_mod, "_platform_rsync_candidates", lambda: ())
+    monkeypatch.setattr(move_mod.remote, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.setattr(move_mod.remote, "_platform_rsync_candidates", lambda: ())
     fake = tmp_path / f"rsync{_EXE_SUFFIX}"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
@@ -113,7 +113,7 @@ def test_resolve_rsync_bin_finds_linux_path_via_platform_candidates(
     should still find a usable GNU rsync via the platform-aware candidates
     ($PATH / /usr/bin/rsync). macOS-only candidate avoidance is intentionally
     macOS-only — every other major OS ships GNU rsync at those locations."""
-    monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.setattr(move_mod.remote, "_BUNDLED_RSYNC_CANDIDATES", ())
     monkeypatch.delenv("VIREO_RSYNC_BIN", raising=False)
 
     # Pretend a usable rsync is discoverable on $PATH at tmp_path/rsync.
@@ -124,7 +124,7 @@ def test_resolve_rsync_bin_finds_linux_path_via_platform_candidates(
     fake.chmod(0o755)
 
     monkeypatch.setattr(
-        move_mod, "_platform_rsync_candidates",
+        move_mod.remote, "_platform_rsync_candidates",
         lambda: (str(fake),))
 
     assert move_mod.resolve_rsync_bin("") == str(fake)
@@ -135,15 +135,15 @@ def test_platform_rsync_candidates_excludes_darwin(monkeypatch):
     platform-aware probe must return empty — the bundled Homebrew/MacPorts
     candidates handle macOS, and including /usr/bin/rsync would silently
     auto-select an unusable binary."""
-    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(move_mod.remote.sys, "platform", "darwin")
     assert move_mod._platform_rsync_candidates() == ()
 
 
 def test_platform_rsync_candidates_includes_usr_bin_on_linux(monkeypatch):
     """On Linux/BSD/Windows, /usr/bin/rsync is GNU rsync. The probe must offer
     it as a candidate so an unconfigured Linux install has a usable default."""
-    monkeypatch.setattr(move_mod.sys, "platform", "linux")
-    monkeypatch.setattr(move_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(move_mod.remote.sys, "platform", "linux")
+    monkeypatch.setattr(move_mod.remote.shutil, "which", lambda name: None)
     assert "/usr/bin/rsync" in move_mod._platform_rsync_candidates()
 
 
@@ -243,13 +243,13 @@ def remote_env(tmp_path, monkeypatch):
     }
     # Default the parent-dir mkdir to success so individual tests don't have
     # to. The dedicated mkdir tests below override this where it matters.
-    monkeypatch.setattr(move_mod, "_remote_mkdir_p",
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_mkdir_p",
                         lambda r, p: (True, ""))
     # Default the pre-merge content-conflict probe to "no conflict" so the
     # existing merge tests don't have to shell out to rsync just to traverse
     # the conflict gate. The dedicated tests below override it where the
     # probe finding (or failing) is the point.
-    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+    monkeypatch.setattr(move_mod.folder_target, "_find_remote_content_conflict",
                         lambda *a, **k: None)
     return {"db": db, "src": src, "fid": fid, "remote": remote,
             "tmp_path": tmp_path}
@@ -268,9 +268,9 @@ def test_remote_move_success_repoints_catalog_to_mount(remote_env, monkeypatch):
         calls["extra_args"] = list(extra_args or [])
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -298,10 +298,10 @@ def test_remote_move_verify_failure_preserves_originals(remote_env, monkeypatch)
     """If the remote --checksum verify reports a missing/differing file, the
     move must NOT delete the originals."""
     env = remote_env
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: ("b.nef", None))
 
     result = move_mod.move_folder(
@@ -321,10 +321,10 @@ def test_remote_move_verify_error_preserves_originals(remote_env, monkeypatch):
     """A verification that couldn't run (SSH/rsync error) is treated as a
     failure — originals preserved, not deleted on an unconfirmed copy."""
     env = remote_env
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: ("__ERROR__", "connection reset"))
 
     result = move_mod.move_folder(
@@ -339,7 +339,7 @@ def test_remote_move_missing_rsync_bin_errors(remote_env, monkeypatch):
     """No resolved GNU rsync -> clear error, nothing transferred or deleted."""
     env = remote_env
     env["remote"]["rsync_bin"] = None
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="",
@@ -354,8 +354,8 @@ def test_remote_move_existing_dest_without_merge_needs_merge(remote_env, monkeyp
     """An existing remote destination without merge returns needs_merge, like
     the local path, so the UI can prompt to merge/resume."""
     env = remote_env
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
@@ -377,9 +377,9 @@ def test_remote_move_merge_uses_ignore_existing(remote_env, monkeypatch):
         seen["flags"] = list(flags or [])
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -402,9 +402,9 @@ def test_remote_move_merge_uses_partial_dir_for_resume(remote_env, monkeypatch):
         seen["extra_args"] = list(extra_args or [])
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     move_mod.move_folder(
@@ -435,11 +435,11 @@ def test_remote_merge_refuses_when_content_conflict_found(
         called["verify"] = True
         return None
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
-    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_target, "_find_remote_content_conflict",
                         lambda *a, **k: ("b.nef", None))
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete", fake_verify)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete", fake_verify)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="", merge=True,
@@ -468,11 +468,11 @@ def test_remote_merge_refuses_when_conflict_probe_errors(
         called["rsync"] = True
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
     monkeypatch.setattr(
-        move_mod, "_find_remote_content_conflict",
+        move_mod.folder_target, "_find_remote_content_conflict",
         lambda *a, **k: ("__ERROR__", "connection reset"))
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="", merge=True,
@@ -498,12 +498,12 @@ def test_remote_merge_skips_conflict_check_for_fresh_move(
         called["conflict"] = True
         return None
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_target, "_find_remote_content_conflict",
                         fake_conflict)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -533,7 +533,7 @@ def test_remote_merge_conflict_check_targets_existing_files_only(
             stderr = ""
         return _R()
 
-    monkeypatch.setattr(move_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(move_mod.verify.subprocess, "run", fake_run)
 
     remote = {
         "host": "nas", "user": "me", "port": 22, "ssh_key": "",
@@ -576,8 +576,8 @@ def test_remote_move_refuses_relative_ssh_dest_base(remote_env, monkeypatch):
         called["exists"] = True
         return False
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="",
@@ -610,8 +610,8 @@ def test_remote_move_refuses_relative_mount_dest_base(remote_env, monkeypatch):
         called["exists"] = True
         return False
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="",
@@ -650,8 +650,8 @@ def test_remote_move_refuses_when_catalog_path_overlaps_source(
         called["exists"] = True
         return False
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="",
@@ -678,9 +678,9 @@ def test_remote_move_uses_posix_join_for_transfer_dest(remote_env, monkeypatch):
         captured["dest_spec"] = dest_spec
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     move_mod.move_folder(
@@ -709,9 +709,9 @@ def test_remote_move_brackets_ipv6_host_in_rsync_target(remote_env, monkeypatch)
         captured["dest_spec"] = dest_spec
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     move_mod.move_folder(
@@ -744,9 +744,9 @@ def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monk
         called["exists"] = True
         return False
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -776,9 +776,9 @@ def test_remote_move_refuses_when_ssh_probe_fails(remote_env, monkeypatch):
         return (0, "", False)
 
     # None == "probe couldn't conclude" — caller must refuse, not assume False.
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: None)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: None)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -818,10 +818,10 @@ def test_remote_move_creates_subpath_parents_before_rsync(remote_env, monkeypatc
         order.append(("rsync", None))
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_remote_mkdir_p", fake_mkdir)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_mkdir_p", fake_mkdir)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     result = move_mod.move_folder(
@@ -852,10 +852,10 @@ def test_remote_move_refuses_when_mkdir_p_fails(remote_env, monkeypatch):
         called["rsync"] = True
         return (0, "", False)
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_remote_mkdir_p",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_mkdir_p",
                         lambda r, p: (False, "Permission denied"))
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid"], destination="",
@@ -878,11 +878,11 @@ def test_remote_move_merge_skips_mkdir_p(remote_env, monkeypatch):
         mkdir_calls.append(path)
         return (True, "")
 
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
-    monkeypatch.setattr(move_mod, "_remote_mkdir_p", fake_mkdir)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_mkdir_p", fake_mkdir)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
-    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_verify_complete",
                         lambda *a, **k: None)
 
     move_mod.move_folder(
@@ -906,23 +906,23 @@ def test_remote_dir_exists_tri_state(monkeypatch):
         def __init__(self, rc):
             self.returncode = rc
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: FakeCompleted(0))
     assert move_mod._remote_dir_exists(remote, "/p") is True
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: FakeCompleted(1))
     assert move_mod._remote_dir_exists(remote, "/p") is False
 
     # SSH-level failure (returncode 255).
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: FakeCompleted(255))
     assert move_mod._remote_dir_exists(remote, "/p") is None
 
     # subprocess raising (ssh binary missing, timeout, etc.).
     def boom(*a, **k):
         raise OSError("ssh: not found")
-    monkeypatch.setattr(move_mod.subprocess, "run", boom)
+    monkeypatch.setattr(move_mod.remote.subprocess, "run", boom)
     assert move_mod._remote_dir_exists(remote, "/p") is None
 
 
@@ -934,8 +934,8 @@ def test_remote_dir_exists_tri_state(monkeypatch):
 def test_missing_local_rsync_offers_server_install_commands(monkeypatch, server_platform, commands):
     from types import SimpleNamespace
 
-    monkeypatch.setattr(move_mod.sys, "platform", server_platform)
-    monkeypatch.setattr(move_mod.subprocess, "run", lambda *a, **kw:
+    monkeypatch.setattr(move_mod.remote.sys, "platform", server_platform)
+    monkeypatch.setattr(move_mod.remote.subprocess, "run", lambda *a, **kw:
                         SimpleNamespace(returncode=0, stdout="vireo_ok\nWRITABLE\n", stderr=""))
     result = move_mod.test_remote_connection(
         {"host": "nas", "user": "me", "remote_path": "/photos", "ssh_bin": "ssh"}, "")
@@ -980,7 +980,7 @@ def test_test_remote_connection_probes_remote_rsync(monkeypatch):
         # Remote rsync probe — simulate command-not-found (exit 127).
         return FakeCompleted(127, "", "rsync: command not found\n")
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         fake_run_remote_rsync_missing)
     res = move_mod.test_remote_connection(remote, "/usr/bin/rsync")
     assert res["ssh"] is True
@@ -1001,7 +1001,7 @@ def test_test_remote_connection_probes_remote_rsync(monkeypatch):
             return FakeCompleted(0, "WRITABLE\n", "")
         return FakeCompleted(0, "rsync  version 3.2.7\n", "")
 
-    monkeypatch.setattr(move_mod.subprocess, "run", fake_run_all_ok)
+    monkeypatch.setattr(move_mod.remote.subprocess, "run", fake_run_all_ok)
     res = move_mod.test_remote_connection(remote, "/usr/bin/rsync")
     assert res["remote_rsync_ok"] is True
     assert res["ok"] is True
@@ -1026,7 +1026,7 @@ def test_remote_free_bytes_parses_posix_df(monkeypatch):
         "Filesystem     1024-blocks      Used Available Capacity Mounted on\n"
         "/dev/vg1/lv        1000000    400000    600000      40% /volume1\n"
     )
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: _FakeCompleted(0, df_out))
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/volume1/Photo") == \
         600000 * 1024
@@ -1035,15 +1035,15 @@ def test_remote_free_bytes_parses_posix_df(monkeypatch):
 def test_remote_free_bytes_returns_none_on_failure(monkeypatch):
     """Probe failures must read as 'unknown' (None), never as a number —
     the caller skips the check instead of fabricating a verdict."""
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: _FakeCompleted(1, "", "df: not found"))
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
+    monkeypatch.setattr(move_mod.remote.subprocess, "run",
                         lambda *a, **k: _FakeCompleted(0, "garbage\n"))
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
 
     def boom(*a, **k):
         raise OSError("ssh: not found")
-    monkeypatch.setattr(move_mod.subprocess, "run", boom)
+    monkeypatch.setattr(move_mod.remote.subprocess, "run", boom)
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None

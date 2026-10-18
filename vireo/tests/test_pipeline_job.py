@@ -13064,7 +13064,7 @@ class _RemoteArchiveRunner(FakeRunner):
 def _remote_env(tmp_path, monkeypatch, mount_path=None):
     """Config + SSH/rsync seam fakes for a remote-archive pipeline run.
 
-    Every subprocess-backed seam in move.py is replaced (same seams
+    Every subprocess-backed seam in the move package is replaced (same seams
     test_move_remote.py fakes) so no test ever shells out to ssh/rsync.
     Returns a dict of captured rsync calls plus the paths the assertions
     need.
@@ -13108,13 +13108,13 @@ def _remote_env(tmp_path, monkeypatch, mount_path=None):
         lambda t, r: {"ok": True, "message": "Connection OK"})
     monkeypatch.setattr(
         move_mod, "_remote_free_bytes", lambda t, p: 100 * 1024 ** 3)
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
-    monkeypatch.setattr(move_mod, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod.folder_transfer, "_remote_mkdir_p", lambda r, p: (True, ""))
     monkeypatch.setattr(
-        move_mod, "_find_remote_content_conflict", lambda *a, **k: None)
+        move_mod.folder_target, "_find_remote_content_conflict", lambda *a, **k: None)
     monkeypatch.setattr(
-        move_mod, "_remote_verify_complete", lambda *a, **k: None)
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+        move_mod.folder_transfer, "_remote_verify_complete", lambda *a, **k: None)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_rsync)
 
     src = tmp_path / "card"
     src.mkdir()
@@ -13307,7 +13307,7 @@ def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
     files are never overwritten, still with --partial-dir resume."""
     import move as move_mod
     env = _remote_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: True)
     runner = _RemoteArchiveRunner()
     job = _make_job()
 
@@ -13331,7 +13331,7 @@ def test_pipeline_remote_archive_failure_deindexes_staging(
     import move as move_mod
     env = _remote_env(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        move_mod, "_run_rsync_streamed",
+        move_mod.folder_transfer, "_run_rsync_streamed",
         lambda *a, **k: (1, "rsync error: connection reset", False))
     runner = _RemoteArchiveRunner()
     job = _make_job()

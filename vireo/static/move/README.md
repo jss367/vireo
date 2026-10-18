@@ -16,7 +16,7 @@ from `vireo-rsync-help.js`.
 | `remote-targets.js` | Remote (SSH) move targets: `loadRemoteTargets()`, `quickRemoteTargetId()`, and the destination-mode select |
 | `folders.js` | `switchTab()`, `loadFolders()` (`/api/folders`), and the Quick Move / Photo Move folder selects (with the `?folder_id=` preselect) |
 | `quick-move-form.js` | Quick Move inputs: the source folder, the editable folder name, the capture-date folder mode and format presets, and their validation results |
-| `quick-move-preview.js` | The Quick Move summary panel, `updateQuickMoveBtn()`, `updateQuickMovePreview()`, `resolvedMoveDest()`, and the path helpers that mirror `move.py` (`rsyncDestSpec`, `normalizeRemoteSubpath`, `_isAbsolutePath`) |
+| `quick-move-preview.js` | The Quick Move summary panel, `updateQuickMoveBtn()`, `updateQuickMovePreview()`, `resolvedMoveDest()`, and the path helpers that mirror `move/remote.py` (`rsyncDestSpec`, `normalizeRemoteSubpath`, `_isAbsolutePath`) |
 | `quick-move-preflight.js` | The debounced `/api/move-folder/preflight` status line: local, remote and capture-date preflights, the exists warning, and the exact-count follow-up |
 | `quick-move-start.js` | `startQuickMove()` (the preview preflight and the confirm or merge dialog) and `executeQuickMove()` (`/api/jobs/move-folder`) |
 | `photo-move.js` | Photo Move: paged loading of a folder's photos, the grid, click/shift/ctrl selection, the selection bar, `startPhotoMove()` and `executePhotoMove()` (`/api/jobs/move-photos`) |

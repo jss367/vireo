@@ -3291,9 +3291,12 @@ def _save_remote_target(monkeypatch, tmp_path, **overrides):
     # The remote-archive preflight also probes for an OpenSSH client
     # (added for Windows). Stub so happy-path tests don't require ssh
     # in the CI environment.
-    monkeypatch.setattr(
-        move_mod, "resolve_ssh_bin", lambda configured="": "/usr/bin/ssh",
-    )
+    # Routes resolve ssh through ``move``; ``build_remote_move_spec``
+    # resolves it again inside ``move.remote``.
+    for module in (move_mod, move_mod.remote):
+        monkeypatch.setattr(
+            module, "resolve_ssh_bin", lambda configured="": "/usr/bin/ssh",
+        )
     return entry
 
 
@@ -5164,7 +5167,7 @@ def test_import_processes_in_managed_storage_then_moves_to_mount(
         raise FileNotFoundError("exercise the mounted filesystem copy")
 
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", process)
-    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     # A mounted destination must not require any SSH configuration.
     monkeypatch.setattr(move, "resolve_ssh_bin", lambda *args: None)
     response = client.post("/api/jobs/import-photos", json={
@@ -5213,7 +5216,7 @@ def test_managed_import_preserves_originals_on_transfer_failure(app_and_db, tmp_
         photo.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
         return 0, "", False
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", transfer)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", transfer)
     response = client.post("/api/jobs/import-photos", json={
         "sources": [card], "destination": str(tmp_path / "NAS" / "trip"),
         "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
@@ -5255,7 +5258,7 @@ def test_managed_import_preserves_originals_when_mount_replaced(app_and_db, tmp_
         return 0, "", False
 
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", process)
-    monkeypatch.setattr(move, "_run_rsync_streamed", copy)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", copy)
     response = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
         "folder_template": "", "local_processing": True, "defer_nas_transfer": deferred,
@@ -5353,7 +5356,7 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         shutil.copytree(source, destination, dirs_exist_ok=True)
         return 0, "", False
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", copy)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", copy)
     client = app.test_client()
     response = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
@@ -5436,7 +5439,7 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
 
     monkeypatch.setattr(import_job, "run_import_job", run_import)
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
-    monkeypatch.setattr(move, "_run_rsync_streamed", lambda *a, **kw: (1, "offline", False))
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", lambda *a, **kw: (1, "offline", False))
     response = client.post("/api/jobs/import-photos", json=body)
     assert response.status_code == 200, response.get_json()
     retried = wait_for_job_via_client(client, response.get_json()["job_id"])
@@ -5785,7 +5788,7 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     def no_rsync(*a, **kw):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     response = client.post(f"/api/import/pending-archives/{archive_id}/send")
     assert response.status_code == 200, response.get_json()
     sent = wait_for_job_via_client(client, response.get_json()["job_id"])
@@ -5827,7 +5830,7 @@ def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_a
         raise FileNotFoundError()
 
     monkeypatch.setattr(shutil, "rmtree", cleanup)
-    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     client = app.test_client()
     response = client.post(f"/api/import/pending-archives/{archive_id}/send")
     sent = wait_for_job_via_client(client, response.get_json()["job_id"])
@@ -6001,7 +6004,7 @@ def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
     assert not list((tmp_path / "staging").rglob("*.xmp"))
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
@@ -6060,7 +6063,7 @@ def test_pending_archive_sync_first_writes_when_staging_unlinked_from_workspace(
             (owning, fid))
     db.conn.commit()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
@@ -6089,7 +6092,7 @@ def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp
     archive_id = imported["config"]["pending_archive_id"]
     db.queue_change(imported["result"]["photo_ids"][0], "rating", "3")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
@@ -6112,7 +6115,7 @@ def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_d
     archive_id = imported["config"]["pending_archive_id"]
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
@@ -6146,7 +6149,7 @@ def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_
         return result
 
     monkeypatch.setattr(sync_mod, "sync_to_xmp", sync_then_queue_more)
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
@@ -6176,7 +6179,7 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
         db.queue_change(second, "keyword_add", "Kestrel")
         raise FileNotFoundError()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", queue_during_the_move)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", queue_during_the_move)
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
         json={"sync_first": True}).get_json()["job_id"])
@@ -6207,7 +6210,7 @@ def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp
     archive_id = imported["config"]["pending_archive_id"]
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
 
     def recheck_explodes(self, photo_ids):
@@ -6241,7 +6244,7 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     db.workspaces.update(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
     db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
@@ -6333,7 +6336,7 @@ def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_pat
     def no_rsync(*args, **kwargs):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     if cleanup_warning:
         remove = shutil.rmtree
 
@@ -6365,7 +6368,7 @@ def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp
     archive_id = imported["config"]["pending_archive_id"]
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     # Hold the app-wide lock the ordinary /api/jobs/sync job takes.
     assert app._sync_job_lock.acquire(blocking=False)
@@ -6398,7 +6401,7 @@ def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_d
     archive_id = imported["config"]["pending_archive_id"]
     db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
 
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     assert app._sync_job_lock.acquire(blocking=False)
     started = client.post(f"/api/import/pending-archives/{archive_id}/send",
@@ -6435,7 +6438,7 @@ def test_pending_archive_send_rejects_a_conflicting_sync_option(app_and_db, tmp_
         assert release.wait(synchronization_timeout(10))
         raise FileNotFoundError()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", slow_transfer)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", slow_transfer)
     first = client.post(f"/api/import/pending-archives/{archive_id}/send")
     assert first.status_code == 200, first.get_json()
     try:
@@ -6539,7 +6542,7 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
         assert release.wait(synchronization_timeout(10))
         return 1, "NAS offline", False
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", failed_transfer)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", failed_transfer)
     first = client.post(f"/api/import/pending-archives/{archive_id}/send")
     assert first.status_code == 200, first.get_json()
     try:
@@ -6568,7 +6571,7 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
     def no_rsync(*a, **kw):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     retried = client.post(f"/api/import/pending-archives/{archive_id}/send")
     sent = wait_for_job_via_client(client, retried.get_json()["job_id"])
     assert sent["status"] == "completed", sent
@@ -7502,7 +7505,10 @@ def stub_move(monkeypatch):
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
     monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
-    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    # Routes resolve ssh through ``move``; ``build_remote_move_spec``
+    # resolves it again inside ``move.remote``.
+    for module in (move_mod, move_mod.remote):
+        monkeypatch.setattr(module, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
     return calls
 
 
@@ -7844,7 +7850,10 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
     monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
-    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    # Routes resolve ssh through ``move``; ``build_remote_move_spec``
+    # resolves it again inside ``move.remote``.
+    for module in (move_mod, move_mod.remote):
+        monkeypatch.setattr(module, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
 
     app, db = app_and_db
     client = app.test_client()
@@ -7926,7 +7935,10 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
     monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
-    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    # Routes resolve ssh through ``move``; ``build_remote_move_spec``
+    # resolves it again inside ``move.remote``.
+    for module in (move_mod, move_mod.remote):
+        monkeypatch.setattr(module, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
 
     app, db = app_and_db
     client = app.test_client()
@@ -8008,7 +8020,10 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
     monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
-    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    # Routes resolve ssh through ``move``; ``build_remote_move_spec``
+    # resolves it again inside ``move.remote``.
+    for module in (move_mod, move_mod.remote):
+        monkeypatch.setattr(module, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
 
     # Deterministic ordering: intercept the SECOND move-folder thread's
     # ``start()`` and hold its worker at the front of _run_job until the
@@ -13631,7 +13646,7 @@ def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_d
         return real_publish(tree, path)
 
     monkeypatch.setattr(xmp.document, "_write_tree_atomic", cancel_before_publish)
-    monkeypatch.setattr(move, "_run_rsync_streamed",
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     client = app.test_client()
     sent = wait_for_job_via_client(client, client.post(
