@@ -50,7 +50,6 @@ CONN_USE_LIMITS = {
     "pipeline_job.py": 9,
     "pipeline_plan.py": 2,
     "schema.py": 1,
-    "volume_reachability.py": 8,
 }
 
 
