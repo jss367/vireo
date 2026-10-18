@@ -222,7 +222,7 @@ def _fs_lacks_hardlinks(err):
 
 # Seconds a destination-side hash read may go without producing a single
 # chunk before it is declared stalled. Same philosophy as the rsync stall
-# watchdog in move.py: bound silence, not total runtime — a slow but moving
+# watchdog in move/transfer.py: bound silence, not total runtime — a slow but moving
 # mount read never trips this, a wedged SMB session does.
 DEST_HASH_STALL_TIMEOUT = 120.0
 

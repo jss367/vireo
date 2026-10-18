@@ -666,14 +666,14 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     dst = tmp_path / "cleanup_dst"
     dst.mkdir()
 
-    real_rmtree = move_mod.shutil.rmtree
+    real_rmtree = move_mod.folder.shutil.rmtree
 
     def cleanup_fails(path, *args, **kwargs):
         if os.fspath(path) == str(src):
             raise OSError("permission denied")
         return real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(move_mod.shutil, "rmtree", cleanup_fails)
+    monkeypatch.setattr(move_mod.folder.shutil, "rmtree", cleanup_fails)
 
     client = app.test_client()
     resp = client.post("/api/jobs/move-folder", json={

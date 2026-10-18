@@ -366,7 +366,7 @@ def test_auto_cleanup_keeps_replacement_directory(cleanup_case, monkeypatch):
         source.mkdir()
         return result
 
-    monkeypatch.setattr(move, "move_photos", move_then_replace)
+    monkeypatch.setattr(move.dates, "move_photos", move_then_replace)
     result = move.move_folder_by_date(db, folder_id, str(source.parent / "archive"), "%Y-%m-%d")
     assert result["moved"] == 1
     assert result["source_cleanup"]["state"] == "unavailable"
