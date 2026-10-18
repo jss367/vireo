@@ -1,5 +1,9 @@
 """The import's final result and its safe-to-format verdict."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from image_loader import SUPPORTED_EXTENSIONS
 from import_job.file_selection import (
     _append_selection_unsafe,
@@ -8,11 +12,19 @@ from import_job.file_selection import (
 )
 from import_job.snapshots import _capture_photo_fingerprints
 
+if TYPE_CHECKING:
+    from db import Database
+    from import_job.import_types import SourceSnapshot
+    from import_job.planning import _ImportPlan
+    from import_job.state import ImportParams, _ImportRunState
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
 
-def _finalize_import(job, runner, db, state, params, *,
-                     discovered, include_paths, source_snapshots,
-                     deselected, vanished_paths, appeared,
-                     remote_unverified=False):
+
+def _finalize_import(job: JobDict, runner: JobRunner, db: Database, state: _ImportRunState, params: ImportParams, *,
+                     discovered: int, include_paths: set[str] | None, source_snapshots: dict[str, SourceSnapshot],
+                     deselected: int, vanished_paths: set[str], appeared: int,
+                     remote_unverified: bool = False) -> JsonDict:
     """Terminal status, safety verdicts, and the shared 19-key result dict.
 
     ``remote_unverified`` is the one transport-required term: the remote
@@ -95,8 +107,8 @@ def _finalize_import(job, runner, db, state, params, *,
     )
 
 
-def _append_run_unsafe_files(state, *, discovered, deselected,
-                             vanished_paths, appeared, remote_unverified):
+def _append_run_unsafe_files(state: _ImportRunState, *, discovered: int, deselected: int,
+                             vanished_paths: set[str], appeared: int, remote_unverified: bool) -> None:
     """Append the run-level ``unsafe_files`` entries, in render order:
     discovery errors, the remote honesty gate, likely duplicates, then
     selection drift.
@@ -141,7 +153,7 @@ def _append_run_unsafe_files(state, *, discovered, deselected,
     )
 
 
-def _import_partial_scope(params):
+def _import_partial_scope(params: ImportParams) -> bool:
     """True when the run's walk covers less than the card's full
     supported-file set (see ``safe_to_format`` in ``_finalize_import``).
     """
@@ -171,9 +183,11 @@ def _import_partial_scope(params):
     return partial_scope
 
 
-def _import_result(db, state, params, *, discovered, source_snapshots,
-                   safe_to_format, unverified_duplicates_only,
-                   vanished_paths, appeared):
+def _import_result(
+    db: Database, state: _ImportRunState, params: ImportParams, *, discovered: int,
+    source_snapshots: dict[str, SourceSnapshot], safe_to_format: bool,
+    unverified_duplicates_only: bool, vanished_paths: set[str], appeared: int,
+) -> JsonDict:
     """The import's result dict, shared by both transports."""
     return {
         "discovered": discovered,
@@ -251,8 +265,10 @@ def _import_result(db, state, params, *, discovered, source_snapshots,
     }
 
 
-def _finalize_planned(job, runner, db, state, params, plan, *,
-                      remote_unverified):
+def _finalize_planned(
+    job: JobDict, runner: JobRunner, db: Database, state: _ImportRunState, params: ImportParams,
+    plan: _ImportPlan, *, remote_unverified: bool,
+) -> JsonDict:
     """``_finalize_import`` for a run that got through ``_plan_import``."""
     return _finalize_import(
         job, runner, db, state, params,
