@@ -65,7 +65,6 @@ CONN_USE_LIMITS = {
     "site_export.py": 3,
     "species_identity.py": 5,
     "species_identity_repair.py": 3,
-    "sync.py": 5,
     "volume_reachability.py": 8,
 }
 
