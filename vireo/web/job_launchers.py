@@ -36,6 +36,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
+from services.folder_moves import FolderMoveRequest
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -1295,18 +1296,20 @@ def create_job_launchers_blueprint(
 
         job_id = start_move_folder_job(
             ctx.runner, ctx.workspace_id,
-            folder_id=folder_id,
-            destination=destination,
-            display_dest=display_dest,
-            destination_name=destination_name,
-            source_path=folder["path"],
-            resolved_destination=resolved_destination,
-            merge=merge,
-            remote=remote,
-            developed_dir=developed_dir,
-            folder_template=folder_template,
-            keep_visible=keep_visible,
-            date_destinations=date_destinations,
+            FolderMoveRequest(
+                folder_id=folder_id,
+                source_path=folder["path"],
+                destination=destination,
+                display_dest=display_dest,
+                resolved_destination=resolved_destination,
+                merge=merge,
+                developed_dir=developed_dir,
+                destination_name=destination_name,
+                remote=remote,
+                folder_template=folder_template,
+                date_destinations=date_destinations,
+                keep_visible=keep_visible,
+            ),
         )
         return jsonify({"job_id": job_id})
 

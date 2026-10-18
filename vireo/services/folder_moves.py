@@ -7,6 +7,9 @@ entry point (snapshot remote target, no request context); ``guard_error``
 refuses a move that would race a local-workspace or local-folder copy; and
 ``pending_local_workspace_transition`` finds a queued or running
 local-copy transition job, which the scan launchers also check.
+A job's arguments travel as ``FolderMoveRequest`` (what moves, where it
+lands and how), ``MoveChain`` (the chained hook's provenance and batch
+lock) and ``StagedTransfer`` (a NAS transfer out of import staging).
 Nothing here touches Flask's request or app context except the
 ``get_db`` fallback when ``pending_local_workspace_transition`` is called
 without an explicit db.
@@ -17,7 +20,11 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+import threading
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from db import Database
 from services.local_folder import (
@@ -33,6 +40,10 @@ from services.local_workspace import (
 )
 from services.move_steps import MoveSteps, folder_move_steps
 
+if TYPE_CHECKING:
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
+
 log = logging.getLogger(__name__)
 
 
@@ -41,6 +52,119 @@ log = logging.getLogger(__name__)
 # real total separately, so the route stays readable (and the job row small)
 # even when a source folder spans hundreds of dates.
 MOVE_DATE_DEST_PREVIEW_LIMIT = 8
+
+
+class RemoteMoveSpec(TypedDict):
+    """The ``remote`` dict ``move.build_remote_move_spec`` builds for an SSH move."""
+
+    host: str
+    user: str
+    port: int
+    ssh_key: str
+    bwlimit_kbps: int
+    rsync_bin: str
+    ssh_bin: str
+    ssh_dest_base: str
+    mount_dest_base: str
+
+
+class DateDestination(TypedDict):
+    """One planned capture-date folder of a date-organized move."""
+
+    path: str
+    relative_path: str
+    photo_count: int
+
+
+@dataclass(frozen=True)
+class FolderMoveRequest:
+    """What one move-folder job moves, where it lands, and how.
+
+    Plain values only, snapshotted when the job is enqueued; the job never
+    re-resolves them from Settings or the catalog.
+    """
+
+    folder_id: int
+    """The catalog folder being moved."""
+
+    source_path: str
+    """The folder's path when the job was enqueued (the catalog row is
+    rewritten by a successful move)."""
+
+    destination: str
+    """The local parent directory the folder lands inside. For a remote
+    move, the mount path that mirrors the SSH destination."""
+
+    display_dest: str
+    """``destination`` as the jobs panel shows it (the ``user@host:path``
+    rsync spec for a remote move)."""
+
+    resolved_destination: str
+    """Where the photos actually land, including a rename or the source
+    leaf, for the jobs panel."""
+
+    merge: bool
+    """Merge into an existing destination folder instead of refusing."""
+
+    developed_dir: str
+    """The configured darktable output directory ("" when unset); each
+    moved photo's developed file follows it."""
+
+    keep_visible: bool
+    """Keep a date-organized move's photos visible in the other workspaces
+    that showed the source folder. Callers default it from the
+    ``move_keep_visible_in_other_workspaces`` setting."""
+
+    destination_name: str = ""
+    """Rename the landing folder; "" keeps the source folder's name."""
+
+    remote: RemoteMoveSpec | None = None
+    """The SSH transfer spec, or None for a local move."""
+
+    folder_template: str = ""
+    """A capture-date folder template; non-empty makes this a
+    date-organized move (``move.move_folder_by_date``)."""
+
+    date_destinations: list[DateDestination] | None = None
+    """The planned capture-date folders of a date-organized move,
+    snapshotted into the job config for the jobs panel."""
+
+    allow_tracked_merge: bool = False
+    """Passed to ``move_folder``. The chained import→process→move hook opts
+    in (see ``FolderMoves.enqueue_job``); manual moves keep the default
+    refusal of tracked destinations."""
+
+
+@dataclass(frozen=True)
+class MoveChain:
+    """How a move started by the chained process-completion hook runs."""
+
+    chained_from: str | None = None
+    """The chained run that started this move, shown in the jobs panel."""
+
+    serialize_lock: threading.Lock | None = None
+    """A lock shared by a batch of chained moves. When given, the transfer
+    itself runs under it so batch-mates execute one at a time (see
+    ``_acquire_batch_lock``); the job still enqueues, and its id exists,
+    immediately."""
+
+
+@dataclass(frozen=True)
+class StagedTransfer:
+    """A NAS transfer of photos an import kept in local staging."""
+
+    managed_staging_root: str | None = None
+    """The import's managed staging root. When set, the job waits for the
+    workspace's other jobs, becomes uncancellable once the transfer starts,
+    verifies contents, and removes emptied staging parents afterwards."""
+
+    mount_baseline: Mapping[str, bool] | None = None
+    """The archive mounts observed when the import was enqueued; when set,
+    the destination mount is re-checked before originals are deleted."""
+
+    mount_identities: Mapping[str, Any] | None = None
+    """Those mounts' identities, as ``import_staging`` records them.
+    Any: JSON round-trips turn the identity tuples into lists."""
 
 
 class FolderMoves:
@@ -55,16 +179,20 @@ class FolderMoves:
     """
 
     def __init__(
-        self, *, get_runner, get_db, db_path, config,
-        invalidate_missing_originals,
-    ):
+        self, *, get_runner: Callable[[], JobRunner],
+        get_db: Callable[[], Database], db_path: str,
+        config: Mapping[str, Any],
+        invalidate_missing_originals: Callable[[], object],
+    ) -> None:
         self._get_runner = get_runner
         self._get_db = get_db
         self._db_path = db_path
         self._config = config
         self._invalidate_missing_originals = invalidate_missing_originals
 
-    def pending_local_workspace_transition(self, workspace_id, db=None):
+    def pending_local_workspace_transition(
+        self, workspace_id: int | None, db: Database | None = None,
+    ) -> JobDict | None:
         """Return the queued/running local-workspace transition job, or None.
 
         ``db``: pass an explicit Database when calling off the request
@@ -104,7 +232,7 @@ class FolderMoves:
                     return job
         return None
 
-    def guard_error(self, guard_db, folder_id):
+    def guard_error(self, guard_db: Database, folder_id: int) -> str | None:
         """Return the error message blocking a folder move, or None.
 
         Context-free on purpose: takes the db explicitly and touches no
@@ -170,70 +298,30 @@ class FolderMoves:
                     )
         return None
 
-    def start_job(self, runner, workspace_id, *, folder_id,
-                  destination, display_dest, destination_name,
-                  source_path, resolved_destination,
-                  merge, remote, developed_dir, folder_template="",
-                  date_destinations=None,
-                  chained_from=None, serialize_lock=None,
-                  allow_tracked_merge=False,
-                  managed_staging_root=None, mount_baseline=None,
-                  mount_identities=None, keep_visible=None):
+    def start_job(
+        self, runner: JobRunner, workspace_id: int | None,
+        request: FolderMoveRequest, *, chain: MoveChain | None = None,
+        staging: StagedTransfer | None = None,
+    ) -> str:
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
         process-completion hook (which runs on a job thread, so this
-        must not touch Flask request/app context).
-
-        ``serialize_lock``: optional ``threading.Lock`` shared by a batch
-        of chained moves; when given, the transfer itself runs under the
-        lock so batch-mates execute one at a time (see the why-comment at
-        the acquire site). The job still enqueues — and its id exists —
-        immediately.
-
-        ``allow_tracked_merge``: passed through to ``move_folder``. The
-        chained import→process→move hook opts in (see the why-comment in
-        ``enqueue_job``); the manual move endpoint keeps the
-        default refusal of tracked destinations.
-
-        ``date_destinations``: the planned capture-date folders for a
-        date-organized move (``path``/``relative_path``/``photo_count`` per
-        entry, as produced by ``plan_folder_date_moves``). Snapshotted into
-        the job config so the jobs panel can name the folders photos actually
-        land in rather than only the selected root.
+        must not touch Flask request/app context). ``chain`` and
+        ``staging`` are only given by the chained hook.
         """
-        if keep_visible is None:
-            import config as cfg
-            keep_visible = cfg.load().get("move_keep_visible_in_other_workspaces", True)
+        chain = chain or MoveChain()
+        staging = staging or StagedTransfer()
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return self._run_move_job(
-                runner, job, workspace_id,
-                folder_id=folder_id, destination=destination,
-                destination_name=destination_name,
-                source_path=source_path,
-                resolved_destination=resolved_destination,
-                merge=merge, remote=remote, developed_dir=developed_dir,
-                folder_template=folder_template,
-                serialize_lock=serialize_lock,
-                allow_tracked_merge=allow_tracked_merge,
-                managed_staging_root=managed_staging_root,
-                mount_baseline=mount_baseline,
-                mount_identities=mount_identities,
-                keep_visible=keep_visible,
+                runner, job, workspace_id, request, chain, staging,
             )
 
-        job_config = _move_job_config(
-            folder_id=folder_id, display_dest=display_dest, merge=merge,
-            source_path=source_path,
-            resolved_destination=resolved_destination,
-            folder_template=folder_template,
-            date_destinations=date_destinations,
-            destination_name=destination_name, remote=remote,
-            chained_from=chained_from,
-        )
+        job_config = _move_job_config(request, chain.chained_from)
+        managed_staging_root = staging.managed_staging_root
 
-        def staged_work(job):
+        def staged_work(job: JobDict) -> JsonDict:
             runner.push_event(job["id"], "progress", {
                 "current": 0, "total": 0, "current_file": "",
                 "phase": "Waiting for workspace jobs to finish before sending to NAS",
@@ -242,19 +330,21 @@ class FolderMoves:
                 return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
             return work(job)
 
+        if managed_staging_root:
+            return runner.start(
+                "move-folder", staged_work, config=job_config,
+                workspace_id=workspace_id,
+                workspace_transfer_batch=managed_staging_root,
+            )
         return runner.start(
-            "move-folder", staged_work if managed_staging_root else work,
-            config=job_config,
-            workspace_id=workspace_id,
-            **({"workspace_transfer_batch": managed_staging_root} if managed_staging_root else {}),
+            "move-folder", work, config=job_config, workspace_id=workspace_id,
         )
 
-    def _run_move_job(self, runner, job, workspace_id, *, folder_id,
-                      destination, destination_name, source_path,
-                      resolved_destination, merge, remote, developed_dir,
-                      folder_template, serialize_lock, allow_tracked_merge,
-                      managed_staging_root, mount_baseline,
-                      mount_identities, keep_visible):
+    def _run_move_job(
+        self, runner: JobRunner, job: JobDict, workspace_id: int | None,
+        request: FolderMoveRequest, chain: MoveChain,
+        staging: StagedTransfer,
+    ) -> JsonDict:
         """The move-folder job body ``start_job`` enqueues."""
         from move import move_folder, move_folder_by_date
 
@@ -265,8 +355,11 @@ class FolderMoves:
 
         # Set once the transfer starts; a date-organized move reports
         # its own phases and keeps the single progress line.
-        steps = None
+        steps: MoveSteps | None = None
         progress_cb = _move_progress_callback(runner, job, lambda: steps)
+        serialize_lock = chain.serialize_lock
+        managed_staging_root = staging.managed_staging_root
+        remote = request.remote
 
         cancelled = _acquire_batch_lock(runner, job, serialize_lock)
         if cancelled is not None:
@@ -275,22 +368,25 @@ class FolderMoves:
             check_mount = None
             if managed_staging_root and not runner.begin_uncancellable(job["id"]):
                 return {"ok": False, "moved": 0, "errors": [], "summary": "Cancelled before transfer started"}
-            if mount_baseline is not None:
+            if staging.mount_baseline is not None:
                 from import_staging import check_staged_mount
 
-                def check_staged_destination_mount():
-                    check_staged_mount(resolved_destination, mount_baseline, mount_identities)
+                def check_staged_destination_mount() -> None:
+                    check_staged_mount(
+                        request.resolved_destination, staging.mount_baseline,
+                        staging.mount_identities,
+                    )
                 check_mount = check_staged_destination_mount
                 check_mount()
-            if folder_template:
+            if request.folder_template:
                 result = move_folder_by_date(
                     db=thread_db,
-                    folder_id=folder_id,
-                    destination=destination,
-                    folder_template=folder_template,
-                    keep_visible=keep_visible,
+                    folder_id=request.folder_id,
+                    destination=request.destination,
+                    folder_template=request.folder_template,
+                    keep_visible=request.keep_visible,
                     progress_cb=progress_cb,
-                    developed_dir=developed_dir,
+                    developed_dir=request.developed_dir,
                 )
             else:
                 steps = MoveSteps(runner, job, folder_move_steps(
@@ -298,16 +394,16 @@ class FolderMoves:
                     verify_contents=bool(managed_staging_root),
                 ))
                 result = _run_stepped_move(
-                    steps, source_path, move_folder,
+                    steps, request.source_path, move_folder,
                     db=thread_db,
-                    folder_id=folder_id,
-                    destination=destination,
+                    folder_id=request.folder_id,
+                    destination=request.destination,
                     progress_cb=progress_cb,
-                    developed_dir=developed_dir,
-                    merge=merge,
+                    developed_dir=request.developed_dir,
+                    merge=request.merge,
                     remote=remote,
-                    destination_name=destination_name,
-                    allow_tracked_merge=allow_tracked_merge,
+                    destination_name=request.destination_name,
+                    allow_tracked_merge=request.allow_tracked_merge,
                     thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
                     **({"verify_contents": True} if managed_staging_root and not remote else {}),
                     **({"pre_commit_check": check_mount} if check_mount else {}),
@@ -318,7 +414,7 @@ class FolderMoves:
 
         _record_move_outcome(result)
         if result.get("ok") and managed_staging_root:
-            _remove_empty_staging_parents(source_path, managed_staging_root)
+            _remove_empty_staging_parents(request.source_path, managed_staging_root)
         # A partial move already rewrote the catalog for the photos that
         # moved, so cached missing-original entries are stale either way.
         if result.get("ok") or result.get("moved"):
@@ -331,19 +427,22 @@ class FolderMoves:
                 )
         return result
 
-    def enqueue_job(self, thread_db, runner, workspace_id, *,
-                    folder_id, subpath, target,
-                    chained_from=None, serialize_lock=None):
+    def enqueue_job(
+        self, thread_db: Database, runner: JobRunner,
+        workspace_id: int | None, *, folder_id: int, subpath: str,
+        target: Mapping[str, Any], chained_from: str | None = None,
+        serialize_lock: threading.Lock | None = None,
+    ) -> str:
         """Enqueue a chained remote move for one imported folder.
 
         Job-thread path into move-folder (no request context). ``target`` is
         the snapshot captured when the import was enqueued — deliberately NOT
         re-resolved from Settings here, so a mid-chain edit cannot redirect
         the move. Raises on any precondition failure — the caller records the
-        failure per folder rather than aborting the batch.
+        failure per folder rather than aborting the batch. ``target`` is the
+        config remote-target dict (Any: its keys vary by transport).
         """
         import config as cfg
-        import move as move_mod
 
         mount_path = (target.get("mount_path") or "").strip()
         if not mount_path:
@@ -359,79 +458,106 @@ class FolderMoves:
         if guard:
             raise RuntimeError(guard)
         effective_cfg = thread_db.get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+        keep_visible = cfg.load().get("move_keep_visible_in_other_workspaces", True)
+        chain = MoveChain(chained_from=chained_from, serialize_lock=serialize_lock)
         if target.get("transport") == "mounted":
             folder = thread_db.get_folder(folder_id)
             if not folder:
                 raise RuntimeError("folder no longer exists")
             destination = os.path.join(mount_path, *posixpath.dirname(subpath).split("/"))
             return self.start_job(
-                runner, workspace_id, folder_id=folder_id,
-                destination=destination, display_dest=destination,
-                destination_name="", source_path=folder["path"],
-                resolved_destination=os.path.join(destination, os.path.basename(folder["path"])),
-                merge=True, remote=None,
-                developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
-                chained_from=chained_from, serialize_lock=serialize_lock,
-                allow_tracked_merge=True,
-                managed_staging_root=target.get("managed_staging_root"),
-                mount_baseline=target.get("mount_baseline"),
-                mount_identities=target.get("mount_identities"),
+                runner, workspace_id,
+                FolderMoveRequest(
+                    folder_id=folder_id,
+                    source_path=folder["path"],
+                    destination=destination, display_dest=destination,
+                    resolved_destination=os.path.join(destination, os.path.basename(folder["path"])),
+                    merge=True, developed_dir=developed_dir,
+                    keep_visible=keep_visible, allow_tracked_merge=True,
+                ),
+                chain=chain,
+                staging=StagedTransfer(
+                    managed_staging_root=target.get("managed_staging_root"),
+                    mount_baseline=target.get("mount_baseline"),
+                    mount_identities=target.get("mount_identities"),
+                ),
             )
-        rsync_bin = move_mod.resolve_rsync_bin(
-            effective_cfg.get("rsync_bin", "") or "")
-        if not rsync_bin:
-            raise RuntimeError("no usable GNU rsync for remote moves")
-        ssh_bin = move_mod.resolve_ssh_bin(
-            effective_cfg.get("ssh_bin", "") or "")
-        if not ssh_bin:
-            raise RuntimeError("OpenSSH client not found")
-        # ``move_folder`` lands the source folder INSIDE the destination,
-        # keeping the folder's own name — so to mirror the archive layout
-        # (``<local_archive_root>/2026/trip`` → ``<remote_path>/2026/trip``)
-        # the spec's subpath must be the folder's PARENT ("2026"), not the
-        # full archive-relative subpath, or the leaf would double up
-        # ("2026/trip/trip").
-        remote = move_mod.build_remote_move_spec(
-            target, posixpath.dirname(subpath), rsync_bin, ssh_bin)
-        folder = thread_db.get_folder(folder_id)
-        if not folder:
-            raise RuntimeError("folder no longer exists")
-        landing_name = folder["name"] \
-            or os.path.basename(folder["path"].rstrip("/\\"))
-        resolved_destination = move_mod.rsync_dest_spec(
-            target,
-            posixpath.join(remote["ssh_dest_base"], landing_name),
-        )
         return self.start_job(
             runner, workspace_id,
-            folder_id=folder_id,
-            destination=remote["mount_dest_base"],
-            display_dest=move_mod.rsync_dest_spec(
-                target, remote["ssh_dest_base"]),
-            destination_name="",
-            source_path=folder["path"],
-            resolved_destination=resolved_destination,
-            merge=True,
-            remote=remote,
-            developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
-            chained_from=chained_from,
-            serialize_lock=serialize_lock,
-            # Re-importing more photos into an existing shoot folder is the
-            # NORMAL flow, and its chained move lands exactly on the tracked
-            # NAS copy created by the previous chain run. Without tracked-
-            # merge the move would refuse ("Destination overlaps a folder
-            # Vireo already manages") and strand the new photos locally.
-            # Opting in uses move_folder's exact-overlap reconciliation
-            # (fold the new rows into the existing archive rows); the
-            # pre-copy content-conflict scan still refuses any same-name
-            # file whose bytes differ, and manual moves keep the default
-            # refusal.
-            allow_tracked_merge=True,
-            managed_staging_root=target.get("managed_staging_root"),
+            _ssh_move_request(
+                thread_db, target, folder_id=folder_id, subpath=subpath,
+                effective_cfg=effective_cfg, keep_visible=keep_visible,
+            ),
+            chain=chain,
+            staging=StagedTransfer(
+                managed_staging_root=target.get("managed_staging_root"),
+            ),
         )
 
 
-def _acquire_batch_lock(runner, job, serialize_lock):
+def _ssh_move_request(
+    thread_db: Database, target: Mapping[str, Any], *, folder_id: int,
+    subpath: str, effective_cfg: Mapping[str, Any], keep_visible: bool,
+) -> FolderMoveRequest:
+    """The chained move of one imported folder to an SSH remote target."""
+    import move as move_mod
+
+    rsync_bin = move_mod.resolve_rsync_bin(
+        effective_cfg.get("rsync_bin", "") or "")
+    if not rsync_bin:
+        raise RuntimeError("no usable GNU rsync for remote moves")
+    ssh_bin = move_mod.resolve_ssh_bin(
+        effective_cfg.get("ssh_bin", "") or "")
+    if not ssh_bin:
+        raise RuntimeError("OpenSSH client not found")
+    # ``move_folder`` lands the source folder INSIDE the destination,
+    # keeping the folder's own name — so to mirror the archive layout
+    # (``<local_archive_root>/2026/trip`` → ``<remote_path>/2026/trip``)
+    # the spec's subpath must be the folder's PARENT ("2026"), not the
+    # full archive-relative subpath, or the leaf would double up
+    # ("2026/trip/trip").
+    # cast: ``move`` is not annotated yet; RemoteMoveSpec mirrors what
+    # build_remote_move_spec returns.
+    remote = cast("RemoteMoveSpec", move_mod.build_remote_move_spec(
+        target, posixpath.dirname(subpath), rsync_bin, ssh_bin))
+    folder = thread_db.get_folder(folder_id)
+    if not folder:
+        raise RuntimeError("folder no longer exists")
+    landing_name = folder["name"] \
+        or os.path.basename(folder["path"].rstrip("/\\"))
+    resolved_destination = move_mod.rsync_dest_spec(
+        target,
+        posixpath.join(remote["ssh_dest_base"], landing_name),
+    )
+    return FolderMoveRequest(
+        folder_id=folder_id,
+        source_path=folder["path"],
+        destination=remote["mount_dest_base"],
+        display_dest=move_mod.rsync_dest_spec(
+            target, remote["ssh_dest_base"]),
+        resolved_destination=resolved_destination,
+        merge=True,
+        developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
+        keep_visible=keep_visible,
+        remote=remote,
+        # Re-importing more photos into an existing shoot folder is the
+        # NORMAL flow, and its chained move lands exactly on the tracked
+        # NAS copy created by the previous chain run. Without tracked-
+        # merge the move would refuse ("Destination overlaps a folder
+        # Vireo already manages") and strand the new photos locally.
+        # Opting in uses move_folder's exact-overlap reconciliation
+        # (fold the new rows into the existing archive rows); the
+        # pre-copy content-conflict scan still refuses any same-name
+        # file whose bytes differ, and manual moves keep the default
+        # refusal.
+        allow_tracked_merge=True,
+    )
+
+
+def _acquire_batch_lock(
+    runner: JobRunner, job: JobDict, serialize_lock: threading.Lock | None,
+) -> JsonDict | None:
     """Take a chained batch's shared lock before the transfer starts.
 
     Returns ``None`` with the lock held (or with no lock to take), or the
@@ -492,7 +618,10 @@ def _acquire_batch_lock(runner, job, serialize_lock):
     return None
 
 
-def _run_stepped_move(steps, source_path, move_folder, **move_kwargs):
+def _run_stepped_move(
+    steps: MoveSteps, source_path: str, move_folder: Callable[..., JsonDict],
+    **move_kwargs: Any,
+) -> JsonDict:
     """Run ``move_folder`` and record its outcome on the job's step tree."""
     steps.start()
     try:
@@ -517,7 +646,7 @@ def _run_stepped_move(steps, source_path, move_folder, **move_kwargs):
     return result
 
 
-def _record_move_outcome(result):
+def _record_move_outcome(result: JsonDict) -> None:
     """Set the move result's ``ok`` verdict and ``summary`` in place."""
     # Tell the JobRunner whether the move actually succeeded. Without
     # this the runner marks any normal return "completed" — so a move
@@ -554,7 +683,7 @@ def _record_move_outcome(result):
             )
 
 
-def _remove_empty_staging_parents(source_path, managed_staging_root):
+def _remove_empty_staging_parents(source_path: str, managed_staging_root: str) -> None:
     """Remove the moved folder's now-empty ancestors inside the staging root."""
     from path_guard import contains_resolved
     # Remove only empty staging ancestors. Failed transfers and
@@ -571,20 +700,21 @@ def _remove_empty_staging_parents(source_path, managed_staging_root):
         parent = os.path.dirname(parent)
 
 
-def _move_job_config(*, folder_id, display_dest, merge, source_path,
-                     resolved_destination, folder_template,
-                     date_destinations, destination_name, remote,
-                     chained_from):
+def _move_job_config(request: FolderMoveRequest, chained_from: str | None) -> JsonDict:
     """Build the move-folder job's config snapshot for the jobs panel."""
-    job_config = {
-        "folder_id": folder_id, "destination": display_dest, "merge": merge,
+    folder_template = request.folder_template
+    date_destinations = request.date_destinations
+    remote = request.remote
+    job_config: JsonDict = {
+        "folder_id": request.folder_id, "destination": request.display_dest,
+        "merge": request.merge,
         # Snapshot both ends of the move when it is enqueued. The source
         # catalog row is rewritten after a successful move, so resolving
         # it later would make completed jobs misleading. Likewise,
         # ``destination`` above is only the selected parent; the jobs UI
         # needs the actual landing path (including a rename/source leaf).
-        "source_path": source_path,
-        "resolved_destination": resolved_destination,
+        "source_path": request.source_path,
+        "resolved_destination": request.resolved_destination,
     }
     if folder_template:
         job_config["folder_template"] = folder_template
@@ -605,8 +735,8 @@ def _move_job_config(*, folder_id, display_dest, merge, source_path,
         job_config["date_destination_count"] = len(date_destinations)
         job_config["date_photo_count"] = sum(
             item["photo_count"] for item in date_destinations)
-    if destination_name:
-        job_config["destination_name"] = destination_name
+    if request.destination_name:
+        job_config["destination_name"] = request.destination_name
     if remote:
         # Surface that this is an SSH transfer (and to where) so the job
         # panel can show it, per the UI-transparency rule.
@@ -623,7 +753,10 @@ def _move_job_config(*, folder_id, display_dest, merge, source_path,
     return job_config
 
 
-def _move_progress_callback(runner, job, current_steps):
+def _move_progress_callback(
+    runner: JobRunner, job: JobDict,
+    current_steps: Callable[[], MoveSteps | None],
+) -> Callable[..., None]:
     """Build the move-folder job's ``progress_cb``.
 
     ``current_steps()`` returns the job's ``MoveSteps`` once a stepped
@@ -631,7 +764,9 @@ def _move_progress_callback(runner, job, current_steps):
     """
     last_phase: dict[str, str | None] = {"value": None}
 
-    def progress_cb(current, total, filename, phase="Moving folder"):
+    def progress_cb(
+        current: int, total: int, filename: str, phase: str = "Moving folder",
+    ) -> None:
         # Only update keys JobRunner pre-seeds in job["progress"]
         # (current/total/current_file). Do NOT insert "phase" here:
         # this runs on the worker thread outside the runner lock, and
