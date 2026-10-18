@@ -7,15 +7,15 @@ import posixpath
 import shutil
 import sys
 
-from move.folder_catalog import _plan_moved_file_mtimes
-from move.remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
-from move.transfer import (
+from .folder_catalog import _plan_moved_file_mtimes
+from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
+from .transfer import (
     RSYNC_STALL_TIMEOUT,
     _copy_tree_with_progress,
     _rsync_finder_metadata_exclude_file,
     _run_rsync_streamed,
 )
-from move.verify import (
+from .verify import (
     _first_missing_source_file,
     _fresh_copy_mismatch,
     _remote_verify_complete,

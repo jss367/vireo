@@ -10,12 +10,12 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from move.paths import (
+from .paths import (
     _is_case_insensitive_path,
     _samefile_or_false,
     _tracked_destination_overlap,
 )
-from move.transfer import _copy_and_verify
+from .transfer import _copy_and_verify
 
 # The package's one logger, named as before the split.
 log = logging.getLogger("move")
@@ -68,7 +68,7 @@ def _has_untracked_destination_developed(
     render.
     """
     try:
-        from .export import developed_folder_key
+        from ..export import developed_folder_key
     except ImportError:
         from export import developed_folder_key
     if not destination or not stem:
@@ -107,7 +107,7 @@ def _has_untracked_destination_developed(
 def _blocked_destination_developed_path(destination, developed_dir):
     """Return a non-directory entry that would block render relocation."""
     try:
-        from .export import developed_folder_key
+        from ..export import developed_folder_key
     except ImportError:
         from export import developed_folder_key
 
@@ -804,7 +804,7 @@ class _DevelopedRenders:
         renders in agreement at the new location.
         """
         try:
-            from .export import (
+            from ..export import (
                 relocate_default_developed_file,
                 relocate_developed_file,
             )

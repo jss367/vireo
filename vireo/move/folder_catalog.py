@@ -7,8 +7,11 @@ once the rows point at the destination.
 import logging
 import os
 
-from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
-from move.paths import _case_insensitive_root, _path_equal_or_descends
+try:
+    from ..db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
+except ImportError:
+    from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
+from .paths import _case_insensitive_root, _path_equal_or_descends
 
 # The package's one logger, named as before the split.
 log = logging.getLogger("move")

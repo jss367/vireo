@@ -10,10 +10,10 @@ import logging
 import os
 import shutil
 
-from move.folder_catalog import _FolderCatalogRewrite
-from move.folder_target import _FolderMoveTarget
-from move.folder_transfer import _FolderTransfer
-from move.paths import normalize_destination_name
+from .folder_catalog import _FolderCatalogRewrite
+from .folder_target import _FolderMoveTarget
+from .folder_transfer import _FolderTransfer
+from .paths import normalize_destination_name
 
 # The package's one logger, named as before the split.
 log = logging.getLogger("move")

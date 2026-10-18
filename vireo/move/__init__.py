@@ -26,16 +26,16 @@ patches one of those names patches the submodule that calls it (for
 example ``move.folder_transfer._run_rsync_streamed``), not this package.
 """
 
-from move.dates import (
+from .dates import (
     _folder_subtree_photos,
     folder_date_move_photo_ids,
     move_folder_by_date,
     plan_folder_date_moves,
     plan_folder_date_moves_with_capture_dates,
 )
-from move.folder import move_folder
-from move.folder_catalog import _plan_moved_file_mtimes
-from move.paths import (
+from .folder import move_folder
+from .folder_catalog import _plan_moved_file_mtimes
+from .paths import (
     _case_insensitive_root,
     _is_case_insensitive_path,
     _path_equal_or_descends,
@@ -46,8 +46,8 @@ from move.paths import (
     normalize_destination_name,
     resolve_folder_dest,
 )
-from move.photos import _is_same_directory, _xmp_path, move_photos
-from move.remote import (
+from .photos import _is_same_directory, _xmp_path, move_photos
+from .remote import (
     _BUNDLED_RSYNC_CANDIDATES,
     _platform_rsync_candidates,
     _remote_dir_exists,
@@ -64,14 +64,14 @@ from move.remote import (
     sanitize_subpath,
     test_remote_connection,
 )
-from move.transfer import (
+from .transfer import (
     _copy_and_verify,
     _escape_rsync_pattern,
     _rsync_finder_metadata_exclude_file,
     _rsync_finder_metadata_excludes,
     _run_rsync_streamed,
 )
-from move.verify import (
+from .verify import (
     _find_content_conflict,
     _find_remote_content_conflict,
     _first_missing_source_file,

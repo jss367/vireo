@@ -14,7 +14,10 @@ import shutil
 import subprocess
 import sys
 
-from proc import no_window_kwargs
+try:
+    from ..proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 # ``vireo/``: a packaged build ships GNU rsync beside the app's modules.
 _VIREO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

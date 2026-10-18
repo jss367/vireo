@@ -14,9 +14,13 @@ import filecmp
 import os
 import subprocess
 
-from move.remote import _ssh_rsh_string
-from move.transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
-from proc import no_window_kwargs
+from .remote import _ssh_rsh_string
+from .transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
+
+try:
+    from ..proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 # How long the remote verification rsync (a --checksum dry-run over SSH) may
 # run before we give up and treat the move as unverified. This only gates the

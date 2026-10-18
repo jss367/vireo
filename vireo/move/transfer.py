@@ -14,8 +14,14 @@ import tempfile
 import threading
 import time
 
-from proc import no_window_kwargs
-from staged_copy import copy_via_temp
+try:
+    from ..proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
+try:
+    from ..staged_copy import copy_via_temp
+except ImportError:
+    from staged_copy import copy_via_temp
 
 # How long rsync may make NO forward progress (no file transferred and no
 # stderr activity) before we treat it as wedged and kill it. This is a STALL

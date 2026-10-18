@@ -11,8 +11,8 @@ import posixpath
 import sys
 from datetime import datetime
 
-from move.paths import _case_insensitive_root, _path_equal_or_descends
-from move.photos import move_photos
+from .paths import _case_insensitive_root, _path_equal_or_descends
+from .photos import move_photos
 
 
 def _photo_capture_datetime(photo):
@@ -21,7 +21,7 @@ def _photo_capture_datetime(photo):
     so a label can never name a folder the move wouldn't create.
     """
     try:
-        from .capture_time import _capture_datetime
+        from ..capture_time import _capture_datetime
     except ImportError:
         from capture_time import _capture_datetime
 
@@ -164,7 +164,7 @@ def plan_folder_date_moves_with_capture_dates(
         raise ValueError("folder_template must be a non-empty string")
 
     try:
-        from .ingest import build_destination_path
+        from ..ingest import build_destination_path
     except ImportError:
         from ingest import build_destination_path
 
@@ -381,7 +381,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     }
     if moved and not errors and source_path:
         try:
-            from .move_cleanup import finish_source
+            from ..move_cleanup import finish_source
         except ImportError:
             from move_cleanup import finish_source
         result["source_cleanup"] = finish_source(db, source_path, source_device, source_inode)

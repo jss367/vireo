@@ -3,15 +3,15 @@
 import os
 import posixpath
 
-from move.paths import (
+from .paths import (
     _destination_overlaps_source,
     _path_equal_or_descends,
     _rebase_under_stored_ancestor,
     _tracked_destination_ancestor,
     _tracked_destination_overlap,
 )
-from move.remote import _remote_dir_exists, rsync_dest_spec
-from move.verify import _find_content_conflict, _find_remote_content_conflict
+from .remote import _remote_dir_exists, rsync_dest_spec
+from .verify import _find_content_conflict, _find_remote_content_conflict
 
 
 class _FolderMoveTarget:
