@@ -51,7 +51,7 @@ class _ScanFunction(Protocol):
     """``scanner.scan``, as the stage calls it."""
 
     def __call__(
-        self, root: str, db: Database | None, *, options: ScanOptions | None = None,
+        self, root: str, db: Database, *, options: ScanOptions | None = None,
         hooks: ScanHooks | None = None, control: ScanControl | None = None,
         reported_photo_identities: dict[int, Any] | None = None,
     ) -> object: ...
@@ -667,7 +667,7 @@ class _ScanPass:
                 and hooks.photo == self._on_scanned_photo):
             hooks = replace(hooks, photo=_ScannedPhotoCallback(self))
         self.do_scan(
-            root, self.thread_db,
+            root, self._db(),
             options=replace(
                 options,
                 incremental=True,
