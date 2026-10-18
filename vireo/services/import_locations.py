@@ -57,8 +57,13 @@ FOOTPRINT_RADIUS_M = 300
 # How far one of your location keywords' own map point reaches.
 PLACE_RADIUS_M = 300
 
-MAX_CHOICES = 1000
-MAX_CHOICE_CELLS = 50_000
+# One card's worth and then some; the suggestions map every path to its cell.
+MAX_SUGGESTION_PATHS = 100_000
+# Choices come from a preview of at most MAX_SUGGESTION_PATHS files, which
+# has no more cells than files and no more groups than cells, so admission
+# accepts anything the page can send.
+MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS
+MAX_CHOICES = MAX_SUGGESTION_PATHS
 MAX_LOCATION_NAME = 200
 
 _SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area")

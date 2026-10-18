@@ -276,8 +276,8 @@ def test_location_options_stay_unique_when_ancestry_reads_alike(db):
     labels = {o["id"]: o["label"] for o in options}
 
     assert len({label.casefold() for label in labels.values()}) == len(labels)
-    assert labels[ids[0]] == f"Laguna Lake · San Diego County · California · USA (#{ids[0]})"
-    assert labels[dog] == f"Dog Beach · Ocean Beach (#{dog})"
+    assert labels[ids[0]] == f"Laguna Lake · San Diego County · California · USA [#{ids[0]}]"
+    assert labels[dog] == f"Dog Beach · Ocean Beach [#{dog}]"
     assert labels[breadcrumb] == "Dog Beach · Ocean Beach"
 
 
@@ -300,6 +300,16 @@ def test_parse_location_choices_keeps_the_request_shape():
     ]
     assert parse_location_choices(parsed) == parsed
     assert parse_location_choices(None) == []
+
+
+def test_admission_accepts_every_choice_set_a_preview_can_produce():
+    """One choice per cell, for a preview at its file cap, is admissible."""
+    cap = import_locations.MAX_SUGGESTION_PATHS
+    raw = [{"cells": [f"{i // 1000},{i % 1000}"], "kind": "keyword", "keyword_id": 1}
+           for i in range(cap)]
+    assert len(parse_location_choices(raw)) == cap
+    with pytest.raises(LocationChoiceError):
+        parse_location_choices(raw + [{"cells": ["-1,-1"], "kind": "keyword", "keyword_id": 1}])
 
 
 @pytest.mark.parametrize("raw", [

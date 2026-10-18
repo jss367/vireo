@@ -25,7 +25,7 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
-from services.import_locations import stream_location_suggestions
+from services.import_locations import MAX_SUGGESTION_PATHS, stream_location_suggestions
 from services.imports import ImportFailure, ImportService
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -59,9 +59,6 @@ DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS = 0.1
 # subprocess for its leftovers, keeping subprocess overhead unchanged.
 # Module-level so tests can override it.
 DUPLICATE_CHECK_PREP_BATCH_SIZE = 100
-
-# One card's worth and then some; the response maps every path to its cell.
-MAX_LOCATION_SUGGESTION_PATHS = 100_000
 
 
 def _folder_ids_under(folders, staging_destination):
@@ -1810,9 +1807,9 @@ def create_imports_blueprint(
             or any(not isinstance(path, str) or not path for path in paths)
         ):
             return json_error("paths must be a non-empty list of file paths", 400)
-        if len(paths) > MAX_LOCATION_SUGGESTION_PATHS:
+        if len(paths) > MAX_SUGGESTION_PATHS:
             return json_error(
-                f"at most {MAX_LOCATION_SUGGESTION_PATHS:,} files can be checked for locations",
+                f"at most {MAX_SUGGESTION_PATHS:,} files can be checked for locations",
                 400,
             )
         import config as cfg
