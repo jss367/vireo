@@ -398,8 +398,11 @@ class ImportLocationSuggester:
         for group in self._groups.values():
             done = _finish_group(self._db, group)
             if done is None:
-                # The suggested keyword vanished mid-request; offer the cells unnamed.
-                done = _finish_group(self._db, {**group, "key": "none", "suggestion": None})
+                # The suggested keyword vanished mid-request; offer the cells
+                # unnamed, but keep the group's own key so each vanished group
+                # stays distinct from the unnamed group (and from each other):
+                # the frontend stores per-group edits by that key.
+                done = _finish_group(self._db, {**group, "suggestion": None})
             finished.append(done)
         finished.sort(key=lambda g: (g["suggestion"] is None, -g["file_count"]))
         return {
@@ -578,6 +581,11 @@ def _apply_choice(
             if item is not None:
                 items.append(item)
         if items:
+            # Re-check cancellation after the last assignment: without this,
+            # Stop arriving during the final change_photo_location would still
+            # record the undo step and commit the transaction.
+            if cancel_check(pause_safe=False):
+                raise _ChoiceCancelled
             db.record_edit(
                 "photo_location",
                 f'Added location "{name}" during import to {len(items)} photos',

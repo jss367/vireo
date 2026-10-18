@@ -217,6 +217,29 @@ def test_without_an_api_key_unknown_spots_are_offered_unnamed(db, fid, no_google
     assert unnamed["unresolved_reasons"] == {"no_api_key": 1}
 
 
+def test_vanished_keyword_groups_keep_unique_keys(db, fid, no_google):
+    """When a suggested keyword is deleted mid-request, the fallback must
+    keep each group's key unique: the frontend stores per-group edits by
+    that key, so colliding keys would apply one row's typed name to every
+    other collided group — tagging cells the user left blank."""
+    near_a = _kw(db, "Place A", point=(RIVER[0][0] + 0.0001, RIVER[0][1]))
+    near_c = _kw(db, "Place C", point=(RIVER[2][0] + 0.0001, RIVER[2][1]))
+    _photo(db, fid, "unnamed.jpg", FAR_AWAY)  # one cell with no suggestion
+    files = _files([RIVER[0], RIVER[2], FAR_AWAY])
+    suggester = import_locations.ImportLocationSuggester(
+        db, files, api_key="", language="en")
+    for key in suggester.cell_keys:
+        suggester.name_cell(key)
+    # Both suggested keywords vanish before the groups are finished.
+    db.conn.execute("DELETE FROM keywords WHERE id IN (?, ?)", (near_a, near_c))
+    db.conn.commit()
+
+    groups = suggester.result()["groups"]
+    assert [g["suggestion"] for g in groups] == [None, None, None]
+    keys = [g["key"] for g in groups]
+    assert len(set(keys)) == 3
+
+
 def test_location_options_tell_same_named_places_apart(db):
     slo = _kw(db, "San Luis Obispo")
     sd = _kw(db, "San Diego")
@@ -395,6 +418,45 @@ def test_cancelling_mid_choice_leaves_nothing_behind(db, fid, monkeypatch):
     assert summary["locations_added"] == 0
     assert [_location(db, pid) for pid in pids] == [None, None, None]
     assert db.conn.execute("SELECT 1 FROM keywords WHERE name = 'Dog Beach'").fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM edit_history WHERE description LIKE '%Dog Beach%'").fetchone() is None
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE change_type = 'location'").fetchone()[0] == 0
+
+
+def test_cancelling_during_the_final_assignment_rolls_back_too(db, fid, monkeypatch):
+    """Stop arriving during the final (or only) ``change_photo_location``
+    must not leave a tagged photo and an undo step behind: without the
+    final in-transaction cancel_check, the loop ends and record_edit plus
+    the commit still fly even though cancellation has been requested."""
+    pid = _photo(db, fid, "lone.jpg", RIVER[0])
+    choices = parse_location_choices([{
+        "cells": [cell_key(*RIVER[0])], "kind": "new", "name": "Dog Beach",
+        "latitude": 32.7545, "longitude": -117.25,
+    }])
+    from services import edit_history
+    change_location = edit_history.change_photo_location
+    assignments = []
+
+    def observed_change(*args, **kwargs):
+        item = change_location(*args, **kwargs)
+        assignments.append(True)
+        return item
+
+    monkeypatch.setattr(edit_history, "change_photo_location", observed_change)
+
+    def cancel_after_the_change(**kwargs):
+        return bool(assignments)
+
+    summary = _summary()
+    apply_location_choices(db, [pid], choices, api_key="", language="en",
+                           summary=summary, cancel_check=cancel_after_the_change)
+
+    assert summary["cancelled"] is True
+    assert summary.get("locations_added", 0) == 0
+    assert _location(db, pid) is None
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = 'Dog Beach'").fetchone() is None
     assert db.conn.execute(
         "SELECT 1 FROM edit_history WHERE description LIKE '%Dog Beach%'").fetchone() is None
     assert db.conn.execute(
