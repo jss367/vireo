@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 
 import filter_shortcuts
 from config import read_raw_config_file, settings_write_lock
@@ -42,7 +43,7 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
     try:
         db.set_active_workspace(int(workspace_id))
         db.queue_location_changes_for_tagged_photos()
-    except Exception:
+    except Exception:  # broad: a saved setting must not be undone by its cleanup side effect
         log.warning(
             "Failed to queue location cleanup for workspace %s",
             workspace_id, exc_info=True,
@@ -100,7 +101,7 @@ def queue_location_keyword_cleanup_on_global_off(
         return
     try:
         workspaces = db.workspaces.list_all()
-    except Exception:
+    except sqlite3.Error:
         log.warning(
             "Failed to enumerate workspaces for %s cleanup check",
             key, exc_info=True,

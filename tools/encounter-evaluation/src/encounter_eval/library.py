@@ -137,6 +137,13 @@ class FeatureReader:
         """
         return self
 
+    @property
+    def taxa(self):
+        """``db.taxa`` as ``species_identity.SpeciesResolver`` reads it."""
+        from repositories.taxa import TaxaRepository
+
+        return TaxaRepository(self.conn)
+
     def get_detector_run_photo_ids(self, detector_model):
         # Evaluation always loads explicit session IDs. The production loader
         # stages this scope before requesting detector completion evidence.

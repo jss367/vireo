@@ -354,7 +354,7 @@ def _write_inat_upload_render(
         replace_file(tmp_path, out_path)
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(expected_meta, f, sort_keys=True)
-    except Exception:
+    except Exception:  # broad: close and remove the unpublished temporary upload, then re-raise
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)

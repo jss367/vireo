@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 
 from artifact_flight import ArtifactProducerFailed
 from camera_denoise import cache_matches as _camera_cache_matches
-from db import commit_with_retry
 from pipeline_stages.context import PipelineRun
 from preview_materializer import (
     PreviewMaterializationError,
@@ -198,11 +197,8 @@ class _ThumbPass:
 
     def _flush_thumb_paths(self):
         if self.pending_thumb_paths:
-            self.thread_db.conn.executemany(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                self.pending_thumb_paths,
-            )
-            commit_with_retry(self.thread_db.conn)
+            self.thread_db.caches.set_thumbnail_paths(self.pending_thumb_paths)
+            self.thread_db.commit_with_retry()
             self.pending_thumb_paths.clear()
 
     def _report_progress(self, photo_path, total):
