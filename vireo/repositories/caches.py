@@ -1,9 +1,6 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-It also reconciles ``photos.thumb_path`` (the thumbnail cache's catalog
-column) with the files on disk, for ``thumbnails.backfill_thumb_paths``.
-
-It reads the "do not adopt this preview" markers in
+It also reads the "do not adopt this preview" markers in
 ``preview_cache_invalidations``; ``preview_cache`` still creates that table
 lazily and writes it.
 
@@ -12,6 +9,9 @@ repository takes no workspace id. The lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
 passes them in so this module imports no ``db`` code and a monkeypatch of
 ``db.commit_with_retry`` still reaches the offline-original writes.
+
+The thumbnail cache's catalog column, ``photos.thumb_path``, is reconciled
+with the files on disk here too, for ``thumbnails.backfill_thumb_paths``.
 
 Callers reach it as ``db.caches`` (a fresh repository per access, see
 ``Database.caches``); there are no forwarding wrappers on ``Database``.
