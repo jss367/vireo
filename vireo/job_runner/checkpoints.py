@@ -26,11 +26,14 @@ class JobCheckpointer:
     runner's job registry; writes go through ``JobHistory``.
     """
 
-    def __init__(self, lock, jobs, history, workers):
+    def __init__(self, lock, jobs, history, workers, *, checkpoint):
         self._lock = lock
         self._jobs = jobs
         self._history = history
         self._workers = workers
+        # Timer/flush honor the runner hook; its default delegator calls
+        # checkpoint_live_jobs below, which remains the implementation.
+        self._checkpoint = checkpoint
         # Periodic checkpointing of live jobs into job_history. Started
         # lazily by the first persisted job and exits on its own once no
         # persisted job is live, so idle runners (and the thousands the
@@ -86,7 +89,7 @@ class JobCheckpointer:
                     self.thread = None
                     return
             try:
-                self.checkpoint_live_jobs()
+                self._checkpoint()
             except Exception:
                 log.exception("Job checkpoint failed")
 
@@ -168,7 +171,7 @@ class JobCheckpointer:
         for attempt in range(attempts):
             if cancel_check is not None and cancel_check():
                 return False
-            self.checkpoint_live_jobs()
+            self._checkpoint()
             if job.get("_checkpointed_partial") is job.get("partial_result"):
                 return True
             time.sleep(0.2 * (attempt + 1))

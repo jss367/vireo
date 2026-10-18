@@ -35,9 +35,14 @@ class WorkerThreads:
     collaborators read ``shutting_down`` under that lock.
     """
 
-    def __init__(self, lock, run_job):
+    def __init__(self, lock, run_job_provider):
+        # ``run_job_provider`` is a zero-arg callable resolved every time
+        # a worker thread is started so a runner instrumented after
+        # construction (a fixture or subclass that assigns ``_run_job``)
+        # still has its replacement honored — matching the pre-extraction
+        # ``_start_worker_thread`` that read ``self._run_job`` each time.
         self._lock = lock
-        self._run_job = run_job
+        self._run_job_provider = run_job_provider
         self.threads = set()
         self.shutting_down = False
 
@@ -52,7 +57,7 @@ class WorkerThreads:
         already registered a job but had not started its thread yet.
         """
         thread = _TrackedJobThread(
-            target=self._run_job,
+            target=self._run_job_provider(),
             args=(job, work_fn),
             on_finish=self._forget,
             daemon=True,
