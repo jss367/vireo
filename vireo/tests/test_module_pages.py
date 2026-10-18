@@ -21,14 +21,10 @@ import re
 from pathlib import Path
 
 import pytest
-from page_scripts import module_graph, module_imports, module_pages
+from page_scripts import PageMarkup, module_graph, module_imports, module_pages, static_scripts
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 STATIC = Path(__file__).resolve().parents[1] / "static"
-STATIC_SCRIPT_RE = re.compile(r'<script\b([^>]*)\bsrc="/static/([\w./-]+\.js)"[^>]*>', re.I)
-INLINE_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
-# An on<event>= attribute inside a tag (not text such as "Show only").
-INLINE_HANDLER_RE = re.compile(r"<[a-zA-Z][^>]*?\son[a-z]+\s*=", re.S)
 
 PAGES = sorted(module_pages().items())
 PAGE_IDS = [page for page, _ in PAGES]
@@ -55,18 +51,20 @@ def test_module_page_loads_only_its_boot_module(app_and_db, page, contract):
     app, _ = app_and_db
     html = app.test_client().get(contract["route"]).get_data(as_text=True)
     page_scripts = [
-        (attrs, src) for attrs, src in STATIC_SCRIPT_RE.findall(html)
+        (attrs, src) for attrs, src in static_scripts(html)
         if src.startswith(page + "/")
     ]
-    assert page_scripts == [(' type="module" ', f"{page}/boot.js")], page_scripts
+    assert len(page_scripts) == 1, page_scripts
+    attrs, src = page_scripts[0]
+    assert src == f"{page}/boot.js" and attrs.get("type") == "module", page_scripts
 
 
 @pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)
 def test_no_template_loads_module_page_files_as_classic_scripts(page, contract):
     offenders = []
     for template in sorted(TEMPLATES.rglob("*.html")):
-        for attrs, src in STATIC_SCRIPT_RE.findall(template.read_text(encoding="utf-8")):
-            if src.startswith(page + "/") and 'type="module"' not in attrs:
+        for attrs, src in static_scripts(template.read_text(encoding="utf-8")):
+            if src.startswith(page + "/") and attrs.get("type") != "module":
                 offenders.append(f"{template.name}: {src}")
     assert not offenders, offenders
 
@@ -74,10 +72,10 @@ def test_no_template_loads_module_page_files_as_classic_scripts(page, contract):
 @pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)
 def test_module_page_template_has_no_inline_script_or_handlers(page, contract):
     text = (TEMPLATES / contract["template"]).read_text(encoding="utf-8")
-    inline = [body for attrs, body in INLINE_SCRIPT_RE.findall(text)
-              if "src=" not in attrs and body.strip()]
+    markup = PageMarkup(text)
+    inline = [body for attrs, body in markup.scripts if "src" not in attrs and body.strip()]
     assert not inline, f"{contract['template']} has inline <script>; put it in a module"
-    handlers = INLINE_HANDLER_RE.findall(text)
+    handlers = markup.handlers
     assert not handlers, (
         f"{contract['template']} has inline on*= handlers: {handlers}. Bind them "
         "with addEventListener in the page's boot.js."
@@ -133,3 +131,27 @@ def test_shared_writes_belong_to_shared_scripts(page, contract):
     )
     for name in contract["sharedWrites"]:
         assert re.search(rf"\bwindow\.{re.escape(name)}\b", shared_sources), name
+
+
+@pytest.mark.parametrize("text", [
+    '<script src="/static/misses/boot.js"></script>',
+    "<SCRIPT SRC='/static/misses/boot.js'></SCRIPT>",
+    '<script defer src=/static/misses/boot.js></script>',
+    '<script data-x=">" SRC=/static/misses/boot.js?v=1#entry></script>',
+])
+def test_static_script_guard_accepts_html_attribute_forms(text):
+    [(attrs, src)] = static_scripts(text)
+    assert src == "misses/boot.js"
+    assert attrs.get("type") != "module"
+
+
+def test_markup_guard_handles_module_and_inline_attributes():
+    text = "<script SRC='/static/misses/boot.js' TYPE=module></script>"
+    [(attrs, _)] = static_scripts(text)
+    assert attrs["type"] == "module"
+    markup = PageMarkup('<button OnClick="go()" ONDBLCLICK=x></button>'
+                        '<script>const text = "<b onclick=x>";</script>'
+                        '<!-- <button onclick=x> -->')
+    assert markup.handlers == ["onclick", "ondblclick"]
+    assert markup.scripts == [({}, 'const text = "<b onclick=x>";')]
+    assert PageMarkup('<script src=x SRC=y></script>').scripts == [({"src": "x"}, "")]

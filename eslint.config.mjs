@@ -11,19 +11,31 @@ const modulePages = JSON.parse(readFileSync(new URL('./frontend-module-pages.jso
 const GLOBAL_OBJECTS = '/^(window|globalThis|self)$/';
 const inlineHandlerRestrictions = [
   {
-    selector: 'Literal[value=/\\bon[a-z]+\\s*=/]',
+    selector: 'Literal[value=/\\bon[a-z]+\\s*=/i]',
     message: 'Module pages bind events with addEventListener, not inline on*= markup.',
   },
   {
-    selector: 'TemplateElement[value.raw=/\\bon[a-z]+\\s*=/]',
+    selector: 'TemplateElement[value.raw=/\\bon[a-z]+\\s*=/i]',
     message: 'Module pages bind events with addEventListener, not inline on*= markup.',
   },
   {
-    selector: 'AssignmentExpression > MemberExpression.left[property.name=/^on[a-z]+$/]',
+    selector: 'AssignmentExpression > MemberExpression.left[property.name=/^on[a-z]+$/i]',
     message: 'Module pages bind events with addEventListener, not on* properties.',
   },
   {
-    selector: "CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^on[a-z]/]",
+    selector: 'AssignmentExpression > MemberExpression.left[computed=true][property.value=/^on[a-z]+$/i]',
+    message: 'Module pages bind events with addEventListener, not on* properties.',
+  },
+  {
+    selector: `UpdateExpression > MemberExpression.argument[object.name=${GLOBAL_OBJECTS}], UnaryExpression[operator='delete'] > MemberExpression.argument[object.name=${GLOBAL_OBJECTS}]`,
+    message: 'Module pages own no globals: export the value instead.',
+  },
+  {
+    selector: `CallExpression[callee.object.name='Reflect'][callee.property.name=/^(set|defineProperty|deleteProperty)$/][arguments.0.name=${GLOBAL_OBJECTS}]`,
+    message: 'Module pages own no globals: export the value instead.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^on[a-z]+$/i]",
     message: 'Module pages bind events with addEventListener, not on* attributes.',
   },
   {

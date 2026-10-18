@@ -12,6 +12,7 @@ inlining every module the entry reaches, each once.
 
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -74,3 +75,53 @@ def page_with_scripts(client, path):
     """The rendered page with its ``/static`` scripts inlined."""
     html = client.get(path).get_data(as_text=True)
     return _STATIC_SCRIPT_RE.sub(_inline, html)
+
+
+class PageMarkup(HTMLParser):
+    """Browser-style tag/attribute parsing for the module-page guards."""
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=True)
+        self.scripts = []
+        self.handlers = []
+        self._script = None
+        self.feed(text)
+        self.close()
+        if self._script is not None:
+            self.scripts.append(self._script)
+
+    def handle_starttag(self, tag, attrs):
+        # HTML uses the first value when an attribute occurs more than once.
+        attributes = {}
+        for name, value in attrs:
+            attributes.setdefault(name, value)
+            if re.fullmatch(r"on[a-z]+", name):
+                self.handlers.append(name)
+        if tag == "script":
+            self._script = (attributes, "")
+
+    def handle_startendtag(self, tag, attrs):
+        # A trailing slash does not close a non-void HTML script element.
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data):
+        if self._script is not None:
+            attrs, body = self._script
+            self._script = (attrs, body + data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._script is not None:
+            self.scripts.append(self._script)
+            self._script = None
+
+
+def static_scripts(text):
+    """Local JS script attributes and paths, independent of HTML quoting."""
+    scripts = []
+    for attrs, _ in PageMarkup(text).scripts:
+        src = attrs.get("src") or ""
+        # Query strings and fragments do not change which static file loads.
+        path = re.split(r"[?#]", src, maxsplit=1)[0]
+        if path.startswith("/static/") and path.endswith(".js"):
+            scripts.append((attrs, path[len("/static/"):]))
+    return scripts

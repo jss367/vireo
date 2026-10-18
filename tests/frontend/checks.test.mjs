@@ -90,3 +90,26 @@ for (const [page, contract] of Object.entries(modulePages)) {
     assert.deepEqual(messages.map(message => message.ruleId), ['no-restricted-syntax', 'no-restricted-syntax']);
   });
 }
+
+
+for (const page of Object.keys(modulePages)) {
+  for (const file of ['render.js', 'shared.js']) {
+    test(`${page}/${file}: global mutation forms are rejected`, async () => {
+      const messages = await lint(
+        'window.x++; --globalThis.y; delete self.z; Reflect.set(window, "x", 1);'
+          + ' Reflect.defineProperty(self, "y", {}); Reflect.deleteProperty(globalThis, "z");',
+        `vireo/static/${page}/${file}`,
+      );
+      assert.deepEqual(messages.map(message => message.ruleId), Array(6).fill('no-restricted-syntax'));
+    });
+    test(`${page}/${file}: mixed-case inline handler forms are rejected`, async () => {
+      const messages = await lint(
+        'export const a = \'<div ONCLICK="go()">\'; export const b = `<b OnDblClick="x">`;'
+          + ' document.body.OnClick = null; document.body["ONCLICK"] = null;'
+          + ' document.body.setAttribute("OnClick", "x");',
+        `vireo/static/${page}/${file}`,
+      );
+      assert.deepEqual(messages.map(message => message.ruleId), Array(5).fill('no-restricted-syntax'));
+    });
+  }
+}
