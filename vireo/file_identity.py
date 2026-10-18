@@ -11,7 +11,7 @@ _probes = {}
 def catalog_folder_aliases(db):
     """Build a lexical lookup once for a scan, without probing every folder."""
     aliases = {}
-    for row in db.get_all_folders():
+    for row in db.local_folders.catalog_paths():
         aliases.setdefault(os.path.normpath(row["path"]).casefold(), []).append(row["path"])
     return aliases
 
