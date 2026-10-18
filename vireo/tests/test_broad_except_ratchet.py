@@ -27,6 +27,12 @@ Two rules hold that line:
   lines directly above it). A boundary that stays broad on purpose gets both
   the log and the reason. Add a directory (``"services/"``) or a module
   (``"jobs.py"``) to ``DOCUMENTED_ROOTS`` once its handlers pass.
+Traceback accounting proves only a straight-line prefix: conditional
+logging/re-raises, early exits, loops and other control flow need an explicit
+reason. ``log.exception`` must not disable ``exc_info``; other logger calls
+need a truthy literal, the unchanged caught exception, or ``sys.exc_info()``.
+Comprehension iteration targets have their own scope and do not shadow outer
+contextlib aliases. No dynamic import, runtime type or general path analysis.
 """
 
 import ast
@@ -94,7 +100,13 @@ def _scope_bindings(body, inherited, args=None):
     for node in body:
         bind(node)
     # Conservatively invalidate assignments, regardless of statement ordering.
+    comprehension_targets = {
+        id(child) for root in _own_nodes(body) if isinstance(root, ast.comprehension)
+        for child in ast.walk(root.target)
+    }
     for node in _own_nodes(body):
+        if id(node) in comprehension_targets:
+            continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bindings[node.id] = None
         elif isinstance(node, ast.ExceptHandler) and node.name:
@@ -182,19 +194,28 @@ def _logger_receiver(node) -> bool:
     return False
 
 
-def _logs_traceback(call) -> bool:
+def _logs_traceback(call, exception_name=None) -> bool:
+    """Known logger syntax, with no false or unknown traceback override."""
     func = call.func
     if not isinstance(func, ast.Attribute) or func.attr not in LOG_METHODS:
         return False
     if not _logger_receiver(func.value):
         return False
-    if func.attr == "exception":
-        return True
+    if any(keyword.arg is None for keyword in call.keywords):
+        return False  # **options may contain exc_info=False.
     for keyword in call.keywords:
         if keyword.arg == "exc_info":
             value = keyword.value
-            return not (isinstance(value, ast.Constant) and not value.value)
-    return False
+            if isinstance(value, ast.Constant):
+                return bool(value.value)
+            if isinstance(value, ast.Name):
+                return value.id == exception_name
+            return (
+                isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and isinstance(value.func.value, ast.Name) and value.func.value.id == "sys"
+                and value.func.attr == "exc_info" and not value.args and not value.keywords
+            )
+    return func.attr == "exception"
 
 
 def _has_reason_comment(lines, first, last) -> bool:
@@ -214,11 +235,25 @@ def is_accounted_for(kind, node, lines) -> bool:
     """Whether a broad handler re-raises, logs the traceback, or says why."""
     if kind == "suppress":
         return _has_reason_comment(lines, _comment_block_above(lines, node.lineno), node.lineno)
-    for child in _own_nodes(node.body):
-        if isinstance(child, ast.Raise):
+    # Only a straight-line prefix proves every quiet continuation reaches
+    # the logging/re-raise. Branches/loops/try/with/returns fail closed; use
+    # an explicit reason instead of attempting general control-flow analysis.
+    straight_line = (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign,
+                     ast.Pass, ast.Delete, ast.Assert, ast.Import, ast.ImportFrom)
+    exception_name = node.name
+    for statement in node.body:
+        if any(isinstance(child, ast.Yield | ast.YieldFrom) for child in ast.walk(statement)):
+            break
+        if any(isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+               and child.id == exception_name for child in _own_nodes([statement])):
+            exception_name = None
+        if isinstance(statement, ast.Raise):
             return True
-        if isinstance(child, ast.Call) and _logs_traceback(child):
+        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                and _logs_traceback(statement.value, exception_name)):
             return True
+        if not isinstance(statement, straight_line):
+            break
     # The except line through the line before the body's first statement:
     # the clause itself (possibly a multi-line tuple) and comments under it.
     return _has_reason_comment(lines, node.lineno, max(node.lineno, node.body[0].lineno - 1))
@@ -327,6 +362,8 @@ def test_documented_roots_exist():
     ("from contextlib import suppress\ndef f(suppress):\n    with suppress(Exception): pass\n", 0),
     ("import contextlib as ctx\ndef f():\n    ctx = unrelated\n    with ctx.suppress(Exception): pass\n", 0),
     ("def f():\n    from contextlib import suppress as quiet\n    with quiet(Exception): pass\n", 1),
+    ("from contextlib import suppress\nitems = [suppress for suppress in values]\nwith suppress(Exception): pass\n", 1),
+    ("import contextlib as ctx\nitems = {ctx: 1 for ctx in values}\nwith ctx.suppress(Exception): pass\n", 1),
 ])
 def test_broad_handler_detection(source, count):
     assert len(broad_handlers(ast.parse(source))) == count
@@ -339,7 +376,7 @@ def test_broad_handler_detection(source, count):
     ("try:\n    f()\nexcept Exception as e:\n    raise ValueError(str(e)) from e\n", True),
     ("try:\n    f()\nexcept Exception:\n    log.exception('x')\n", True),
     ("try:\n    f()\nexcept Exception:\n    logger.warning('x', exc_info=True)\n", True),
-    ("try:\n    f()\nexcept Exception:\n    self._log.error('x', exc_info=exc)\n", True),
+    ("try:\n    f()\nexcept Exception:\n    self._log.error('x', exc_info=exc)\n", False),
     ("try:\n    f()\nexcept Exception:\n    logging.getLogger().exception('x')\n", True),
     ("try:\n    f()\nexcept Exception as e:\n    log.warning('x %s', e)\n", False),
     ("try:\n    f()\nexcept Exception:\n    log.warning('x', exc_info=False)\n", False),
@@ -357,6 +394,12 @@ def test_broad_handler_detection(source, count):
     ("try:\n    f()\nexcept Exception:\n    catalog.error('x', exc_info=True)\n", False),
     ("try:\n    f()\nexcept Exception:\n    dialog.exception('x')\n", False),
     ("try:\n    f()\nexcept Exception:\n    factory.getLogger().exception('x')\n", False),
+    ("try:\n    f()\nexcept Exception:\n    log.exception('x', exc_info=False)\n", False),
+    ("try:\n    f()\nexcept Exception:\n    if condition: raise\n", False),
+    ("try:\n    f()\nexcept Exception:\n    if condition: log.exception('x')\n", False),
+    ("try:\n    f()\nexcept Exception:\n    if condition: return\n    log.exception('x')\n", False),
+    ("try:\n    f()\nexcept Exception as exc:\n    log.error('x', exc_info=exc)\n", True),
+    ("try:\n    f()\nexcept Exception:\n    log.error('x', exc_info=sys.exc_info())\n", True),
 ])
 def test_accounted_for(source, accounted):
     tree = ast.parse(source)
