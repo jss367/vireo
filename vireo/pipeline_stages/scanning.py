@@ -1304,11 +1304,7 @@ class _ScanPass:
         )
         dest_ci_root = _case_insensitive_root(root)
         indexed: set[str] = set()
-        rows = self._db().conn.execute(
-            """SELECT f.path, p.filename
-                 FROM photos p
-                 JOIN folders f ON f.id = p.folder_id"""
-        ).fetchall()
+        rows = self._db().imports.cataloged_file_rows()
         for row in rows:
             folder = row["path"]
             if not _path_equal_or_descends(

@@ -100,8 +100,9 @@ class ScanningRepository:
 
         ``assignments`` are ``"<column>=?"`` (or literal) clauses for the
         columns the caller decided to write, from the scan's metadata refresh
-        and the companion gap fill; ``params`` binds their placeholders in
-        order.
+        and the companion gap fill (and ``capture_time``'s re-read after it
+        rewrites a photo's capture time); ``params`` binds their placeholders
+        in order.
         """
         self.conn.execute(
             f"UPDATE photos SET {', '.join(assignments)} WHERE id=?",
