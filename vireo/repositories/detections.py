@@ -179,8 +179,8 @@ class DetectionsRepository:
     ) -> list[int]:
         """Replace detections and record the detector_runs row in one commit.
 
-        ``is_pinned(photo_id, detector_model)`` is the façade's
-        ``Database.detector_run_is_pinned``; it is consulted only when the
+        ``is_pinned(photo_id, detector_model)`` is
+        ``ModelRunsRepository.detector_run_is_pinned``; it is consulted only when the
         run's identity changed and the caller did not force the replace.
         See ``Database.write_detection_batch``.
         """

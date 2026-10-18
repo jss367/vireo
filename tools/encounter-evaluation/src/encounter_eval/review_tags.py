@@ -28,7 +28,7 @@ def _apply_tags(db, photo, answer, marker):
         if now is None or not same_photo(photo, dict(now)):
             raise ValueError('Photo no longer matches this library or workspace; no tags were changed')
         fingerprint = digest([answer['revision'], answer['taxa'], answer['status']])
-        receipt = db.get_meta(marker)
+        receipt = db.meta.get(marker)
         if receipt:
             receipt = json.loads(receipt)
             if receipt['revision'] >= answer['revision']:
@@ -80,7 +80,7 @@ def _apply_tags(db, photo, answer, marker):
                 db.record_edit('keyword_add', f'Species review: added "{name}"', str(kid),
                                [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}], _commit=False)
         result = {'added': len(desired - existing), 'removed': len(removed)}
-        db.set_meta(marker, json.dumps({'revision': answer['revision'], 'fingerprint': fingerprint, 'result': result}), _commit=False)
+        db.meta.set(marker, json.dumps({'revision': answer['revision'], 'fingerprint': fingerprint, 'result': result}), _commit=False)
     return result
 
 

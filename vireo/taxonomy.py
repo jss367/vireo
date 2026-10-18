@@ -1644,8 +1644,8 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     cn_loaded = _index_taxa_common_names(db, taxa_by_common, _status)
 
     db.keywords.relink_source_species()
-    db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
-    db.set_meta("ambiguous_common_names", json.dumps(sorted(ambiguous_common)), _commit=False)
+    db.meta.set("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
+    db.meta.set("ambiguous_common_names", json.dumps(sorted(ambiguous_common)), _commit=False)
     db.commit()
     result = {
         "taxa_loaded": len(entries_by_inat_id),
@@ -1674,7 +1674,7 @@ def fetch_common_names(db, locale='en'):
     remaining = {iid for _, iid in inat_ids}
     # A partial refresh cannot certify an old, lossy name index.
     if locale == 'en':
-        db.set_meta("common_name_identity_version", "", _commit=False)
+        db.meta.set("common_name_identity_version", "", _commit=False)
 
     for i in range(0, len(inat_ids), INAT_BATCH_SIZE):
         batch = inat_ids[i:i + INAT_BATCH_SIZE]
@@ -1714,8 +1714,8 @@ def fetch_common_names(db, locale='en'):
             continue
 
     if locale == 'en' and inat_ids and not remaining:
-        db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
-        db.set_meta("ambiguous_common_names", "[]", _commit=False)
+        db.meta.set("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
+        db.meta.set("ambiguous_common_names", "[]", _commit=False)
     db.commit()
     log.info("Common names: %d taxa updated", updated)
     return {"updated": updated}

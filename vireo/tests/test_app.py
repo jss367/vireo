@@ -26239,7 +26239,7 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
         "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (42, ?, ?, 'species')",
         (scientific, common),
     )
-    db.set_meta("common_name_identity_version", "1" if verified_names else "")
+    db.meta.set("common_name_identity_version", "1" if verified_names else "")
     photos = []
     prediction_ids = []
     for i in range(2):
@@ -26371,7 +26371,7 @@ def test_batch_accept_same_species_with_different_keyword_names(
         (taxon, scientific, common),
     ).lastrowid
     db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
-    db.set_meta("common_name_identity_version", "1")
+    db.meta.set("common_name_identity_version", "1")
     alias_id = db.add_keyword(alias, is_species=True)
     common_id = db.add_keyword(common, is_species=True)
     assert alias_id != common_id
@@ -26470,7 +26470,7 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
         (taxon, scientific, common),
     ).lastrowid
     db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
-    db.set_meta("common_name_identity_version", "1")
+    db.meta.set("common_name_identity_version", "1")
     alias_id = db.add_keyword(alias, is_species=True)
     common_id = db.add_keyword(common, is_species=True)
     assert alias_id != common_id
@@ -26531,7 +26531,7 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
         "VALUES (14850, 'Sturnus vulgaris', ?, 'species')", (common,),
     ).lastrowid
     db.conn.execute("INSERT INTO taxa_common_names (name, taxon_id) VALUES (?, ?)", (alias, local_id))
-    db.set_meta("common_name_identity_version", "1")
+    db.meta.set("common_name_identity_version", "1")
     alias_id = db.add_keyword(alias, is_species=True)
     common_id = db.add_keyword(common, is_species=True)
     photo_a, _ = _seed_prediction_photo(db, "alias-status.jpg", alias, .95)
@@ -26671,7 +26671,7 @@ def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
         "INSERT INTO taxa (inat_id, name, common_name, rank) "
         "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
     )
-    db.set_meta("common_name_identity_version", "1")
+    db.meta.set("common_name_identity_version", "1")
     existing_kid = db.conn.execute(
         "INSERT INTO keywords (name, is_species, type) "
         "VALUES ('California Towhee', 1, 'general')"
@@ -26713,7 +26713,7 @@ def test_batch_accept_on_all_bare_name_reuses_unlinked_same_name_keyword(app_and
         "INSERT INTO taxa (inat_id, name, common_name, rank) "
         "VALUES (42, 'Melozone crissalis', 'California Towhee', 'species')"
     )
-    db.set_meta("common_name_identity_version", "1")
+    db.meta.set("common_name_identity_version", "1")
     existing_kid = db.conn.execute(
         "INSERT INTO keywords (name, is_species, type) "
         "VALUES ('California Towhee', 1, 'general')"

@@ -398,7 +398,8 @@ def malformed_and_bound():
         assert result[1] == 400 and not any(e[0] == "loader" for e in events)
     folder_db = types.SimpleNamespace(
         folders=types.SimpleNamespace(get=lambda fid: {"id": fid, "path": "/invented", "name": "invented"}),
-        get_workspace_visible_folder_ids=lambda ids: ids,
+        active_workspace_id=1,
+        workspace_folders=types.SimpleNamespace(visible_ids=lambda ws, ids: ids),
     )
     folder_ns = dict(
         pure,

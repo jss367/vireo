@@ -882,21 +882,21 @@ def test_root_ancestor_and_descendant_checks(db, tree):
     db.add_workspace_folder(ws, a)
     db.add_workspace_folder(ws, win)
     _link_raw(db, ws, q, 0)  # non-root links never count
-    assert db._active_ws_root_ancestor_exists(ws, "/p/a") is True
-    assert db._active_ws_root_ancestor_exists(ws, "/p/a/b/c/") is True
-    assert db._active_ws_root_ancestor_exists(ws, "E:/arch/2026") is True
-    assert db._active_ws_root_ancestor_exists(ws, "/p") is False
-    assert db._active_ws_root_ancestor_exists(ws, "/p/ab") is False
-    assert db._active_ws_root_ancestor_exists(ws, "/q") is False
-    assert db._active_ws_root_descendant_exists(ws, "/p") is True
-    assert db._active_ws_root_descendant_exists(ws, "\\p\\") is True
-    assert db._active_ws_root_descendant_exists(ws, "E:\\") is True
-    assert db._active_ws_root_descendant_exists(ws, "/p/a") is False
-    assert db._active_ws_root_descendant_exists(ws, "/") is True  # "" + "/" prefix
-    assert db._active_ws_root_descendant_exists(ws, "/q") is False
+    assert db.workspace_folders.root_ancestor_exists(ws, "/p/a") is True
+    assert db.workspace_folders.root_ancestor_exists(ws, "/p/a/b/c/") is True
+    assert db.workspace_folders.root_ancestor_exists(ws, "E:/arch/2026") is True
+    assert db.workspace_folders.root_ancestor_exists(ws, "/p") is False
+    assert db.workspace_folders.root_ancestor_exists(ws, "/p/ab") is False
+    assert db.workspace_folders.root_ancestor_exists(ws, "/q") is False
+    assert db.workspace_folders.root_descendant_exists(ws, "/p") is True
+    assert db.workspace_folders.root_descendant_exists(ws, "\\p\\") is True
+    assert db.workspace_folders.root_descendant_exists(ws, "E:\\") is True
+    assert db.workspace_folders.root_descendant_exists(ws, "/p/a") is False
+    assert db.workspace_folders.root_descendant_exists(ws, "/") is True  # "" + "/" prefix
+    assert db.workspace_folders.root_descendant_exists(ws, "/q") is False
     empty = db.create_workspace("Empty")
-    assert db._active_ws_root_ancestor_exists(empty, "/p") is False
-    assert db._active_ws_root_descendant_exists(empty, "/") is False
+    assert db.workspace_folders.root_ancestor_exists(empty, "/p") is False
+    assert db.workspace_folders.root_descendant_exists(empty, "/") is False
 
 
 def test_prune_nonroot_links_outside_roots(db, cache):
@@ -1010,12 +1010,12 @@ def test_photo_in_workspace_follows_folder_membership(db):
     seen = _photo(db, linked, "seen.jpg")
     hidden = _photo(db, unlinked, "hidden.jpg")
 
-    assert db._photo_in_workspace(seen) is True
-    assert db._photo_in_workspace(hidden) is False
-    assert db._photo_in_workspace(hidden + 999) is False
+    assert db.workspace_folders.photo_in_workspace(seen, db.require_workspace_id()) is True
+    assert db.workspace_folders.photo_in_workspace(hidden, db.require_workspace_id()) is False
+    assert db.workspace_folders.photo_in_workspace(hidden + 999, db.require_workspace_id()) is False
     db.set_active_workspace(other)
-    assert db._photo_in_workspace(seen) is False
-    assert db._photo_in_workspace(hidden) is True
+    assert db.workspace_folders.photo_in_workspace(seen, db.require_workspace_id()) is False
+    assert db.workspace_folders.photo_in_workspace(hidden, db.require_workspace_id()) is True
 
 
 def test_photo_in_workspace_needs_an_active_workspace(db):
@@ -1024,7 +1024,7 @@ def test_photo_in_workspace_needs_an_active_workspace(db):
     pid = _photo(db, fid, "a.jpg")
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db._photo_in_workspace(pid)
+        db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id())
 
 
 def test_verify_photo_in_workspace_goes_through_the_facade(db, monkeypatch):
@@ -1032,12 +1032,13 @@ def test_verify_photo_in_workspace_goes_through_the_facade(db, monkeypatch):
     db.add_workspace_folder(db._active_workspace_id, fid)
     pid = _photo(db, fid, "a.jpg")
     db._verify_photo_in_workspace(pid)
-    monkeypatch.setattr(Database, "_photo_in_workspace", lambda self, photo_id: False)
+    monkeypatch.setattr(WorkspaceFolderRepository, "photo_in_workspace",
+                        lambda self, photo_id, workspace_id: False)
     with pytest.raises(ValueError, match=f"Photo {pid} does not belong"):
         db._verify_photo_in_workspace(pid)
 
 
-# -- get_workspace_visible_folder_ids ------------------------------------------------
+# -- workspace_folders.visible_ids ------------------------------------------------
 
 
 def test_get_workspace_visible_folder_ids_links_grants_and_other_workspaces(db, tree):
@@ -1054,16 +1055,16 @@ def test_get_workspace_visible_folder_ids_links_grants_and_other_workspaces(db, 
     # /p is linked, /p/a/b is reached through a photo-only grant, /p/a is
     # unlinked (raw link without descendants) and /q belongs to another
     # workspace; an unknown id is simply absent.
-    assert db.get_workspace_visible_folder_ids([p, a, b, q, 999999]) == {p, b}
-    assert db.get_workspace_visible_folder_ids([a]) == set()
-    assert db.get_workspace_visible_folder_ids([]) == set()
+    assert db.workspace_folders.visible_ids(db.active_workspace_id, [p, a, b, q, 999999]) == {p, b}
+    assert db.workspace_folders.visible_ids(db.active_workspace_id, [a]) == set()
+    assert db.workspace_folders.visible_ids(db.active_workspace_id, []) == set()
 
 
 def test_get_workspace_visible_folder_ids_without_active_workspace_is_empty(db, tree):
     ws, p, a, b, q = tree
     _link_raw(db, ws, p, 1)
     db.set_active_workspace(None)
-    assert db.get_workspace_visible_folder_ids([p]) == set()
+    assert db.workspace_folders.visible_ids(db.active_workspace_id, [p]) == set()
 
 
 def test_get_workspace_visible_folder_ids_chunks(db, tree, monkeypatch):
@@ -1075,7 +1076,7 @@ def test_get_workspace_visible_folder_ids_chunks(db, tree, monkeypatch):
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    got = db.get_workspace_visible_folder_ids([p, a, b, q, 999999])
+    got = db.workspace_folders.visible_ids(db.active_workspace_id, [p, a, b, q, 999999])
     db.conn.set_trace_callback(None)
     assert got == {p, q}
     assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 3
@@ -1238,11 +1239,13 @@ _REMOVED_WRAPPERS = (
     "workspace_has_direct_folder_link",
 )
 
-# Still on ``Database``. ``_photo_in_workspace`` and
-# ``get_workspace_visible_folder_ids`` resolve the active workspace for a
-# repository that takes it explicitly; ``_active_ws_root_ancestor_exists`` /
-# ``_active_ws_root_descendant_exists`` are bound into the merge as callbacks;
-# the rest coordinate subtree walks, removal records or cache invalidation.
+# Still on ``Database``: these coordinate subtree walks, removal records or
+# cache invalidation. The forwarders that only resolved the active workspace
+# (``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) or were bound
+# into the merge as callbacks (``_active_ws_root_ancestor_exists`` /
+# ``_active_ws_root_descendant_exists``) are gone: callers pass the workspace to
+# ``db.workspace_folders.photo_in_workspace`` / ``visible_ids`` and the merge
+# binds ``self.workspace_folders.root_*_exists``.
 _MOVED_METHODS = [
     "_add_workspace_folder_no_commit",
     "add_workspace_folder",
@@ -1256,13 +1259,15 @@ _MOVED_METHODS = [
     "get_workspace_folder_roots",
     "get_workspace_extensions",
     "move_folders_to_workspace",
-    "_active_ws_root_ancestor_exists",
-    "_active_ws_root_descendant_exists",
     "_prune_ws_nonroot_links_outside_roots",
     "workspace_unlinked_folder_count",
-    "_photo_in_workspace",
-    "get_workspace_visible_folder_ids",
 ]
+
+
+def test_workspace_folder_forwarders_are_gone():
+    for name in ("_photo_in_workspace", "get_workspace_visible_folder_ids",
+                 "_active_ws_root_ancestor_exists", "_active_ws_root_descendant_exists"):
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.workspace_folders"
 
 
 @pytest.mark.parametrize("name", _MOVED_METHODS)

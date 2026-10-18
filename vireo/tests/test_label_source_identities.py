@@ -29,8 +29,8 @@ def db(tmp_path):
         )
     # A verified taxonomy that recorded "Redhead" as an alternate name of the
     # Common Pochard too, so the bare label cannot be resolved by name.
-    database.set_meta("common_name_identity_version", "1")
-    database.set_meta("ambiguous_common_names", json.dumps(["redhead"]))
+    database.meta.set("common_name_identity_version", "1")
+    database.meta.set("ambiguous_common_names", json.dumps(["redhead"]))
     database.conn.commit()
     yield database
     database.close()
@@ -164,7 +164,7 @@ def test_backfill_runs_once_per_label_set(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
     db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
-    marker = json.loads(db.get_meta(MARKER_PREFIX + legacy_list["fingerprint"]))
+    marker = json.loads(db.meta.get(MARKER_PREFIX + legacy_list["fingerprint"]))
     assert marker == {"labels": 2, "identified": 1, "predictions_updated": 1, "unidentified": ["Mallard"]}
 
     assert pending_label_sets(db) == []
@@ -212,7 +212,7 @@ def test_an_unreachable_list_is_reported_and_retried_next_time(db, tmp_path, leg
     assert result["errors"] == [
         "california-birds.txt: Could not fetch page 1 of Birds species from iNaturalist",
     ]
-    assert db.get_meta(MARKER_PREFIX + legacy_list["fingerprint"]) is None
+    assert db.meta.get(MARKER_PREFIX + legacy_list["fingerprint"]) is None
     assert [s["fingerprint"] for s in pending_label_sets(db)] == [legacy_list["fingerprint"]]
 
 
@@ -420,7 +420,7 @@ def test_legacy_only_predictions_query_their_saved_lists(db, tmp_path, legacy_li
     result = backfill(db, fetch=fetch)
     assert len(fetch.calls) == 1
     assert result["legacy_predictions_updated"] == 1
-    assert db.get_meta(LEGACY_MARKER) is not None
+    assert db.meta.get(LEGACY_MARKER) is not None
     assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] == 7056
 
 
@@ -436,7 +436,7 @@ def test_failed_legacy_only_lookup_is_retried(db, tmp_path, legacy_list):
 
     result = backfill(db, fetch=offline)
     assert result["ok"] is False
-    assert db.get_meta(LEGACY_MARKER) is None
+    assert db.meta.get(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
     assert backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))["legacy_predictions_updated"] == 1
 
@@ -465,7 +465,7 @@ def test_failed_pending_list_defers_legacy_consensus_until_retry(db, tmp_path, l
 
     result = backfill(db, fetch=fetch)
     assert result["ok"] is False
-    assert db.get_meta(LEGACY_MARKER) is None
+    assert db.meta.get(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
 
     def retry(place_id, *args, **kwargs):
@@ -474,7 +474,7 @@ def test_failed_pending_list_defers_legacy_consensus_until_retry(db, tmp_path, l
     result = backfill(db, fetch=retry)
     assert result["ok"] is True
     assert result["legacy_predictions_updated"] == 0
-    assert db.get_meta(LEGACY_MARKER) is not None
+    assert db.meta.get(LEGACY_MARKER) is not None
     assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
 
 
@@ -533,8 +533,8 @@ def test_source_change_during_lookup_keeps_old_fingerprint_unstamped(db, tmp_pat
     result = backfill(db, fetch=fetch)
     assert result["ok"] is False
     assert "changed" in result["errors"][0]
-    assert db.get_meta(MARKER_PREFIX + fingerprint) is None
-    assert db.get_meta(LEGACY_MARKER) is None
+    assert db.meta.get(MARKER_PREFIX + fingerprint) is None
+    assert db.meta.get(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
     assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
 
@@ -579,7 +579,7 @@ def test_legacy_only_source_change_during_lookup_leaves_consensus_retryable(db, 
 
     result = backfill(db, fetch=fetch)
     assert result['ok'] is False
-    assert db.get_meta(LEGACY_MARKER) is None
+    assert db.meta.get(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, old, 'BioCLIP-2.5', 'legacy'))['source_taxon_id'] is None
 
 
@@ -609,7 +609,7 @@ def test_replaced_sidecar_after_catalog_read_uses_current_query(db, tmp_path, le
     assert fetch.calls and all(call[0] == 1 for call in fetch.calls)
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] == 7054
     if not tracked:
-        assert db.get_meta(LEGACY_MARKER) is not None
+        assert db.meta.get(LEGACY_MARKER) is not None
 
 
 @pytest.mark.parametrize("tracked", [False, True])
@@ -629,8 +629,8 @@ def test_cancel_during_final_lookup_does_not_commit_repairs(db, tmp_path, legacy
     result = backfill(db, fetch=fetch, cancel_check=lambda: cancelled)
     assert result["cancelled"] is True
     assert result["predictions_updated"] == 0
-    assert db.get_meta(MARKER_PREFIX + fingerprint) is None
-    assert db.get_meta(LEGACY_MARKER) is None
+    assert db.meta.get(MARKER_PREFIX + fingerprint) is None
+    assert db.meta.get(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
     assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
 
@@ -644,7 +644,7 @@ def test_null_legacy_species_does_not_block_consensus(db, tmp_path, legacy_list)
     result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
     assert result["ok"] is True
     assert result["legacy_predictions_updated"] == 1
-    assert db.get_meta(LEGACY_MARKER) is not None
+    assert db.meta.get(LEGACY_MARKER) is not None
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
     identified = db.conn.execute("SELECT source_taxon_id FROM predictions WHERE species='Redhead'").fetchone()
     assert identified[0] == 7056

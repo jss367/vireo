@@ -1052,7 +1052,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     assert {k["name"] for k in db.keywords.get_for_photo(tagged)} == {"2Birds", "Heron"}
     assert {k["name"] for k in db.keywords.get_for_photo(already)} == {"Egret"}
     assert db.keywords.get_for_photo(raw) == []
-    assert db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
+    assert db.meta.get(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
 
     # One-shot: keywords the user removes afterwards are not re-imported.
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (tagged,))
@@ -1086,7 +1086,7 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
 
     monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", conflict)
     assert scanner.backfill_embedded_keywords(db) == 1
-    assert db.get_meta(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) != "1"
+    assert db.meta.get(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) != "1"
     assert db.keywords.get_for_photo(blocked) == []
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (handled,))
     db.conn.commit()
@@ -1095,7 +1095,7 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
     assert scanner.backfill_embedded_keywords(db) == 1
     assert {k["name"] for k in db.keywords.get_for_photo(blocked)} == {"Egret"}
     assert db.keywords.get_for_photo(handled) == []
-    assert db.get_meta(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
+    assert db.meta.get(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
     assert scanner.backfill_embedded_keywords(db) == 0
 
 

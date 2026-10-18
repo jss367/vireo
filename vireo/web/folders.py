@@ -142,7 +142,7 @@ def create_folders_blueprint(
         folder = db.folders.get(folder_id)
         if not folder:
             return json_error("folder not found", 404)
-        if folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
+        if folder_id not in db.workspace_folders.visible_ids(db.active_workspace_id, [folder_id]):
             return json_error("folder not found", 404)
         return jsonify({
             "id": folder["id"],
@@ -167,7 +167,7 @@ def create_folders_blueprint(
         """
         db = get_db()
         folder = db.folders.get(folder_id)
-        if not folder or folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
+        if not folder or folder_id not in db.workspace_folders.visible_ids(db.active_workspace_id, [folder_id]):
             return json_error("folder not found", 404)
         try:
             margin = numeric_query_arg(request.args, "margin", DEFAULT_CLOSE_CALL_MARGIN,

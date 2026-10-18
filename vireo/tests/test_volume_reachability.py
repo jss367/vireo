@@ -966,7 +966,7 @@ def test_record_known_mount_roots_commits_pending_implicit_transaction(tmp_path)
         vr.record_known_mount_roots(db, {"/srv/photos": True})
 
         assert not db.conn.in_transaction
-        assert db.get_meta("pending_before_mount_history") == "preserved"
+        assert db.meta.get("pending_before_mount_history") == "preserved"
         assert vr.load_known_mount_roots(db) == {"/srv/photos"}
     finally:
         db.close()

@@ -4,9 +4,8 @@ The tables here are ``workspace_folders`` (which folders a workspace sees,
 and which of them are user-facing roots) and ``workspace_folder_removals``
 (read through the ``workspace_removed_folders`` view), plus the
 workspace-scoped rows that follow a folder when it moves to another
-workspace, and the photo-visibility read behind
-``Database._photo_in_workspace``. It also reads a local session's folder ids
-from ``local_folder_mappings`` and unlinks or transfers exactly those rows
+workspace, and the photo-visibility read ``photo_in_workspace``. It also
+reads a local session's folder ids from ``local_folder_mappings`` and unlinks or transfers exactly those rows
 (no subtree walk, the caller commits) for the folder routes that sweep a
 staged descendant session the ``folders.path`` walk can't see. Every method
 takes the workspace id explicitly, so the repository is not bound to the
@@ -18,10 +17,10 @@ Callers reach the single-statement reads and writes as
 discovery (``folders.subtree_ids_by_path``, ``folders.local_source_descendant_ids``),
 the removal-set lookup that decides which descendants to link, workspace
 existence checks, and the new-images cache invalidation all run in the façade
-methods, so monkeypatches of those ``Database`` methods still apply. It also
-keeps the reads that default to the active workspace
-(``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) and the
-merge's ``root_ancestor_exists`` / ``root_descendant_exists`` callbacks.
+methods, so monkeypatches of those ``Database`` methods still apply. The
+reads that need the active workspace (``photo_in_workspace``,
+``visible_ids``) take it from the caller, and the merge binds
+``root_ancestor_exists`` / ``root_descendant_exists`` from ``db.workspace_folders``.
 
 The new-images walk (``new_images.mapped_roots`` and the post-scan cache
 invalidation) reads the linked folders with their root flags, every folder's
@@ -898,7 +897,13 @@ class WorkspaceFolderRepository:
     # -- merge helpers: root ancestry and pruning --------------------------------
 
     def root_ancestor_exists(self, workspace_id: int, path: str) -> bool:
-        """True if the workspace has a root equal to or above ``path``."""
+        """True if the workspace has a root equal to or above ``path``.
+
+        Used by the merge to decide whether the archive base should itself
+        become a workspace root. Comparison is platform-neutral (``\\`` folded
+        to ``/``, trailing slashes stripped) so a Windows-style stored root
+        still matches a forward-slash archive path.
+        """
         target = self.path_for_subtree_match(path)
         rows = self.conn.execute(
             """SELECT f.path FROM workspace_folders wf

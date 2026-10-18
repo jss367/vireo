@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from repositories.local_workspaces import LocalWorkspaceRepository
     from repositories.locations import LocationRepository
     from repositories.masks_features import MasksFeaturesRepository
+    from repositories.meta import MetaRepository
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
@@ -1564,26 +1565,9 @@ class Database:
             self._db_path, [workspace_id]
         )
 
-    def _photo_in_workspace(self, photo_id):
-        """Return True if the photo belongs to a folder visible in the active workspace."""
-        return self._workspace_folder_repository().photo_in_workspace(
-            photo_id, self._ws_id()
-        )
-
-    def get_workspace_visible_folder_ids(self, folder_ids):
-        """The subset of ``folder_ids`` the active workspace sees, as a set.
-
-        Visible means linked or holding a photo-only grant
-        (``workspace_visible_folders``). With no active workspace nothing
-        is visible.
-        """
-        return self._workspace_folder_repository().visible_ids(
-            self._active_workspace_id, folder_ids,
-        )
-
     def _verify_photo_in_workspace(self, photo_id):
         """Raise ValueError if the photo is not in the active workspace."""
-        if not self._photo_in_workspace(photo_id):
+        if not self.workspace_folders.photo_in_workspace(photo_id, self._ws_id()):
             raise ValueError(
                 f"Photo {photo_id} does not belong to the active workspace"
             )
@@ -1596,7 +1580,7 @@ class Database:
         remapped edit stays syncable without the workspace gaining
         visibility of every other photo in the folder.
         """
-        if self._photo_in_workspace(photo_id):
+        if self.workspace_folders.photo_in_workspace(photo_id, self._ws_id()):
             return True
         return self._moves_merge_repository().photo_has_sync_only_grant(
             photo_id, self._ws_id()
@@ -1849,10 +1833,10 @@ class Database:
         """Build the workspace-folder membership repository on this connection.
 
         Every membership method takes its workspace id explicitly, so the
-        repository is not bound to the active workspace; the façade methods
-        that default to it (``_photo_in_workspace``,
-        ``get_workspace_visible_folder_ids``, ``get_workspace_root_folder_ids``
-        and the like) resolve it themselves.
+        repository is not bound to the active workspace; callers of
+        ``photo_in_workspace`` and ``visible_ids`` pass it, and the façade
+        methods that default to it (``get_workspace_root_folder_ids`` and the
+        like) resolve it themselves.
         """
         from repositories.workspace_folders import WorkspaceFolderRepository
 
@@ -1873,9 +1857,7 @@ class Database:
         workspace. Membership changes that also walk subtrees, record
         removals or invalidate the new-images cache (``add_workspace_folder``,
         ``remove_workspace_folder_tree``, ``get_workspace_folders``, ...)
-        and the reads that default to the active workspace
-        (``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) stay
-        on ``Database``.
+        stay on ``Database``.
         """
         return self._workspace_folder_repository()
 
@@ -2419,7 +2401,7 @@ class Database:
 
     def get_folder_health_version(self):
         """Return the monotonic version for folder-health-visible changes."""
-        value = self.get_meta("folder_health_version")
+        value = self.meta.get("folder_health_version")
         return int(value or 0)
 
     def _missing_photos_subtree_clause(self, folder_id, params):
@@ -2590,21 +2572,6 @@ class Database:
             folder_id, new_path, new_name,
             relink_parents_by_path=self.folders.relink_parents_by_path,
         )
-
-    def _active_ws_root_ancestor_exists(self, workspace_id, path):
-        """True if ``workspace_id`` has an ``is_root=1`` folder that equals or
-        is an ancestor of ``path``.
-
-        Used by the merge to decide whether the archive base should itself
-        become a workspace root. Comparison is platform-neutral (``\\`` folded
-        to ``/``, trailing slashes stripped) so a Windows-style stored root
-        still matches a forward-slash archive path.
-        """
-        return self._workspace_folder_repository().root_ancestor_exists(workspace_id, path)
-
-    def _active_ws_root_descendant_exists(self, workspace_id, path):
-        """True if ``workspace_id`` has a strict root descendant of ``path``."""
-        return self._workspace_folder_repository().root_descendant_exists(workspace_id, path)
 
     def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
         """Drop non-root links that could re-materialize ``path``'s subtree.
@@ -3021,8 +2988,8 @@ class Database:
         return self._moves_merge_repository().merge_staged_tree_into_archive(
             staged_root_id, archive_path,
             workspace_id_fn=self._ws_id,
-            root_ancestor_exists=self._active_ws_root_ancestor_exists,
-            root_descendant_exists=self._active_ws_root_descendant_exists,
+            root_ancestor_exists=self.workspace_folders.root_ancestor_exists,
+            root_descendant_exists=self.workspace_folders.root_descendant_exists,
             prune_nonroot_links_outside_roots=self._prune_ws_nonroot_links_outside_roots,
             materialize_workspace_descendants=self._materialize_workspace_descendants,
             add_workspace_folder=self.add_workspace_folder,
@@ -5776,13 +5743,15 @@ class Database:
 
         return MetaRepository(self.conn)
 
-    def get_meta(self, key):
-        """Return the db_meta value for `key`, or None if unset."""
-        return self._meta_repository().get(key)
+    @property
+    def meta(self) -> MetaRepository:
+        """The ``db_meta`` markers: ``db.meta.get(key)`` and ``db.meta.set(key, value)``.
 
-    def set_meta(self, key, value, _commit=True):
-        """Upsert a db_meta row."""
-        self._meta_repository().set(key, value, _commit=_commit)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_meta_repository``. ``db_meta`` is catalog-wide,
+        so nothing in it needs a workspace.
+        """
+        return self._meta_repository()
 
     def _local_workspace_repository(self) -> LocalWorkspaceRepository:
         """Build local-copy persistence on the live catalog connection."""
@@ -6483,10 +6452,11 @@ class Database:
         use. Every model-run table is catalog-wide, so no method needs an
         active workspace.
 
-        ``detector_run_is_pinned`` stays on ``Database`` as well: the
-        detection writes receive it as their ``is_pinned`` callback, so a
-        patch of it on ``db`` reaches them. The classify preflight reads that
-        resolve the workspace's detector floor stay there too.
+        The detection writes receive ``detector_run_is_pinned`` from here as
+        their ``is_pinned`` callback, so a patch of
+        ``ModelRunsRepository.detector_run_is_pinned`` reaches them. The
+        classify preflight reads that resolve the workspace's detector floor
+        stay on ``Database``.
         """
         return self._model_runs_repository()
 
@@ -6508,20 +6478,6 @@ class Database:
         ``db.commit()`` / ``db.rollback()``.
         """
         return self._computation_cache_repository()
-
-    def detector_run_is_pinned(self, photo_id, detector_model):
-        """Return whether any workspace manually reviewed this detector output.
-
-        Review state belongs to predictions, but replacing a detector runtime
-        can delete the detection and cascade through both predictions and
-        reviews.  A real accepted/rejected decision therefore pins the whole
-        (photo, detector_model) result.  Auto-created taxonomy-match reviews
-        are reproducible cache state and deliberately do not pin it.
-        """
-        return self._model_runs_repository().detector_run_is_pinned(
-            photo_id,
-            detector_model,
-        )
 
     def get_classifier_run_cache_hits(
         self,
@@ -6838,7 +6794,7 @@ class Database:
         if detector_model is None:
             raise ValueError("detector_model is required")
         # The pin check stays on the façade (model-runs domain), so a patched
-        # ``detector_run_is_pinned`` still applies inside the transaction.
+        # ``model_runs.detector_run_is_pinned`` still applies inside the transaction.
         return self._detections_repository().write_batch(
             photo_id,
             detector_model,
@@ -6846,7 +6802,7 @@ class Database:
             runtime_fingerprint,
             input_fingerprint,
             force_runtime_replace,
-            is_pinned=self.detector_run_is_pinned,
+            is_pinned=self.model_runs.detector_run_is_pinned,
         )
 
     def get_detections(self, photo_id, min_conf=None, detector_model=None):
@@ -7262,8 +7218,8 @@ class Database:
 
         Recording an edit (``record_edit``, which prunes after a committed
         record), undo and redo, and their replay handlers stay on
-        ``Database``, and so does ``_prediction_scope``, which the
-        prediction-review replay receives as a callback.
+        ``Database``; the prediction-review replay receives this repository's
+        ``prediction_scope`` as a callback.
         """
         return self._edit_history_repository()
 
@@ -7592,10 +7548,6 @@ class Database:
             )
         return name
 
-    def _prediction_scope(self, pred_id):
-        """``(detection_id, classifier_model, labels_fingerprint)`` or None."""
-        return self._edit_history_repository().prediction_scope(pred_id)
-
     # -- keyword_remove ---------------------------------------------------
 
     def _undo_keyword_remove(self, entry, item):
@@ -7712,7 +7664,7 @@ class Database:
         if not pred_ids:
             return
         self._edit_history_repository().undo_prediction_accept_statuses(
-            pred_ids, self._prediction_scope,
+            pred_ids, self.edit_history.prediction_scope,
         )
         # A Highlights confirm of a ``reviewed`` row records that status, so
         # undo restores the user's earlier decision instead of ``pending``.
@@ -7751,7 +7703,7 @@ class Database:
         history = self._edit_history_repository()
         accepted_by_scope = {}
         for pred_id in pred_ids:
-            scope = self._prediction_scope(pred_id)
+            scope = self.edit_history.prediction_scope(pred_id)
             if scope is None:
                 continue
             self.update_prediction_status(pred_id, 'accepted')

@@ -129,9 +129,9 @@ def apply_repairs(db, changes, retire_artifacts=True):
 
 def repair_on_upgrade(db):
     marker = "species_identity_repair:" + resolution_identity()
-    if db.get_meta(marker) == "1":
+    if db.meta.get(marker) == "1":
         return 0
     with db.transaction():
         count = apply_repairs(db, plan_repairs(db))
-        db.set_meta(marker, "1", _commit=False)
+        db.meta.set(marker, "1", _commit=False)
     return count

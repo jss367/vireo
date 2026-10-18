@@ -442,7 +442,7 @@ def create_system_blueprint(
                 return None, False, json_error("folder not found", 404)
             # Reject reveal for folders not linked to the active workspace,
             # matching the photo branch's verify_workspace gate.
-            if fid_int not in db.get_workspace_visible_folder_ids([fid_int]):
+            if fid_int not in db.workspace_folders.visible_ids(db.active_workspace_id, [fid_int]):
                 return None, False, json_error("folder not found", 404)
             folder_path = folder["path"]
             if not folder_path:

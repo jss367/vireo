@@ -8802,7 +8802,7 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
     )
 
     assert returned == [old_id]
-    assert db.detector_run_is_pinned(photo_id, "megadetector-v6")
+    assert db.model_runs.detector_run_is_pinned(photo_id, "megadetector-v6")
     run = db.conn.execute(
         """SELECT runtime_fingerprint FROM detector_runs
            WHERE photo_id = ? AND detector_model = ?""",

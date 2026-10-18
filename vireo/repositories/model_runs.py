@@ -25,9 +25,9 @@ and the release of a reserved ``'incomplete'`` classifier run once its
 predictions are stored.
 
 Callers reach it as ``db.model_runs`` (a fresh repository per access, see
-``Database.model_runs``). ``Database.detector_run_is_pinned`` is the one
-forwarding wrapper left, because the detection writes receive it as their
-``is_pinned`` callback.
+``Database.model_runs``). The detection writes receive
+``detector_run_is_pinned`` from ``db.model_runs`` as their ``is_pinned``
+callback.
 """
 
 import sqlite3
@@ -192,7 +192,14 @@ class ModelRunsRepository:
                 "model_count": r["model_count"] or 0}
 
     def detector_run_is_pinned(self, photo_id: int, detector_model: str) -> bool:
-        """Return whether a real manual review pins this detector output."""
+        """Return whether any workspace manually reviewed this detector output.
+
+        Review state belongs to predictions, but replacing a detector runtime
+        can delete the detection and cascade through both predictions and
+        reviews.  A real accepted/rejected decision therefore pins the whole
+        (photo, detector_model) result.  Auto-created taxonomy-match reviews
+        are reproducible cache state and deliberately do not pin it.
+        """
         row = self.conn.execute(
             """SELECT 1
                FROM detections d
