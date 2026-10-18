@@ -466,7 +466,7 @@ def create_photo_edit_recipes_blueprint(
                 return None
             try:
                 return copy_recipe(value)
-            except Exception:
+            except Exception:  # broad: a stored payload can be any malformed shape; skip the entry, not the history
                 log.warning(
                     "Skipping invalid edit recipe history payload for photo %s",
                     photo_id,

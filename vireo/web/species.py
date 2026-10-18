@@ -62,7 +62,7 @@ def create_species_blueprint(get_db):
                         if len(matches) >= 20:
                             break
             except Exception:
-                # One unreadable label set must not break autocomplete.
+                # broad: one unreadable label set must not break autocomplete.
                 log.warning("Could not read label set %s for species search", labels_file, exc_info=True)
             if len(matches) >= 20:
                 break

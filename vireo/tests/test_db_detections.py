@@ -194,6 +194,18 @@ def test_promote_full_image_runtime_stamps_only_full_image_rows_without_committi
     assert [r["runtime_fingerprint"] for r in _det_rows(db, other)] == ["legacy"]
 
 
+def test_runtime_fingerprints_for_photos_are_distinct_over_the_given_photos(db):
+    a = _photo(db)
+    b = _photo(db, "b.jpg")
+    c = _photo(db, "c.jpg")
+    _raw_det(db, a, runtime_fingerprint="rt-1")
+    _raw_det(db, a, runtime_fingerprint="rt-1", x=0.5)
+    _raw_det(db, b, runtime_fingerprint="rt-2")
+    _raw_det(db, c, runtime_fingerprint="rt-3")
+    assert db.detections.runtime_fingerprints_for_photos([a, b]) == {"rt-1", "rt-2"}
+    assert db.detections.runtime_fingerprints_for_photos([c]) == {"rt-3"}
+
+
 def test_save_detections_defaults_runtime_fingerprint_to_legacy(db):
     pid = _photo(db)
     db.save_detections(pid, [_d()], MODEL)

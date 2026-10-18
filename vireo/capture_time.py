@@ -235,9 +235,7 @@ def _shift_arg(minutes):
 
 
 def _photo_paths(db, photo):
-    folder = db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-    ).fetchone()
+    folder = db.get_folder(photo["folder_id"])
     if not folder:
         return []
     paths = [os.path.join(folder["path"], photo["filename"])]
@@ -270,10 +268,11 @@ def _refresh_photo_metadata(db, photo_id, metadata_path, *, refresh_file_identit
     if refresh_file_identity:
         stat = os.stat(metadata_path)
         file_hash = compute_file_hash(metadata_path) if stat.st_size else None
-        db.conn.execute(
-            "UPDATE photos SET file_hash=?, file_size=?, file_mtime=?, "
-            "hash_status=NULL, hash_checked_at=NULL WHERE id=?",
-            (file_hash, stat.st_size, stat.st_mtime, photo_id),
+        db.scanning.update_photo(
+            photo_id,
+            ["file_hash=?", "file_size=?", "file_mtime=?",
+             "hash_status=NULL", "hash_checked_at=NULL"],
+            (file_hash, stat.st_size, stat.st_mtime),
         )
     metadata = extract_metadata([metadata_path]).get(metadata_path)
     if not metadata:
@@ -286,9 +285,7 @@ def _refresh_photo_metadata(db, photo_id, metadata_path, *, refresh_file_identit
     if timestamp is not None:
         updates.append("timestamp=?")
         params.append(timestamp)
-    params.append(photo_id)
-    update_clause = ", ".join(updates)
-    db.conn.execute("UPDATE photos SET " + update_clause + " WHERE id=?", params)
+    db.scanning.update_photo(photo_id, updates, params)
 
 
 def _capture_time_command(exiftool, paths, photo_shift, target_offset_str, keep_backups):
@@ -347,8 +344,8 @@ def _write_capture_time(db, cmd, photo, paths, catalog_paths):
     # Invalidate only a companion that was actually edited. An offline
     # companion still needs its saved identity for import deduplication.
     if any(path in paths for path in catalog_paths[1:]):
-        db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
-    db.conn.commit()
+        db.companion_pairing.delete_identities(photo["id"])
+    db.commit()
     log.debug("ExifTool stdout: %s", result.stdout.strip())
     if result.stderr:
         log.debug("ExifTool stderr: %s", result.stderr.strip())
@@ -460,12 +457,12 @@ def adjust_capture_time(
             written += 1
             shifts_used.append(photo_shift)
         except (subprocess.TimeoutExpired, RuntimeError, OSError) as exc:
-            db.conn.rollback()
+            db.rollback()
             log.warning("Capture-time adjustment failed for photo %s: %s", photo["id"], exc)
             failed += 1
             failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})
         except Exception as exc:
-            db.conn.rollback()
+            db.rollback()
             log.exception("Unexpected capture-time adjustment error for photo %s", photo["id"])
             failed += 1
             failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})

@@ -1646,7 +1646,7 @@ def create_pipeline_blueprint(
                     save_results_raw(results, os.path.dirname(db_path), db.require_workspace_id())
                     saved = True
                 db.commit()
-            except Exception:
+            except Exception:  # broad: roll back catalog changes and restore the saved cache before re-raising
                 db.rollback()
                 if saved:
                     save_results_raw(before, os.path.dirname(db_path), db.require_workspace_id())
@@ -2012,7 +2012,7 @@ def _save_recent_destination(destination):
             ingest_cfg["recent_destinations"] = recents
             raw["ingest"] = ingest_cfg
             cfg.save(raw)
-    except Exception:
+    except Exception:  # broad: remembering a recent destination must not fail the import
         log.warning("Failed to save recent destination to config", exc_info=True)
 
 

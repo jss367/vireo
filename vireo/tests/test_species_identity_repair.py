@@ -4,6 +4,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+from repositories.taxa import TaxaRepository
 from species_identity import SpeciesResolver
 from species_identity_repair import refresh_common_name_index
 
@@ -43,7 +44,7 @@ def resolver(conn):
     def meta(key):
         row = conn.execute('SELECT value FROM db_meta WHERE key=?', (key,)).fetchone()
         return row[0] if row else None
-    return SpeciesResolver(db=SimpleNamespace(conn=conn, get_meta=meta))
+    return SpeciesResolver(db=SimpleNamespace(conn=conn, get_meta=meta, taxa=TaxaRepository(conn)))
 
 
 def test_refresh_unifies_legacy_and_native_predictions_preserving_references(catalog):

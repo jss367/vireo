@@ -12,10 +12,10 @@ subject-crop preview applies; ``subjects`` still owns that table's writes.
 
 Callers reach the pass-through operations as ``db.detections`` (a fresh
 repository per access, see ``Database.detections``): ``upsert_rows``,
-``clear``, ``get_ids_for_photos``, ``confidence_summary``,
-``subject_exposure_ev`` and ``promote_full_image_runtime`` (the classify
-job's legacy full-image anchor promotion, SQL unchanged from
-``classify_job``). The rest stay behind the ``Database`` methods that
+``clear``, ``get_ids_for_photos``, ``runtime_fingerprints_for_photos``,
+``confidence_summary``, ``subject_exposure_ev`` and
+``promote_full_image_runtime`` (the classify job's and the detect stage's
+legacy full-image anchor promotion, SQL unchanged from ``classify_job``). The rest stay behind the ``Database`` methods that
 add the steps above (``save_detections``, ``write_detection_batch``,
 ``get_detections``, ``get_detections_for_photos``,
 ``get_predictions_for_detection``, the misses methods and
@@ -427,6 +427,18 @@ class DetectionsRepository:
             for row in rows:
                 result.setdefault(row["photo_id"], set()).add(row["id"])
         return result
+
+    def runtime_fingerprints_for_photos(self, photo_ids: Sequence[int]) -> set[str | None]:
+        """The distinct ``runtime_fingerprint`` values (None included) of the
+        detections on ``photo_ids``. One query; the caller chunks the ids."""
+        placeholders = ",".join("?" * len(photo_ids))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT runtime_fingerprint "
+            f"FROM detections "
+            f"WHERE photo_id IN ({placeholders})",
+            list(photo_ids),
+        ).fetchall()
+        return {row["runtime_fingerprint"] for row in rows}
 
     def confidence_summary(self, photo_ids: Iterable[int]) -> list[sqlite3.Row]:
         """Rows (``photo_id``, ``max_conf``, ``n``) for the photos with detections.
