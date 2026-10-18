@@ -251,6 +251,22 @@ def test_preview_get_returns_row_or_none(db):
     assert db.caches.preview_get(pid + 1, 1920) is None
 
 
+def test_mark_preview_invalidated_is_idempotent_and_uncommitted(db):
+    pid = _photo(db)
+    db.caches.mark_preview_invalidated(pid, 1920)
+    db.caches.mark_preview_invalidated(pid, 1920)
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        assert reader.execute("SELECT COUNT(*) FROM preview_cache_invalidations").fetchone()[0] == 0
+        db.commit()
+        assert [tuple(r) for r in reader.execute(
+            "SELECT photo_id, size FROM preview_cache_invalidations"
+        ).fetchall()] == [(pid, 1920)]
+    finally:
+        reader.close()
+
+
 # -- offline_originals --------------------------------------------------------
 
 

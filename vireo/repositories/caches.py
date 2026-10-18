@@ -1,8 +1,8 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-It also reads the "do not adopt this preview" markers in
-``preview_cache_invalidations``; ``preview_cache`` still creates that table
-lazily and writes it.
+It also reads and writes the "do not adopt this preview" markers in
+``preview_cache_invalidations`` (``preview_cache.mark_preview_cache_invalid``
+decides when to commit them).
 
 The caches are catalog-wide (keyed by photo id, not by workspace), so the
 repository takes no workspace id. The lock-retry helpers
@@ -290,6 +290,14 @@ class CachesRepository:
         return self.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()["c"]
+
+    def mark_preview_invalidated(self, photo_id: int, size: int | str) -> None:
+        """Record the "do not adopt this preview" marker; the caller commits."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
+            "VALUES (?, ?)",
+            (photo_id, size),
+        )
 
     def clear_preview_invalidation(self, photo_id: int, size: int | str) -> None:
         self.conn.execute(
