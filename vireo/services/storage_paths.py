@@ -5,12 +5,20 @@ contain unrelated user data. Recorded Work Locally roots are exact copies,
 not the user's entire selected destination volume.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from db import Database
 
 
-def huggingface_cache_dir():
+def huggingface_cache_dir() -> str:
     return os.path.abspath(os.path.expanduser(
         os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
         or os.path.join(os.environ.get("HF_HOME") or os.path.join(
@@ -18,7 +26,7 @@ def huggingface_cache_dir():
     ))
 
 
-def huggingface_repositories(*, managed_only=False):
+def huggingface_repositories(*, managed_only: bool = False) -> set[str]:
     """Exact repositories for reporting, or managed-provenance cleanup scope.
 
     The default preserves non-destructive reporting of all registrations.
@@ -44,7 +52,8 @@ def huggingface_repositories(*, managed_only=False):
     return {"models--" + repo.replace("/", "--") for repo in repos}
 
 
-def auxiliary_paths(db_path, thumb_dir, config, db):
+# Any: ``config`` is the Flask app config, whose values are heterogeneous.
+def auxiliary_paths(db_path: str, thumb_dir: str, config: Mapping[str, Any], db: Database) -> list[str]:
     import classifier
     import config as cfg
     import labels
@@ -102,7 +111,7 @@ def auxiliary_paths(db_path, thumb_dir, config, db):
     return paths
 
 
-def directory_bytes(path):
+def directory_bytes(path: str) -> int:
     """Logical file bytes without following nested symlinks or duplicate blobs."""
     total = 0
     for root, dirs, files in os.walk(path):
@@ -115,6 +124,6 @@ def directory_bytes(path):
     return total
 
 
-def location_id(path):
+def location_id(path: str) -> str:
     import hashlib
     return "managed-" + hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:20]

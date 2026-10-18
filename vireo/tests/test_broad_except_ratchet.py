@@ -74,6 +74,22 @@ def _is_broad_type(node) -> bool:
     return False
 
 
+def _definition_expressions(node):
+    """Expressions evaluated now, before the new definition name is bound.
+
+    Decorators run top-down before defaults or class arguments. Annotations
+    and type-parameter bounds are deferred and do not advance these bindings.
+    """
+    expressions = list(node.decorator_list)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        expressions.extend(node.args.defaults)
+        expressions.extend(value for value in node.args.kw_defaults if value is not None)
+    else:
+        expressions.extend(node.bases)
+        expressions.extend(keyword.value for keyword in node.keywords)
+    return expressions
+
+
 def _scope_bindings(body, inherited, args=None):
     """Bounded import resolution; assignments/parameters shadow imported aliases.
 
@@ -83,6 +99,7 @@ def _scope_bindings(body, inherited, args=None):
     bindings = dict(inherited)
     def bind(node):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings.update(_scope_bindings(_definition_expressions(node), bindings))
             bindings[node.name] = None
             return
         if isinstance(node, ast.Import):
@@ -210,13 +227,20 @@ def broad_handlers(tree):
         nonlocal state_only
         # Module bindings flow into nested class bodies; class namespaces do not.
         nested_lexical = None if lexical is bindings else lexical
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            local = _scope_bindings(node.body, function_lexical, node.args)
-            body(node.body, local, local, local, False)
-            return None
-        if isinstance(node, ast.ClassDef):
-            body(node.body, lexical, lexical, function_lexical, True)
-            return None
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            current = dict(bindings)
+            for expression in _definition_expressions(node):
+                visit(expression, current, lexical, function_lexical, ordered, prefixes)
+                current = _expression_bindings(expression, current)
+                for collector in prefixes:
+                    collector.append(current)
+            if isinstance(node, ast.ClassDef):
+                class_lexical = current if lexical is bindings else lexical
+                body(node.body, class_lexical, class_lexical, function_lexical, True)
+            else:
+                local = _scope_bindings(node.body, function_lexical, node.args)
+                body(node.body, local, local, local, False)
+            return dict(current, **{node.name: None})
         if isinstance(node, ast.ExceptHandler):
             if _is_broad_type(node.type):
                 found.append(("except", node))
@@ -737,3 +761,77 @@ def test_context_and_match_expression_stores(compound, count, scope):
     if scope == "class":
         source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
     assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("definition, count", [
+    ("def f(x=(quiet := replacement)): pass", 0),
+    ("async def f(*, x=(quiet := replacement)): pass", 0),
+    ("@(quiet := replacement)\ndef f(): pass", 0),
+    ("@factory(quiet := replacement)\nasync def f(): pass", 0),
+    ("def f(x=condition and (quiet := replacement)): pass", 1),
+    ("def f(x: 'quiet := replacement') -> 'quiet := replacement': pass", 1),
+    ("def f(x: (quiet := replacement)): pass", 1),
+    ("def f():\n    quiet = replacement", 1),
+    ("class C(quiet := replacement): pass", 0),
+    ("class C(metaclass=(quiet := replacement)): pass", 0),
+    ("@(quiet := replacement)\nclass C: pass", 0),
+    ("class C(condition and (quiet := replacement)): pass", 1),
+    ("class C:\n    quiet = replacement", 1),
+    ("def quiet(x=quiet): pass", 0),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_definition_time_stores_precede_name_binding(definition, count, scope):
+    source = "from __future__ import annotations\nfrom contextlib import suppress as quiet\n"
+    statement = definition + "\nwith quiet(Exception): pass\n"
+    if scope == "class":
+        statement = "class Outer:\n" + "\n".join("    " + line for line in statement.splitlines())
+    assert len(broad_handlers(ast.parse(source + statement))) == count
+
+
+@pytest.mark.parametrize("definition", [
+    "@factory(quiet := replacement)\ndef f(x=probe()): pass",
+    "def f(x=(quiet := replacement), *, y=probe()): pass",
+    "@factory(quiet := replacement)\nclass C(probe()): pass",
+    "class C(quiet := replacement, metaclass=probe()): pass",
+])
+def test_definition_expression_order_and_exception_prefixes(definition):
+    # A later definition-time expression can fail after the alias is replaced.
+    source = (
+        "try:\n    quiet = replacement\n    from contextlib import suppress as quiet\n"
+        + "\n".join("    " + line for line in definition.splitlines())
+        + "\nexcept ValueError:\n    with quiet(Exception): pass\n"
+    )
+    # The import can itself fail before quiet is rebound; both paths remain.
+    assert len(broad_handlers(ast.parse(source))) == 1
+
+
+@pytest.mark.parametrize("definition", [
+    "def f(x=(quiet := replacement)): pass",
+    "async def f(*, x=(quiet := replacement)): pass",
+    "@(quiet := replacement)\nclass C: pass",
+])
+def test_definition_time_stores_shadow_function_locals(definition):
+    source = (
+        "def outer():\n    from contextlib import suppress as quiet\n"
+        + "\n".join("    " + line for line in definition.splitlines())
+        + "\n    with quiet(Exception): pass\n"
+    )
+    assert len(broad_handlers(ast.parse(source))) == 0
+
+
+def test_definition_expressions_preserve_runtime_order():
+    function = ast.parse("@first\n@second\ndef f(a=third, *, b=fourth): pass").body[0]
+    cls = ast.parse("@first\n@second\nclass C(third, metaclass=fourth): pass").body[0]
+    for node in (function, cls):
+        assert [ast.unparse(value) for value in _definition_expressions(node)] == [
+            "first", "second", "third", "fourth",
+        ]
+
+
+@pytest.mark.parametrize("definition", [
+    "class C(quiet := replacement):\n    with quiet(Exception): pass",
+    "@factory(quiet := replacement)\nclass C:\n    with quiet(Exception): pass",
+])
+def test_class_body_sees_definition_time_outer_stores(definition):
+    source = "from contextlib import suppress as quiet\n" + definition
+    assert len(broad_handlers(ast.parse(source))) == 0
