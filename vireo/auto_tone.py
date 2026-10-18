@@ -54,6 +54,7 @@ try:
         LUMA_B,
         LUMA_G,
         LUMA_R,
+        ToneAdjustments,
         apply_adjustments,
         linear_to_srgb,
         srgb_to_linear,
@@ -66,6 +67,7 @@ except ImportError:
         LUMA_B,
         LUMA_G,
         LUMA_R,
+        ToneAdjustments,
         apply_adjustments,
         linear_to_srgb,
         srgb_to_linear,
@@ -273,10 +275,9 @@ class _Fitter:
             return cached
         rgb = apply_adjustments(
             self.rgb,
-            white_balance=self.white_balance,
+            ToneAdjustments(white_balance=self.white_balance, **dict(key)),
             input_linear=self.input_linear,
             range_radius=self.range_radius,
-            **dict(key),
         )
         if self.presence:
             try:

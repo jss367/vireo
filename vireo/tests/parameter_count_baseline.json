@@ -10,8 +10,6 @@
   "ingest.py:ingest": 13,
   "move.py:_FolderMove.__init__": 13,
   "move.py:move_folder": 13,
-  "new_images.py:_root_walk_worker": 13,
-  "new_images.py:_walk_root_bounded": 16,
   "pipeline_stages/classification.py:classify_stage": 13,
   "pipeline_stages/media.py:thumbnail_stage": 13,
   "pipeline_stages/scanning.py:_ScanPass.__init__": 15,
@@ -31,8 +29,6 @@
   "services/folder_moves.py:FolderMoves._run_move_job": 18,
   "services/folder_moves.py:FolderMoves.start_job": 20,
   "services/import_in_place.py:_admit_in_place_job": 17,
-  "tone.py:_apply_adjustments_weighted": 20,
-  "tone.py:apply_adjustments": 20,
   "web/export.py:_photo_export_work": 14,
   "web/imports.py:_DuplicateCheckStream.__init__": 13,
   "web/job_launchers.py:create_job_launchers_blueprint": 14

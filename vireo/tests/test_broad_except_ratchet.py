@@ -80,8 +80,8 @@ def _definition_expressions(node):
     Decorators run top-down before defaults or class arguments. Annotations
     and type-parameter bounds are deferred and do not advance these bindings.
     """
-    expressions = list(node.decorator_list)
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    expressions = list(getattr(node, "decorator_list", ()))
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         expressions.extend(node.args.defaults)
         expressions.extend(value for value in node.args.kw_defaults if value is not None)
     else:
@@ -98,6 +98,9 @@ def _scope_bindings(body, inherited, args=None):
     """
     bindings = dict(inherited)
     def bind(node):
+        if isinstance(node, ast.Lambda):
+            bindings.update(_scope_bindings(_definition_expressions(node), bindings))
+            return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bindings.update(_scope_bindings(_definition_expressions(node), bindings))
             bindings[node.name] = None
@@ -175,7 +178,10 @@ def _irrefutable_pattern(pattern):
 def _expression_bindings(node, bindings):
     """Named-expression stores on normal evaluation paths, without truth refinement."""
     if isinstance(node, ast.Lambda):
-        return bindings  # Its body is another scope and is not evaluated now.
+        current = bindings
+        for value in _definition_expressions(node):
+            current = _expression_bindings(value, current)
+        return current  # Defaults run now; the lambda body does not.
     if isinstance(node, ast.NamedExpr):
         current = _expression_bindings(node.value, bindings)
         return _scope_bindings([node.target], current)
@@ -206,7 +212,8 @@ def broad_handlers(tree):
     Functions retain conservative whole-local-scope shadowing. This is not a
     general Python control-flow or dynamic-value analyzer. Try handlers join
     possible statement-prefix states; named stores in conditions flow into
-    both branches, without inferring which values make a condition true.
+    both branches, without inferring which values make a condition true. Loop
+    bodies are inspected once after their finite incoming alias sets stabilize.
     """
     found = []
     state_only = False
@@ -299,10 +306,26 @@ def broad_handlers(tree):
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             is_for = isinstance(node, (ast.For, ast.AsyncFor))
             condition = node.iter if is_for else node.test
-            visit(condition, bindings, lexical, function_lexical, ordered, prefixes)
-            # The condition/iterable is evaluated even on a zero-iteration path.
-            # Its named stores precede both the body and the loop's outgoing state.
-            incoming = _expression_bindings(condition, bindings)
+            # For iterables run once; while tests and for targets run on every
+            # iteration. Join the finite alias states before inspecting syntax.
+            head = _expression_bindings(condition, bindings) if is_for else bindings
+            if ordered:
+                checkpoint, previous_state_only = len(found), state_only
+                state_only = True
+                try:
+                    while True:
+                        incoming = head if is_for else _expression_bindings(condition, head)
+                        current = _scope_bindings([node.target], incoming) if is_for else incoming
+                        back = body(node.body, current, nested_lexical, function_lexical, ordered)
+                        joined = _join_bindings(head, back)
+                        if joined == head:
+                            break
+                        head = joined
+                finally:
+                    state_only = previous_state_only
+                    del found[checkpoint:]  # State passes must not count handlers.
+            visit(condition, head, lexical, function_lexical, ordered, prefixes)
+            incoming = head if is_for else _expression_bindings(condition, head)
             current = _scope_bindings([node.target], incoming) if is_for else incoming
             after_body = body(node.body, current, nested_lexical, function_lexical, ordered, prefixes)
             # Else may run after zero iterations; break may bypass else.
@@ -339,6 +362,15 @@ def broad_handlers(tree):
                         visit(child, bindings, lexical, function_lexical, ordered, prefixes)
             elif isinstance(value, ast.AST):
                 visit(value, bindings, lexical, function_lexical, ordered, prefixes)
+        if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Assert)):
+            # Only assignment targets bind unconditionally. Stores inside a
+            # short-circuited RHS/expression retain the skipped incoming path.
+            value = node.test if isinstance(node, ast.Assert) else node.value
+            current = bindings if value is None else _expression_bindings(value, bindings)
+            targets = node.targets if isinstance(node, ast.Assign) else (
+                [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else []
+            )
+            return _scope_bindings(targets, current)
         return None
 
     initial = {"contextlib": "contextlib"}
@@ -834,4 +866,62 @@ def test_definition_expressions_preserve_runtime_order():
 ])
 def test_class_body_sees_definition_time_outer_stores(definition):
     source = "from contextlib import suppress as quiet\n" + definition
+    assert len(broad_handlers(ast.parse(source))) == 0
+
+
+@pytest.mark.parametrize("statement, count", [
+    ("def f(x=(lambda y=(quiet := replacement): None)): pass", 0),
+    ("f = lambda y=(quiet := replacement): None", 0),
+    ("f = lambda *, y=(quiet := replacement): None", 0),
+    ("f = lambda: (quiet := replacement)", 1),
+    ("f = lambda y=condition and (quiet := replacement): None", 1),
+    ("condition and (quiet := replacement)", 1),
+    ("condition or (quiet := replacement)", 1),
+    ("assert condition or (quiet := replacement)", 1),
+    ("assert condition, (quiet := replacement)", 1),
+    ("value = condition and (quiet := replacement)", 1),
+    ("value: object = condition or (quiet := replacement)", 1),
+    ("value = (quiet := replacement) if condition else other", 1),
+    ("factory(condition and (quiet := replacement))", 1),
+    ("value = (quiet := replacement)", 0),
+    ("quiet = condition and replacement", 0),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_lambda_defaults_and_conditional_expression_stores(statement, count, scope):
+    source = "from contextlib import suppress as quiet\n" + statement + "\nwith quiet(Exception): pass\n"
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("loop, count", [
+    ("for item in values:\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet", 1),
+    ("while condition:\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet", 1),
+    ("async for item in values:\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet", 1),
+    ("for item in values:\n    with quiet(Exception): pass\n    if condition:\n        from contextlib import suppress as quiet", 1),
+    ("for quiet in values:\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet", 0),
+    ("while (quiet := replacement):\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet", 0),
+    ("for item in values:\n    with quiet(Exception): pass\n    from contextlib import suppress as quiet\n    quiet = replacement", 0),
+    ("for item in values:\n    with quiet(Exception), quiet(BaseException): pass\n    from contextlib import suppress as quiet", 2),
+    ("for item in values:\n    for nested in others:\n        with quiet(Exception): pass\n    from contextlib import suppress as quiet", 1),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_loop_carried_aliases_are_inspected_without_duplicate_counts(loop, count, scope):
+    source = "quiet = replacement\n" + loop
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("statement", [
+    "f = lambda y=(quiet := replacement): None",
+    "def f(x=(lambda y=(quiet := replacement): None)): pass",
+    "async def f(*, x=(lambda y=(quiet := replacement): None)): pass",
+])
+def test_lambda_default_stores_bind_conservative_function_locals(statement):
+    source = (
+        "def outer():\n    from contextlib import suppress as quiet\n"
+        + "\n".join("    " + line for line in statement.splitlines())
+        + "\n    with quiet(Exception): pass\n"
+    )
     assert len(broad_handlers(ast.parse(source))) == 0
