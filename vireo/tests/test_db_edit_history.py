@@ -24,6 +24,7 @@ from db import Database
 from repositories.edit_history import EditHistoryRepository
 from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
+from repositories.species_curation import SpeciesCurationRepository
 
 
 @contextlib.contextmanager
@@ -955,13 +956,13 @@ def test_restore_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
     _rep(db, "RepNew", p1, 1)
     db.conn.commit()
     restored = []
-    real = db._restore_species_representative
+    real = SpeciesCurationRepository.restore_representative
 
-    def spy(species, photo_id, selected_order=None):
+    def spy(self, species, photo_id, selected_order=None):
         restored.append((species, photo_id, selected_order))
-        return real(species, photo_id, selected_order=selected_order)
+        return real(self, species, photo_id, selected_order=selected_order)
 
-    monkeypatch.setattr(db, "_restore_species_representative", spy)
+    monkeypatch.setattr(SpeciesCurationRepository, "restore_representative", spy)
     curation = {
         "pref_prev": [
             "junk",
@@ -1038,13 +1039,13 @@ def test_reapply_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
     _rep(db, "OldC", p0, 6)
     db.conn.commit()
     restored = []
-    real = db._restore_species_representative
+    real = SpeciesCurationRepository.restore_representative
 
-    def spy(species, photo_id, selected_order=None):
+    def spy(self, species, photo_id, selected_order=None):
         restored.append((species, photo_id, selected_order))
-        return real(species, photo_id, selected_order=selected_order)
+        return real(self, species, photo_id, selected_order=selected_order)
 
-    monkeypatch.setattr(db, "_restore_species_representative", spy)
+    monkeypatch.setattr(SpeciesCurationRepository, "restore_representative", spy)
     curation = {
         "pref_prev": [
             None,
@@ -1379,8 +1380,6 @@ def test_edit_history_method_has_no_sql(name):
 
 @pytest.mark.parametrize("name,callback", [
     ("_undo_prediction_accept_statuses", "_prediction_scope"),
-    # The relabel-curation restores get it from the factory.
-    ("_edit_history_repository", "_restore_species_representative"),
     ("_edit_history_repository", "_ws_id"),
 ])
 def test_mid_statement_facade_calls_are_passed_as_bound_callbacks(name, callback):
@@ -1396,6 +1395,19 @@ def test_mid_statement_facade_calls_are_passed_as_bound_callbacks(name, callback
         and arg.value.id == "self"
     }
     assert callback in passed
+
+
+def test_relabel_curation_restores_get_the_representative_restore_from_the_factory():
+    """The relabel-curation restores call ``species_curation.restore_representative``
+    mid-loop; the factory hands it over bound."""
+    fn, _ = _self_attrs("_edit_history_repository")
+    passed = {
+        ast.unparse(kw.value)
+        for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        for kw in call.keywords
+    }
+    assert "self.species_curation.restore_representative" in passed
 
 
 def test_undo_prediction_accept_scope_lookup_is_patchable(db, pids, monkeypatch):
@@ -1459,7 +1471,9 @@ def test_edit_history_is_a_fresh_repository_on_the_connection_per_access(db):
     assert first.conn is db.conn
     assert first.workspace_id_fn == db._ws_id
     assert first.non_undoable is Database._NON_UNDOABLE
-    assert first.restore_species_representative == db._restore_species_representative
+    assert first.restore_species_representative.__func__ is (
+        SpeciesCurationRepository.restore_representative
+    )
     db._NON_UNDOABLE = ("rating",)
     assert db.edit_history.non_undoable == ("rating",)
 

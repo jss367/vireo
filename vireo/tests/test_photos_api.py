@@ -1098,7 +1098,7 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
-    db.set_photo_preference("life_list", "American Robin", pid)
+    db.species_curation.set_photo_preference("life_list", "American Robin", pid)
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == [
@@ -1120,7 +1120,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
-    db.set_photo_preference("life_list", "American Robin", p2)
+    db.species_curation.set_photo_preference("life_list", "American Robin", p2)
 
     data = client.get(f"/api/photos/{p1}").get_json()
     assert data["life_list"] == [
@@ -1143,7 +1143,7 @@ def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
-    # p1 selected first, then p2 — get_species_representative_lists is
+    # p1 selected first, then p2 — species_curation.get_representative_lists is
     # newest-first, so p2 is the primary (index 0) and p1 is secondary.
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
@@ -1206,7 +1206,7 @@ def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
 
 def test_photo_detail_life_list_includes_taxonomy_type_keyword(app_and_db):
     """type='taxonomy' keywords count even when is_species is 0 — same rule as
-    get_life_list_candidates, so the button and the list can't drift."""
+    species_curation.get_life_list_candidates, so the button and the list can't drift."""
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]["id"]
@@ -1236,7 +1236,7 @@ def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     db.tag_photo(pid, db.add_keyword("American Robin", is_species=True))
     db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
-    db.set_photo_preference("life_list", "Blue Jay", pid)
+    db.species_curation.set_photo_preference("life_list", "Blue Jay", pid)
 
     data = client.get(f"/api/photos/{pid}").get_json()
     by_species = {e["species"]: e["is_current_photo"] for e in data["life_list"]}

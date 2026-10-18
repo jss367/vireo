@@ -102,13 +102,13 @@ def _explorer_classes(db, root, root_id, found, uncounted):
         entry["taxon_id"] for entry in uncounted
         if entry["taxon_id"] is not None
     )
-    classes = db.get_classes_for_taxa(class_seed_taxa)
+    classes = db.species_curation.get_classes_for_taxa(class_seed_taxa)
     # Always include the default Aves class in the selector, regardless of the
-    # currently selected root. `get_classes_for_taxa(found)` only returns classes
+    # currently selected root. `species_curation.get_classes_for_taxa(found)` only returns classes
     # the user has actually tagged in, so a user who tags only non-bird species
     # and then picks that class would otherwise lose Birds from the selector with
     # no in-page way back to the default view.
-    default_root = root if root_id is None else db.get_explorer_root()
+    default_root = root if root_id is None else db.species_curation.get_explorer_root()
     if default_root is not None and not any(
         c["id"] == default_root["id"] for c in classes
     ):
@@ -122,8 +122,8 @@ def _build_explorer_payload(db, root_id=None):
     """Completeness tree (down to genus) for one class. Species leaves load
     separately via _build_explorer_species. Honest about the two failure
     states: taxonomy-not-downloaded and unmatched species."""
-    root = (db.get_explorer_root() if root_id is None
-            else db.get_taxon_by_id(root_id))
+    root = (db.species_curation.get_explorer_root() if root_id is None
+            else db.species_curation.get_taxon_by_id(root_id))
     if root is None:
         # Taxonomy absent (default lookup found no Aves class) -> not ready.
         return _explorer_unavailable(taxonomy_ready=False)
@@ -133,11 +133,11 @@ def _build_explorer_payload(db, root_id=None):
         # taxonomy exists, but this root is not valid.
         return _explorer_unavailable(taxonomy_ready=True)
 
-    rows = db.get_taxon_subtree(root["id"])
-    found = db.get_life_list_taxon_ids()
+    rows = db.species_curation.get_taxon_subtree(root["id"])
+    found = db.species_curation.get_life_list_taxon_ids()
     summary, top = _explorer_tree(rows, root["id"], found)
 
-    uncounted = db.get_life_list_uncounted_identifications()
+    uncounted = db.species_curation.get_life_list_uncounted_identifications()
     scoped_uncounted = [
         entry for entry in uncounted
         if entry["class"] is not None and entry["class"]["id"] == root["id"]
@@ -179,11 +179,11 @@ def _build_explorer_payload(db, root_id=None):
 def _build_explorer_species(db, genus_id):
     """Found+missing species directly under a genus, found ones with a
     representative photo. Found sorted first, then missing; each alphabetical."""
-    rows = [r for r in db.get_taxon_subtree(genus_id, max_depth=1)
+    rows = [r for r in db.species_curation.get_taxon_subtree(genus_id, max_depth=1)
             if r["rank"] == "species"]
-    found = db.get_life_list_taxon_ids()
+    found = db.species_curation.get_life_list_taxon_ids()
     found_ids = [r["id"] for r in rows if r["id"] in found]
-    photos = db.get_life_list_best_photo_by_taxon(found_ids)
+    photos = db.species_curation.get_life_list_best_photo_by_taxon(found_ids)
     species = []
     for r in rows:
         is_found = r["id"] in found
@@ -202,8 +202,8 @@ def _build_explorer_rank(db, rank, root_id=None):
     found/unfound. Server-authoritative so it agrees with the summary chips."""
     if rank not in _EXPLORER_RANKS:
         rank = "family"
-    root = (db.get_explorer_root() if root_id is None
-            else db.get_taxon_by_id(root_id))
+    root = (db.species_curation.get_explorer_root() if root_id is None
+            else db.species_curation.get_taxon_by_id(root_id))
     empty = {"taxonomy_ready": root is not None, "valid_root": False,
              "rank": rank, "root": None, "found": 0, "total": 0, "items": []}
     if root is None:
@@ -212,8 +212,8 @@ def _build_explorer_rank(db, rank, root_id=None):
     if root["rank"] != "class":
         return empty
 
-    rows = db.get_taxon_subtree(root["id"])
-    found = db.get_life_list_taxon_ids()
+    rows = db.species_curation.get_taxon_subtree(root["id"])
+    found = db.species_curation.get_life_list_taxon_ids()
     nodes = {r["id"]: {**r, "children": [], "found_species": 0,
                        "total_species": 0}
              for r in rows}
@@ -245,7 +245,7 @@ def _build_explorer_rank(db, rank, root_id=None):
     targets = [n for n in nodes.values() if n["rank"] == rank]
     found_species_ids = [n["id"] for n in targets
                          if rank == "species" and n["found_species"] > 0]
-    photos = (db.get_life_list_best_photo_by_taxon(found_species_ids)
+    photos = (db.species_curation.get_life_list_best_photo_by_taxon(found_species_ids)
               if found_species_ids else {})
 
     items = []

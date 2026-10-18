@@ -2086,9 +2086,9 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
 def test_move_folders_moves_photo_preferences(db_with_workspace):
     """Representative choices and ordered highlights follow moved photos."""
     db, ws1, folder_id, photo_id = db_with_workspace
-    db.set_photo_preference("life_list", "Robin", photo_id)
-    db.set_photo_preference("highlights", "Robin", photo_id)
-    db.add_species_highlight("Robin", photo_id)
+    db.species_curation.set_photo_preference("life_list", "Robin", photo_id)
+    db.species_curation.set_photo_preference("highlights", "Robin", photo_id)
+    db.species_curation.add_highlight("Robin", photo_id)
 
     ws2 = db.create_workspace("Target")
     result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
@@ -2096,14 +2096,14 @@ def test_move_folders_moves_photo_preferences(db_with_workspace):
     assert result["photo_preferences_moved"] == 2
     assert result["species_highlights_moved"] == 1
     db.set_active_workspace(ws2)
-    assert db.get_photo_preferences("life_list") == {"Robin": photo_id}
-    assert db.get_photo_preferences("highlights") == {"Robin": photo_id}
-    assert db.get_species_highlights() == {"Robin": {photo_id: 1}}
+    assert db.species_curation.get_photo_preferences("life_list") == {"Robin": photo_id}
+    assert db.species_curation.get_photo_preferences("highlights") == {"Robin": photo_id}
+    assert db.species_curation.get_highlights() == {"Robin": {photo_id: 1}}
 
     db.set_active_workspace(ws1)
-    assert db.get_photo_preferences("life_list") == {}
-    assert db.get_photo_preferences("highlights") == {}
-    assert db.get_species_highlights() == {}
+    assert db.species_curation.get_photo_preferences("life_list") == {}
+    assert db.species_curation.get_photo_preferences("highlights") == {}
+    assert db.species_curation.get_highlights() == {}
 
 
 def test_move_folders_reranks_species_highlights_on_collision(db):
@@ -2124,9 +2124,9 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
                              extension=".jpg", file_size=100, file_mtime=2.0)
 
     db.set_active_workspace(ws1)
-    db.add_species_highlight("Robin", src_photo)
+    db.species_curation.add_highlight("Robin", src_photo)
     db.set_active_workspace(ws2)
-    db.add_species_highlight("Robin", tgt_photo)
+    db.species_curation.add_highlight("Robin", tgt_photo)
 
     result = db.move_folders_to_workspace(ws1, ws2, [src_folder])
     assert result["species_highlights_moved"] == 1
@@ -2134,7 +2134,7 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
     db.set_active_workspace(ws2)
     # Both photos are in the Robin bucket, with distinct ranks; the target's
     # original rank-1 stays first because moved rows append after it.
-    assert db.get_species_highlights("Robin") == {
+    assert db.species_curation.get_highlights("Robin") == {
         "Robin": {tgt_photo: 1, src_photo: 2},
     }
 

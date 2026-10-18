@@ -268,7 +268,7 @@ def _bucket_unanalyzed_count(photos):
 
 
 def apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representative_lists(eligible_only=True)
+    preferences = db.species_curation.get_representative_lists(eligible_only=True)
     for bucket in buckets:
         representative_ids = preferences.get(bucket["species"]) or []
         representative_set = set(representative_ids)
@@ -314,7 +314,7 @@ def apply_highlight_preferences(db, buckets):
 
 
 def apply_ordered_highlights(db, buckets):
-    highlights = db.get_species_highlights(eligible_only=True)
+    highlights = db.species_curation.get_highlights(eligible_only=True)
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
         # Species-level state stays true even when every selected highlight is
@@ -364,7 +364,7 @@ def photo_highlight_entries(db, photo_id):
     the requested photo so the photo-detail endpoint doesn't rebuild every
     workspace bucket for each call (browse detail, lightbox, batch actions).
     """
-    candidates = db.get_highlights_candidates(
+    candidates = db.species_curation.get_highlights_candidates(
         None, min_quality=0.0, photo_id=photo_id
     )
     buckets, _unidentified = collect_highlight_buckets(
@@ -376,7 +376,7 @@ def photo_highlight_entries(db, photo_id):
         species = bucket.get("species")
         if not species:
             continue
-        ranks = db.get_species_highlights(species).get(species, {})
+        ranks = db.species_curation.get_highlights(species).get(species, {})
         for photo in bucket.get("photos") or []:
             if photo.get("id") != photo_id:
                 continue
@@ -817,7 +817,7 @@ def build_highlights_payload(db, query=None):
         query.representative_filter
     )
 
-    candidates = db.get_highlights_candidates(folder_id, min_quality=query.min_quality)
+    candidates = db.species_curation.get_highlights_candidates(folder_id, min_quality=query.min_quality)
     total_in_scope = db.photos.count_filtered(folder_id=folder_id)
 
     buckets, unidentified_photos = collect_highlight_buckets(
@@ -1054,9 +1054,9 @@ def build_life_list_payload(
     photo_offset=0,
     species_filter=None,
 ):
-    rows = db.get_life_list_candidates(species=species_filter)
-    locations_by_species = db.get_life_list_locations(species=species_filter)
-    class_by_taxon = db.get_class_ancestors_for_taxa({
+    rows = db.species_curation.get_life_list_candidates(species=species_filter)
+    locations_by_species = db.species_curation.get_life_list_locations(species=species_filter)
+    class_by_taxon = db.species_curation.get_class_ancestors({
         row["taxon_id"] for row in rows if row["taxon_id"] is not None
     })
     photo_offset = max(0, int(photo_offset))
@@ -1084,8 +1084,8 @@ def build_life_list_payload(
 
     species_entries = []
     distinct_photo_ids = set()
-    representatives = db.get_species_representative_lists(species=species_filter)
-    highlights_by_species = db.get_species_highlights(species=species_filter)
+    representatives = db.species_curation.get_representative_lists(species=species_filter)
+    highlights_by_species = db.species_curation.get_highlights(species=species_filter)
     for species, entry in buckets.items():
         photos = entry["photos"]
         distinct_photo_ids.update(p["id"] for p in photos)

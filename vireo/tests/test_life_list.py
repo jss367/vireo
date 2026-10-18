@@ -259,7 +259,7 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     assert cardinal["has_preferred_photo"] is True
     assert cardinal["best_source"] == "representative"
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
-    assert db.get_species_highlights("Northern Cardinal") == {
+    assert db.species_curation.get_highlights("Northern Cardinal") == {
         "Northern Cardinal": {ids["p1"]: 1},
     }
 
@@ -274,8 +274,8 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
 
 def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     app, db, ids = life_app
-    db.add_species_highlight("Northern Cardinal", ids["p1"])
-    db.add_species_highlight("Northern Cardinal", ids["p2"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p2"])
 
     resp = app.test_client().post("/api/photo-preferences", json={
         "purpose": "species_representative",
@@ -286,32 +286,32 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     body = resp.get_json()
     assert body["highlight_rank"] == 1
 
-    assert db.get_species_highlights("Northern Cardinal") == {
+    assert db.species_curation.get_highlights("Northern Cardinal") == {
         "Northern Cardinal": {ids["p2"]: 1, ids["p1"]: 2},
     }
 
 
 @pytest.mark.parametrize(
     "failing_method",
-    ["get_highlights_candidates", "promote_species_highlight"],
+    ["get_highlights_candidates", "promote_highlight"],
 )
 def test_representative_preference_rolls_back_when_promotion_step_raises(
     life_app, monkeypatch, failing_method,
 ):
     # The route writes the representative with _commit=False, then runs the
-    # Highlights eligibility check (get_highlights_candidates) and the
+    # Highlights eligibility check (species_curation.get_highlights_candidates) and the
     # promotion. If either raises, the uncommitted representative write must
     # be rolled back rather than left open on the request connection, where
     # a later commit on it would persist it.
-    from db import Database
     from flask import g
+    from repositories.species_curation import SpeciesCurationRepository
 
     app, db, ids = life_app
 
     def boom(self, *args, **kwargs):
         raise RuntimeError("forced failure")
 
-    monkeypatch.setattr(Database, failing_method, boom)
+    monkeypatch.setattr(SpeciesCurationRepository, failing_method, boom)
 
     # teardown_appcontext runs in reverse registration order, so this runs
     # before close_request_db and sees the request connection still open.
@@ -332,7 +332,7 @@ def test_representative_preference_rolls_back_when_promotion_step_raises(
     assert seen == {"in_transaction": False}
     monkeypatch.undo()
     assert "Northern Cardinal" not in db.get_species_representatives()
-    assert db.get_species_highlights("Northern Cardinal") == {}
+    assert db.species_curation.get_highlights("Northern Cardinal") == {}
 
 
 def test_representative_preference_promotes_unscored_pick_to_highlight(life_app):
@@ -351,14 +351,14 @@ def test_representative_preference_promotes_unscored_pick_to_highlight(life_app)
     body = resp.get_json()
     assert body["highlight_rank"] == 1
 
-    assert db.get_species_highlights("House Sparrow") == {
+    assert db.species_curation.get_highlights("House Sparrow") == {
         "House Sparrow": {ids["p3"]: 1},
     }
 
 
 def test_unscored_species_highlight_renders_as_highlighted(life_app):
     # An unscored photo saved as a species highlight must render as a chosen
-    # highlight. get_species_highlights(eligible_only=True) — used by the
+    # highlight. species_curation.get_highlights(eligible_only=True) — used by the
     # render/order path — has to admit unscored rows the widened write path
     # now accepts, otherwise the just-saved highlight is silently dropped and
     # the highlight-selection filters misclassify it until analysis runs.
@@ -373,7 +373,7 @@ def test_unscored_species_highlight_renders_as_highlighted(life_app):
 
     # The eligibility-filtered read (what apply_ordered_highlights uses) must
     # include the unscored row.
-    assert db.get_species_highlights("House Sparrow", eligible_only=True) == {
+    assert db.species_curation.get_highlights("House Sparrow", eligible_only=True) == {
         "House Sparrow": {ids["p3"]: 1},
     }
 
@@ -419,11 +419,11 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     db.add_workspace_folder(year_ws, feb_fid)
 
     db.set_active_workspace(jan_ws)
-    assert db.get_species_representative_lists()[species] == [jan_pid]
+    assert db.species_curation.get_representative_lists()[species] == [jan_pid]
     db.set_active_workspace(feb_ws)
-    assert db.get_species_representative_lists()[species] == [feb_pid]
+    assert db.species_curation.get_representative_lists()[species] == [feb_pid]
     db.set_active_workspace(year_ws)
-    assert db.get_species_representative_lists()[species] == [feb_pid, jan_pid]
+    assert db.species_curation.get_representative_lists()[species] == [feb_pid, jan_pid]
 
     resp = client.post(f"/api/workspaces/{year_ws}/activate")
     assert resp.status_code == 200
@@ -442,12 +442,12 @@ def test_reselecting_representative_promotes_it(life_app):
     app, db, ids = life_app
     db.set_species_representative("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
-    assert db.get_species_representative_lists()["Northern Cardinal"] == [
+    assert db.species_curation.get_representative_lists()["Northern Cardinal"] == [
         ids["p2"], ids["p1"],
     ]
 
     db.set_species_representative("Northern Cardinal", ids["p1"])
-    assert db.get_species_representative_lists()["Northern Cardinal"] == [
+    assert db.species_curation.get_representative_lists()["Northern Cardinal"] == [
         ids["p1"], ids["p2"],
     ]
 
@@ -469,8 +469,8 @@ def test_life_list_photo_preference_must_match_species(life_app):
 
 def test_clearing_representative_removes_legacy_fallbacks(life_app):
     app, db, ids = life_app
-    db.set_photo_preference("life_list", "Northern Cardinal", ids["p1"])
-    db.set_photo_preference("highlights", "Northern Cardinal", ids["p2"])
+    db.species_curation.set_photo_preference("life_list", "Northern Cardinal", ids["p1"])
+    db.species_curation.set_photo_preference("highlights", "Northern Cardinal", ids["p2"])
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "species_representative",
@@ -507,10 +507,10 @@ def test_photo_preferences_highlights_purpose_adds_ordered_highlight(life_app):
 
     # The photo landed in species_highlights, not in photo_preferences
     # as a representative.
-    assert db.get_species_highlights("Northern Cardinal") == {
+    assert db.species_curation.get_highlights("Northern Cardinal") == {
         "Northern Cardinal": {ids["p2"]: 1},
     }
-    assert db.get_photo_preferences("species_representative") == {}
+    assert db.species_curation.get_photo_preferences("species_representative") == {}
 
 
 def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app):
@@ -518,7 +518,7 @@ def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app)
     must remove that specific ordered highlight and leave the species
     representative alone."""
     app, db, ids = life_app
-    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
 
     resp = app.test_client().delete("/api/photo-preferences", json={
@@ -528,7 +528,7 @@ def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app)
     })
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("Northern Cardinal") == {}
+    assert db.species_curation.get_highlights("Northern Cardinal") == {}
     # The species_representative pick is untouched — DELETE with
     # purpose=highlights must not clear the representative.
     assert db.get_species_representatives() == {"Northern Cardinal": ids["p2"]}
@@ -539,7 +539,7 @@ def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
     (ordered highlights are per-photo) and must 400 rather than clearing
     all highlights for the species."""
     app, db, ids = life_app
-    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -547,7 +547,7 @@ def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
     })
     assert resp.status_code == 400
     # The highlight is still there.
-    assert db.get_species_highlights("Northern Cardinal") == {
+    assert db.species_curation.get_highlights("Northern Cardinal") == {
         "Northern Cardinal": {ids["p1"]: 1},
     }
 
@@ -569,7 +569,7 @@ def test_photo_preferences_highlights_rejects_predicted_only_photo(life_app):
 
 def test_ordered_highlight_is_life_list_fallback(life_app):
     app, db, ids = life_app
-    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
@@ -580,7 +580,7 @@ def test_ordered_highlight_is_life_list_fallback(life_app):
 
 def test_species_representative_beats_ordered_highlight_for_life_list(life_app):
     app, db, ids = life_app
-    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
     db.set_species_representative("Northern Cardinal", ids["p2"])
 
     data = _get_life_list(app)
@@ -774,7 +774,7 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     accept ``POST /api/photo-preferences`` for the entry it renders under.
 
     Regression test for the eligibility guards in
-    :func:`get_photo_life_list_species` and
+    :func:`species_curation.get_photo_life_list_species` and
     :func:`_photo_can_be_life_list_preference` that previously filtered to
     ``t.rank = 'species' OR t.rank IS NULL`` — which hid the shared Set
     Representative row on the higher-rank Life List entry and 400'd a
@@ -786,7 +786,7 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
 
     # The shared Set-Representative row (browse context menu / lightbox
     # panel) reads the photo's life_list block, which comes from
-    # ``get_photo_life_list_species``. Without the broadened eligibility,
+    # ``species_curation.get_photo_life_list_species``. Without the broadened eligibility,
     # this list would be empty and the affordance would not render.
     detail = client.get(f"/api/photos/{seed['photo']}").get_json()
     assert [entry["species"] for entry in detail["life_list"]] == ["Accipiter"]
@@ -807,14 +807,14 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     assert entry["has_preferred_photo"] is True
 
     # The just-saved representative must survive
-    # ``get_species_representative_lists(eligible_only=True)`` — which is
+    # ``species_curation.get_representative_lists(eligible_only=True)`` — which is
     # what the lightbox / context menu re-reads via
     # ``GET /api/photos/<id>`` to decide whether the button is current.
     # Without the broadened eligibility EXISTS, the higher-rank row would
     # be dropped and ``is_current_photo`` would come back false, so the
     # UI would keep offering "Set Representative" for a save that
     # already succeeded.
-    assert db.get_species_representative_lists(eligible_only=True) == {
+    assert db.species_curation.get_representative_lists(eligible_only=True) == {
         "Accipiter": [seed["photo"]],
     }
     detail_after = client.get(f"/api/photos/{seed['photo']}").get_json()
@@ -827,7 +827,7 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
 def test_higher_rank_taxonomy_link_survives_mark_species_pass(life_app):
     """A linked higher-rank taxonomy identification (genus/family/class)
     must keep its ``taxon_id`` across the startup ``mark_species_keywords``
-    pass, so ``get_life_list_candidates`` continues to surface the entry's
+    pass, so ``species_curation.get_life_list_candidates`` continues to surface the entry's
     ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
     used by the new Life List rank and class filters.
 
@@ -963,7 +963,7 @@ def test_life_list_suppresses_ancestor_keywords_from_lightroom_import(life_app):
 
 
 def test_life_list_locations_omit_ancestor_buckets(life_app):
-    """The locations map returned by ``get_life_list_locations`` must not
+    """The locations map returned by ``species_curation.get_life_list_locations`` must not
     attribute a species-photo's location to its ancestor keywords — the
     classifier's broader-label ancestors should not inherit every place
     the species was seen. Codex noted this drove inflated ancestor
@@ -975,7 +975,7 @@ def test_life_list_locations_omit_ancestor_buckets(life_app):
     db.tag_photo(seed["photo"], location_id)
     db.conn.commit()
 
-    locations = db.get_life_list_locations()
+    locations = db.species_curation.get_life_list_locations()
     assert "American Robin" in locations
     assert locations["American Robin"] == ["Backyard"]
     for ancestor in ("Turdus", "Turdidae", "Aves"):
@@ -1034,7 +1034,7 @@ def test_life_list_ancestor_representative_write_denied_when_descendant_exists(l
 
 
 def test_species_representative_lists_suppress_ancestor_with_descendant(life_app):
-    """``get_species_representative_lists(eligible_only=True)`` must drop
+    """``species_curation.get_representative_lists(eligible_only=True)`` must drop
     an ancestor keyword's representative when the photo also carries a
     descendant identification. That reader powers ``is_current_photo`` on
     ``GET /api/photos/<id>``, so a lingering ancestor eligibility would
@@ -1050,7 +1050,7 @@ def test_species_representative_lists_suppress_ancestor_with_descendant(life_app
     db.set_species_representative("Aves", seed["photo"])
     db.conn.commit()
 
-    eligible = db.get_species_representative_lists(eligible_only=True)
+    eligible = db.species_curation.get_representative_lists(eligible_only=True)
     assert "Aves" not in eligible, (
         "Aves representative eligibility must be suppressed when the "
         "photo also carries American Robin"
