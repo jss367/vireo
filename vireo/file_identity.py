@@ -11,7 +11,7 @@ _probes = {}
 def catalog_folder_aliases(db):
     """Build a lexical lookup once for a scan, without probing every folder."""
     aliases = {}
-    for row in db.conn.execute("SELECT path FROM folders"):
+    for row in db.get_all_folders():
         aliases.setdefault(os.path.normpath(row["path"]).casefold(), []).append(row["path"])
     return aliases
 
@@ -20,9 +20,10 @@ def catalog_folder_path(db, path, *, aliases=None):
     """Normalize aliases and reuse the spelling of an existing catalog folder."""
     supplied = os.fspath(path)
     if aliases is None:
-        exact = db.conn.execute("SELECT path FROM folders WHERE path=?", (supplied,)).fetchone()
-        if exact:
-            return exact["path"]
+        # ``folders.path`` uses binary collation, so an exact match is the
+        # stored spelling itself.
+        if db.get_folder_id_by_path(supplied) is not None:
+            return supplied
         aliases = catalog_folder_aliases(db)
     elif supplied in aliases.get(os.path.normpath(supplied).casefold(), ()):
         return supplied

@@ -21,6 +21,7 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
+    from repositories.card_cleanup import CardCleanupRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
     from repositories.detections import DetectionsRepository
@@ -2426,6 +2427,26 @@ class Database:
         works by photo id with none active.
         """
         return self._audit_repository()
+
+    # -- Card cleanup (``card_cleanup`` owns the gates and the commits) --
+
+    def _card_cleanup_repository(self):
+        """Build the (catalog-wide) card-cleanup repository on this connection."""
+        from repositories.card_cleanup import CardCleanupRepository
+
+        return CardCleanupRepository(self.conn)
+
+    @property
+    def card_cleanup(self) -> CardCleanupRepository:
+        """Card cleanup's catalog SQL: ``db.card_cleanup.rows_by_hash(hash)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_card_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to a workspace, and its verdict write runs in the caller's
+        transaction (``card_cleanup`` commits through ``db.commit()``).
+        """
+        return self._card_cleanup_repository()
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
