@@ -246,7 +246,7 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     try:
         changes, _here, _elsewhere, _overlap = db.pending_changes.staged_scope_by_photos(photo_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
-    except Exception:
+    except Exception:  # broad: the transfer succeeded; None makes the summary say the re-check failed
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return None
 
@@ -949,7 +949,7 @@ class _ImportFullRun:
             # failure, since rows are committed incrementally.
             try:
                 self.invalidate_missing_originals()
-            except Exception:
+            except Exception:  # broad: cache invalidation is best-effort; the scan already finished
                 log.exception(
                     "Failed to invalidate missing-originals cache after import scan of %s",
                     scan_target,
@@ -1547,7 +1547,7 @@ def create_imports_blueprint(
                         try:
                             invalidate_missing_originals()
                         except Exception:
-                            # The archive already completed; a stale Missing
+                            # broad: the archive already completed; a stale Missing
                             # Originals cache refreshes on its next scan.
                             log.warning("Could not invalidate Missing Originals after archive", exc_info=True)
                         return result
@@ -1577,7 +1577,7 @@ def create_imports_blueprint(
 
             result = preview_import(catalogs, db)
             return jsonify(result)
-        except Exception as e:
+        except Exception as e:  # broad: catalog parsers raise undocumented errors; answered as a 500 with the reason
             log.exception("Catalog import preview failed")
             return json_error(str(e), 500)
 

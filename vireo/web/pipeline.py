@@ -2008,7 +2008,7 @@ def _save_recent_destination(destination):
             ingest_cfg["recent_destinations"] = recents
             raw["ingest"] = ingest_cfg
             cfg.save(raw)
-    except Exception:
+    except Exception:  # broad: remembering a recent destination must not fail the import
         log.warning("Failed to save recent destination to config", exc_info=True)
 
 

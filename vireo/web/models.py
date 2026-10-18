@@ -186,9 +186,9 @@ def create_models_blueprint(
         try:
             release, reason = darktable_install.resolve_release_cached()
         except Exception as e:
-            # resolve_release is documented never to raise; this is belt and
+            # broad: resolve_release is documented never to raise; this is belt and
             # braces so an unexpected bug still degrades to a link, not a 500.
-            log.warning("darktable release lookup failed: %s", e)
+            log.warning("darktable release lookup failed: %s", e, exc_info=True)
             return jsonify({
                 "available": False,
                 "reason": darktable_install.REASON_UNREACHABLE,
@@ -319,9 +319,9 @@ def create_models_blueprint(
         try:
             asset, reason = darktable_install.resolve_release()
         except Exception as e:
-            # resolve_release is documented never to raise; belt and braces so
+            # broad: resolve_release is documented never to raise; belt and braces so
             # an unexpected bug degrades to a message, not a 500.
-            log.warning("darktable release lookup failed: %s", e)
+            log.warning("darktable release lookup failed: %s", e, exc_info=True)
             asset, reason = None, darktable_install.REASON_UNREACHABLE
         if not asset:
             # Surface the specific reason. resolve_release distinguishes
@@ -595,7 +595,7 @@ def create_models_blueprint(
                     usable, skipped = label_set_summary(meta)
                     trimmed["usable_count"] = usable
                     trimmed["ambiguous_count"] = skipped
-                except Exception:
+                except Exception:  # broad: one unreadable label set must not break the listing
                     log.warning(
                         "Could not inspect %s for ambiguous labels", path,
                         exc_info=True,
@@ -800,7 +800,7 @@ def create_models_blueprint(
                             if cached != dest:
                                 shutil.copy2(cached, dest)
                         break
-                    except Exception as exc:
+                    except Exception as exc:  # broad: hf_hub_download raises many network types; the last retry re-raises
                         if attempt == MAX_RETRIES:
                             raise
                         wait = 2 ** attempt
@@ -883,8 +883,8 @@ def create_models_blueprint(
             try:
                 from services.hf_cache import purge_outcome, purge_subfolder
                 cache = purge_outcome(purge_subfolder, spec["subfolder"])
-            except Exception as exc:  # pragma: no cover - cleanup must not fail the delete
-                log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+            except Exception as exc:  # pragma: no cover  # broad: HF cache cleanup must not fail the delete
+                log.warning("Could not purge HF cache for %s: %s", model_id, exc, exc_info=True)
                 cache = {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
                     {"key": model_id, "error": str(exc)},
                 ]}}
