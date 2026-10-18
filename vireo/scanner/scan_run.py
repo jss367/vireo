@@ -12,6 +12,7 @@ run here. The SQL lives in ``repositories/scanning.py`` (``db.scanning``).
 import errno
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from image_loader import is_excluded_scan_path
@@ -31,6 +32,23 @@ from scanner.triage import _incremental_photo_index, _IncrementalTriage
 from scanner.working_copies import _extract_working_copies
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ResolvedScanRoot:
+    """The cataloged root a scan walks and the caller's inputs rebased under it.
+
+    ``root_path`` is the catalog's spelling of the root; the path lists are
+    the caller's ``ScanOptions`` values re-expressed under it, and
+    ``frozen_files`` is the discovered-files manifest consumed into a list
+    (None when the scan walks the filesystem).
+    """
+
+    root_path: Path
+    restrict_dirs: list | None
+    restrict_files: list | None
+    skip_paths: set | None
+    frozen_files: list | None
 
 
 _EMPTY_SCAN_COUNTS = {
@@ -84,27 +102,21 @@ def scan(root, db, *, options=None, hooks=None, control=None, counts=None,
     # exception) or a fresh one; either way start from a known shape.
     counts = {} if counts is None else counts
     counts.update(_EMPTY_SCAN_COUNTS)
-    status_supports_phase = _status_callback_supports_phase(hooks.status)
     resolved = _resolve_scan_root(
         root, db, options.restrict_dirs, options.restrict_files,
         options.skip_paths, options.discovered_files,
     )
     if resolved is None:
         return counts
-    root_path, restrict_dirs, restrict_files, skip_paths, frozen_files = resolved
     from file_identity import catalog_folder_aliases, catalog_folder_path
 
     _ScanRun(
-        root, root_path, db, counts, frozen_files,
+        root, resolved, db, counts,
         catalog_folder_path=catalog_folder_path,
         catalog_folder_aliases=catalog_folder_aliases,
         options=options,
         hooks=hooks,
         control=control,
-        status_supports_phase=status_supports_phase,
-        skip_paths=skip_paths,
-        restrict_dirs=restrict_dirs,
-        restrict_files=restrict_files,
         reported_photo_identities=reported_photo_identities,
     ).run()
     return counts
@@ -114,9 +126,9 @@ def _resolve_scan_root(root, db, restrict_dirs, restrict_files, skip_paths,
                        discovered_files):
     """The cataloged root and the caller's inputs rebased under it.
 
-    Returns ``(root_path, restrict_dirs, restrict_files, skip_paths,
-    frozen_files)``, or ``None`` when the root must not be scanned (an
-    other-app data bundle, or a missing root without a frozen manifest).
+    Returns a ``_ResolvedScanRoot``, or ``None`` when the root must not be
+    scanned (an other-app data bundle, or a missing root without a frozen
+    manifest).
     """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
@@ -175,7 +187,9 @@ def _resolve_scan_root(root, db, restrict_dirs, restrict_files, skip_paths,
             )
         log.warning("Root path does not exist or is not a directory: %s", root)
         return None
-    return root_path, restrict_dirs, restrict_files, skip_paths, frozen_files
+    return _ResolvedScanRoot(
+        root_path, restrict_dirs, restrict_files, skip_paths, frozen_files,
+    )
 
 
 def _rebase_scan_inputs(original_root, root_path, restrict_dirs,
@@ -210,23 +224,23 @@ class _ScanRun:
     """
 
     def __init__(
-        self, root, root_path, db, counts, frozen_files, *,
+        self, root, resolved, db, counts, *,
         catalog_folder_path, catalog_folder_aliases,
-        options, hooks, control, status_supports_phase,
-        skip_paths, restrict_dirs, restrict_files,
+        options, hooks, control,
         reported_photo_identities=None,
     ):
         self.root = root
-        self.root_path = root_path
+        self.root_path = resolved.root_path
         self.db = db
         self.catalog_folder_path = catalog_folder_path
         self.catalog_folder_aliases = catalog_folder_aliases
         self.options = options
         # The rebased spellings ``_resolve_scan_root`` returned, not the
         # caller's ``options`` values.
-        self.restrict_dirs = restrict_dirs
+        self.restrict_dirs = resolved.restrict_dirs
         self.signals = _ScanSignals(
-            control.cancel_check, hooks.status, status_supports_phase,
+            control.cancel_check, hooks.status,
+            _status_callback_supports_phase(hooks.status),
         )
         self.tally = _ScanTally(
             counts,
@@ -236,11 +250,11 @@ class _ScanRun:
             reported_identities=reported_photo_identities,
         )
         self.discovery = _Discovery(
-            root, root_path, frozen_files,
+            root, resolved.root_path, resolved.frozen_files,
             signals=self.signals,
-            restrict_dirs=restrict_dirs,
-            restrict_files=restrict_files,
-            skip_paths=skip_paths,
+            restrict_dirs=resolved.restrict_dirs,
+            restrict_files=resolved.restrict_files,
+            skip_paths=resolved.skip_paths,
             recursive=options.recursive,
             permission_error_callback=hooks.permission_error,
         )
