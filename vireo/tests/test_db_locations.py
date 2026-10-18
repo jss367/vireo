@@ -987,6 +987,38 @@ def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
     assert len(_selects(statements, "ORDER BY pk.rowid")) == 2
 
 
+# -- GPS discrepancy read --------------------------------------------------------
+
+
+def test_gps_discrepancy_rows_pick_the_sync_leaf_and_review(db, fid):
+    early = _photo(db, fid, "early.jpg", 1.0, 2.0, timestamp="2026-01-01T00:00:00")
+    late = _photo(db, fid, "late.jpg", 3.0, 4.0, timestamp="2026-02-01T00:00:00")
+    unplaced = _photo(db, fid, "none.jpg", 5.0, 6.0)
+    root = _kw(db, "Kenya", lat=0.5, lng=37.0)
+    leaf = _kw(db, "Mara", parent_id=root, lat=-1.0, lng=35.0)
+    _kw(db, "Coordless", parent_id=root)
+    for kid in (root, leaf):
+        _link(db, late, kid)
+    _link(db, early, root)
+    _link(db, unplaced, _kw(db, "Generic", kw_type="general", lat=1.0, lng=1.0))
+    db.conn.execute(
+        "INSERT INTO location_gps_reviews (photo_id, fingerprint) VALUES (?, 'fp')", (late,),
+    )
+    db.conn.commit()
+
+    rows = db.locations.gps_discrepancy_rows([late, early, unplaced])
+
+    assert [
+        (r["id"], r["keyword_id"], r["assigned_name"], r["assigned_latitude"],
+         r["assigned_longitude"], r["reviewed_fingerprint"], r["folder_path"])
+        for r in rows
+    ] == [
+        (early, root, "Kenya", 0.5, 37.0, None, "/photos"),
+        (late, leaf, "Mara", -1.0, 35.0, "fp", "/photos"),
+    ]
+    assert (rows[1]["latitude"], rows[1]["longitude"], rows[1]["filename"]) == (3.0, 4.0, "late.jpg")
+
+
 # -- structure: the location SQL lives in the repository -----------------------
 
 # Database methods whose SQL moved to repositories/locations.py. Each stays on
@@ -1151,3 +1183,27 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
     finally:
         repository.conn = connection
         writer.close()
+
+
+def test_locations_is_a_fresh_repository_on_the_connection_per_access(db):
+    from repositories.locations import LocationRepository
+
+    first, second = db.locations, db.locations
+    assert isinstance(first, LocationRepository)
+    assert first is not second
+    assert first.conn is db.conn
+
+
+def test_locations_accessor_builds_through_the_factory_not_the_connection():
+    accessor = Database.__dict__["locations"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_location_repository" in attrs
+    assert "conn" not in attrs

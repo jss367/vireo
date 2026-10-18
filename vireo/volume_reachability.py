@@ -881,10 +881,7 @@ KNOWN_MOUNT_ROOTS_KEY = "known_archive_mount_roots"
 def load_known_mount_roots(db) -> set[str]:
     """Return mount roots previously observed live in this catalog."""
     try:
-        row = db.conn.execute(
-            "SELECT value FROM db_meta WHERE key = ?",
-            (KNOWN_MOUNT_ROOTS_KEY,),
-        ).fetchone()
+        value = db.get_meta(KNOWN_MOUNT_ROOTS_KEY)
     except Exception:
         log.warning(
             "Could not read known mount roots; detached-stub detection "
@@ -892,10 +889,10 @@ def load_known_mount_roots(db) -> set[str]:
             exc_info=True,
         )
         return set()
-    if row is None or row["value"] is None:
+    if value is None:
         return set()
     try:
-        entries = json.loads(row["value"])
+        entries = json.loads(value)
     except (TypeError, ValueError):
         return set()
     if not isinstance(entries, list):
@@ -913,30 +910,28 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
         # This helper has always committed at the end, so preserving pending
         # caller DML is part of its existing contract. End an implicit legacy
         # sqlite3 transaction before opening the explicit writer transaction.
-        if db.conn.in_transaction:
-            db.conn.commit()
+        if db.in_transaction:
+            db.commit()
         # Acquire SQLite's writer reservation before reading the JSON value.
         # Concurrent Database connections then serialize the complete
         # read/merge/write sequence instead of both reading the same old set
         # and letting the later UPSERT discard the other's newly seen root.
-        db.conn.execute("BEGIN IMMEDIATE")
+        db.begin_immediate()
         transaction_started = True
         existing = load_known_mount_roots(db)
         merged = existing | fresh
         if merged == existing:
-            db.conn.commit()
+            db.commit()
             return
-        db.conn.execute(
-            "INSERT INTO db_meta(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged))),
+        db.set_meta(
+            KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)), _commit=False,
         )
-        db.conn.commit()
+        db.commit()
     except Exception:
         if transaction_started:
             # Must not replace the failure logged just below.
             with contextlib.suppress(Exception):
-                db.conn.rollback()
+                db.rollback()
         log.debug(
             "Could not persist known mount roots (%r); cold-start detached "
             "stub detection will lack that evidence next run.",

@@ -25,7 +25,7 @@ import time
 import uuid
 from functools import partial
 
-from db import Database, commit_with_retry
+from db import Database
 from file_replace import replace_file
 from job_contract import progress_event
 from pipeline_locks import (
@@ -81,7 +81,7 @@ _MAX_SOURCE_OFFLINE_PAUSES = 3
 def _rollback_failed_mask_photo(thread_db, photo_id):
     """Reset the reused mask-stage connection or abort if it cannot recover."""
     try:
-        thread_db.conn.rollback()
+        thread_db.rollback()
     except Exception as exc:
         log.exception("Mask extraction rollback failed for photo %s", photo_id)
         raise RuntimeError(
@@ -574,11 +574,7 @@ def _preflight_mask_outcomes(
             primary["box_x"], primary["box_y"],
             primary["box_w"], primary["box_h"],
         )
-        state = thread_db.conn.execute(
-            "SELECT active_mask_variant, dino_embedding_variant, quality_input_recipe "
-            "FROM photos WHERE id = ?",
-            (photo_id,),
-        ).fetchone()
+        state = thread_db.masks_features.photo_mask_state(photo_id)
         if (
             existing["detector_model"] == primary["detector_model"]
             and cached_prompt == live_prompt
@@ -678,26 +674,16 @@ def _still_offline_folder_ids_of(thread_db, folder_ids) -> set:
     if not folder_ids:
         return set()
     ids = [int(fid) for fid in folder_ids]
-    _CHUNK = 900
     probe_cache: dict = {}
     still_offline: set = set()
-    for i in range(0, len(ids), _CHUNK):
-        chunk = ids[i:i + _CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        rows = thread_db.conn.execute(
-            f"SELECT id, path FROM folders WHERE id IN ({placeholders})",
-            chunk,
-        ).fetchall()
-        for row in rows:
-            fid = row["id"] if hasattr(row, "keys") else row[0]
-            path = row["path"] if hasattr(row, "keys") else row[1]
-            if not path:
-                still_offline.add(fid)
-                continue
-            if path not in probe_cache:
-                probe_cache[path] = os.path.isdir(path)
-            if not probe_cache[path]:
-                still_offline.add(fid)
+    for fid, path in thread_db.get_folder_paths(ids).items():
+        if not path:
+            still_offline.add(fid)
+            continue
+        if path not in probe_cache:
+            probe_cache[path] = os.path.isdir(path)
+        if not probe_cache[path]:
+            still_offline.add(fid)
     return still_offline
 
 
@@ -738,15 +724,9 @@ def _still_offline_folder_ids(thread_db, seed_photo_ids) -> set:
     still_offline_folder_ids: set = set()
     for i in range(0, len(ids), _CHUNK):
         chunk = ids[i:i + _CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        rows = thread_db.conn.execute(
-            f"SELECT DISTINCT p.folder_id, f.path "
-            f"FROM photos p JOIN folders f ON p.folder_id = f.id "
-            f"WHERE p.id IN ({placeholders})",
-            chunk,
-        ).fetchall()
+        rows = thread_db.photo_visibility.folder_rows_for_photos(chunk)
         for row in rows:
-            fid = row["folder_id"] if hasattr(row, "keys") else row[0]
+            fid = row["id"] if hasattr(row, "keys") else row[0]
             path = row["path"] if hasattr(row, "keys") else row[1]
             if not path:
                 still_offline_folder_ids.add(fid)
@@ -977,15 +957,10 @@ def _retry_thumbnail_with_companion(
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
         try:
-            thread_db.conn.execute(
-                "UPDATE photos SET"
-                " working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?,"
-                " working_copy_failed_source='source'"
-                " WHERE id=?",
-                (file_mtime, photo_id),
+            thread_db.working_copies.mark_raw_decode_failed(
+                photo_id, file_mtime,
             )
-            commit_with_retry(thread_db.conn)
+            thread_db.commit_with_retry()
         except Exception:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
@@ -1026,15 +1001,10 @@ def _retry_thumbnail_with_working_copy(
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
         try:
-            thread_db.conn.execute(
-                "UPDATE photos SET"
-                " working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?,"
-                " working_copy_failed_source='source'"
-                " WHERE id=?",
-                (file_mtime, photo_id),
+            thread_db.working_copies.mark_raw_decode_failed(
+                photo_id, file_mtime,
             )
-            commit_with_retry(thread_db.conn)
+            thread_db.commit_with_retry()
         except Exception:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
@@ -1142,25 +1112,12 @@ def _find_broken_metadata_folders(db, photo_ids):
     """
     if not photo_ids:
         return []
-    raw_list = ",".join(f"'{e}'" for e in _RAW_EXTENSIONS)
     ids = list(photo_ids)
     _CHUNK = 900
     by_folder: dict[str, list[str]] = {}
     for i in range(0, len(ids), _CHUNK):
         chunk = ids[i : i + _CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        rows = db.conn.execute(
-            f"""SELECT f.path AS folder_path, p.filename
-                FROM photos p
-                JOIN folders f ON p.folder_id = f.id
-                WHERE p.id IN ({placeholders})
-                  AND p.exif_data IS NULL
-                  AND (p.timestamp IS NULL
-                       OR (p.extension IN ({raw_list})
-                           AND p.width IS NOT NULL AND p.width < 1000))
-                ORDER BY f.path, p.filename""",
-            tuple(chunk),
-        ).fetchall()
+        rows = db.scanning.broken_metadata_rows(chunk, _RAW_EXTENSIONS)
         for r in rows:
             full_path = os.path.join(r["folder_path"], r["filename"])
             if not os.path.isfile(full_path):
