@@ -14575,7 +14575,7 @@ def test_edit_render_touches_working_copy_source_under_guard(
     import os
     import time
 
-    import web.media as media_module
+    import services.original_photo as original_photo_module
     import working_copy_cache
     from PIL import Image
 
@@ -14610,7 +14610,7 @@ def test_edit_render_touches_working_copy_source_under_guard(
         lock_held_when_touched.append((os.fspath(path), held))
         return real_touch(path)
 
-    monkeypatch.setattr(media_module, "touch_working_copy_access", spy_touch)
+    monkeypatch.setattr(original_photo_module, "touch_working_copy_access", spy_touch)
 
     resp = app.test_client().get(f"/photos/{photo_id}/original")
     assert resp.status_code == 200, resp.data

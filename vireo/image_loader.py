@@ -644,7 +644,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
         )
 
 
-def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
+def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Load an image file, resized to max_size (Pillow or a float RAW buffer).
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
