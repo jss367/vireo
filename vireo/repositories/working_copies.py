@@ -19,9 +19,9 @@ access, see ``Database.working_copies``); there are no forwarding wrappers on
 ``Database``. The data is catalog-wide, so the repository takes no workspace
 id. Nothing here commits: the extraction pass owns its commits (through
 ``Database.commit_with_retry``) except ``load_scope``, which commits only the
-transaction it opened itself, exactly as the scanner did. The thumbnail
-renderers' RAW-decode failure marker (``mark_raw_decode_failed``) lives here
-too; they commit it themselves.
+transaction it opened itself, exactly as the scanner did. The render paths'
+RAW-decode failure marker (``mark_raw_decode_failed``) lives here too; they
+commit it themselves.
 """
 
 import sqlite3
@@ -219,9 +219,9 @@ class WorkingCopyRepository:
     def mark_raw_decode_failed(self, photo_id: int, file_mtime: Any) -> None:
         """Record that the photo's RAW source failed to decode at ``file_mtime``.
 
-        Set by the thumbnail renderers when they fall back to a companion JPEG
-        or working copy, so the next render skips the RAW decode until the
-        source changes. The caller commits.
+        The render paths (the thumbnail fallbacks, ``render_source``) stamp it
+        so the next request fails fast instead of repeating the decode until
+        the source changes. The caller commits.
         """
         self.conn.execute(
             "UPDATE photos SET"
