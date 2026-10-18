@@ -259,7 +259,13 @@ def broad_handlers(tree):
                 for collector in prefixes:
                     collector.append(current)
             if any(collector is module_prefixes for collector in prefixes):
-                definition_offsets[id(node)] = len(module_prefixes), _possible_aliases(current)
+                seed = current
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.decorator_list:
+                    # An undecorated function becomes callable only after its
+                    # own module name is bound. Decorators/class construction
+                    # can invoke callbacks before the enclosing name is bound.
+                    seed = dict(current, **{node.name: None})
+                definition_offsets[id(node)] = len(module_prefixes), _possible_aliases(seed)
             if not state_only:
                 definition_lexical = definition_globals.get(id(node), function_lexical)
                 if isinstance(node, ast.ClassDef):
@@ -998,3 +1004,31 @@ def test_chained_comparison_stores_preserve_short_circuit_paths(expression, coun
 ])
 def test_functions_keep_possible_module_globals_from_definition_onward(source, count):
     assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("kind", ["def", "async def"])
+@pytest.mark.parametrize("source, count", [
+    ("from contextlib import suppress as quiet\n{kind} quiet():\n    with quiet(Exception): pass", 0),
+    ("import contextlib as ctx\n{kind} ctx():\n    with ctx.suppress(Exception): pass", 0),
+    ("from contextlib import suppress as quiet\n{kind} quiet():\n    with quiet(Exception): pass\nsaved = quiet\nfrom contextlib import suppress as quiet\nsaved()", 1),
+    ("from contextlib import suppress as quiet\n{kind} quiet():\n    with quiet(Exception): pass\nsaved = quiet\nif condition:\n    from contextlib import suppress as quiet\nsaved()", 1),
+    ("from contextlib import suppress as quiet\n@factory\n{kind} quiet():\n    with quiet(Exception): pass", 1),
+])
+def test_function_own_name_shadows_only_after_undecorated_binding(kind, source, count):
+    assert len(broad_handlers(ast.parse(source.format(kind=kind)))) == count
+
+
+def test_class_method_name_does_not_shadow_module_alias():
+    source = (
+        "from contextlib import suppress as quiet\nclass C:\n"
+        "    def quiet(self):\n        with quiet(Exception): pass\n"
+    )
+    assert len(broad_handlers(ast.parse(source))) == 1
+
+
+def test_decorator_expression_store_precedes_possible_callback():
+    source = (
+        "from contextlib import suppress as quiet\n@factory(quiet := replacement)\n"
+        "def quiet():\n    with quiet(Exception): pass\n"
+    )
+    assert len(broad_handlers(ast.parse(source))) == 0

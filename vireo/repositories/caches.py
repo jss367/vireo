@@ -308,6 +308,16 @@ class CachesRepository:
             (photo_id, size),
         )
 
+    def photo_exists(self, photo_id: int) -> bool:
+        """True when the catalog still has this photo.
+
+        ``preview_cache`` rows reference ``photos``; the startup preview
+        adoption checks this before tracking (or instead unlinks) a file.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone() is not None
+
     def clear_thumbnail_path(self, pid: int) -> None:
         self.conn.execute(
             "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
