@@ -1211,10 +1211,7 @@ def _adopt_unsized_legacy_previews(db, preview_dir, unsized_files, unsized_pat,
         # preview_cache would raise a FK error and rolling back the
         # already-performed os.rename is ugly. Unlink the orphan so
         # disk doesn't keep pointing at vanished photos.
-        photo_row = db.conn.execute(
-            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-        ).fetchone()
-        if photo_row is None:
+        if not db.caches.photo_exists(photo_id):
             try:
                 os.remove(src)
                 orphaned += 1
@@ -1251,10 +1248,7 @@ def _adopt_untracked_sized_previews(db, preview_dir, sized_files, sized_pat):
         path = os.path.join(preview_dir, fname)
         if db.caches.preview_get(photo_id, size):
             continue
-        photo_row = db.conn.execute(
-            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-        ).fetchone()
-        if photo_row is None:
+        if not db.caches.photo_exists(photo_id):
             try:
                 os.remove(path)
                 orphaned += 1
@@ -1307,10 +1301,7 @@ def _migrate_edit_math_render_caches(app):
         if stored_version >= EDIT_MATH_VERSION:
             return
 
-        rows = db.conn.execute(
-            "SELECT photo_id FROM photo_edit_recipes"
-        ).fetchall()
-        photo_ids = [row["photo_id"] for row in rows]
+        photo_ids = db.edits.edited_photo_ids()
 
         invalidated_previews = 0
         invalidated_thumbs = 0
@@ -1335,7 +1326,7 @@ def _migrate_edit_math_render_caches(app):
             # Commit the row deletions that did succeed, but leave the stored
             # version unchanged so the next boot re-runs and retries the
             # paths that couldn't be purged this time.
-            db.conn.commit()
+            db.commit()
             log.warning(
                 "edit_math_version %s -> %s: some cache purges failed; "
                 "leaving version at %s so the migration retries next boot "
@@ -1346,7 +1337,7 @@ def _migrate_edit_math_render_caches(app):
             return
 
         db.set_meta("edit_math_version", EDIT_MATH_VERSION, _commit=False)
-        db.conn.commit()
+        db.commit()
 
         if photo_ids:
             log.info(
@@ -1420,9 +1411,7 @@ def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names
     invalidated_previews = 0
     invalidated_thumbs = 0
     purge_failed = False
-    for row in db.conn.execute(
-        "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
-    ).fetchall():
+    for row in db.caches.preview_sizes(pid):
         size_value = row["size"]
         path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
         try:
@@ -1435,10 +1424,7 @@ def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names
             )
             purge_failed = True
             continue
-        db.conn.execute(
-            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-            (pid, size_value),
-        )
+        db.caches.delete_preview_rows([(pid, size_value)])
         invalidated_previews += 1
     for name in untracked_names:
         path = os.path.join(preview_dir, name)
@@ -1470,9 +1456,7 @@ def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names
                 "edit-math migration", variant, exc_info=True,
             )
             purge_failed = True
-    db.conn.execute(
-        "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
-    )
+    db.caches.clear_thumbnail_path(pid)
     return invalidated_previews, invalidated_thumbs, purge_failed
 
 

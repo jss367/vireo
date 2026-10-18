@@ -286,6 +286,15 @@ def test_edit_history_undo_restores_recipe_through_facade(db, photos, monkeypatc
     assert db.get_photo_edit_recipe(inside) is None
 
 
+def test_recipes_with_local_adjustments_prefilters_on_the_local_key(db, photos):
+    inside, outside = photos
+    local = json.dumps({"local": [{"mask": {"ref": "0123456789ab"}}]})
+    _raw_recipe(db, inside, local)
+    _raw_recipe(db, outside, json.dumps(EXPOSURE))
+    db.set_active_workspace(None)
+    assert db.edits.recipes_with_local_adjustments() == [local]
+
+
 # -- edit presets --------------------------------------------------------------
 
 
@@ -538,3 +547,11 @@ def test_edits_repository_builds_without_an_active_workspace(db):
     repo = db.edits
     assert repo.conn is db.conn
     assert repo.preset_name_max == Database.EDIT_PRESET_NAME_MAX
+
+
+def test_edited_photo_ids_lists_every_recipe_catalog_wide(db, photos):
+    inside, outside = photos
+    assert db.edits.edited_photo_ids() == []
+    _raw_recipe(db, inside, "{}")
+    _raw_recipe(db, outside, "{}")
+    assert sorted(db.edits.edited_photo_ids()) == sorted([inside, outside])

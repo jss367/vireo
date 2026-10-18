@@ -20,6 +20,7 @@ from contextlib import suppress
 
 import numpy as np
 from file_replace import replace_file
+from repositories.masks_features import PipelineFeatures
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ def _resolve_collection_photo_ids(db, collection_id):
     Returns:
         set of photo IDs (empty set if collection not found or has no photos)
     """
-    rows = db.get_collection_photos(collection_id, page=1, per_page=1_000_000)
+    rows = db.collections.get_photos(collection_id, page=1, per_page=1_000_000)
     return {r["id"] for r in rows} if rows else set()
 
 
@@ -2456,11 +2457,13 @@ def _mark_eye_attempted_without_eye(db, photo_id):
     # remain on the to-do list and are cheaply re-skipped on each run.
     db.masks_features.update_pipeline_features(
         photo_id,
-        eye_x=None,
-        eye_y=None,
-        eye_conf=None,
-        eye_tenengrad=None,
-        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        PipelineFeatures(
+            eye_x=None,
+            eye_y=None,
+            eye_conf=None,
+            eye_tenengrad=None,
+            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+        ),
     )
 
 
@@ -2641,11 +2644,13 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         # (box_x/box_y are also normalized 0-1).
         db.masks_features.update_pipeline_features(
             row["id"],
-            eye_x=best["x"] / float(iw),
-            eye_y=best["y"] / float(ih),
-            eye_conf=best["conf"],
-            eye_tenengrad=best_score,
-            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+            PipelineFeatures(
+                eye_x=best["x"] / float(iw),
+                eye_y=best["y"] / float(ih),
+                eye_conf=best["conf"],
+                eye_tenengrad=best_score,
+                eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+            ),
         )
 
 

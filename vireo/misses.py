@@ -185,7 +185,7 @@ def _target_ids_from_scope(rows, collection_id=None, db=None, since=None,
                            photo_ids=None):
     target_ids = set(photo_ids) if photo_ids is not None else None
     if collection_id is not None:
-        collection_ids = db.collection_photo_ids(collection_id)
+        collection_ids = db.collections.photo_ids(collection_id)
         target_ids = (
             collection_ids if target_ids is None else target_ids & collection_ids
         )

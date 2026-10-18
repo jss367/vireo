@@ -296,12 +296,12 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
         db.photo_visibility.grant(b, [visible])
         db.conn.commit()
         db.set_active_workspace(b)
-        assert [r['id'] for r in db.query_photos([])] == [visible]
-        assert db.query_photo_ids([]) == [visible]
-        assert db.count_photos_for_rules([]) == 1
-        cid = db.add_collection('Granted', json.dumps([]))
-        assert db.get_collection_photo_ids(cid) == [visible]
-        assert [r['id'] for r in db.get_collection_photos(cid)] == [visible]
+        assert [r['id'] for r in db.collections.query_photos([])] == [visible]
+        assert db.collections.query_photo_ids([]) == [visible]
+        assert db.collections.count_photos_for_rules([]) == 1
+        cid = db.collections.add('Granted', json.dumps([]))
+        assert db.collections.get_photo_ids(cid) == [visible]
+        assert [r['id'] for r in db.collections.get_photos(cid)] == [visible]
         (tmp_path / 'folder' / 'visible.jpg').unlink()
         (tmp_path / 'folder' / 'hidden.jpg').unlink()
         progress = []
@@ -415,7 +415,7 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
     db.set_active_workspace(b)
     assert resolve_folder_id(db, folder) == folder
     assert db.get_folder_coverage_stats(folder_id=folder)[0]['total'] == 1
-    assert db.query_photo_ids([], folder_id=folder) == [photo]
+    assert db.collections.query_photo_ids([], folder_id=folder) == [photo]
     assert b in db.workspaces.ids_for_folders([folder])
     from web.pipeline import _PipelineLaunch
 

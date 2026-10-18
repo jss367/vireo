@@ -24,6 +24,67 @@ class JobHistoryRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def catalog_file(self) -> str:
+        """The file SQLite opened as this connection's main database.
+
+        ``PRAGMA database_list``'s path for ``main``: what ``JobRunner``
+        reopens on its own connections for checkpoints and the final record.
+        """
+        return self.conn.execute("PRAGMA database_list").fetchone()[2]
+
+    def unfinished(self) -> list[sqlite3.Row]:
+        """Every ``running`` or ``queued`` row, with the columns the startup sweep rewrites."""
+        return self.conn.execute(
+            "SELECT id, status, result, tree, progress, error_count "
+            "FROM job_history WHERE status IN ('running', 'queued')",
+        ).fetchall()
+
+    def mark_interrupted(
+        self,
+        job_id: str,
+        finished_at: str,
+        result_json: str,
+        error_count: int,
+        tree: str | None,
+        summary: str,
+        progress_json: str | None,
+    ) -> None:
+        """Fail one row the restart cut short. Does not commit (the sweep commits once)."""
+        self.conn.execute(
+            "UPDATE job_history "
+            "SET status='failed', finished_at=?, result=?, error_count=?, "
+            "    tree=?, summary=?, progress=? "
+            "WHERE id = ?",
+            (
+                finished_at,
+                result_json,
+                error_count,
+                tree,
+                summary,
+                progress_json,
+                job_id,
+            ),
+        )
+
+    def terminal(
+        self, workspace_id: int | None, statuses: Sequence[str], limit: int,
+    ) -> list[sqlite3.Row]:
+        """Newest-first rows in ``statuses``, of one workspace or (``None``) every one."""
+        placeholders = ",".join(["?"] * len(statuses))
+        if workspace_id is not None:
+            return self.conn.execute(
+                f"SELECT * FROM job_history "
+                f"WHERE workspace_id = ? AND status IN ({placeholders}) "
+                f"ORDER BY started_at DESC LIMIT ?",
+                (workspace_id, *statuses, limit),
+            ).fetchall()
+        return self.conn.execute(
+            f"SELECT * FROM job_history "
+            f"WHERE status IN ({placeholders}) "
+            f"ORDER BY started_at DESC LIMIT ?",
+            (*statuses, limit),
+        ).fetchall()
+
     def last_completed_with_result(self, job_type: str) -> sqlite3.Row | None:
         """Newest completed ``job_type`` row that stored a result, or None.
 

@@ -4,7 +4,10 @@ Covers saved move rules, the folder-path and photo-folder rewrites a move
 performs, the move-rule match query, the sync-only grants a merge records for
 sibling workspaces (and the grant lookup behind
 ``Database._photo_syncable_in_workspace``), and the staged-tree -> archive
-reconciliation with the per-collision state transfers it runs.
+reconciliation with the per-collision state transfers it runs. It also holds
+the catalog reads and writes of ``move.py``'s file-move jobs (reached through
+``db.moves_merge``), which leave every commit to the caller so the commit
+points stay among the filesystem steps they guard.
 
 ``Database`` keeps the composition. Most keyword re-tagging stays on the façade
 (``Database.tag_photo`` / ``untag_photo``), whose writes live in
@@ -24,6 +27,7 @@ module imports no ``db`` code.
 import logging
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
@@ -591,6 +595,209 @@ class MovesMergeRepository:
             (photo_id, workspace_id),
         ).fetchone()
         return row is not None
+
+    # -- The file-move jobs in ``move.py`` -----------------------------------
+    #
+    # ``move.py`` copies and deletes originals between these reads and writes,
+    # so none of them commits on its own: the caller keeps every commit point
+    # (``db.commit()``) where it sits among the filesystem steps. The one
+    # exception is ``photo_move_savepoint``, whose commit sits inside the
+    # savepoint's rollback guard exactly as the inline block did.
+
+    def folders_except(self, folder_id):
+        """Cursor over ``(id, path)`` of every folder but ``folder_id``.
+
+        Returned unfetched so a caller that stops at the first match reads no
+        further rows.
+        """
+        return self.conn.execute(
+            "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+        )
+
+    def folder_path_row(self, folder_id):
+        """The folder's row (``path``), or None for an unknown id."""
+        return self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+
+    def folder_source_row(self, folder_id):
+        """The folder's row (``id``, ``path``, ``name``), or None."""
+        return self.conn.execute(
+            "SELECT id, path, name FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+
+    def folder_id_row(self, path):
+        """The row (``id``) of the folder stored at exactly ``path``, or None."""
+        return self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (path,)
+        ).fetchone()
+
+    def insert_folder_if_absent(self, path, name, parent_id):
+        """``INSERT OR IGNORE`` a folder row with no workspace link; no commit.
+
+        Returns the cursor, whose ``rowcount`` is 0 when ``path`` already had
+        a row and whose ``lastrowid`` is the new id otherwise.
+        """
+        return self.conn.execute(
+            "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
+            (path, name, parent_id),
+        )
+
+    def folder_paths_below(self, base):
+        """Rows (``path``) of folders whose path is ``LIKE base + '/%'``.
+
+        ``LIKE`` wildcards in ``base`` match too; callers filter on a literal
+        prefix.
+        """
+        return self.conn.execute(
+            "SELECT path FROM folders WHERE path LIKE ?",
+            (base + "/%",),
+        ).fetchall()
+
+    def date_move_subtree_photos(self, folder_id, descendant_predicate,
+                                 descendant_params, sql_functions=()):
+        """Date-planning columns of the photos in a folder and its descendants.
+
+        ``descendant_predicate`` is SQL over folder alias ``f`` with
+        ``descendant_params``; ``sql_functions`` are ``(name, narg, func)``
+        registered on the connection first, for predicates that call into
+        Python (the caller's alias-aware containment test).
+        """
+        for name, narg, func in sql_functions:
+            self.conn.create_function(name, narg, func)
+        return self.conn.execute(
+            f"""SELECT p.id, p.filename, p.exif_data, p.timestamp, p.file_mtime
+           FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE f.id = ?
+              OR {descendant_predicate}
+           ORDER BY p.id""",
+            (folder_id, *descendant_params),
+        ).fetchall()
+
+    def subtree_photo_rows(self, src_path, prefix):
+        """Photos stored at ``src_path`` or whose folder's separator-folded
+        path starts with ``prefix``, with their folder path; a prefilter.
+        """
+        return self.conn.execute(
+            """SELECT p.id, p.filename, p.file_mtime, p.file_size,
+                  f.path AS folder_path
+           FROM photos p JOIN folders f ON f.id = p.folder_id
+           WHERE f.path = ?
+              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+            (src_path, len(prefix), prefix),
+        ).fetchall()
+
+    def photo_ids_under_path(self, src_path):
+        """Rows (``id``) of photos in the folder at ``src_path`` or ``LIKE src_path/%``."""
+        return self.conn.execute(
+            """SELECT p.id FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               WHERE f.path = ? OR f.path LIKE ?""",
+            (src_path, src_path + "/%"),
+        ).fetchall()
+
+    def move_provenance_in_folder(self, folder_id):
+        """Cursor over ``(filename, last_move_source_folder_path)`` in a folder."""
+        return self.conn.execute(
+            "SELECT filename, last_move_source_folder_path "
+            "FROM photos WHERE folder_id = ?",
+            (folder_id,),
+        )
+
+    def filenames_in_folder(self, folder_id):
+        """Cursor over the ``filename`` of every photo in a folder."""
+        return self.conn.execute(
+            "SELECT filename FROM photos WHERE folder_id = ?",
+            (folder_id,),
+        )
+
+    def photos_moved_from(self, src_dir):
+        """Cursor over ``(id, filename)`` of photos whose last move came from ``src_dir``."""
+        return self.conn.execute(
+            "SELECT id, filename FROM photos "
+            "WHERE last_move_source_folder_path = ?",
+            (src_dir,),
+        )
+
+    def clear_move_source(self, photo_ids):
+        """Null ``last_move_source_folder_path`` on the given photos; no commit."""
+        placeholders = ",".join("?" for _ in photo_ids)
+        self.conn.execute(
+            f"UPDATE photos SET "
+            f"last_move_source_folder_path = NULL "
+            f"WHERE id IN ({placeholders})",
+            photo_ids,
+        )
+
+    def repoint_moved_photo(self, photo_id, dest_folder_id, src_dir):
+        """Point a moved photo at its new folder and record where it came from."""
+        self.conn.execute(
+            "UPDATE photos SET folder_id = ?, "
+            "last_move_source_folder_path = ? WHERE id = ?",
+            (dest_folder_id, src_dir, photo_id),
+        )
+
+    @contextmanager
+    def photo_move_savepoint(self):
+        """One photo's catalog repoint: released and committed on success.
+
+        Any exception, including one from the release or commit, rolls back to
+        the savepoint and re-raises.
+        """
+        self.conn.execute("SAVEPOINT photo_move_visibility")
+        try:
+            yield
+            self.conn.execute("RELEASE photo_move_visibility")
+            self.conn.commit()
+        except BaseException:
+            self.conn.execute("ROLLBACK TO photo_move_visibility")
+            self.conn.execute("RELEASE photo_move_visibility")
+            raise
+
+    def restamp_photo_mtimes(self, mtime_updates):
+        """Correct ``file_mtime`` and the working-copy markers pinned to it; no commit.
+
+        ``mtime_updates`` holds ``(fresh, photo_id, stale, size)``; a row moves
+        only while it still has ``stale``/``size``, and a working-copy
+        eviction/failure marker moves with it only when pinned to ``stale``.
+        Returns the number of photo rows updated.
+        """
+        cursor = self.conn.executemany(
+            "UPDATE photos SET file_mtime = ?,"
+            " working_copy_evicted_mtime = CASE"
+            "   WHEN working_copy_evicted_mtime IS ? THEN ?"
+            "   ELSE working_copy_evicted_mtime END,"
+            " working_copy_failed_mtime = CASE"
+            "   WHEN working_copy_failed_mtime IS ? THEN ?"
+            "   ELSE working_copy_failed_mtime END"
+            " WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
+            [(fresh, stale, fresh, stale, fresh, photo_id, stale, size)
+             for fresh, photo_id, stale, size in mtime_updates],
+        )
+        return cursor.rowcount
+
+    def restamp_offline_original_mtimes(self, mtime_updates):
+        """Move ``offline_originals.source_mtime`` pinned to the corrected
+        timestamp, for a file of the same size; no commit.
+
+        ``mtime_updates`` holds ``(fresh, photo_id, stale, size)``.
+        """
+        self.conn.executemany(
+            "UPDATE offline_originals SET source_mtime = ?"
+            " WHERE photo_id = ? AND source_mtime IS ? AND source_size IS ?",
+            mtime_updates,
+        )
+
+    def thumb_paths_for_ids(self, photo_ids):
+        """Rows (``id``, ``thumb_path``) of the given photos that have a thumbnail."""
+        placeholders = ",".join(["?"] * len(photo_ids))
+        return self.conn.execute(
+            f"SELECT id, thumb_path FROM photos"
+            f" WHERE id IN ({placeholders})"
+            f" AND thumb_path IS NOT NULL",
+            photo_ids,
+        ).fetchall()
 
     def merge_staged_tree_into_archive(
             self, staged_root_id, archive_path, *, workspace_id_fn,

@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 from PIL import Image, ImageFilter
+from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -349,7 +350,7 @@ def test_compute_all_features_compatible_with_db(tmp_path):
 
     features = compute_all_quality_features(img, mask)
     # Should not raise — all keys match DB column names
-    db.masks_features.update_pipeline_features(pid, **features)
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(**features))
 
     row = db.conn.execute(
         "SELECT subject_tenengrad, bg_tenengrad, subject_clip_high, "

@@ -447,17 +447,8 @@ def qualify_rows(rows, source_root_real, card_path, contains_check=None):
         reason, saw_never_checked, saw_check_failed)
 
 
-_ROWS_BY_HASH_SQL = """
-    SELECT p.id, p.folder_id, p.filename, p.file_size, p.file_mtime,
-           p.hash_status,
-           f.path AS folder_path
-    FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
-    WHERE p.file_hash = ?
-"""
-
-
 def fetch_rows_by_hash(db, file_hash):
-    return db.conn.execute(_ROWS_BY_HASH_SQL, (file_hash,)).fetchall()
+    return db.card_cleanup.rows_by_hash(file_hash)
 
 
 def _record_unchecked_hash_verdict(db, row, expected_hash, status,
@@ -470,35 +461,16 @@ def _record_unchecked_hash_verdict(db, row, expected_hash, status,
     from certifying (or flagging) that newer row.
     """
     now = datetime.now().isoformat()
-    assignments = "hash_status = ?, hash_checked_at = ?"
-    values = [status, now]
-    if file_size is not None and file_mtime is not None:
-        assignments += ", file_size = ?, file_mtime = ?"
-        values.extend([file_size, file_mtime])
-    values.extend([
-        row["id"], expected_hash, row["folder_id"], row["filename"],
-        row["file_size"], row["file_mtime"],
-    ])
-    cursor = db.conn.execute(
-        f"UPDATE photos SET {assignments} "
-        "WHERE id = ? AND file_hash = ? AND hash_status IS NULL "
-        "AND folder_id IS ? AND filename = ? "
-        "AND file_size IS ? AND file_mtime IS ?",
-        values,
-    )
-    return cursor.rowcount == 1
+    return db.card_cleanup.record_unchecked_hash_verdict(
+        row, expected_hash, status, now,
+        file_size=file_size, file_mtime=file_mtime)
 
 
 def _load_catalog_by_hash(db):
     """One pass over the catalog for the scan — a per-file SELECT over an
     unindexed file_hash column would rescan the photos table for every
     card file."""
-    rows = db.conn.execute("""
-        SELECT p.filename, p.file_size, p.file_mtime, p.hash_status,
-               p.file_hash, f.path AS folder_path
-        FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
-        WHERE p.file_hash IS NOT NULL
-    """).fetchall()
+    rows = db.card_cleanup.hashed_photo_rows()
     by_hash = {}
     for row in rows:
         by_hash.setdefault(row["file_hash"], []).append(row)
@@ -690,7 +662,7 @@ class _ScopedArchiveVerify:
 
             outcome = self._verify_hash(expected_hash, card_entries)
 
-            self.db.conn.commit()
+            self.db.commit()
             self.stats["hashes_processed"] += 1
             if not outcome.verified:
                 self.failure_reasons[expected_hash] = outcome.reason

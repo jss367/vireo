@@ -4,6 +4,7 @@
     "../types/pages/misses.d.ts",
     "../vireo/static/misses/badges.js",
     "../vireo/static/misses/boot.js",
+    "../vireo/static/misses/card-events.js",
     "../vireo/static/misses/context-menu.js",
     "../vireo/static/misses/delete.js",
     "../vireo/static/misses/filters.js",
@@ -15,6 +16,7 @@
     "../vireo/static/misses/render.js",
     "../vireo/static/misses/scope.js",
     "../vireo/static/misses/selection.js",
+    "../vireo/static/misses/shared.js",
     "../vireo/static/misses/state.js",
     "../vireo/static/misses/tuning.js"
   ]

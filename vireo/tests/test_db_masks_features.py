@@ -22,7 +22,7 @@ import config as cfg
 import db as db_module
 import pytest
 from db import Database
-from repositories.masks_features import MasksFeaturesRepository
+from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures
 
 BOX = (0.1, 0.2, 0.3, 0.4)
 OTHER_BOX = (0.5, 0.5, 0.2, 0.2)
@@ -70,10 +70,10 @@ def _det(db, photo_id, detector_model="megadetector-v6", conf=0.9, box=BOX,
 
 
 def _mask(db, photo_id, variant="sam2-small", path=None,
-          detector_model="megadetector-v6", box=BOX, **features):
+          detector_model="megadetector-v6", box=BOX, _commit=True, **features):
     db.masks_features.upsert_mask(
         photo_id, variant, path or f"/nowhere/{photo_id}_{variant}.png",
-        detector_model, *box, **features,
+        detector_model, box, MaskQuality(**features), _commit=_commit,
     )
 
 
@@ -536,7 +536,11 @@ def test_get_workspace_photo_ids_with_mask_variant_is_workspace_scoped(db):
 def test_get_photo_pipeline_features_reads_the_feature_columns(db):
     foreign = _other_workspace_photo(db)
     db.masks_features.update_pipeline_features(
-        foreign, subject_tenengrad=4.5, bg_tenengrad=1.5, subject_y_median=0.2,
+        foreign, PipelineFeatures(
+            subject_tenengrad=4.5,
+            bg_tenengrad=1.5,
+            subject_y_median=0.2,
+        ),
     )
     row = db.masks_features.pipeline_feature_row(foreign)
     assert list(row.keys()) == [
@@ -595,7 +599,7 @@ def _sam_fixture(db, n_photos=4, selected=0, alternate=4, conf=0.9):
         if i < selected:
             _mask(db, pid, "sam2-small", path=f"/m/{pid}_s.png")
         if i < max(selected, alternate):
-            db.masks_features.update_pipeline_features(pid, mask_path=f"/m/{pid}.png")
+            db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path=f"/m/{pid}.png"))
     return pids
 
 
@@ -668,7 +672,7 @@ def test_sam_variant_rerun_warning_ignores_unknown_and_empty_paths(db):
     for pid in pids:
         _det(db, pid)
         _mask(db, pid, "unknown")
-        db.masks_features.update_pipeline_features(pid, mask_path="/m/x.png")
+        db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path="/m/x.png"))
     db.conn.execute("UPDATE photo_masks SET path='', variant='sam2-large' "
                     "WHERE photo_id=?", (pids[0],))
     db.conn.commit()
@@ -708,11 +712,24 @@ def test_save_subject_raw_analysis_rejects_nan(db):
 def test_update_photo_pipeline_features_writes_only_provided_columns(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     db.masks_features.update_pipeline_features(
-        pid, mask_path="/m/a.png", subject_tenengrad=1.0, bg_tenengrad=2.0,
-        crop_complete=1.0, bg_separation=3.0, subject_clip_high=0.1,
-        subject_clip_low=0.2, subject_y_median=0.3, phash_crop="ab",
-        noise_estimate=0.4, eye_x=5.0, eye_y=6.0, eye_conf=0.7,
-        eye_tenengrad=8.0, eye_kp_fingerprint="v1", quality_input_recipe="q",
+        pid, PipelineFeatures(
+            mask_path="/m/a.png",
+            subject_tenengrad=1.0,
+            bg_tenengrad=2.0,
+            crop_complete=1.0,
+            bg_separation=3.0,
+            subject_clip_high=0.1,
+            subject_clip_low=0.2,
+            subject_y_median=0.3,
+            phash_crop="ab",
+            noise_estimate=0.4,
+            eye_x=5.0,
+            eye_y=6.0,
+            eye_conf=0.7,
+            eye_tenengrad=8.0,
+            eye_kp_fingerprint="v1",
+            quality_input_recipe="q",
+        ),
     )
     with _reader(db) as reader:
         p = reader.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
@@ -728,7 +745,7 @@ def test_update_photo_pipeline_features_writes_only_provided_columns(db, monkeyp
 
     statements = []
     db.conn.set_trace_callback(statements.append)
-    db.masks_features.update_pipeline_features(pid, eye_x=None, noise_estimate=0.9)
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(eye_x=None, noise_estimate=0.9))
     db.conn.set_trace_callback(None)
     updates = [s for s in statements if s.startswith("UPDATE photos")]
     assert updates == [f"UPDATE photos SET noise_estimate=0.9, eye_x=NULL WHERE id={pid}"]
@@ -743,7 +760,7 @@ def test_update_photo_pipeline_features_noop_without_columns(db, monkeypatch):
     calls = _commit_recorder(monkeypatch)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    db.masks_features.update_pipeline_features(pid)
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures())
     db.conn.set_trace_callback(None)
     assert statements == []
     assert calls == []
@@ -752,11 +769,11 @@ def test_update_photo_pipeline_features_noop_without_columns(db, monkeypatch):
 def test_update_photo_pipeline_features_commit_flag(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     calls = _commit_recorder(monkeypatch)
-    db.masks_features.update_pipeline_features(pid, mask_path="/m/a.png", _commit=False)
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path="/m/a.png"), _commit=False)
     assert calls == []
     assert db.conn.in_transaction
     db.conn.rollback()
-    db.masks_features.update_pipeline_features(pid, mask_path="/m/b.png")
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path="/m/b.png"))
     assert calls == [db.conn]
     with _reader(db) as reader:
         assert reader.execute(
@@ -774,7 +791,7 @@ def test_get_photos_missing_masks_whole_workspace(db):
     _det(db, a, conf=0.9, box=BOX)
     _det(db, b, conf=0.1)  # below the default 0.2 floor
     _det(db, c, conf=0.9)
-    db.masks_features.update_pipeline_features(c, mask_path="/m/c.png")
+    db.masks_features.update_pipeline_features(c, PipelineFeatures(mask_path="/m/c.png"))
     foreign = _other_workspace_photo(db)
     _det(db, foreign, conf=0.9)
 
@@ -817,7 +834,7 @@ def test_workspace_mask_candidate_detections_rows_and_order(db):
     _det(db, b, conf=0.1)  # below the floor the caller passes
     _det(db, c, conf=0.3)
     # Already masked photos stay: the job checks the cache per photo.
-    db.masks_features.update_pipeline_features(c, mask_path="/m/c.png")
+    db.masks_features.update_pipeline_features(c, PipelineFeatures(mask_path="/m/c.png"))
     foreign = _other_workspace_photo(db)
     _det(db, foreign, conf=0.9)
 
@@ -857,7 +874,7 @@ def test_get_photo_mask_state_reads_the_three_columns(db):
     db.set_active_mask_variant(pid, "sam2-small")
     db.masks_features.update_embeddings(pid, dino_subject_embedding=b"s",
                                dino_global_embedding=b"g", variant="vit-b14")
-    db.masks_features.update_pipeline_features(pid, quality_input_recipe="r1")
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(quality_input_recipe="r1"))
     assert dict(db.masks_features.photo_mask_state(pid)) == {
         "active_mask_variant": "sam2-small",
         "dino_embedding_variant": "vit-b14",
@@ -902,10 +919,10 @@ def test_list_photos_for_eye_keypoint_stage_filters(db):
     ready, _ = _eye_ready(db, "ready.jpg", fid)
     stamped, _ = _eye_ready(db, "stamped.jpg", fid)
     db.masks_features.update_pipeline_features(
-        stamped, eye_kp_fingerprint=pipeline.EYE_KP_FINGERPRINT_VERSION,
+        stamped, PipelineFeatures(eye_kp_fingerprint=pipeline.EYE_KP_FINGERPRINT_VERSION),
     )
     old_stamp, _ = _eye_ready(db, "old.jpg", fid)
-    db.masks_features.update_pipeline_features(old_stamp, eye_kp_fingerprint="v0")
+    db.masks_features.update_pipeline_features(old_stamp, PipelineFeatures(eye_kp_fingerprint="v0"))
     stale, _ = _eye_ready(db, "stale.jpg", fid)
     # A new, stronger detection makes the active mask's prompt stale.
     _det(db, stale, conf=0.99, box=OTHER_BOX)
@@ -1096,10 +1113,10 @@ def test_photo_keyed_operations_need_no_workspace(db):
     pid = _photo(db, "a.jpg", _folder(db))
     db.set_active_workspace(None)
     repo = db.masks_features
-    repo.upsert_mask(pid, "sam2-small", "/m/a.png", "megadetector-v6", *BOX)
+    repo.upsert_mask(pid, "sam2-small", "/m/a.png", "megadetector-v6", BOX)
     assert repo.get_mask(pid, "sam2-small")["path"] == "/m/a.png"
     assert [m["variant"] for m in repo.list_masks_for_photo(pid)] == ["sam2-small"]
-    repo.update_pipeline_features(pid, mask_path="/m/a.png")
+    repo.update_pipeline_features(pid, PipelineFeatures(mask_path="/m/a.png"))
     assert repo.photo_mask_path(pid) == "/m/a.png"
     assert repo.pipeline_feature_row(pid)["mask_path"] == "/m/a.png"
     repo.update_embeddings(pid, b"s", b"g", variant="vit-b14")
@@ -1224,7 +1241,7 @@ def test_accessor_writes_reach_a_patched_commit_with_retry(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     db.masks_features.get_mask(pid, "sam2-small")  # an access before the patch
     calls = _commit_recorder(monkeypatch)
-    db.masks_features.update_pipeline_features(pid, mask_path="/m/a.png")
+    db.masks_features.update_pipeline_features(pid, PipelineFeatures(mask_path="/m/a.png"))
     assert calls == [db.conn]
 
 

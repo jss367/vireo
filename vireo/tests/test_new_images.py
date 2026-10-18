@@ -1797,8 +1797,8 @@ def test_overlapping_healthy_walk_waits_without_marking_offline(tmp_path, monkey
 
     def invoke(gate):
         results.append(new_images_module._walk_root_bounded(
-            {"id": 1, "path": root_path}, root_path, gate.mount_root,
-            set(), set(), gate, 0, 0, None, 250, 0, 2,
+            new_images_module._RootWalk(root_path, gate.mount_root, gate),
+            set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
         ))
 
     first = threading.Thread(target=invoke, args=(gates[0],))
@@ -1865,8 +1865,8 @@ def test_overlapping_waiter_rechecks_offline_verdict_before_second_walk(
 
     def invoke():
         results.append(new_images_module._walk_root_bounded(
-            {"id": 1, "path": root_path}, root_path, gate.mount_root,
-            set(), set(), gate, 0, 0, None, 250, 0, 2,
+            new_images_module._RootWalk(root_path, gate.mount_root, gate),
+            set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
         ))
 
     first = threading.Thread(target=invoke)
@@ -1903,8 +1903,8 @@ def test_root_enoent_is_offline_but_descendant_enoent_is_tolerated(
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", missing_root)
     assert new_images_module._walk_root_bounded(
-        {"id": 1, "path": root_path}, root_path, gate.mount_root,
-        set(), set(), gate, 0, 0, None, 250, 0, 2,
+        new_images_module._RootWalk(root_path, gate.mount_root, gate),
+        set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
     ) is None
     assert gate.marked_offline == [gate.mount_root]
 
@@ -1916,8 +1916,8 @@ def test_root_enoent_is_offline_but_descendant_enoent_is_tolerated(
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", missing_child)
     assert new_images_module._walk_root_bounded(
-        {"id": 1, "path": root_path}, root_path, gate.mount_root,
-        set(), set(), gate, 0, 0, None, 250, 0, 2,
+        new_images_module._RootWalk(root_path, gate.mount_root, gate),
+        set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
     ) == ([], 0, 0)
     assert gate.marked_offline == []
 
@@ -1941,8 +1941,8 @@ def test_descendant_windows_network_loss_aborts_root(tmp_path, monkeypatch):
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", disconnected_child)
     assert new_images_module._walk_root_bounded(
-        {"id": 1, "path": root_path}, root_path, gate.mount_root,
-        set(), set(), gate, 0, 0, None, 250, 0, 2,
+        new_images_module._RootWalk(root_path, gate.mount_root, gate),
+        set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
     ) is None
     assert gate.marked_offline == [gate.mount_root]
 
@@ -2008,8 +2008,8 @@ def test_forget_stalled_walks_lets_a_wedged_root_be_rewalked(tmp_path, monkeypat
     new_images_module._STALLED_WALK_PATHS.add(root_path)
 
     args = (
-        {"id": 1, "path": root_path}, root_path, gate.mount_root,
-        set(), set(), gate, 0, 0, None, 250, 0, 2,
+        new_images_module._RootWalk(root_path, gate.mount_root, gate),
+        set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
     )
     try:
         assert new_images_module._walk_root_bounded(*args) is None
@@ -2061,9 +2061,11 @@ def test_walk_quotes_the_reachability_generation_it_started_under(
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", dead_share)
     assert new_images_module._walk_root_bounded(
-        {"id": 1, "path": root_path}, root_path, gate.mount_root,
-        set(), set(), gate, 0, 0, None, 250, 0, 2,
-        reachability_generation=gate.current_generation(),
+        new_images_module._RootWalk(
+            root_path, gate.mount_root, gate,
+            reachability_generation=gate.current_generation(),
+        ),
+        set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
     ) is None
     assert gate.marked_generations == [7]
 
@@ -2101,8 +2103,8 @@ def test_a_walk_that_stalls_during_the_recheck_does_not_block_it(
         new_images_module._STALLED_WALK_EPOCHS[root_path] = epoch_at_walk_start
 
         assert new_images_module._walk_root_bounded(
-            {"id": 1, "path": root_path}, root_path, gate.mount_root,
-            set(), set(), gate, 0, 0, None, 250, 0, 2,
+            new_images_module._RootWalk(root_path, gate.mount_root, gate),
+            set(), set(), new_images_module._WalkProgress(None, 250, 0, 0, 0), 2,
         ) == ([], 0, 0)
         assert gate.marked_offline == []
         assert wedged in new_images_module._FORGOTTEN_STALLED_WALKS
