@@ -299,7 +299,7 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
     assert runner.shutdown(timeout=2) is True
     assert stopped.is_set()
     assert runner.get(job_id)["status"] == "cancelled"
-    assert not runner._worker_threads
+    assert not runner._workers.threads
 
     with pytest.raises(RuntimeError, match="shut down"):
         runner.start("late", lambda _job: {})
@@ -330,7 +330,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
     assert runner.shutdown(timeout=2) is False
     assert stopped.is_set()
     assert observed_timeouts and 0 < observed_timeouts[0] <= 2
-    assert not runner._worker_threads
+    assert not runner._workers.threads
     with runner._lock:
         runner._queued_pipelines.clear()
 
@@ -713,6 +713,7 @@ def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
     the job is 'failed'. The history row keeps the counts as the summary,
     with how many failed beside them and the first error in the details."""
     from db import Database
+    from job_runner.outcome import attach_result_text
     from jobs import JobRunner
 
     db = Database(str(tmp_path / "test.db"))
@@ -738,7 +739,7 @@ def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
     assert row["summary"].endswith("· 2 errors")
 
     live = runner.get(job_id)
-    JobRunner._attach_result_text(live)
+    attach_result_text(live)
     assert live["summary"] == row["summary"]
     assert live["result_details"][0] == "a.jpg: unreadable"
 
@@ -932,7 +933,8 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
     the serialized result, and the startup-sweep +1 compounds the
     mismatch on an interrupted row.
     """
-    from jobs import JobRunner
+    from job_runner.outcome import error_total
+    from job_runner.views import snapshot_job
 
     live_result = {
         "failed": 50,
@@ -950,7 +952,7 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
         "result": live_result,
     }
 
-    snap = JobRunner._snapshot_job(job)
+    snap = snapshot_job(job)
 
     # The snapshot's result must be a distinct dict so later worker
     # mutations cannot bleed into subsequent reads by callers (checkpoint
@@ -967,7 +969,7 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
     assert snap["result"]["errors_total"] == 50
     # ``_error_total`` reading from the snapshot must agree with the
     # ``errors_total`` the same snapshot's result would serialize.
-    assert JobRunner._error_total(snap) == snap["result"]["errors_total"] == 50
+    assert error_total(snap) == snap["result"]["errors_total"] == 50
 
 
 def test_snapshot_job_freezes_nested_result_sample_lists():
@@ -982,7 +984,7 @@ def test_snapshot_job_freezes_nested_result_sample_lists():
     and the serialized result must therefore read a single immutable
     snapshot of the sample.
     """
-    from jobs import JobRunner
+    from job_runner.views import snapshot_job
 
     live_errors = ["file_0.jpg: boom"]
     live_kept = ["file_1.jpg: source busy"]
@@ -1003,7 +1005,7 @@ def test_snapshot_job_freezes_nested_result_sample_lists():
         "result": live_result,
     }
 
-    snap = JobRunner._snapshot_job(job)
+    snap = snapshot_job(job)
 
     # Simulate the worker appending more sample entries after the snapshot.
     live_errors.append("file_2.jpg: boom")
@@ -1914,7 +1916,7 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
     # A late checkpoint racing the final write must not resurrect the row.
     snapshot = runner.get(job_id)
     snapshot["status"] = "running"
-    assert runner._write_checkpoints([snapshot]) == 0
+    assert runner._history.write_checkpoints([snapshot]) == 0
     assert _history_row(db, job_id)["status"] == "completed"
     assert runner.shutdown(timeout=5)
 
@@ -2037,7 +2039,7 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
         entered.set()
         result_holder["written"] = runner.checkpoint_live_jobs()
 
-    with runner._checkpoint_write_lock:
+    with runner._checkpoints.write_lock:
         # The second caller starts trying to take the write lock while
         # the first (this thread) still holds it.
         t = threading.Thread(target=concurrent_checkpoint)
@@ -2148,14 +2150,14 @@ def test_ephemeral_job_is_never_checkpointed(tmp_path):
 def test_checkpoint_thread_runs_on_timer_and_exits_when_idle(tmp_path, monkeypatch):
     import json
 
-    import jobs as jobs_module
+    import job_runner.checkpoints as checkpoints_module
     from db import Database
     from jobs import JobRunner
 
-    monkeypatch.setattr(jobs_module, "CHECKPOINT_INTERVAL_SECS", 0.05)
+    monkeypatch.setattr(checkpoints_module, "CHECKPOINT_INTERVAL_SECS", 0.05)
     db = Database(str(tmp_path / "test.db"))
     runner = JobRunner(db=db)
-    assert runner._checkpoint_thread is None
+    assert runner._checkpoints.thread is None
     release = threading.Event()
 
     def work(job):
@@ -2176,15 +2178,15 @@ def test_checkpoint_thread_runs_on_timer_and_exits_when_idle(tmp_path, monkeypat
         time.sleep(0.02)
     else:
         pytest.fail("checkpoint thread never wrote progress")
-    thread = runner._checkpoint_thread
+    thread = runner._checkpoints.thread
     assert thread is not None and thread.is_alive()
 
     release.set()
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     deadline = time.time() + 5
-    while runner._checkpoint_thread is not None and time.time() < deadline:
+    while runner._checkpoints.thread is not None and time.time() < deadline:
         time.sleep(0.02)
-    assert runner._checkpoint_thread is None, (
+    assert runner._checkpoints.thread is None, (
         "checkpoint thread should exit once no persisted job is live"
     )
 

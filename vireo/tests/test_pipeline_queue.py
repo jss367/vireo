@@ -272,7 +272,7 @@ def test_terminal_pipeline_status_can_precede_queue_promotion(tmp_path, monkeypa
     occupant_ids, release_work = _fill_slots(runner)
     persistence_entered = {jid: threading.Event() for jid in occupant_ids}
     release_persistence = threading.Event()
-    original = runner._persist_job
+    original = runner._history.persist_job
 
     def blocked_persistence(job, duration):
         if job["id"] in persistence_entered and job["status"] == "completed":
@@ -280,7 +280,7 @@ def test_terminal_pipeline_status_can_precede_queue_promotion(tmp_path, monkeypa
             assert release_persistence.wait(timeout=synchronization_timeout(30)), "test did not release persistence"
         return original(job, duration)
 
-    monkeypatch.setattr(runner, "_persist_job", blocked_persistence)
+    monkeypatch.setattr(runner._history, "persist_job", blocked_persistence)
     extra_started = threading.Event()
 
     def extra_work(job):
@@ -829,7 +829,7 @@ def test_cancel_queued_pipeline_after_promotion_finishes_marks_running(tmp_path,
     original_connect = sqlite3.connect
 
     def fake_connect(path, *args, **kwargs):
-        if str(path) == str(runner._db_path):
+        if str(path) == str(runner._history.db_path):
             return FakeConnection()
         return original_connect(path, *args, **kwargs)
 
@@ -875,7 +875,7 @@ def test_shutdown_after_promotion_before_worker_start_records_never_started(tmp_
         assert runner.shutdown()
         return False
 
-    monkeypatch.setattr(runner, "_start_worker_thread", shutdown_before_registration)
+    monkeypatch.setattr(runner._workers, "start", shutdown_before_registration)
     job_id = runner.enqueue_pipeline(
         work_fn=lambda job: work_called.set(), config={}, workspace_id=1,
     )
@@ -923,7 +923,7 @@ def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):
         # Only the runner's database is "locked"; coverage.py's own SQLite
         # data file (flushed at every test boundary under --cov-context)
         # must keep connecting normally.
-        if str(path) != str(runner._db_path):
+        if str(path) != str(runner._history.db_path):
             return original_connect(path, *args, **kwargs)
         calls["count"] += 1
         if calls["count"] == 1:

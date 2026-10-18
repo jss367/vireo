@@ -11837,7 +11837,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
             seed_ids,
         )
         db.conn.commit()
-        runner._startup_sweep(db)
+        runner._history.startup_sweep(db)
         db.conn.commit()
         row = next(
             h for h in client.get("/api/jobs/history").get_json()
@@ -11933,7 +11933,7 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
         (json.dumps(result), job_id),
     )
     db.conn.commit()
-    runner._startup_sweep(db)
+    runner._history.startup_sweep(db)
     db.conn.commit()
 
 

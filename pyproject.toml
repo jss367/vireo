@@ -158,6 +158,7 @@ ignore = [
 "vireo/detector.py" = ["B904"]
 "vireo/dino_embed.py" = ["B904"]
 "vireo/importer.py" = ["B007"]
+"vireo/job_runner/history.py" = ["SIM105"]
 "vireo/jobs.py" = ["SIM105"]
 "vireo/masking.py" = ["B904"]
 "vireo/models.py" = ["B904", "F401"]
