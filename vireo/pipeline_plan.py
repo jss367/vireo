@@ -800,12 +800,7 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "summary": "Recompute quality with per-subject RAW exposure analysis",
         }
     scope_sql, scope_params = db._scope_clause(photo_ids)
-    prior_raw_analysis = db.conn.execute(
-        "SELECT 1 FROM photos p JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
-        "WHERE wf.workspace_id=? AND p.quality_input_recipe IS NOT NULL"
-        + scope_sql + " LIMIT 1", [db.require_workspace_id(), *scope_params],
-    ).fetchone()
-    if prior_raw_analysis:
+    if db.stats.has_quality_input_recipe(scope_sql, scope_params):
         return {
             "state": "will-run",
             "summary": "Recompute quality without RAW exposure correction",
@@ -1247,10 +1242,7 @@ def _regroup_cached_plan(db, params, ws_id, effective_cfg):
     # the cache is stale even though it's there.
     from pipeline import compute_group_fingerprint
     current_fp = compute_group_fingerprint(effective_cfg)
-    row = db.conn.execute(
-        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
-        (ws_id,),
-    ).fetchone()
+    row = db.workspaces.get(ws_id)
     last_fp = row["last_group_fingerprint"] if row else None
     if last_fp is None:
         # Cache file exists but no fingerprint stamp. Two paths land

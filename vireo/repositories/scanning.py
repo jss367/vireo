@@ -5,7 +5,8 @@ domain: the incremental pre-pass's baseline rows, the per-file existence
 check, the metadata and identity columns a scan refreshes on a ``photos``
 row, the sidecar ``xmp_mtime``, the ``folders.status`` badge a failed scan
 leaves (``'partial'``) and a clean one clears, and the embedded-keyword
-backfill's candidate rows. It also owns the connection-local machinery the
+backfill's candidate rows, and the photos whose broken metadata the
+pipeline's scan stage sends back through a rescan. It also owns the connection-local machinery the
 scan uses to notice collection edits between its inserts (TEMP triggers and
 a Python counter on the connection; see ``install_collection_change_counter``).
 
@@ -83,6 +84,33 @@ class ScanningRepository:
            WHERE exif_data LIKE '%"Subject": %'
               OR exif_data LIKE '%"HierarchicalSubject": %'
               OR exif_data LIKE '%"Keywords": %'"""
+        ).fetchall()
+
+    def broken_metadata_rows(
+        self, photo_ids: Sequence[int], raw_extensions: Sequence[str],
+    ) -> list[sqlite3.Row]:
+        """``folder_path`` and ``filename`` of the photos in ``photo_ids`` (one
+        chunk) whose metadata a rescan should repair, ordered by folder path
+        then filename.
+
+        A photo qualifies when it has no stored ExifTool JSON and either no
+        timestamp or, for a RAW extension in ``raw_extensions``, a recorded
+        width under 1000 px (the embedded-preview size a failed RAW read
+        leaves behind).
+        """
+        raw_list = ",".join(f"'{e}'" for e in raw_extensions)
+        placeholders = ",".join("?" * len(photo_ids))
+        return self.conn.execute(
+            f"""SELECT f.path AS folder_path, p.filename
+                FROM photos p
+                JOIN folders f ON p.folder_id = f.id
+                WHERE p.id IN ({placeholders})
+                  AND p.exif_data IS NULL
+                  AND (p.timestamp IS NULL
+                       OR (p.extension IN ({raw_list})
+                           AND p.width IS NOT NULL AND p.width < 1000))
+                ORDER BY f.path, p.filename""",
+            tuple(photo_ids),
         ).fetchall()
 
     def keyword_count(self, photo_id: int) -> int:
