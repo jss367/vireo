@@ -202,7 +202,7 @@ class JobRunner:
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
         self._promotion_retry_scheduled = False
-        self._workers = WorkerThreads(self._lock, self._run_job)
+        self._workers = WorkerThreads(self._lock, lambda: self._run_job)
         self._history = JobHistory(db.job_history.catalog_file() if db else None)
         self._checkpoints = JobCheckpointer(
             self._lock, self._jobs, self._history, self._workers,
