@@ -178,15 +178,17 @@ def test_shader_matches_tone_for_full_recipe():
         wb = {"temperature": temp, "tint": tint} if (temp or tint) else None
         expected = tone.apply_adjustments(
             px[None, :, :],
-            exposure=ev,
-            white_balance=wb,
-            highlights=hi,
-            shadows=sh,
-            whites=wh,
-            blacks=bl,
-            contrast=con,
-            vibrance=vib,
-            saturation=sat,
+            tone.ToneAdjustments(
+                exposure=ev,
+                white_balance=wb,
+                highlights=hi,
+                shadows=sh,
+                whites=wh,
+                blacks=bl,
+                contrast=con,
+                vibrance=vib,
+                saturation=sat,
+            ),
         )[0]
 
         # The dispatcher applies the complete values to a neutral source.

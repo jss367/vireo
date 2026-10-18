@@ -50,7 +50,7 @@ def _filter_boolean(values, name):
 
 def _rules_only_collection_photo_ids(db, collection_id):
     """Return a collection's rules-only photo ids, refusing visual collections."""
-    valid = {c["id"]: c for c in db.get_collections()}
+    valid = {c["id"]: c for c in db.collections.list_all()}
     if collection_id not in valid:
         raise ValueError("collection not found")
     if valid[collection_id]["visual_json"] is not None:
@@ -58,7 +58,7 @@ def _rules_only_collection_photo_ids(db, collection_id):
             "visual collections have no rules-only expansion; "
             "open the collection from Browse instead"
         )
-    return db.collection_photo_ids(collection_id)
+    return db.collections.photo_ids(collection_id)
 
 
 def _miss_legacy_photo_ids(db, values, collection_id):
@@ -290,7 +290,7 @@ def create_misses_blueprint(
             if ordered_ids is not None:
                 photo_ids = set(ordered_ids)
         if photo_ids is None and rules:
-            photo_ids = set(db.query_photo_ids(
+            photo_ids = set(db.collections.query_photo_ids(
                 rules, collection_id=collection_id,
             ))
 

@@ -436,7 +436,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
 
 def test_add_collection_uses_workspace(db_with_workspace):
     db, ws_id, _, _ = db_with_workspace
-    cid = db.add_collection("Flagged", '[{"field":"flag","op":"equals","value":"flagged"}]')
+    cid = db.collections.add("Flagged", '[{"field":"flag","op":"equals","value":"flagged"}]')
     row = db.conn.execute(
         "SELECT workspace_id FROM collections WHERE id = ?", (cid,)
     ).fetchone()
@@ -445,26 +445,26 @@ def test_add_collection_uses_workspace(db_with_workspace):
 
 def test_get_collections_scoped(db_with_workspace):
     db, ws_id, _, _ = db_with_workspace
-    db.add_collection("WS1 Collection", "[]")
+    db.collections.add("WS1 Collection", "[]")
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
-    db.add_collection("WS2 Collection", "[]")
+    db.collections.add("WS2 Collection", "[]")
     # Each workspace sees only its own
-    assert len(db.get_collections()) == 1
-    assert db.get_collections()[0]["name"] == "WS2 Collection"
+    assert len(db.collections.list_all()) == 1
+    assert db.collections.list_all()[0]["name"] == "WS2 Collection"
     db.set_active_workspace(ws_id)
-    assert len(db.get_collections()) == 1
-    assert db.get_collections()[0]["name"] == "WS1 Collection"
+    assert len(db.collections.list_all()) == 1
+    assert db.collections.list_all()[0]["name"] == "WS1 Collection"
 
 
 def test_create_default_collections_per_workspace(db_with_workspace):
     db, ws_id, _, _ = db_with_workspace
-    db.create_default_collections()
-    count_ws1 = len(db.get_collections())
+    db.collections.create_defaults()
+    count_ws1 = len(db.collections.list_all())
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
-    db.create_default_collections()
-    count_ws2 = len(db.get_collections())
+    db.collections.create_defaults()
+    count_ws2 = len(db.collections.list_all())
     assert count_ws1 == count_ws2
     # Both workspaces have their own copies
     total = db.conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
@@ -473,7 +473,7 @@ def test_create_default_collections_per_workspace(db_with_workspace):
 
 def test_cascade_delete_removes_collections(db_with_workspace):
     db, ws_id, _, _ = db_with_workspace
-    db.add_collection("Test", "[]")
+    db.collections.add("Test", "[]")
     db.delete_workspace(ws_id)
     count = db.conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
     assert count == 0
@@ -488,14 +488,14 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip",
                       taxonomy={"order": "Passeriformes"})
     rules = json.dumps([{"field": "taxonomy_order", "op": "equals", "value": "Passeriformes"}])
-    cid = db.add_collection("Passerines", rules)
-    photos = db.get_collection_photos(cid, per_page=100)
+    cid = db.collections.add("Passerines", rules)
+    photos = db.collections.get_photos(cid, per_page=100)
     assert len(photos) == 1
     # Switch workspace — same collection rule should find nothing
     ws2 = db.create_workspace("Empty")
     db.set_active_workspace(ws2)
-    cid2 = db.add_collection("Passerines", rules)
-    photos2 = db.get_collection_photos(cid2, per_page=100)
+    cid2 = db.collections.add("Passerines", rules)
+    photos2 = db.collections.get_photos(cid2, per_page=100)
     assert len(photos2) == 0
 
 
@@ -901,8 +901,8 @@ def test_get_collection_photos_scoped_to_workspace_folders(db):
     db.photo_review.set_rating(p1, 5)
     db.photo_review.set_rating(p2, 5)
     db.set_active_workspace(ws)
-    cid = db.add_collection("High Rated", json.dumps([{"field": "rating", "op": ">=", "value": 4}]))
-    photos = db.get_collection_photos(cid, per_page=100)
+    cid = db.collections.add("High Rated", json.dumps([{"field": "rating", "op": ">=", "value": 4}]))
+    photos = db.collections.get_photos(cid, per_page=100)
     assert len(photos) == 1
     assert photos[0]["filename"] == "lion.jpg"
 
@@ -2142,15 +2142,15 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
 def test_move_folders_collections_stay_behind(db_with_workspace):
     """Collections in the source workspace are NOT moved."""
     db, ws1, folder_id, photo_id = db_with_workspace
-    db.add_collection("Flagged", "[]")
+    db.collections.add("Flagged", "[]")
 
     ws2 = db.create_workspace("Target")
     db.move_folders_to_workspace(ws1, ws2, [folder_id])
 
     db.set_active_workspace(ws1)
-    assert len(db.get_collections()) == 1
+    assert len(db.collections.list_all()) == 1
     db.set_active_workspace(ws2)
-    assert len(db.get_collections()) == 0
+    assert len(db.collections.list_all()) == 0
 
 
 def test_move_folders_blocks_descendant_when_source_root_remains(db):

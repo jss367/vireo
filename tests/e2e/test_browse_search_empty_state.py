@@ -85,7 +85,7 @@ def test_folder_health_refresh_preserves_active_collection(live_server, page, tm
     db.conn.commit()
 
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
-    collection_id = db.add_collection("All JPGs", rules)
+    collection_id = db.collections.add("All JPGs", rules)
 
     # Deep-link into the collection so bootstrap scopes the first paint
     # through ``activeCollectionId`` and then loads the saved expression
@@ -1311,7 +1311,7 @@ def test_load_collections_renders_older_success_after_newer_failure(
     # The held request reaches the server only after release, so it observes
     # this new collection. A later request starts first but fails; the older
     # success is therefore the newest usable response and must be rendered.
-    collection_id = db.add_collection("Fallback collection", "[]")
+    collection_id = db.collections.add("Fallback collection", "[]")
     page.evaluate("() => { window._failedCollectionLoad = loadCollections(); }")
     page.wait_for_timeout(200)
     held[0].continue_()
@@ -1673,7 +1673,7 @@ def test_folder_health_refresh_drops_selection_when_photo_goes_offline(
     db.conn.commit()
     collection_id = next(
         collection["id"]
-        for collection in db.get_collections()
+        for collection in db.collections.list_all()
         if collection["name"] == "All Photos"
     )
     target_id = live_server["data"]["photos"][3]
@@ -2161,7 +2161,7 @@ def test_toolbar_history_requeries_flag_filter_and_keeps_collection(live_server,
     db = live_server['db']
     ids = live_server['data']['photos'][:2]
     db.photo_review.set_flag(ids[1], 'rejected')
-    collection_id = db.add_collection('Rejected history test', json.dumps([
+    collection_id = db.collections.add('Rejected history test', json.dumps([
         {'field': 'flag', 'op': 'is', 'value': 'rejected'},
     ]))
     page.goto(live_server['url'] + '/browse')

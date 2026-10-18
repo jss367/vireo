@@ -102,7 +102,7 @@ def _collection_list_entry(db, c):
             )
     else:
         try:
-            counts = db.count_collection_photo_availability(c["id"])
+            counts = db.collections.count_photo_availability(c["id"])
             d["photo_count"] = counts["total"]
             d["available_photo_count"] = counts["available"]
             d["offline_photo_count"] = counts["offline"]
@@ -183,17 +183,17 @@ def _collection_photos_page(
     """``(photos, total, stack_count)`` for one page of a collection."""
     stack_count = None
     if stacks:
-        photos = db.query_browse_stacks(
+        photos = db.collections.query_browse_stacks(
             [], collection_id=collection_id, sort=sort,
             page=page, per_page=per_page, stack_config=stack_cfg,
         )
-        stack_totals = db.browse_stack_totals(
+        stack_totals = db.collections.browse_stack_totals(
             [], collection_id=collection_id, stack_config=stack_cfg,
         )
         total = stack_totals["total"]
         stack_count = stack_totals["stack_count"]
     else:
-        photos = db.get_collection_photos(
+        photos = db.collections.get_photos(
             collection_id, page=page, per_page=per_page, sort=sort,
         )
         total = underlying_total
@@ -212,7 +212,7 @@ def create_collections_blueprint(get_db, json_error):
     @blueprint.route("/api/collections")
     def api_collections():
         db = get_db()
-        collections = db.get_collections()
+        collections = db.collections.list_all()
         result = []
         for c in collections:
             result.append(_collection_list_entry(db, c))
@@ -236,7 +236,7 @@ def create_collections_blueprint(get_db, json_error):
             # widens the collection to "any embedding exists" (Codex
             # review r3621749904).
             rules = inject_active_visual_model(rules)
-            db.count_photos_for_rules(rules)
+            db.collections.count_photos_for_rules(rules)
             # The visual clause is saved alongside rules — a collection
             # saved from an expression with a visual component must
             # reproduce the same result set on reopen, not silently drop
@@ -244,7 +244,7 @@ def create_collections_blueprint(get_db, json_error):
             visual = validate_visual_arg(body.get("visual"))
         except ValueError as e:
             return json_error(str(e), 400)
-        cid = db.add_collection(
+        cid = db.collections.add(
             name, json.dumps(rules),
             visual_json=json.dumps(visual) if visual else None,
         )
@@ -278,7 +278,7 @@ def create_collections_blueprint(get_db, json_error):
             return json_error("request body must be a JSON object", 400)
         rules = body.get("rules", [])
         try:
-            count = db.count_photos_for_rules(rules)
+            count = db.collections.count_photos_for_rules(rules)
         except ValueError as e:
             # Validation in _build_query_from_rules raises ValueError for every
             # input shape SQLite could not bind, so we don't need to catch
@@ -291,7 +291,7 @@ def create_collections_blueprint(get_db, json_error):
     @blueprint.route("/api/collections/<int:collection_id>", methods=["DELETE"])
     def api_delete_collection(collection_id):
         db = get_db()
-        db.delete_collection(collection_id)
+        db.collections.delete(collection_id)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>", methods=["PUT"])
@@ -299,7 +299,7 @@ def create_collections_blueprint(get_db, json_error):
         """Update a collection. Body: {"name": "...", "rules": [...|group]}."""
         db = get_db()
         body = request.get_json(silent=True) or {}
-        row = db.get_collection(collection_id)
+        row = db.collections.get(collection_id)
         if not row:
             return json_error("collection not found", 404)
 
@@ -316,7 +316,7 @@ def create_collections_blueprint(get_db, json_error):
                 # rules match what the save-time preview counted
                 # (Codex review r3621749904).
                 rules = inject_active_visual_model(rules)
-                db.count_photos_for_rules(rules)
+                db.collections.count_photos_for_rules(rules)
             except ValueError as e:
                 return json_error(str(e), 400)
             updates["rules_json"] = json.dumps(rules)
@@ -326,7 +326,7 @@ def create_collections_blueprint(get_db, json_error):
             except ValueError as e:
                 return json_error(str(e), 400)
             updates["visual_json"] = json.dumps(visual) if visual else None
-        if updates and not db.update_collection(collection_id, **updates):
+        if updates and not db.collections.update(collection_id, **updates):
             return json_error("collection not found", 404)
         return jsonify({"ok": True})
 
@@ -356,7 +356,7 @@ def create_collections_blueprint(get_db, json_error):
                 f"photo_ids not in the active workspace: {foreign}", 403
             )
 
-        row = db.get_collection(collection_id)
+        row = db.collections.get(collection_id)
         if not row:
             return json_error("Collection not found", 404)
 
@@ -410,7 +410,7 @@ def create_collections_blueprint(get_db, json_error):
             existing.add(pid)
         ids_rule["value"] = sorted(existing)
 
-        db.update_collection(collection_id, rules_json=json.dumps(rules))
+        db.collections.update(collection_id, rules_json=json.dumps(rules))
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
     @blueprint.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
@@ -418,7 +418,7 @@ def create_collections_blueprint(get_db, json_error):
         """Duplicate a collection within the active workspace. Returns {id}."""
         db = get_db()
         try:
-            new_id = db.duplicate_collection(collection_id)
+            new_id = db.collections.duplicate(collection_id)
         except ValueError:
             return json_error("collection not found", 404)
         return jsonify({"ok": True, "id": new_id})
@@ -474,16 +474,16 @@ def create_collections_blueprint(get_db, json_error):
         focus_index = None
         focus_resolved_id = None
         try:
-            underlying_total = db.count_collection_photos(collection_id)
+            underlying_total = db.collections.count_photos(collection_id)
             stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
             if focus_candidates:
                 found = (
-                    db.query_browse_stack_position_first(
+                    db.collections.query_browse_stack_position_first(
                         [], focus_candidates, sort=sort,
                         collection_id=collection_id, stack_config=stack_cfg,
                     )
                     if stacks
-                    else db.query_photo_position_first(
+                    else db.collections.query_photo_position_first(
                         [], focus_candidates, sort=sort,
                         collection_id=collection_id,
                     )
@@ -550,7 +550,7 @@ def create_collections_blueprint(get_db, json_error):
                     stack_config=db.browse_stack_settings(cfg.load()),
                 )
             else:
-                photo_ids = db.get_collection_photo_ids(collection_id, sort=sort)
+                photo_ids = db.collections.get_photo_ids(collection_id, sort=sort)
         except ValueError as e:
             current_app.logger.exception(
                 "Collection %s has unresolvable rules", collection_id

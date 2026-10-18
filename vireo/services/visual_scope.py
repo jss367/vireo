@@ -225,7 +225,7 @@ class VisualScope:
         base["model"] = model_name
         if active.get("model_type", "bioclip") == "timm":
             return {**base, "status": "model_no_text_search"}, None, None
-        candidates = db.query_photo_ids(
+        candidates = db.collections.query_photo_ids(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
         )

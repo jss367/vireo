@@ -27,10 +27,10 @@ def scoped_app(tmp_path):
                           timestamp="2026-01-01T10:00:00")
     p_child = db.add_photo(child_id, "b.jpg", ".jpg", 1000, 1.0,
                            timestamp="2026-01-01T11:00:00")
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "picked", json.dumps([{"field": "photo_ids", "value": [p_child]}]),
     )
-    visual_id = db.add_collection(
+    visual_id = db.collections.add(
         "owls", json.dumps([]),
         visual_json=json.dumps({"prompt": "owl", "strength": "medium"}),
     )

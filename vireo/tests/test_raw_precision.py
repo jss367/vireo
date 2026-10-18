@@ -14,7 +14,7 @@ from image_edits import apply_recipe_to_loaded_image
 from image_loader import RAW_DECODE_LINEAR, load_image
 from PIL import Image
 from testing.waits import synchronization_timeout
-from tone import apply_adjustments, linear_to_srgb
+from tone import ToneAdjustments, apply_adjustments, linear_to_srgb
 
 
 def write_dng(path):
@@ -56,12 +56,12 @@ def test_real_raw_decode_retains_above_white_and_sub_byte_detail(dng):
 
 def test_negative_exposure_recovers_distinct_highlights_before_display_mapping():
     source = np.array([[[1.2] * 3, [1.8] * 3, [2.4] * 3]], dtype=np.float32)
-    output = apply_adjustments(source, exposure=-2, input_linear=True)
+    output = apply_adjustments(source, ToneAdjustments(exposure=-2), input_linear=True)
     np.testing.assert_allclose(output, linear_to_srgb(source / 4), atol=1e-6)
     assert np.all(np.diff(output[0, :, 0]) > 0.09)
     # Encoding the source to 8-bit first irreversibly merges all three values.
     clipped = np.clip(linear_to_srgb(source) * 255, 0, 255).astype(np.uint8)
-    legacy = apply_adjustments(clipped.astype(np.float32) / 255, exposure=-2)
+    legacy = apply_adjustments(clipped.astype(np.float32) / 255, ToneAdjustments(exposure=-2))
     assert np.ptp(legacy[0, :, 0]) == 0
 
 
