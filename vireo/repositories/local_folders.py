@@ -200,6 +200,13 @@ class LocalFolderRepository:
             (path, folder_id),
         ).fetchone()
 
+    def root_source_paths(self) -> list[sqlite3.Row]:
+        """``source_path`` of every staged root, ordered by that path."""
+        return self.conn.execute(
+            "SELECT source_path FROM local_folder_mappings "
+            "WHERE is_root = 1 ORDER BY source_path"
+        ).fetchall()
+
     def source_paths(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT source_path FROM local_folder_mappings"

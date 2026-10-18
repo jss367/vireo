@@ -138,6 +138,120 @@ def test_imports_is_catalog_wide(db, catalog):
     assert len(db.imports.twin_rows_by_size(100)) == 2
 
 
+# -- duplicate gate (``import_dedup``, ``ingest``) -----------------------------
+
+
+def _record_identity(db, photo_id, filename, *, size=50, timestamp=None, file_hash=None):
+    db.conn.execute(
+        "INSERT INTO companion_identities "
+        "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
+        (photo_id, filename, size, timestamp, file_hash),
+    )
+    db.commit()
+
+
+def test_catalog_identity_rows_list_photos_then_paired_companions(db, catalog):
+    _record_identity(db, catalog["raw"], "bird.jpg", timestamp="t", file_hash="h-bird")
+    # An identity whose filename is no longer the photo's companion is stale.
+    _record_identity(db, catalog["jpg"], "old.jpg", file_hash="h-old")
+    rows = [tuple(r) for r in db.imports.catalog_identity_rows()]
+    assert sorted(rows[:3]) == sorted([
+        ("bird.cr3", 300, "2026-01-01T10:00:00", "h-raw"),
+        ("fox.jpg", 100, "2026-01-01T11:00:00", "h-fox"),
+        ("fox-copy.jpg", 100, "2026-01-02T11:00:00", "h-twin"),
+    ])
+    assert rows[3:] == [("bird.jpg", 50, "t", "h-bird")]
+
+
+def test_missing_companion_identity_reads_skip_recorded_and_unusable(db, catalog):
+    jpg2 = db.add_photo(catalog["other"], "owl.cr3", ".cr3", 10, 1.0)
+    gone = db.add_folder("/gone", name="gone")
+    lost = db.add_photo(gone, "lost.cr3", ".cr3", 10, 1.0)
+    db.conn.execute(
+        "UPDATE photos SET companion_path = id || '.jpg' WHERE id IN (?, ?)",
+        (jpg2, lost),
+    )
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (gone,))
+    db.commit()
+
+    rows = db.imports.missing_companion_identity_rows()
+    assert [tuple(r) for r in rows] == [
+        (catalog["raw"], "bird.jpg", "/archive/2026"),
+        (jpg2, f"{jpg2}.jpg", "/other"),
+    ]
+    batch = db.imports.missing_companion_identity_batch(catalog["raw"], 5)
+    assert [r["id"] for r in batch] == [jpg2]
+    assert [r["id"] for r in db.imports.missing_companion_identity_batch(0, 1)] == [
+        catalog["raw"]]
+    _record_identity(db, catalog["raw"], "bird.jpg")
+    assert [r["id"] for r in db.imports.missing_companion_identity_rows()] == [jpg2]
+
+
+def _committed_identities(db):
+    with contextlib.closing(sqlite3.connect(db._db_path)) as other:
+        return other.execute(
+            "SELECT photo_id, filename, file_size, timestamp, file_hash, "
+            "file_mtime, needs_sync FROM companion_identities ORDER BY photo_id"
+        ).fetchall()
+
+
+def test_record_recovered_companion_identities_commits_on_release(db, catalog):
+    assert not db.in_transaction
+    db.imports.record_recovered_companion_identities(
+        [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
+    assert not db.in_transaction
+    assert _committed_identities(db) == [
+        (catalog["raw"], "bird.jpg", 50, "t", "h-bird", None, 1)]
+
+
+def test_record_recovered_companion_identities_nests_in_an_open_transaction(db, catalog):
+    db.begin()
+    db.imports.record_recovered_companion_identities(
+        [(catalog["raw"], "bird.jpg", 50, "t", "h-bird")])
+    assert db.in_transaction
+    assert _committed_identities(db) == []
+    db.rollback()
+    assert db.conn.execute("SELECT COUNT(*) FROM companion_identities").fetchone()[0] == 0
+
+
+def test_record_recovered_companion_identities_rolls_back_and_reraises(db, catalog):
+    db.begin()
+    db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (catalog["jpg"],))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.imports.record_recovered_companion_identities([
+            (catalog["raw"], "bird.jpg", 50, "t", "h-bird"),
+            (999999, "ghost.jpg", 1, None, None),  # violates the photo FK
+        ])
+    # Only the savepoint's writes are undone; the outer work stays pending.
+    assert db.in_transaction
+    assert db.conn.execute("SELECT COUNT(*) FROM companion_identities").fetchone()[0] == 0
+    assert db.conn.execute(
+        "SELECT rating FROM photos WHERE id = ?", (catalog["jpg"],)).fetchone()[0] == 3
+    db.rollback()
+
+
+def test_destination_identity_rows_scope_and_functions(db, catalog):
+    _record_identity(db, catalog["raw"], "bird.jpg", timestamp="t")
+    every = db.imports.destination_identity_rows("", ())
+    assert sorted(r["filename"] for r in every) == [
+        "bird.cr3", "bird.jpg", "fox-copy.jpg", "fox.jpg"]
+    assert every[-1]["folder_path"] == "/archive/2026"
+    seen = []
+
+    def in_archive(path):
+        seen.append(path)
+        return int(path.startswith("/archive"))
+
+    scoped = db.imports.destination_identity_rows(
+        "AND VIREO_TEST_IN_ARCHIVE(f.path) = ?", (1,),
+        [("VIREO_TEST_IN_ARCHIVE", 1, in_archive)],
+    )
+    assert sorted(r["filename"] for r in scoped) == ["bird.cr3", "bird.jpg", "fox.jpg"]
+    assert "/other" in seen
+    assert scoped[0].keys() == [
+        "file_hash", "filename", "file_size", "timestamp", "folder_path"]
+
+
 # -- structure ------------------------------------------------------------------
 
 
@@ -190,3 +304,17 @@ def test_import_job_never_touches_the_connection():
         f"import_job reaches the catalog connection again (file: lines): {offenders}. "
         "Add a method to repositories/imports.py and call it through db.imports."
     )
+
+
+def test_duplicate_gate_modules_never_touch_the_connection():
+    """``import_dedup``, ``ingest`` and ``importer`` reach SQL through ``db.imports``."""
+    offenders = {}
+    for name in ("import_dedup.py", "ingest.py", "importer.py"):
+        tree = ast.parse((VIREO / name).read_text(encoding="utf-8"))
+        lines = [
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "conn"
+        ]
+        if lines:
+            offenders[name] = lines
+    assert not offenders, offenders

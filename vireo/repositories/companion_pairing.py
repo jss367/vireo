@@ -309,6 +309,16 @@ class CompanionPairingRepository:
             (file_mtime, owner_id, filename),
         )
 
+    def delete_identities(self, owner_id: int) -> None:
+        """Forget every stored companion identity of ``owner_id``.
+
+        A capture-time edit rewrites the companion's bytes and timestamp, so
+        its saved import identity no longer describes the file.
+        """
+        self.conn.execute(
+            "DELETE FROM companion_identities WHERE photo_id=?", (owner_id,)
+        )
+
     def clear_identity_mtime(self, owner_id: int) -> None:
         """Null the owner's stored companion mtime so the next scan re-reads it."""
         self.conn.execute(
