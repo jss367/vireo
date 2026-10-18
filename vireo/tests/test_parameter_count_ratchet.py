@@ -37,9 +37,9 @@ function defined directly in a class body, unless it is a
 ``@staticmethod``) is not counted. Lambdas are not measured. Keys are
 ``<path>:<qualname>`` with ``path`` relative to ``vireo/``, the same as the
 function-length baseline; duplicate qualified names use ``#<ordinal>-of-<total>`` suffixes. Their
-order and group size identify separate budgets; inserting or removing a
-duplicate fails closed and requires a reviewed baseline-key migration.
-Unique names keep their existing keys.
+order and group size distinguish diagnostics, but cannot prove identity.
+Every duplicate over the cap fails closed, even with a baseline entry;
+refactor such definitions below the cap. Unique names keep existing keys.
 """
 
 import ast
@@ -134,6 +134,12 @@ def test_no_function_crosses_or_grows_past_the_cap():
     baseline = load_baseline()
     current = over_cap(parameter_counts())
 
+    duplicates = sorted(key for key in current if "#" in key.split(":", 1)[1])
+    assert not duplicates, (
+        "Over-cap duplicate qualified names have no provable stable identity; "
+        "refactor each below the cap rather than assigning ordinal budgets: " + str(duplicates)
+    )
+
     new = sorted(key for key in current if key not in baseline)
     assert not new, (
         f"These functions take more than {MAX_PARAMETERS} parameters and are not in "
@@ -204,7 +210,7 @@ def test_counting_rules():
 
 
 def test_duplicate_budgets_and_cli_refuse_insertion(tmp_path):
-    """Each duplicate can shrink but cannot borrow a sibling's allowance."""
+    """Unproved duplicate identities cannot borrow a removed sibling's budget."""
     fixture = tmp_path / "vireo"
     tests = fixture / "tests"
     tests.mkdir(parents=True)
@@ -219,26 +225,36 @@ def test_duplicate_budgets_and_cli_refuse_insertion(tmp_path):
     baseline.write_text(json.dumps(expected), encoding="utf-8")
     def write():
         return subprocess.run([sys.executable, str(script), "--write-baseline"], capture_output=True).returncode
-    assert write() == 0
     previous = baseline.read_bytes()
-    module.write_text(definitions(14, 15), encoding="utf-8")
     assert write() == 1 and baseline.read_bytes() == previous
-    module.write_text(definitions(12, 15), encoding="utf-8")
-    assert write() == 0
-    assert json.loads(baseline.read_text(encoding="utf-8")) == {"invented.py:f#2-of-2": 15}
+    module.write_text(definitions(20, 16, 13), encoding="utf-8")
+    baseline.write_text(json.dumps({
+        "invented.py:f#1-of-3": 20, "invented.py:f#2-of-3": 16, "invented.py:f#3-of-3": 13,
+    }), encoding="utf-8")
     previous = baseline.read_bytes()
-    module.write_text(definitions(1, 12, 15), encoding="utf-8")
+    # Same-size replacement previously borrowed the removed first budget.
+    module.write_text(definitions(18, 15, 1), encoding="utf-8")
     assert write() == 1 and baseline.read_bytes() == previous
+    module.write_text(definitions(1, 18, 15, 1), encoding="utf-8")
+    assert write() == 1 and baseline.read_bytes() == previous
+    module.write_text(definitions(12, 11, 1), encoding="utf-8")
+    assert write() == 0
+    assert json.loads(baseline.read_text(encoding="utf-8")) == {}
+
 
 
 def write_baseline() -> int:
     """Rewrite the baseline from the tree; refuse to raise or add any entry.
 
     With no baseline file yet (a first run, or reuse of this ratchet in a
-    fresh tree) every over-cap function is written, since there is nothing
-    to ratchet against.
+    fresh tree) unique over-cap functions are written. Ambiguous duplicate
+    identities are refused even during bootstrap.
     """
     current = over_cap(parameter_counts())
+    duplicates = sorted(key for key in current if "#" in key.split(":", 1)[1])
+    if duplicates:
+        print("Refusing unproved duplicate identities; refactor these below the cap:", duplicates)
+        return 1
     bootstrapping = not BASELINE_PATH.exists()
     previous = {} if bootstrapping else load_baseline()
     grown = sorted(key for key in current if key in previous and current[key] > previous[key])
