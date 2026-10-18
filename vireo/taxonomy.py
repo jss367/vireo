@@ -1398,30 +1398,21 @@ def _insert_filtered_taxa(db, filtered):
     """Upsert the filtered taxa, then link each to its kept parent."""
     # Insert into database
     # First pass: insert all taxa without parent_id (to get local IDs)
+    taxa = db.taxa
     inat_to_local = {}
     for inat_id, t in filtered.items():
-        db.conn.execute(
-            "INSERT INTO taxa (inat_id, name, rank, kingdom) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(inat_id) DO UPDATE SET "
-            "name = excluded.name, rank = excluded.rank, kingdom = excluded.kingdom",
-            (inat_id, t['name'], t['rank'], t['kingdom']),
+        local_id = taxa.upsert_inat_export_taxon(
+            inat_id, t['name'], t['rank'], t['kingdom'],
         )
-        row = db.conn.execute(
-            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
-        ).fetchone()
-        if row:
-            inat_to_local[inat_id] = row['id']
+        if local_id is not None:
+            inat_to_local[inat_id] = local_id
 
     # Second pass: set parent_id using local IDs
     for inat_id, t in filtered.items():
         if t['parent_inat_id'] and t['parent_inat_id'] in inat_to_local:
             local_id = inat_to_local[inat_id]
             parent_local_id = inat_to_local[t['parent_inat_id']]
-            db.conn.execute(
-                "UPDATE taxa SET parent_id = ? WHERE id = ?",
-                (parent_local_id, local_id),
-            )
+            taxa.set_parent(local_id, parent_local_id)
 
 
 def load_taxa_from_file(db, gz_path):
@@ -1438,7 +1429,7 @@ def load_taxa_from_file(db, gz_path):
     _insert_filtered_taxa(db, filtered)
 
     db.relink_source_species_keywords()
-    db.conn.commit()
+    db.commit()
 
     loaded = len(filtered)
     skipped = len(all_taxa) - loaded
@@ -1495,9 +1486,7 @@ def _refuse_suspicious_taxa_payload(db, entries_by_inat_id):
             "Taxonomy payload has no usable entries — refusing to "
             "populate (would delete the entire local taxa table)"
         )
-    existing_count = db.conn.execute(
-        "SELECT COUNT(*) FROM taxa"
-    ).fetchone()[0]
+    existing_count = db.taxa.count()
     if existing_count > 100 and len(entries_by_inat_id) < existing_count * 0.1:
         raise ValueError(
             f"Taxonomy payload has only {len(entries_by_inat_id):,} entries "
@@ -1523,33 +1512,7 @@ def _prune_stale_taxa(db, entries_by_inat_id, status):
     #     CASCADE and go automatically; seed_informal_groups reseeds
     #     its side from the fresh taxa afterward.
     status("Pruning stale taxa...")
-    db.conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS fresh_inat_ids "
-        "(inat_id INTEGER PRIMARY KEY)"
-    )
-    db.conn.execute("DELETE FROM fresh_inat_ids")
-    db.conn.executemany(
-        "INSERT OR IGNORE INTO fresh_inat_ids (inat_id) VALUES (?)",
-        [(iid,) for iid in entries_by_inat_id],
-    )
-    stale_local_ids_sql = (
-        "SELECT id FROM taxa "
-        "WHERE inat_id IS NOT NULL "
-        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
-    )
-    db.conn.execute(
-        f"UPDATE keywords SET taxon_id = NULL "
-        f"WHERE taxon_id IN ({stale_local_ids_sql})"
-    )
-    db.conn.execute(
-        f"UPDATE taxa SET parent_id = NULL "
-        f"WHERE parent_id IN ({stale_local_ids_sql})"
-    )
-    pruned = db.conn.execute(
-        "DELETE FROM taxa WHERE inat_id IS NOT NULL "
-        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
-    ).rowcount
-    db.conn.execute("DROP TABLE fresh_inat_ids")
+    pruned = db.taxa.prune_absent_inat_ids(entries_by_inat_id)
     if pruned:
         status(f"Pruned {pruned:,} taxa no longer in the taxonomy")
     return pruned
@@ -1558,6 +1521,7 @@ def _prune_stale_taxa(db, entries_by_inat_id, status):
 def _upsert_taxa_entries(db, entries_by_inat_id, status):
     """Insert or overwrite one taxa row per payload entry."""
     status(f"Inserting {len(entries_by_inat_id):,} taxa...")
+    taxa = db.taxa
     for inat_id, entry in entries_by_inat_id.items():
         lineage_names = entry.get("lineage_names") or []
         lineage_ranks = entry.get("lineage_ranks") or []
@@ -1570,14 +1534,9 @@ def _upsert_taxa_entries(db, entries_by_inat_id, status):
         # common name, we need to let it drop to NULL here, otherwise
         # add_keyword's auto-detect (which reads taxa.common_name before
         # taxa_common_names) keeps matching the obsolete name.
-        db.conn.execute(
-            "INSERT INTO taxa (inat_id, name, rank, kingdom, common_name) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(inat_id) DO UPDATE SET "
-            "name=excluded.name, rank=excluded.rank, "
-            "kingdom=excluded.kingdom, common_name=excluded.common_name",
-            (inat_id, entry["scientific_name"], entry["rank"],
-             kingdom, common_name),
+        taxa.upsert_taxon(
+            inat_id, entry["scientific_name"], entry["rank"],
+            kingdom, common_name,
         )
 
 
@@ -1591,6 +1550,7 @@ def _resolve_taxa_parents(db, entries_by_inat_id, status):
     # tuple of lineage_names disambiguates: two taxa with the same
     # scientific name always have different ancestry.
     status("Resolving parent relationships...")
+    taxa = db.taxa
     inat_id_by_lineage = {}
     local_id_by_inat_id = {}
     for inat_id, entry in entries_by_inat_id.items():
@@ -1600,11 +1560,9 @@ def _resolve_taxa_parents(db, entries_by_inat_id, status):
             # taxa share the exact same lineage path, which shouldn't
             # happen in well-formed data.
             inat_id_by_lineage.setdefault(lineage, inat_id)
-        row = db.conn.execute(
-            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
-        ).fetchone()
-        if row:
-            local_id_by_inat_id[inat_id] = row["id"]
+        local_id = taxa.local_id_for_inat_id(inat_id)
+        if local_id is not None:
+            local_id_by_inat_id[inat_id] = local_id
 
     for inat_id, entry in entries_by_inat_id.items():
         lineage = tuple(entry.get("lineage_names") or [])
@@ -1617,10 +1575,7 @@ def _resolve_taxa_parents(db, entries_by_inat_id, status):
         own_local = local_id_by_inat_id.get(inat_id)
         if parent_local is None or own_local is None or own_local == parent_local:
             continue
-        db.conn.execute(
-            "UPDATE taxa SET parent_id = ? WHERE id = ?",
-            (parent_local, own_local),
-        )
+        taxa.set_parent(own_local, parent_local)
 
 
 def _index_taxa_common_names(db, taxa_by_common, status):
@@ -1635,22 +1590,17 @@ def _index_taxa_common_names(db, taxa_by_common, status):
     # keep matching obsolete common names across re-downloads. Still
     # inside the populate transaction, so a failure rolls it back.
     status(f"Indexing {len(taxa_by_common):,} common names...")
-    db.conn.execute("DELETE FROM taxa_common_names WHERE locale = 'en'")
+    taxa = db.taxa
+    taxa.clear_english_common_names()
     cn_loaded = 0
     for name_lower, entry in taxa_by_common.items():
         inat_id = entry.get("taxon_id")
         if inat_id is None:
             continue
-        row = db.conn.execute(
-            "SELECT id FROM taxa WHERE inat_id = ?", (int(inat_id),)
-        ).fetchone()
-        if not row:
+        local_id = taxa.local_id_for_inat_id(int(inat_id))
+        if local_id is None:
             continue
-        db.conn.execute(
-            "INSERT OR IGNORE INTO taxa_common_names "
-            "(taxon_id, name, locale) VALUES (?, ?, 'en')",
-            (row["id"], name_lower),
-        )
+        taxa.add_common_name(local_id, name_lower, "en")
         cn_loaded += 1
     return cn_loaded
 
@@ -1696,7 +1646,7 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     db.relink_source_species_keywords()
     db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
     db.set_meta("ambiguous_common_names", json.dumps(sorted(ambiguous_common)), _commit=False)
-    db.conn.commit()
+    db.commit()
     result = {
         "taxa_loaded": len(entries_by_inat_id),
         "common_names_loaded": cn_loaded,
@@ -1716,9 +1666,8 @@ def fetch_common_names(db, locale='en'):
 
     Returns dict with 'updated' count.
     """
-    rows = db.conn.execute(
-        "SELECT id, inat_id FROM taxa WHERE inat_id IS NOT NULL"
-    ).fetchall()
+    taxa = db.taxa
+    rows = taxa.ids_with_inat_id()
 
     inat_ids = [(r['id'], r['inat_id']) for r in rows]
     updated = 0
@@ -1751,20 +1700,15 @@ def fetch_common_names(db, locale='en'):
                 remaining.discard(inat_id)
                 # Replace each returned taxon's names so a removed alias does
                 # not survive a complete refresh as false identity evidence.
-                db.conn.execute("DELETE FROM taxa_common_names WHERE taxon_id = ? AND locale = ?",
-                                (local_id, locale))
+                taxa.delete_common_names(local_id, locale)
                 preferred = taxon.get('preferred_common_name')
-                db.conn.execute("UPDATE taxa SET common_name = ? WHERE id = ?", (preferred, local_id))
+                taxa.set_common_name(local_id, preferred)
                 if preferred:
                     updated += 1
 
                 for name_entry in taxon.get('names', []):
                     if name_entry.get('locale') == locale:
-                        db.conn.execute(
-                            "INSERT OR IGNORE INTO taxa_common_names "
-                            "(taxon_id, name, locale) VALUES (?, ?, ?)",
-                            (local_id, name_entry['name'], locale),
-                        )
+                        taxa.add_common_name(local_id, name_entry['name'], locale)
         except requests.RequestException as e:
             log.warning("iNat API request failed: %s", e)
             continue
@@ -1772,7 +1716,7 @@ def fetch_common_names(db, locale='en'):
     if locale == 'en' and inat_ids and not remaining:
         db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
         db.set_meta("ambiguous_common_names", "[]", _commit=False)
-    db.conn.commit()
+    db.commit()
     log.info("Common names: %d taxa updated", updated)
     return {"updated": updated}
 
@@ -1799,35 +1743,23 @@ def seed_informal_groups(db):
 
     Returns dict with 'groups_created' count.
     """
+    taxa = db.taxa
     created = 0
     for group_name, taxon_names in DEFAULT_INFORMAL_GROUPS.items():
         # Insert group (ignore if exists)
-        db.conn.execute(
-            "INSERT OR IGNORE INTO informal_groups (name) VALUES (?)",
-            (group_name,),
-        )
-        group_row = db.conn.execute(
-            "SELECT id FROM informal_groups WHERE name = ?", (group_name,)
-        ).fetchone()
-        group_id = group_row["id"]
+        group_id = taxa.ensure_informal_group(group_name)
 
         linked_any = False
         for taxon_name in taxon_names:
-            taxon_row = db.conn.execute(
-                "SELECT id FROM taxa WHERE name = ?", (taxon_name,)
-            ).fetchone()
-            if taxon_row:
-                db.conn.execute(
-                    "INSERT OR IGNORE INTO informal_group_taxa "
-                    "(group_id, taxon_id) VALUES (?, ?)",
-                    (group_id, taxon_row["id"]),
-                )
+            taxon_id = taxa.local_id_for_name(taxon_name)
+            if taxon_id is not None:
+                taxa.link_informal_group(group_id, taxon_id)
                 linked_any = True
 
         if linked_any:
             created += 1
 
-    db.conn.commit()
+    db.commit()
     log.info("Informal groups: %d created/verified", created)
     return {"groups_created": created}
 
@@ -2090,10 +2022,8 @@ def classify_to_keypoint_group(db, inat_id):
     """
     if inat_id is None:
         return None
-    row = db.conn.execute(
-        "SELECT id, name, rank, parent_id FROM taxa WHERE inat_id=?",
-        (inat_id,),
-    ).fetchone()
+    taxa = db.taxa
+    row = taxa.node_by_inat_id(inat_id)
     if row is None:
         return None
     seen = set()
@@ -2109,10 +2039,7 @@ def classify_to_keypoint_group(db, inat_id):
             return name
         if parent_id is None:
             return None
-        row = db.conn.execute(
-            "SELECT id, name, rank, parent_id FROM taxa WHERE id=?",
-            (parent_id,),
-        ).fetchone()
+        row = taxa.node_by_id(parent_id)
     return None
 
 
