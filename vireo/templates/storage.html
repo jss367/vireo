@@ -388,10 +388,10 @@ dialog.modal-overlay::backdrop { background: transparent; }
   </div>
 </div>
 
-<script src="/static/vireo-release-originals.js"></script>
-<script src="/static/storage-retained.js"></script>
-<script src="/static/storage-overview.js"></script>
-<script src="/static/storage-hf-cache.js"></script>
+<script defer src="/static/vireo-release-originals.js"></script>
+<script defer src="/static/storage-retained.js"></script>
+<script defer src="/static/storage-overview.js"></script>
+<script defer src="/static/storage-hf-cache.js"></script>
 <script>
 function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
@@ -414,8 +414,8 @@ function storageFormatBytes(b) {
   return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
-refreshStoragePage();
-loadStorageConfig();
+document.addEventListener('DOMContentLoaded', function() { refreshStoragePage(); });
+document.addEventListener('DOMContentLoaded', function() { loadStorageConfig(); });
 
 var _storageSaveTimer = null;
 var _committedWorkingCopyQuotaMb = 20480;

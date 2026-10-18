@@ -1,12 +1,32 @@
-/** @type {LightboxViewport} */ var vireoLightboxViewport = VireoLightboxViewport.create({
+import { lbState } from './shared-state.js';
+import { VireoLightboxSession } from './session.js';
+import { VireoLightboxViewport, _lbSrcRank } from './viewport.js';
+import {
+  _lbAdjustmentSourceHint, _lbRememberEditRecipe, _vireoPairKnownByPhoto, _vireoPairSource,
+  vireoRememberPhotoRenderKey,
+} from './edits.js';
+import {
+  _lbApplyTrackEyeState, _lbOrientationSwapsAxes, _lbPhotoData, _lbPhotoEyePoint,
+  _lbSourceOverlaysAvailable, lbOverlays,
+} from './overlays.js';
+import {
+  _lbFullPreviewLimit, _lbPickSourceKey, _lbRenderDetailStatus, _lbScheduleSourceSwap,
+  _lbSetPreviewLoading, _lbSrcUrl,
+} from './source-loading.js';
+import { showToast } from '../navbar-shared-helpers.js';
+
+// The viewport calls these through the object on every use, so a browser test
+// can replace one (tests/e2e/navbar_modules.py), as it once replaced the global
+// function behind it.
+/** @type {LightboxViewportOptions} */ export const lbViewportHost = {
   photoId: function() { return vireoLightboxSession.requestedPhotoId(); },
   photo: function() {
     var id = vireoLightboxSession.requestedPhotoId();
     return {
-      width: _lbPhotoW, height: _lbPhotoH, orientation: _lbPhotoOrientation,
-      recipe: _lbCurrentEditRecipe, originalUnavailable: _lbOriginalUnavailable,
-      currentSrcKey: _lbCurrentSrcKey, desiredSrcKey: _lbDesiredSrcKey,
-      transitionPending: _lbVisualTransitionPending, trackEyeEnabled: _lbTrackEyeEnabled,
+      width: lbState.photoW, height: lbState.photoH, orientation: lbState.photoOrientation,
+      recipe: lbState.currentEditRecipe, originalUnavailable: lbState.originalUnavailable,
+      currentSrcKey: lbState.currentSrcKey, desiredSrcKey: lbState.desiredSrcKey,
+      transitionPending: lbState.visualTransitionPending, trackEyeEnabled: lbOverlays.trackEyeEnabled,
       pairKnown: !!_vireoPairKnownByPhoto[String(id)], pairSource: _vireoPairSource(id)
     };
   },
@@ -14,26 +34,29 @@
   pickSource: function(zoom) { return _lbPickSourceKey(zoom); },
   scheduleSource: function(zoom) { _lbScheduleSourceSwap(zoom); },
   cancelSourceSwap: function() { vireoLightboxSession.cancelSwap(); },
-  keepSource: function(key) { _lbDesiredSrcKey = key; },
+  keepSource: function(key) { lbState.desiredSrcKey = key; },
   scheduleAdjacent: function(key) { vireoLightboxSession.scheduleAdjacent(key); },
   photoData: function(id) { return _lbPhotoData(id); },
   eyePoint: function(id, photo) { return _lbPhotoEyePoint(id, photo); },
   overlaysAvailable: function() { return _lbSourceOverlaysAvailable(); },
   updateEyeControl: function() { _lbApplyTrackEyeState(); },
-  cancelProgressiveLoad: function() { _lbProgressiveTargetKey = null; _lbSetPreviewLoading(false); },
-  handledClick: function() { window._lightboxZoomHandled = true; }
-});
+  cancelProgressiveLoad: function() { lbState.progressiveTargetKey = null; _lbSetPreviewLoading(false); },
+  handledClick: function() { lbState.zoomHandled = true; }
+};
+/** @type {LightboxViewport} */ export var vireoLightboxViewport = VireoLightboxViewport.create(lbViewportHost);
 
-/** @type {LightboxSession} */ var vireoLightboxSession = VireoLightboxSession.create({
-  photos: function() { return _lightboxPhotoList; },
+// The session's view of the lightbox, likewise one object a browser test can
+// build a replacement session from (tests/e2e/test_browse_lightbox.py).
+/** @type {LightboxSessionOptions} */ export const lbSessionHost = {
+  photos: function() { return lbState.photoList; },
   photoData: function(id) { return _lbPhotoDataByPhoto[String(id)]; },
   view: function() {
     return {
-      currentSrcKey: _lbCurrentSrcKey, fullUsesOriginal: _lbFullUsesOriginal,
-      originalUnavailable: _lbOriginalUnavailable, zoom: vireoLightboxViewport.zoom(),
-      desiredSrcKey: _lbDesiredSrcKey, nativeZoom: vireoLightboxViewport.nativeZoom(),
-      photoW: _lbPhotoW, photoH: _lbPhotoH,
-      visualTransitionPending: _lbVisualTransitionPending
+      currentSrcKey: lbState.currentSrcKey, fullUsesOriginal: lbState.fullUsesOriginal,
+      originalUnavailable: lbState.originalUnavailable, zoom: vireoLightboxViewport.zoom(),
+      desiredSrcKey: lbState.desiredSrcKey, nativeZoom: vireoLightboxViewport.nativeZoom(),
+      photoW: lbState.photoW, photoH: lbState.photoH,
+      visualTransitionPending: lbState.visualTransitionPending
     };
   },
   sourceUrl: function(id, key, speculative) { return _lbSrcUrl(id, key, speculative); },
@@ -41,76 +64,68 @@
   fullPreviewLimit: function() { return _lbFullPreviewLimit(); },
   pickSourceKey: function(zoom) { return _lbPickSourceKey(zoom); },
   rememberEditRecipe: function(id, recipe) { _lbRememberEditRecipe(id, recipe); },
-  rememberRenderKey: function(id, key) { window.vireoRememberPhotoRenderKey(id, key); }
-});
+  rememberRenderKey: function(id, key) { vireoRememberPhotoRenderKey(id, key); }
+};
+/** @type {LightboxSession} */ export var vireoLightboxSession = VireoLightboxSession.create(lbSessionHost);
 
-/** @type {LightboxPhoto[]} */ var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
-var _lbReadOnly = false;
-var _lbReadOnlyMessage = 'This lightbox is read-only';
+/**
+ * Replace the session or viewport controller. Browser tests use this (through
+ * tests/e2e/navbar_modules.py) to stub a controller method, such as keeping
+ * the session from preloading originals, the way they once reassigned the
+ * global. Every lightbox module reads the controllers through these live
+ * bindings, so a replacement reaches all of them.
+ * @param {{session?: LightboxSession, viewport?: LightboxViewport}} controllers
+ */
+export function replaceLightboxControllers(controllers) {
+  if (controllers.session) vireoLightboxSession = controllers.session;
+  if (controllers.viewport) vireoLightboxViewport = controllers.viewport;
+}
 
-/** @type {number | null} */ var _lbPhotoW = null;       // original photo width (px)
-/** @type {number | null} */ var _lbPhotoH = null;       // original photo height (px)
-/** @type {unknown} */ var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
-/** @type {LightboxRecipe | null} */ var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
-/** @type {string | null} */ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
-/** @type {number | null} */ var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
-// Bootstrap before opening any photo; metadata refreshes the workspace cap later.
-var _lbPreviewMaxSize = window.VIREO_FULL_PREVIEW_MAX_SIZE ?? null; // 0 means original
-var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
-/** @type {boolean | null} */ var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
-var _lbCurrentWildlifeExcluded = false;
-var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
-var _lbFlagPendingWrites = 0;
-/** @type {Record<string, number>} */ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
-/** @type {Record<string, LightboxFlag>} */ var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
-/** @type {Record<string, LightboxFlag>} */ var _lbProvisionalFlags = {}; // page-owned staged flags (for example Group Review before Apply)
-/** @type {Record<string, number>} */ var _lbProvisionalFlagSeq = {}; // edit sequence that produced each staged flag
-var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
-/** @type {(() => void) | null} */ var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
-var _lbPreviewLoading = false;
-/** @type {string | null} */ var _lbProgressiveTargetKey = null;
-/** @type {boolean | null} */ var _lbSessionFullUsesOriginal = null;
-/** @type {Record<string, LightboxRecipe>} */ var _lbEditRecipeByPhoto = {};
+
+/** @type {Record<string, number>} */ export var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
+/** @type {Record<string, LightboxFlag>} */ export var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
+/** @type {Record<string, LightboxFlag>} */ export var _lbProvisionalFlags = {}; // page-owned staged flags (for example Group Review before Apply)
+/** @type {Record<string, number>} */ export var _lbProvisionalFlagSeq = {}; // edit sequence that produced each staged flag
+/** @type {Record<string, LightboxRecipe>} */ export var _lbEditRecipeByPhoto = {};
 // The recipe exactly as the server sent it, kept alongside the clipped
 // ``_lbEditRecipeByPhoto`` view above. ``_lbCloneEditRecipe`` only models the
 // fields the lightbox itself can edit, so it drops sections such as ``local``;
 // a cache fingerprint computed from the clipped copy cannot tell two different
 // local-adjustment recipes apart. Fingerprints read this map instead.
-/** @type {Record<string, LightboxRecipe | null>} */ var _lbRawEditRecipeByPhoto = {};
+/** @type {Record<string, LightboxRecipe | null>} */ export var _lbRawEditRecipeByPhoto = {};
 // Server-computed render keys (``photo_payload.render_key_for_recipe``),
 // remembered per photo from whichever payload delivered the photo dict. The
 // server derives its key from the whole canonical recipe, so preferring it
 // over the client's own fingerprint keeps the two from drifting.
-/** @type {Record<string, string>} */ var _lbRenderKeyByPhoto = {};
-/** @type {Record<string, boolean>} */ var _lbEditRecipeKnownByPhoto = {};
-var _lbEditRecipeWriteSeq = 0;
-/** @type {Record<string, number>} */ var _lbEditRecipeWriteSeqByPhoto = {};
-/** @type {Record<string, LightboxPhoto>} */ var _lbPhotoDataByPhoto = {};
-/** @type {Record<string, string>} */ var _lbRenderVersionByPhoto = {};
+/** @type {Record<string, string>} */ export var _lbRenderKeyByPhoto = {};
+/** @type {Record<string, boolean>} */ export var _lbEditRecipeKnownByPhoto = {};
+/** @type {Record<string, number>} */ export var _lbEditRecipeWriteSeqByPhoto = {};
+/** @type {Record<string, LightboxPhoto>} */ export var _lbPhotoDataByPhoto = {};
+/** @type {Record<string, string>} */ export var _lbRenderVersionByPhoto = {};
 
 /**
  * Why the open page keeps Edit / Open in Browse disabled for a photo, from
  * its getLightboxBrowseDisabledHint page hook (Pipeline Review), or null.
  * @param {number | null} photoId
  */
-function _lbPageBrowseDisabledHint(photoId) {
+export function _lbPageBrowseDisabledHint(photoId) {
   var hint = Vireo.pageHook('getLightboxBrowseDisabledHint');
   return hint ? hint(photoId, true) : null;
 }
 
 /** The photo in the open page's detail panel (Browse), whose image edits refresh too. */
-function _lbPageDetailPhotoId() {
+export function _lbPageDetailPhotoId() {
   var detailPhotoId = Vireo.pageHook('getDetailPhotoId');
   return detailPhotoId ? detailPhotoId() : null;
 }
 
-function _lbGuardReadOnly() {
-  if (!_lbReadOnly) return false;
-  if (typeof showToast === 'function') showToast(_lbReadOnlyMessage, 'warning');
+export function _lbGuardReadOnly() {
+  if (!lbState.readOnly) return false;
+  if (typeof showToast === 'function') showToast(lbState.readOnlyMessage, 'warning');
   return true;
 }
 
-function _lbApplyReadOnlyState() {
+export function _lbApplyReadOnlyState() {
   /** @type {[string, string][]} */ var controls = [
     ['lightboxFlagBtn', 'Flag photo (p)'],
     ['lightboxRejectBtn', 'Reject photo (x)'],
@@ -121,37 +136,37 @@ function _lbApplyReadOnlyState() {
   controls.forEach(function(entry) {
     var button = /** @type {HTMLButtonElement | null} */ (document.getElementById(entry[0]));
     if (!button) return;
-    button.disabled = _lbReadOnly;
-    button.title = _lbReadOnly ? _lbReadOnlyMessage : entry[1];
+    button.disabled = lbState.readOnly;
+    button.title = lbState.readOnly ? lbState.readOnlyMessage : entry[1];
   });
   var adjustmentHint = _lbAdjustmentSourceHint();
   var adjustmentButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxAdjustBtn'));
-  if (adjustmentButton && adjustmentHint && !_lbReadOnly) {
+  if (adjustmentButton && adjustmentHint && !lbState.readOnly) {
     adjustmentButton.disabled = true;
     adjustmentButton.title = adjustmentHint;
   }
   var panel = document.getElementById('lightboxAdjustPanel');
-  if ((_lbReadOnly || adjustmentHint) && panel) {
+  if ((lbState.readOnly || adjustmentHint) && panel) {
     panel.classList.remove('open');
     if (adjustmentButton) adjustmentButton.setAttribute('aria-expanded', 'false');
   }
   var editButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxEditPhoto'));
   if (editButton) {
-    var editHint = _lbReadOnly
-      ? _lbReadOnlyMessage
+    var editHint = lbState.readOnly
+      ? lbState.readOnlyMessage
       : _lbPageBrowseDisabledHint(vireoLightboxSession.requestedPhotoId());
     editButton.disabled = !!editHint;
     editButton.title = editHint || 'Edit photo';
   }
 }
 
-window.setLightboxReadOnlyMode = function(readOnly, message) {
-  _lbReadOnly = !!readOnly;
-  _lbReadOnlyMessage = message || 'This lightbox is read-only';
+/** @type {LightboxApi['setLightboxReadOnlyMode']} */ export function setLightboxReadOnlyMode(readOnly, message) {
+  lbState.readOnly = !!readOnly;
+  lbState.readOnlyMessage = message || 'This lightbox is read-only';
   _lbApplyReadOnlyState();
-};
+}
 
-/** @param {boolean} pending */ function _lbSetPhotoTransitionPending(pending) {
+/** @param {boolean} pending */ export function _lbSetPhotoTransitionPending(pending) {
   ['lightboxActions', 'lightboxAdjustPanel', 'syncLightboxPanel'].forEach(function(id) {
     var controls = document.getElementById(id);
     if (!controls) return;

@@ -2,6 +2,8 @@
 
 from playwright.sync_api import expect
 
+from e2e.browser_doubles import fulfill_sse
+
 INAT_UPLOAD_URL = "https://www.inaturalist.org/observations/upload"
 INAT_URL = (
     INAT_UPLOAD_URL
@@ -60,32 +62,17 @@ def _open_commands(page):
 
 
 def _defer_token_validation(page):
-    page.evaluate(
-        """
-        () => {
-          const originalSafeFetch = window.safeFetch;
-          window.__tokenValidation = {};
-          window.safeFetch = (url, ...args) => {
-            if (url !== '/api/inat/token') return originalSafeFetch(url, ...args);
-            return new Promise((resolve, reject) => {
-              window.__tokenValidation.resolve = resolve;
-              window.__tokenValidation.reject = reject;
-            });
-          };
-        }
-        """
-    )
+    """Hold the token check until _resolve_token_validation answers it."""
+    held = []
+    page.route("**/api/inat/token", lambda route: held.append(route))
+    return held
 
 
-def _resolve_token_validation(page):
-    page.evaluate(
-        """
-        async () => {
-          window.__tokenValidation.resolve({ok: true, login: 'birder42'});
-          await new Promise(resolve => setTimeout(resolve, 0));
-        }
-        """
-    )
+def _resolve_token_validation(page, held):
+    page.wait_for_timeout(0)
+    assert held, "expected the token check to be pending"
+    held.pop(0).fulfill(json={"ok": True, "login": "birder42"})
+    page.wait_for_timeout(50)
 
 
 def test_native_quick_open_reviews_checked_metadata_before_opening(live_server, page):
@@ -167,14 +154,14 @@ def test_valid_inline_token_switches_modal_to_direct_submission(live_server, pag
 def test_stale_token_validation_does_not_reopen_closed_modal(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     _mock_tauri(page)
-    _defer_token_validation(page)
+    held_token_checks = _defer_token_validation(page)
     page.evaluate("item => openInatQuickModal([item], [])", _item())
 
     page.locator("#inatQuickToken").fill("valid-token")
     page.locator("#inatQuickTokenBtn").click()
     expect(page.locator("#inatQuickTokenBtn")).to_have_text("Validating…")
     page.evaluate("closeInatModal()")
-    _resolve_token_validation(page)
+    _resolve_token_validation(page, held_token_checks)
 
     expect(page.locator("#inatModal")).to_have_class("modal-overlay")
     assert page.evaluate("inatQueue.length") == 0
@@ -183,14 +170,14 @@ def test_stale_token_validation_does_not_reopen_closed_modal(live_server, page):
 def test_stale_token_validation_does_not_replace_new_quick_modal(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     _mock_tauri(page)
-    _defer_token_validation(page)
+    held_token_checks = _defer_token_validation(page)
     page.evaluate("item => openInatQuickModal([item], [])", _item())
 
     page.locator("#inatQuickToken").fill("valid-token")
     page.locator("#inatQuickTokenBtn").click()
     expect(page.locator("#inatQuickTokenBtn")).to_have_text("Validating…")
     page.evaluate("item => openInatQuickModal([item], [])", _item(2))
-    _resolve_token_validation(page)
+    _resolve_token_validation(page, held_token_checks)
 
     expect(page.locator("#inatQuickToken")).to_be_visible()
     expect(page.locator("#inatCards")).to_contain_text("photo-2.jpg")
@@ -211,18 +198,6 @@ def test_token_free_export_uses_checked_metadata(live_server, page):
             }
             return Promise.resolve(null);
           };
-          window.safeEventSource = (url, callbacks) => {
-            window.__externalTest.exportStreamUrl = url;
-            Promise.resolve().then(() => callbacks.onComplete({
-              status: 'completed',
-              result: {
-                exported: [{photo_id: 1, filename: 'photo-1-iNaturalist.jpg'}],
-                errors: [],
-                revealed: true
-              }
-            }));
-            return {close: () => {}};
-          };
         }
         """
     )
@@ -237,6 +212,20 @@ def test_token_free_export_uses_checked_metadata(live_server, page):
         )
 
     page.route("**/api/inat/export", handle_export)
+    streams = []
+
+    def complete_export(route):
+        streams.append(route.request.url)
+        fulfill_sse(route, "complete", {
+            "status": "completed",
+            "result": {
+                "exported": [{"photo_id": 1, "filename": "photo-1-iNaturalist.jpg"}],
+                "errors": [],
+                "revealed": True,
+            },
+        })
+
+    page.route("**/api/jobs/inat-export-1/stream", complete_export)
     page.evaluate("item => openInatQuickModal([item], [])", _item())
     page.locator("#inatIncludeLocation0").uncheck()
     page.locator("#inatIncludeDescription0").check()
@@ -247,9 +236,7 @@ def test_token_free_export_uses_checked_metadata(live_server, page):
 
     assert captured["destination"] == "/tmp/inaturalist-exports"
     assert captured["reveal"] is True
-    assert page.evaluate("window.__externalTest.exportStreamUrl") == (
-        "/api/jobs/inat-export-1/stream"
-    )
+    assert [url.split("/api/", 1)[1] for url in streams] == ["jobs/inat-export-1/stream"]
     assert captured["submissions"] == [{
         "photo_id": 1,
         "taxon_name": "Corvus corax",
@@ -364,13 +351,6 @@ def test_closing_quick_modal_closes_export_stream(live_server, page):
             }
             return Promise.resolve(null);
           };
-          window.safeEventSource = (url, callbacks) => {
-            window.__externalTest.exportCallbacks = callbacks;
-            window.__externalTest.exportCloseCount = 0;
-            return {
-              close: () => { window.__externalTest.exportCloseCount += 1; }
-            };
-          };
         }
         """
     )
@@ -382,13 +362,15 @@ def test_closing_quick_modal_closes_export_stream(live_server, page):
             body='{"job_id":"inat-export-open"}',
         ),
     )
+    # The export job's progress stream stays open until the modal closes it.
+    page.route("**/api/jobs/inat-export-open/stream", lambda route: None)
     page.evaluate("item => openInatQuickModal([item], [])", _item())
 
     page.locator("#inatQuickExportBtn").click()
     page.wait_for_function("window._inatExportStream !== null")
-    page.evaluate("closeInatModal()")
+    page.evaluate("window.__exportStream = window._inatExportStream; closeInatModal()")
 
-    assert page.evaluate("window.__externalTest.exportCloseCount") == 1
+    assert page.evaluate("window.__exportStream.readyState === EventSource.CLOSED")
     assert page.evaluate("window._inatExportStream") is None
     expect(page.locator("#inatModal")).to_have_class("modal-overlay")
 

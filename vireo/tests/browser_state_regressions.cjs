@@ -17,7 +17,7 @@ function fn(file, name) {
 const browse = ['vireo/static/browse/loading.js', 'vireo/static/browse/selection.js'];
 const review = Array.from(
   fs.readFileSync('vireo/templates/pipeline_review.html', 'utf8')
-    .matchAll(/<script src="\/static\/(pipeline-review\/[^"]+\.js)"><\/script>/g),
+    .matchAll(/<script(?: defer)? src="\/static\/(pipeline-review\/[^"]+\.js)"><\/script>/g),
   match => 'vireo/static/' + match[1],
 );
 assert(review.length > 0, 'Pipeline Review scripts must be loaded by the template');

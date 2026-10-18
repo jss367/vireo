@@ -5,6 +5,7 @@ import sys
 import pytest
 from PIL import Image
 
+from e2e.navbar_modules import install_navbar_exposure
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
@@ -104,6 +105,17 @@ def seed_e2e_data(db, thumb_dir):
         )
 
     return {"photos": photos, "folders": [f1, f2]}
+
+
+@pytest.fixture()
+def page(browser, page):
+    """pytest-playwright's page, with the navbar's module internals exposed
+    to the test after every goto and reload (see navbar_modules.py).
+
+    Requests ``browser`` first so the session's browser launches before a
+    fixture like ``live_server`` points HOME at a temporary directory (the
+    browser binaries are found under HOME)."""
+    return install_navbar_exposure(page)
 
 
 @pytest.fixture()

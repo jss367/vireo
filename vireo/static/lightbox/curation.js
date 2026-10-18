@@ -1,3 +1,6 @@
+import { lbState } from './shared-state.js';
+import { _lbGuardReadOnly, _lbPhotoDataByPhoto, vireoLightboxSession } from './state.js';
+import { safeFetch, showToast } from '../navbar-shared-helpers.js';
 
 // --- Species Representative panel, shared across every page's lightbox.
 // Driven by the `life_list` block on GET /api/photos/<id> (cached in
@@ -17,7 +20,7 @@ function _lbEnsureLifeListPanel() {
   return panel;
 }
 
-function _lbRenderLifeListPanel(/** @type {number} */ photoId) {
+export function _lbRenderLifeListPanel(/** @type {number} */ photoId) {
   const panel = _lbEnsureLifeListPanel();
   if (!panel) return;
   var data = _lbPhotoDataByPhoto[String(photoId)];
@@ -49,8 +52,8 @@ function _lbRenderLifeListPanel(/** @type {number} */ photoId) {
     } else {
       btn.textContent = 'Set Representative';
     }
-    btn.disabled = _lbReadOnly;
-    if (_lbReadOnly) btn.title = _lbReadOnlyMessage;
+    btn.disabled = lbState.readOnly;
+    if (lbState.readOnly) btn.title = lbState.readOnlyMessage;
     btn.addEventListener('click', function(event) {
       event.stopPropagation();
       setLifeListPhoto(entry.species, photoId, btn);
@@ -66,7 +69,7 @@ async function setLifeListPhoto(/** @type {string} */ species, /** @type {number
   if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
-    await window.safeFetch('/api/photo-preferences', {
+    await safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
@@ -74,7 +77,7 @@ async function setLifeListPhoto(/** @type {string} */ species, /** @type {number
     // Re-read this photo's block so the panel shows the honest new state, and
     // refresh the lightbox's cache so re-renders stay consistent.
     try {
-      var fresh = await /** @type {Promise<LightboxPhoto>} */ (window.safeFetch('/api/photos/' + photoId, {}, { toast: false }));
+      var fresh = await /** @type {Promise<LightboxPhoto>} */ (safeFetch('/api/photos/' + photoId, {}, { toast: false }));
       if (fresh) _lbPhotoDataByPhoto[String(photoId)] = fresh;
     } catch (e) { /* keep the panel usable even if the refresh fails */ }
     if (vireoLightboxSession.requestedPhotoId() === photoId) _lbRenderLifeListPanel(photoId);
@@ -89,7 +92,6 @@ async function setLifeListPhoto(/** @type {string} */ species, /** @type {number
     if (button) button.disabled = false;
   }
 }
-window.setLifeListPhoto = setLifeListPhoto;
 
 function _lifeListEntriesFromPhotoLike(/** @type {LightboxPhoto | null | undefined} */ photo) {
   if (!photo) return [];
@@ -126,7 +128,7 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
   if (!photoId) return;
   var data;
   try {
-    data = await /** @type {Promise<LightboxPhoto>} */ (window.safeFetch('/api/photos/' + photoId));
+    data = await /** @type {Promise<LightboxPhoto>} */ (safeFetch('/api/photos/' + photoId));
   } catch (err) {
     return;
   }
@@ -146,9 +148,8 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
   }
   await setLifeListPhoto(entry.species, photoId);
 }
-window.chooseSpeciesRepresentativeForPhoto = chooseSpeciesRepresentativeForPhoto;
 
-window.buildSpeciesRepresentativeMenuItems = function(photoIds, opts) {
+/** @type {LightboxApi['buildSpeciesRepresentativeMenuItems']} */ export function buildSpeciesRepresentativeMenuItems(photoIds, opts) {
   opts = opts || {};
   photoIds = (photoIds || []).filter(function(id) { return id != null; });
   if (!photoIds.length) return [];
@@ -181,7 +182,7 @@ window.buildSpeciesRepresentativeMenuItems = function(photoIds, opts) {
     label: 'Set Representative\u2026',
     onClick: function() { chooseSpeciesRepresentativeForPhoto(photoId); },
   }];
-};
+}
 
 function _highlightEntriesFromPhotoLike(/** @type {LightboxPhoto | null | undefined} */ photo) {
   if (!photo) return [];
@@ -207,13 +208,13 @@ function _highlightMenuEntriesForPhotoId(/** @type {number} */ photoId, /** @typ
 
 async function setSpeciesHighlightFromMenu(/** @type {string} */ species, /** @type {number} */ photoId) {
   if (!species || !photoId) return;
-  await window.safeFetch('/api/species-highlights', {
+  await safeFetch('/api/species-highlights', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ species: species, photo_id: photoId }),
   });
   try {
-    var fresh = await /** @type {Promise<LightboxPhoto>} */ (window.safeFetch('/api/photos/' + photoId, {}, { toast: false }));
+    var fresh = await /** @type {Promise<LightboxPhoto>} */ (safeFetch('/api/photos/' + photoId, {}, { toast: false }));
     if (fresh && typeof _lbPhotoDataByPhoto !== 'undefined') {
       _lbPhotoDataByPhoto[String(photoId)] = fresh;
     }
@@ -231,13 +232,12 @@ async function setSpeciesHighlightFromMenu(/** @type {string} */ species, /** @t
     showToast('Added to Highlights', 'success');
   }
 }
-window.setSpeciesHighlightFromMenu = setSpeciesHighlightFromMenu;
 
 async function chooseSpeciesHighlightForPhoto(/** @type {number} */ photoId) {
   if (!photoId) return;
   var data;
   try {
-    data = await /** @type {Promise<LightboxPhoto>} */ (window.safeFetch('/api/photos/' + photoId));
+    data = await /** @type {Promise<LightboxPhoto>} */ (safeFetch('/api/photos/' + photoId));
   } catch (err) {
     return;
   }
@@ -257,9 +257,8 @@ async function chooseSpeciesHighlightForPhoto(/** @type {number} */ photoId) {
   }
   await setSpeciesHighlightFromMenu(entry.species, photoId);
 }
-window.chooseSpeciesHighlightForPhoto = chooseSpeciesHighlightForPhoto;
 
-window.buildSpeciesHighlightMenuItems = function(photoIds, opts) {
+/** @type {LightboxApi['buildSpeciesHighlightMenuItems']} */ export function buildSpeciesHighlightMenuItems(photoIds, opts) {
   opts = opts || {};
   photoIds = (photoIds || []).filter(function(id) { return id != null; });
   if (!photoIds.length) return [];
@@ -287,7 +286,7 @@ window.buildSpeciesHighlightMenuItems = function(photoIds, opts) {
     label: 'Add to Highlights\u2026',
     onClick: function() { chooseSpeciesHighlightForPhoto(photoId); },
   }];
-};
+}
 
 document.addEventListener('lightbox:photochanged', function(event) {
   var detail = /** @type {CustomEvent<{photoId: number}>} */ (event).detail; var pid = detail ? detail.photoId : null;
@@ -305,7 +304,7 @@ document.addEventListener('lightbox:flagchanged', async function(event) {
   var detail = /** @type {CustomEvent<{photoId: number}>} */ (event).detail; var pid = detail ? detail.photoId : null;
   if (pid == null || vireoLightboxSession.requestedPhotoId() !== pid) return;
   try {
-    var fresh = await /** @type {Promise<LightboxPhoto>} */ (window.safeFetch('/api/photos/' + pid, {}, { toast: false }));
+    var fresh = await /** @type {Promise<LightboxPhoto>} */ (safeFetch('/api/photos/' + pid, {}, { toast: false }));
     // Guard against a stale fetch clobbering the panel after navigation.
     if (!fresh || vireoLightboxSession.requestedPhotoId() !== pid) return;
     _lbPhotoDataByPhoto[String(pid)] = fresh;

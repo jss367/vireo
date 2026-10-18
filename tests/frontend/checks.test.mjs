@@ -50,6 +50,30 @@ test('third-party scripts are excluded from application lint', async () => {
   assert.equal(await eslint.isPathIgnored('vireo/static/browse/grid.js'), false);
 });
 
+// The shared navbar and lightbox are ES modules too: explicit imports, the
+// classic shared scripts' globals declared, no window writes outside the
+// classic bridge, and no inline handler markup.
+for (const file of ['navbar-tabs.js', 'lightbox/navigation.js']) {
+  test(`${file}: navbar modules reject undeclared names, window writes and inline handlers`, async () => {
+    const messages = await lint(
+      'import { a } from "./a.js"; export const b = a + Keymap.getScope(); misspelledHelper();'
+        + ' window.x = 1; globalThis.y = 2; export const c = \'<div onclick="go()">\';'
+        + ' document.body.setAttribute("onclick", "x");',
+      `vireo/static/${file}`,
+    );
+    assert.deepEqual(messages.map(message => message.ruleId),
+      ['no-undef', 'no-restricted-syntax', 'no-restricted-syntax', 'no-restricted-syntax', 'no-restricted-syntax']);
+  });
+}
+
+test('navbar-globals.js is the one navbar module that may write window', async () => {
+  const messages = await lint(
+    'import { a } from "./a.js"; window.a = a; Object.assign(window, {a}); export const c = \'<b onclick="x">\';',
+    'vireo/static/navbar-globals.js',
+  );
+  assert.deepEqual(messages.map(message => message.ruleId), ['no-restricted-syntax']);
+});
+
 // Module pages (frontend-module-pages.json): ES modules that share nothing
 // through globals. Every listed page gets these rules from eslint.config.mjs.
 const modulePages = JSON.parse(readFileSync(new URL('../../frontend-module-pages.json', import.meta.url), 'utf8'));

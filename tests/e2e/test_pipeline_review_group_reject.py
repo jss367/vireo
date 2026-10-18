@@ -1331,8 +1331,16 @@ def test_lightbox_browse_uses_state_preserving_navigation_helper(live_server, pa
     page.evaluate(
         """pid => {
           grmMoveReject();
-          window.__lightboxBrowsePhotoId = null;
-          window.openInBrowse = id => { window.__lightboxBrowsePhotoId = id; };
+          // openInBrowse opens Browse in a new tab so this page keeps its
+          // state; record where that tab is sent instead of opening one.
+          window.__lightboxBrowseUrl = null;
+          window.open = () => {
+            const tab = {};
+            Object.defineProperty(tab, 'location', {
+              set: value => { window.__lightboxBrowseUrl = String(value); },
+            });
+            return tab;
+          };
           openPipelineLightbox(pid);
         }""",
         photo_id,
@@ -1347,7 +1355,7 @@ def test_lightbox_browse_uses_state_preserving_navigation_helper(live_server, pa
         }""",
         photo_id,
     )
-    assert page.evaluate("window.__lightboxBrowsePhotoId") == photo_id
+    assert page.evaluate("window.__lightboxBrowseUrl") == f"/browse?photo_id={photo_id}"
     expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
     assert page.evaluate("grmState.rejects.has(grmState.selected)") is True
 
@@ -2421,22 +2429,10 @@ def test_tauri_disables_navigation_when_group_review_is_dirty(live_server, page)
     ) is False
     assert page.url == original_url
 
-    native_state = page.evaluate(
-        """() => {
-          const originalRoute = window.nativeMenuRoute;
-          window.__nativeBrowseRoute = null;
-          window.nativeMenuRoute = path => { window.__nativeBrowseRoute = path; };
-          try {
-            return {
-              result: nativeMenuOpenBrowse(),
-              route: window.__nativeBrowseRoute,
-            };
-          } finally {
-            window.nativeMenuRoute = originalRoute;
-          }
-        }"""
-    )
-    assert native_state == {"result": False, "route": None}
+    # The native menu's Open in Browse refuses too, and stays on the page.
+    assert page.evaluate("nativeMenuOpenBrowse()") is False
+    page.wait_for_timeout(100)
+    assert page.url == original_url
 
 
 def test_tauri_edit_photo_allows_untouched_suggested_species(live_server, page):

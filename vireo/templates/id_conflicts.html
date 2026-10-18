@@ -1528,8 +1528,8 @@ async function batchAction(action) {
   await refreshDecisionPhotos(refreshPhotoIds, decisionScope);
 }
 
-updateConflictThresholdControl();
-loadCollections();
+document.addEventListener('DOMContentLoaded', function() { updateConflictThresholdControl(); });
+document.addEventListener('DOMContentLoaded', function() { loadCollections(); });
 </script>
 </body>
 </html>

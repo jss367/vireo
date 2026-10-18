@@ -1,4 +1,17 @@
 /* Per-detection suggestions are previews. Only explicit Use actions edit a photo. */
+import { lbState } from './lightbox/shared-state.js';
+import { _lbGuardReadOnly, _lbPhotoDataByPhoto, vireoLightboxSession } from './lightbox/state.js';
+import {
+  _lbEditWritePending, _lbFlushPendingAdjustmentSave, _lbMarkEditRecipeWrite,
+  _lbReloadCurrentRenderAfterEdit, _lbRememberEditRecipe, _lbSetEditBusy,
+  _lbTransformBoxByRecipe, _lbWaitForAdjustmentSaveIdle, _vireoBumpRenderVersion,
+  vireoRefreshPhotoRenders,
+} from './lightbox/edits.js';
+import {
+  _lbLoadDetections, _lbLoadMaskVariants, _lbRenderEyeCrosshair, _lbResetMaskOverlay,
+} from './lightbox/overlays.js';
+import { safeFetch, showToast } from './navbar-shared-helpers.js';
+
 (function () {
   'use strict';
   /** @type {NavSubjectData | null} */ let data = null;
@@ -33,8 +46,8 @@
     // subjects" enqueues a job that writes detection_subjects and can
     // change the primary, and Use crop / Use exposure PUT the edit
     // recipe — so they all must honor _lbReadOnly (Codex r4056621185).
-    const readOnly = typeof _lbReadOnly !== 'undefined' && _lbReadOnly;
-    const readOnlyTitle = readOnly && typeof _lbReadOnlyMessage === 'string' ? _lbReadOnlyMessage : null;
+    const readOnly = typeof lbState.readOnly !== 'undefined' && lbState.readOnly;
+    const readOnlyTitle = readOnly && typeof lbState.readOnlyMessage === 'string' ? lbState.readOnlyMessage : null;
     /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')';
     // Stable spatial order keeps thumbnails from jumping when primary changes.
     data.subjects.slice().sort((a, b) => a.box_x - b.box_x || a.box_y - b.box_y || a.id - b.id).forEach((subject, index) => {
@@ -185,7 +198,7 @@
       _lbMarkEditRecipeWrite(photoId);
       _lbRememberEditRecipe(photoId, result.recipe);
       _vireoBumpRenderVersion(photoId);
-      if (typeof window.vireoRefreshPhotoRenders === 'function') window.vireoRefreshPhotoRenders([photoId]);
+      if (typeof vireoRefreshPhotoRenders === 'function') vireoRefreshPhotoRenders([photoId]);
       if (vireoLightboxSession.requestedPhotoId() === photoId) _lbReloadCurrentRenderAfterEdit(photoId);
     } catch (error) {
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;

@@ -27,7 +27,7 @@ def test_browse_page_loads_every_browse_script_once_boot_last(app_and_db):
 
     app, _ = app_and_db
     html = app.test_client().get("/browse").get_data(as_text=True)
-    loaded = re.findall(r'<script src="/static/browse/([\w.-]+\.js)"></script>', html)
+    loaded = re.findall(r'<script(?: defer)? src="/static/browse/([\w.-]+\.js)"></script>', html)
     on_disk = sorted(p.name for p in (Path(__file__).resolve().parents[1] / "static" / "browse").glob("*.js"))
     assert sorted(loaded) == on_disk
     assert len(loaded) == len(set(loaded))

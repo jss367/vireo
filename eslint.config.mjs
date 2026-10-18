@@ -11,6 +11,22 @@ import globals from 'globals';
 // page's shared.js.
 const modulePages = JSON.parse(readFileSync(new URL('./frontend-module-pages.json', import.meta.url), 'utf8'));
 const GLOBAL_OBJECTS = '/^(window|globalThis|self)$/';
+// Markup a script builds binds its events with addEventListener: no inline
+// on*= handlers in HTML strings and no setAttribute('on…').
+const inlineMarkupRestrictions = [
+  {
+    selector: 'Literal[value=/\\bon[a-z]+\\s*=/i]',
+    message: 'Bind events with addEventListener, not inline on*= markup.',
+  },
+  {
+    selector: 'TemplateElement[value.raw=/\\bon[a-z]+\\s*=/i]',
+    message: 'Bind events with addEventListener, not inline on*= markup.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^on[a-z]+$/i]",
+    message: 'Bind events with addEventListener, not on* attributes.',
+  },
+];
 const inlineHandlerRestrictions = [
   {
     selector: 'Literal[value=/\\bon[a-z]+\\s*=/i]',
@@ -82,6 +98,38 @@ function modulePageConfig(page, contract) {
     },
   ];
 }
+
+// The shared navbar and lightbox (see navbar-boot.js and CLAUDE.md): ES
+// modules that import each other's functions and reach page code only through
+// the page-hook registry. The globals below are the classic shared scripts
+// they still call, which load before them. navbar-globals.js is the only file
+// here that may write to window: it publishes what classic pages still use.
+const navbarModules = ['vireo/static/navbar-*.js', 'vireo/static/lightbox/*.js'];
+const navbarBridge = 'vireo/static/navbar-globals.js';
+const classicSharedGlobals = {
+  // vireo-api.js, vireo-utils.js, vireo-page-hooks.js, vireo-visible-poll.js
+  Vireo: 'readonly',
+  escapeHtml: 'readonly',
+  escapeAttr: 'readonly',
+  formatBytes: 'readonly',
+  VireoViewPreferences: 'readonly',
+  VireoTextSearch: 'readonly',
+  // keymap.js, vireo-color-labels.js, vireo-workspace-switcher.js, help.js
+  Keymap: 'readonly',
+  VireoColorLabels: 'readonly',
+  VireoWorkspaceSwitcher: 'readonly',
+  openHelpModal: 'readonly',
+  // tauri-bridge.js
+  isTauri: 'readonly',
+  openExternal: 'readonly',
+  openExternalWithRecovery: 'readonly',
+  copyExternalUrl: 'readonly',
+  pickDirectory: 'readonly',
+  showExternalOpenFailure: 'readonly',
+  // vendor/fuse.min.js
+  Fuse: 'readonly',
+};
+const globalWrite = `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`;
 
 const checkedControllers = [
   'vireo/static/browse/panel-requests.js',
@@ -164,6 +212,23 @@ export default [
         openPredictionInReview: 'readonly',
       },
     },
+  },
+  {
+    files: navbarModules,
+    languageOptions: {sourceType: 'module', globals: {...globals.browser, ...classicSharedGlobals}},
+    rules: {
+      'no-undef': 'error',
+      'no-unused-vars': ['error', {caughtErrors: 'none'}],
+      'no-restricted-syntax': ['error', ...inlineMarkupRestrictions, {
+        selector: `${globalWrite}, UpdateExpression > MemberExpression.argument[object.name=${GLOBAL_OBJECTS}]`,
+        message: 'Navbar modules own no globals: export the value, and publish it from navbar-globals.js '
+          + 'only if a classic page still needs it.',
+      }],
+    },
+  },
+  {
+    files: [navbarBridge],
+    rules: {'no-restricted-syntax': ['error', ...inlineMarkupRestrictions]},
   },
   ...Object.entries(modulePages).flatMap(([page, contract]) => modulePageConfig(page, contract)),
 ];

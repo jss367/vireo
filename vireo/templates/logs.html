@@ -104,12 +104,12 @@ var logLines = [];
 var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
 
 /* Load recent logs first */
-safeFetch('/api/logs/recent?count=500', {}, { toast: false })
+document.addEventListener('DOMContentLoaded', () => safeFetch('/api/logs/recent?count=500', {}, { toast: false })
   .then(function(logs) {
     logs.forEach(function(l) { addLogLine(l); });
     applyFilter();
   })
-  .catch(function() {});
+  .catch(function() {}));
 
 /* Connect to SSE stream */
 var source = new EventSource('/api/logs/stream');

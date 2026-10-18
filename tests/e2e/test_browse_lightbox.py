@@ -28,14 +28,12 @@ def _png_bytes(size, color):
 
 
 def _use_single_preload_slot(page):
-    """Inject a one-slot pool before the page constructs its controller."""
-    page.add_init_script("""(() => {
-      let factory;
-      Object.defineProperty(window, 'VireoLightboxSession', {
-        get: () => factory,
-        set: value => { factory = {create: options => value.create({...options, preloadConcurrency: 1})}; }
-      });
-    })()""")
+    """After each navigation, swap the lightbox's session for one with a
+    one-slot pool, built from the same host options. The session holds no
+    listeners and nothing has opened yet, so the swap is complete."""
+    page.after_navigation.append(lambda page: page.evaluate(
+        "() => { vireoLightboxSession = VireoLightboxSession.create({...lbSessionHost, preloadConcurrency: 1}); }"
+    ))
 
 
 def test_browse_lightbox_arrows_navigate(live_server, page):

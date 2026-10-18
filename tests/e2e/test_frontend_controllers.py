@@ -1,4 +1,5 @@
 """Exercise complete controller modules with explicit dependencies and real DOMs."""
+import re
 from pathlib import Path
 
 from playwright.sync_api import expect
@@ -299,7 +300,10 @@ def mount_lightbox_viewport(page):
         <span id="lightboxZoomBadge"></span>
     ''')
     page.wait_for_function("document.getElementById('lightboxImg').naturalWidth === 3200")
-    page.add_script_tag(path=str(STATIC / "lightbox/viewport.js"))
+    # viewport.js is an ES module; load it as a script that publishes its factory.
+    viewport_source = (STATIC / "lightbox/viewport.js").read_text(encoding="utf-8")
+    page.add_script_tag(content=re.sub(r"^export ", "", viewport_source, flags=re.M)
+                        + "\nwindow.VireoLightboxViewport = VireoLightboxViewport;\n")
     page.evaluate('''() => {
         window.timers = new Map();
         window.observers = [];
