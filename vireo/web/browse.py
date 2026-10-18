@@ -73,7 +73,7 @@ def _first_paint_photos(
                 [], folder_id=folder_id, collection_id=collection_id,
             )
         else:
-            photos = db.get_photos(
+            photos = db.photos.list_page(
                 folder_id=folder_id,
                 collection_id=collection_id,
                 page=page,
@@ -84,10 +84,10 @@ def _first_paint_photos(
         raise _BadFirstPaintScope(str(exc)) from exc
     if not stacks:
         if not any([folder_id, collection_id]):
-            total = db.count_photos()
+            total = db.photos.count()
         else:
             try:
-                total = db.count_filtered_photos(
+                total = db.photos.count_filtered(
                     folder_id=folder_id,
                     collection_id=collection_id,
                 )
@@ -132,7 +132,7 @@ def _first_paint_focus(
             focus_index = (page - 1) * per_page + local_index
         else:
             try:
-                focus_index = db.get_photo_position(
+                focus_index = db.photos.get_position(
                     focus_photo_id,
                     folder_id=folder_id,
                     collection_id=collection_id,
@@ -151,7 +151,7 @@ def _first_paint_focus(
             focus_page = focus_index // per_page + 1
             if focus_page != page:
                 try:
-                    photos = db.get_photos(
+                    photos = db.photos.list_page(
                         folder_id=folder_id,
                         collection_id=collection_id,
                         page=focus_page,
@@ -362,7 +362,7 @@ def _prediction_suggestion(db, key, entry, order, kids_by_key):
 
 def _is_visual_collection(db, collection_id):
     """Whether Browse's first paint must show an empty grid for this scope."""
-    # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
+    # ``db.photos.list_page(collection_id=...)`` / ``count_filtered_photos`` both
     # expand only ``collections.rules`` — the same rules-only path guarded
     # elsewhere by ``reject_visual_collection``. A visual-only collection
     # stores ``rules: []``, so running it through that path here would

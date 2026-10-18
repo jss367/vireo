@@ -334,7 +334,7 @@ def create_batch_blueprint(
         desired_flags = {best_photo_id: "flagged"}
         desired_flags.update({pid: "rejected" for pid in normalized_reject_ids})
         photo_ids = list(desired_flags.keys())
-        photos_map = db.get_photos_by_ids(photo_ids)
+        photos_map = db.photos.get_by_ids(photo_ids)
         if len(photos_map) != len(photo_ids):
             return json_error("One or more photos were not found", 404)
         try:

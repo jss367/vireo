@@ -40,7 +40,7 @@ def test_duplicate_collection_copies_static_photo_memberships(app_and_db):
     app, db = app_and_db
     _clear_default_collections(db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p["id"] for p in photos][:3]
 
     cid = db.collections.add("Static", json.dumps([]))

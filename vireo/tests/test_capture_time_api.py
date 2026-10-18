@@ -38,7 +38,7 @@ def test_capture_time_offset_validation_rejects_invalid_extremes():
 
 def test_capture_time_preview_preserves_instant_from_current_offset(app_and_db):
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     db.conn.execute(
         "UPDATE photos SET exif_data = ? WHERE id = ?",
         (
@@ -98,7 +98,7 @@ def test_capture_time_job_writes_exiftool_and_refreshes_cache(client_with_photo,
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -168,7 +168,7 @@ def test_capture_time_job_writes_exiftool_and_refreshes_cache(client_with_photo,
     assert "-OffsetTimeOriginal=-10:00" in cmd
     assert path in cmd
 
-    refreshed = db.get_photo(photo_id)
+    refreshed = db.photos.get(photo_id)
     assert refreshed["timestamp"] == "2026-05-22T17:07:23.560000"
     metadata = json.loads(refreshed["exif_data"])
     assert metadata["EXIF"]["OffsetTimeOriginal"] == "-10:00"
@@ -229,7 +229,7 @@ def test_capture_time_job_writes_missing_offset_tags(client_with_photo, monkeypa
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -307,7 +307,7 @@ def test_capture_time_job_does_not_skip_companion_pair_from_primary_cache(
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -393,7 +393,7 @@ def test_capture_time_preview_preserves_instant_uses_per_photo_shifts(app_and_db
     capture instant for any selection whose photos had differing offsets.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert len(photos) >= 2
     p1, p2 = photos[0], photos[1]
     db.conn.execute(
@@ -452,7 +452,7 @@ def test_capture_time_manual_mode_ignores_target_offset(client_with_photo, monke
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -512,7 +512,7 @@ def test_capture_time_manual_mode_ignores_target_offset(client_with_photo, monke
 def test_capture_time_preview_manual_mode_ignores_target_offset(app_and_db):
     """Manual preview must not present target_offset as the after-offset."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     db.conn.execute(
         "UPDATE photos SET exif_data = ? WHERE id = ?",
         (
@@ -549,7 +549,7 @@ def test_capture_time_preview_manual_mode_ignores_target_offset(app_and_db):
 def test_capture_time_preview_accepts_large_select_all_payload(app_and_db):
     """Preview accepts full-result select-all payloads while sampling rows."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
 
     client = app.test_client()
     resp = client.post(
@@ -570,7 +570,7 @@ def test_capture_time_job_accepts_large_select_all_payload(client_with_photo, mo
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -613,7 +613,7 @@ def test_capture_time_job_applies_per_photo_shifts(client_with_photo, monkeypatc
     import capture_time
 
     app, db, p1 = client_with_photo
-    photo = db.get_photo(p1)
+    photo = db.photos.get(p1)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -757,7 +757,7 @@ def test_capture_time_job_counts_exiftool_write_error_as_failed(client_with_phot
     assert "read-only" in job["result"]["failures"][0]["error"]
 
     # Timestamp untouched — no false "updated" report
-    refreshed = db.get_photo(photo_id)
+    refreshed = db.photos.get(photo_id)
     assert refreshed["timestamp"] == "2026-05-22T20:07:23.560000"
 
 
@@ -766,7 +766,7 @@ def test_capture_time_companion_only_preserves_primary_identity(client_with_phot
     import metadata
 
     _, db, pid = client_with_photo
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute("SELECT path FROM folders WHERE id=?", (photo["folder_id"],)).fetchone()[0]
     companion = os.path.join(folder, photo["filename"])
     db.conn.execute(

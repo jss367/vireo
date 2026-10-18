@@ -714,7 +714,7 @@ def create_settings_blueprint(
             # UPDATE runs, leaving the row permanently ineligible for
             # backfill under the raised ceiling.
             with working_copy_publication_guard():
-                quota_db.clear_working_copy_evictions()
+                quota_db.photos.clear_working_copy_evictions()
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         evict_preview_cache_if_over_quota(quota_db, vireo_dir)

@@ -357,7 +357,7 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     app, db, pid = client_with_photo
     client = app.test_client()
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -384,7 +384,7 @@ def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
     app, db, pid = client_with_photo
     client = app.test_client()
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -416,7 +416,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     app, db, pid = client_with_photo
     client = app.test_client()
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -487,7 +487,7 @@ def test_original_route_uses_offline_cache_when_source_missing(client_with_photo
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -514,7 +514,7 @@ def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -560,7 +560,7 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     assert os.path.isfile(os.path.join(vireo_dir, cached_original_path))
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -620,7 +620,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     app, db, pid = client_with_photo
     client = app.test_client()
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -1729,7 +1729,7 @@ def test_quota_raise_reenables_evicted_companion_backed_copy(app_and_db):
     import config as cfg
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     cfg.set("working_copy_cache_max_mb", 0)
     db.conn.execute(
         """UPDATE photos
@@ -1768,7 +1768,7 @@ def test_original_route_enforces_working_copy_quota(
     import config as cfg
     from PIL import Image
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
     ).fetchone()
@@ -5077,7 +5077,7 @@ def test_pipeline_page_init_attaches_photo_edit_recipes(app_and_db, monkeypatch)
     import pipeline
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
     db.conn.execute(
         """UPDATE photos
@@ -8003,7 +8003,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     db.conn.commit()
     k = cur.lastrowid
     # Tag a photo in the current workspace with the variant
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     db.tag_photo(photos[0]["id"], k)
 
     # Create workspace B with its own folder and photo
@@ -8047,7 +8047,7 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
     clicking Clean.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     p1 = photos[0]["id"]
     p2 = photos[1]["id"]
 
@@ -8106,7 +8106,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
     k_birds = db.add_keyword("Birds")
     k_hawk = db.add_keyword("Hawk", parent_id=k_birds)
     # Tag a photo in workspace A with the child only
-    photos_a = db.get_photos()
+    photos_a = db.photos.list_page()
     db.tag_photo(photos_a[0]["id"], k_hawk)
 
     # Create workspace B with its own folder, photo, and keyword "Penguin"
@@ -12236,8 +12236,8 @@ def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path
     assert data["sidecars_deleted"] == 1
 
     # Ghost row is gone, restored row is kept.
-    assert db.get_photo(pid_ghost) is None
-    assert db.get_photo(pid_restored) is not None
+    assert db.photos.get(pid_ghost) is None
+    assert db.photos.get(pid_restored) is not None
     # Ghost sidecar was cleaned up, restored one was left alone.
     assert not (real_dir / "ghost.xmp").exists()
     assert (real_dir / "restored.xmp").exists()
@@ -12285,7 +12285,7 @@ def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
     assert data["folder_offline"] == [pid]
     assert data["sidecars_deleted"] == 0
     # Row must still be present — we did not delete it.
-    assert db.get_photo(pid) is not None
+    assert db.photos.get(pid) is not None
 
 
 def test_api_photos_missing_remove_skips_unreadable_folder(
@@ -12336,7 +12336,7 @@ def test_api_photos_missing_remove_skips_unreadable_folder(
     assert data["folder_offline"] == [pid]
     assert data["sidecars_deleted"] == 0
     assert sidecar.exists()
-    assert db.get_photo(pid) is not None
+    assert db.photos.get(pid) is not None
 
 
 def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp_path):
@@ -12538,7 +12538,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     working_dir = os.path.join(vireo_dir, "working")
     os.makedirs(working_dir, exist_ok=True)
     Image.new("RGB", (10, 10)).save(os.path.join(working_dir, f"{pid}.jpg"))
-    assert db.get_photo(pid)["working_copy_path"] is None
+    assert db.photos.get(pid)["working_copy_path"] is None
 
     data = _run_missing_originals_check(client)["photos"]
     assert len(data) == 1
@@ -16465,7 +16465,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
             )
-            db.update_photo_quality(pid, subject_size=0.08 + i * 0.02)
+            db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
             det_ids = db.save_detections(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
@@ -16565,7 +16565,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
             )
-            db.update_photo_quality(pid, subject_size=0.08 + i * 0.02)
+            db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
             det_ids = db.save_detections(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")

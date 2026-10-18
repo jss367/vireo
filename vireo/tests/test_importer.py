@@ -156,7 +156,7 @@ def test_execute_import_populates_db(tmp_path):
     assert result['imported'] >= 1
 
     # Check keywords were imported
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     if photos:
         kws = db.get_photo_keywords(photos[0]['id'])
         kw_names = {k['name'] for k in kws}
@@ -205,7 +205,7 @@ def test_execute_import_skips_empty_normalized_keywords(tmp_path):
 
     assert result['failed'] == 0
     assert result['imported'] >= 1
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert photos
     kw_names = {k['name'] for k in db.get_photo_keywords(photos[0]['id'])}
     assert 'Cardinal' in kw_names

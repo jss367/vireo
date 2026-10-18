@@ -351,7 +351,7 @@ class _ClassifyPlan:
         db = self.db
         pipeline_cfg = self.pipeline_cfg
         self.scope_ids = (
-            list(db.get_photo_ids())
+            list(db.photos.get_ids())
             if self.photo_ids is None else list(self.photo_ids)
         )
         try:
@@ -374,7 +374,7 @@ class _ClassifyPlan:
         ):
             from weak_detections import contextual_weak_photo_ids
 
-            scoped_photos = db.get_photos_by_ids(self.scope_ids)
+            scoped_photos = db.photos.get_by_ids(self.scope_ids)
             raw_mdv6_detections = db.get_detections_for_photos(
                 self.scope_ids,
                 min_conf=self.weak_detection_confidence,
@@ -1556,7 +1556,7 @@ def _import_scope(db, params):
     # downstream queries see paths in the user's preview order.
     unique_paths = list(dict.fromkeys(params.source_paths))
     unique_path_set = set(unique_paths)
-    known = db.photos_by_paths(unique_paths)
+    known = db.photos.by_paths(unique_paths)
     photo_ids = set(known.values())
     known_at_path_set = set(known.keys())
     # Hash-dedup gate (copy-mode imports with skip_duplicates=True).
@@ -1699,7 +1699,7 @@ def compute_plan(db, params, db_path):
     if params.exclude_photo_ids:
         excl = set(params.exclude_photo_ids)
         if photo_ids is None:
-            photo_ids = set(db.get_photo_ids())
+            photo_ids = set(db.photos.get_ids())
         photo_ids = {pid for pid in photo_ids if pid not in excl}
 
     stages = _stage_plans(

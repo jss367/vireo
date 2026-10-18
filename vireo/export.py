@@ -750,7 +750,7 @@ class _PhotoExportBatch:
 
     def _load_catalog(self, db):
         """Fetch catalog data once for the whole batch."""
-        self.photos_map = db.get_photos_by_ids(self.photo_ids)
+        self.photos_map = db.photos.get_by_ids(self.photo_ids)
         self.folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
         self.exif_data_map = _get_photo_exif_data(db, self.photo_ids)
         self.camera_data_map = (
@@ -987,38 +987,17 @@ def _developed_ext_preference(output_ext):
 
 def _get_photo_exif_data(db, photo_ids):
     """Return a photo_id -> exif_data map without bloating list photo queries."""
+    # Closed databases and test fakes have no connection: nothing to read.
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    out = {}
-    for i in range(0, len(photo_ids), 999):
-        chunk = photo_ids[i:i + 999]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"SELECT id, exif_data FROM photos WHERE id IN ({placeholders})",
-            list(chunk),
-        ).fetchall()
-        for row in rows:
-            out[row["id"]] = row["exif_data"]
-    return out
+    return db.photo_metadata.exif_data_by_ids(photo_ids)
 
 
 def _get_photo_camera_data(db, photo_ids):
     """Return promoted camera/exposure fields for an export selection."""
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    out = {}
-    for i in range(0, len(photo_ids), 999):
-        chunk = photo_ids[i:i + 999]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"""SELECT id, camera_make, camera_model, lens, focal_length,
-                       aperture, shutter_speed, iso
-                FROM photos WHERE id IN ({placeholders})""",
-            list(chunk),
-        ).fetchall()
-        for row in rows:
-            out[row["id"]] = dict(row)
-    return out
+    return db.photo_metadata.camera_data_by_ids(photo_ids)
 
 
 def _photo_value(photo, key, default=None):
@@ -2201,7 +2180,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
         if options.get("export_to_subfolder") else ""
     )
 
-    photos_map = db.get_photos_by_ids(photo_ids)
+    photos_map = db.photos.get_by_ids(photo_ids)
     folders = {folder["id"]: folder["path"] for folder in db.get_folder_tree()}
     species_map = db.get_species_keywords_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)

@@ -12,6 +12,7 @@ import pytest
     [
         ("repositories.keywords", "KeywordRepository"),
         ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
+        ("repositories.photos", "PhotoRepository"),
         ("repositories.predictions", "PredictionRepository"),
     ],
 )

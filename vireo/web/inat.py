@@ -146,7 +146,7 @@ def _inat_export_work(
                 if ctx.runner.is_cancelled(job["id"]):
                     break
                 photo_id = item["photo_id"]
-                photo = thread_db.get_photo(
+                photo = thread_db.photos.get(
                     photo_id, verify_workspace=True,
                 )
                 if not photo:
@@ -440,7 +440,7 @@ def create_inat_blueprint(
         import config as cfg
 
         db = get_db()
-        photo = db.get_photo_with_folder_path(photo_id)
+        photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
         if not db._photo_in_workspace(photo_id):
@@ -794,7 +794,7 @@ def create_inat_blueprint(
             return json_error("photo_id is required")
 
         db = get_db()
-        photo = db.get_photo_with_folder_path(photo_id)
+        photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
         if not db._photo_in_workspace(photo_id):
@@ -877,7 +877,7 @@ def create_inat_blueprint(
                 "photo_id": photo_id,
                 "error": "latitude and longitude must be provided together",
             }
-        photo = db.get_photo_with_folder_path(photo_id)
+        photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return {"photo_id": photo_id, "error": "Photo not found"}
         if not db._photo_in_workspace(photo_id):

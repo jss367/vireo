@@ -87,7 +87,7 @@ def test_incremental_scan_reprocesses_photos_missing_metadata(tmp_path):
 
     # First scan populates the photo
     scan(tmp_path, db, options=ScanOptions(incremental=False))
-    photos = db.get_photos(per_page=999)
+    photos = db.photos.list_page(per_page=999)
     assert len(photos) == 1
     photo_id = photos[0]["id"]
 
@@ -125,7 +125,7 @@ def test_incremental_scan_skips_photos_with_exif_data_but_no_timestamp(tmp_path)
     db.set_active_workspace(db._active_workspace_id)
 
     scan(tmp_path, db, options=ScanOptions(incremental=False))
-    photos = db.get_photos(per_page=999)
+    photos = db.photos.list_page(per_page=999)
     photo_id = photos[0]["id"]
 
     # Simulate: ExifTool ran (exif_data present) but no timestamp in EXIF

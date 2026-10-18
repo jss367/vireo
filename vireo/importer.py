@@ -174,7 +174,7 @@ def preview_import(catalog_paths, db):
 def _photo_path_index(db, pause_callback):
     """Build path -> DB photo lookup."""
     photos_by_path = _PhotoPathIndex()
-    all_photos = db.get_photos(per_page=999999)
+    all_photos = db.photos.list_page(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     for p in all_photos:
         if pause_callback:

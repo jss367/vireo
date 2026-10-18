@@ -426,7 +426,7 @@ def _working_copy(app, db, pid, size=(3000, 2000), color=(40, 90, 160)):
 
 def test_focus_crop_centres_on_the_eye_at_native_scale(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
     db.conn.execute(
         "UPDATE photos SET eye_x = 0.5, eye_y = 0.5, eye_conf = 0.9, eye_tenengrad = 40 WHERE id = ?",
@@ -455,7 +455,7 @@ def test_focus_crop_centres_on_the_eye_at_native_scale(app_and_db):
 
 def test_focus_crop_falls_back_to_subject_then_frame(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
     client = app.test_client()
 
@@ -477,7 +477,7 @@ def test_focus_crop_falls_back_to_subject_then_frame(app_and_db):
 
 def test_focus_crop_validates_size_and_basis_and_workspace(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
     client = app.test_client()
     assert client.get(f"/photos/{pid}/focus-crop?size=12").status_code == 400
@@ -496,7 +496,7 @@ def test_focus_crop_validates_size_and_basis_and_workspace(app_and_db):
 
 def test_focus_crop_shades_outside_the_mask(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid, color=(200, 200, 200))
     masks_dir = os.path.join(os.path.dirname(app.config["DB_PATH"]), "masks")
     os.makedirs(masks_dir, exist_ok=True)
@@ -531,7 +531,7 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
 
 def test_focus_crop_falls_back_to_the_original_file(app_and_db, tmp_path):
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_dir = tmp_path / "photo_files"
     photo_dir.mkdir()
     db.conn.execute("UPDATE folders SET path=? WHERE id=?", (str(photo_dir), photo["folder_id"]))
@@ -575,7 +575,7 @@ def test_v1_aliases_cover_the_burst_endpoints(app_and_db):
 
 def test_focus_crop_center_puts_the_window_where_the_reviewer_chose(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
     db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
@@ -593,7 +593,7 @@ def test_focus_crop_center_puts_the_window_where_the_reviewer_chose(app_and_db):
 
 def test_focus_crop_source_prefers_the_original_over_a_downsized_working_copy(app_and_db, tmp_path):
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     # The catalog knows the sensor size; the working copy is half of it.
     _working_copy(app, db, pid, size=(1500, 1000))

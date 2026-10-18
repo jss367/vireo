@@ -389,7 +389,7 @@ class _DetectBatchRun:
             # and clear any stale quality fields from a prior run so
             # noise photos don't float to the top of highlights with a
             # giant ``subject_size`` from a whole-frame noise box.
-            db.update_photo_quality(photo["id"])
+            db.photos.update_quality(photo["id"])
             primary = None
         if not primary:
             return
@@ -397,7 +397,7 @@ class _DetectBatchRun:
         subject_size = det_box["w"] * det_box["h"]
 
         if compute_sharpness is None:
-            db.update_photo_quality(
+            db.photos.update_quality(
                 photo["id"],
             )
             return
@@ -434,7 +434,7 @@ class _DetectBatchRun:
             norm_size = min(1.0, subject_size * 4)
             quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
 
-        db.update_photo_quality(
+        db.photos.update_quality(
             photo["id"],
             subject_sharpness=subject_sharpness,
             subject_size=subject_size,

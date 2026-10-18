@@ -2616,7 +2616,7 @@ class _PhotoMove:
     def load_source_stem_counts(self, photo_ids):
         """Load the photos and count same-stem rows in each source folder."""
         db = self.db
-        self.photos_map = db.get_photos_by_ids(photo_ids)
+        self.photos_map = db.photos.get_by_ids(photo_ids)
         source_stem_counts = self.source_stem_counts
         for source_folder_id in {
             photo["folder_id"] for photo in self.photos_map.values()

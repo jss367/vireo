@@ -73,7 +73,7 @@ def test_api_photos_default(app_and_db):
 def test_api_photos_includes_edit_recipe(app_and_db):
     """GET /api/photos exposes edit recipes so card overlays can align."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
 
     client = app.test_client()
@@ -87,7 +87,7 @@ def test_api_photos_includes_edit_recipe(app_and_db):
 def test_api_photos_marks_species_representative(app_and_db):
     """List payloads expose representative state for card views and menus."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(photo["id"], kid)
     db.set_species_representative("American Robin", photo["id"])
@@ -123,7 +123,7 @@ def test_api_photos_pagination(app_and_db):
 def test_api_photos_reports_and_filters_coordinate_sources(app_and_db):
     """Browse separates embedded GPS, assigned map coordinates, and neither."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     exif_id, assigned_id, none_id = [photo["id"] for photo in photos]
     with db.conn:
         db.conn.execute(
@@ -189,7 +189,7 @@ def test_api_photo_ids_matches_browse_filters(app_and_db):
     app, db = app_and_db
     folders = db.get_folder_tree()
     jan = [f for f in folders if f['name'] == 'January'][0]
-    expected = [p["id"] for p in db.get_photos(folder_id=jan["id"], sort="name")]
+    expected = [p["id"] for p in db.photos.list_page(folder_id=jan["id"], sort="name")]
 
     client = app.test_client()
     resp = client.get(f'/api/photos/ids?folder_id={jan["id"]}&sort=name')
@@ -202,7 +202,7 @@ def test_api_photo_ids_matches_browse_filters(app_and_db):
 def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
     """Dashboard drill-down parameters preserve collection/date intersections."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     collection_id = db.collections.add(
         "Two dates",
         json.dumps([{
@@ -299,7 +299,7 @@ def test_browse_init_reports_focus_photo_index_in_requested_sort(app_and_db):
     january = next(
         folder for folder in db.get_folder_tree() if folder["name"] == "January"
     )
-    target_id = db.get_photos(folder_id=january["id"])[0]["id"]
+    target_id = db.photos.list_page(folder_id=january["id"])[0]["id"]
     db.add_photo(
         folder_id=january["id"],
         filename="aaa-before-target.jpg",
@@ -335,7 +335,7 @@ def test_browse_init_focus_index_is_null_outside_scope(app_and_db):
     january = next(folder for folder in folders if folder["name"] == "January")
     outside_id = next(
         photo["id"]
-        for photo in db.get_photos()
+        for photo in db.photos.list_page()
         if photo["folder_id"] != january["id"]
     )
 
@@ -360,19 +360,19 @@ def test_browse_init_focus_index_skips_ordered_scan_when_target_on_page(
     review r3792637103), so the endpoint should compute the index
     from the fetched page whenever the target is already on it.
     """
-    from db import Database
+    from repositories.photos import PhotoRepository
 
     app, db = app_and_db
     ordered_calls = []
-    original_get_photo_ids = Database.get_photo_ids
+    original_get_photo_ids = PhotoRepository.get_ids
 
     def spy(self, *args, **kwargs):
         ordered_calls.append(kwargs)
         return original_get_photo_ids(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "get_photo_ids", spy)
+    monkeypatch.setattr(PhotoRepository, "get_ids", spy)
 
-    target_id = db.get_photos()[0]["id"]
+    target_id = db.photos.list_page()[0]["id"]
     response = app.test_client().get(
         f"/api/browse/init?focus_photo_id={target_id}&sort=date&per_page=50"
     )
@@ -390,13 +390,13 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
     app_and_db, monkeypatch
 ):
     """An off-page target returns one database rank, not every ordered id."""
-    from db import Database
+    from repositories.photos import PhotoRepository
 
     app, db = app_and_db
     january = next(
         folder for folder in db.get_folder_tree() if folder["name"] == "January"
     )
-    baseline_id = db.get_photos(folder_id=january["id"])[0]["id"]
+    baseline_id = db.photos.list_page(folder_id=january["id"])[0]["id"]
     # Insert five photos earlier in the sort order so the baseline no
     # longer fits on a per_page=1 first page.
     for i in range(5):
@@ -411,8 +411,8 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
 
     ordered_calls = []
     position_calls = []
-    original_get_photo_ids = Database.get_photo_ids
-    original_get_photo_position = Database.get_photo_position
+    original_get_photo_ids = PhotoRepository.get_ids
+    original_get_photo_position = PhotoRepository.get_position
 
     def spy(self, *args, **kwargs):
         ordered_calls.append(kwargs)
@@ -422,8 +422,8 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
         position_calls.append((args, kwargs))
         return original_get_photo_position(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "get_photo_ids", spy)
-    monkeypatch.setattr(Database, "get_photo_position", position_spy)
+    monkeypatch.setattr(PhotoRepository, "get_ids", spy)
+    monkeypatch.setattr(PhotoRepository, "get_position", position_spy)
 
     response = app.test_client().get(
         f"/api/browse/init?folder_id={january['id']}"
@@ -442,7 +442,7 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
 def test_browse_init_clamps_nonpositive_page_for_focus_index(app_and_db):
     """A malformed page must not report a negative focused position."""
     app, db = app_and_db
-    target_id = db.get_photos()[0]["id"]
+    target_id = db.photos.list_page()[0]["id"]
 
     response = app.test_client().get(
         f"/api/browse/init?focus_photo_id={target_id}&page=0&per_page=50"
@@ -458,7 +458,7 @@ def test_browse_init_clamps_nonpositive_page_for_focus_index(app_and_db):
 def test_browse_init_focus_on_later_requested_page_returns_target_page(app_and_db):
     """Focused init remains bounded to the page containing the target."""
     app, db = app_and_db
-    ordered_ids = [photo["id"] for photo in db.get_photos(sort="date")]
+    ordered_ids = [photo["id"] for photo in db.photos.list_page(sort="date")]
     assert len(ordered_ids) >= 2
 
     response = app.test_client().get(
@@ -491,9 +491,9 @@ def test_browse_init_focus_on_later_requested_page_returns_target_page(app_and_d
 def test_photo_position_matches_photo_id_order(app_and_db, sort):
     """The scalar rank query must match every supported Browse sort."""
     _, db = app_and_db
-    ordered_ids = db.get_photo_ids(sort=sort)
+    ordered_ids = db.photos.get_ids(sort=sort)
 
-    assert [db.get_photo_position(photo_id, sort=sort) for photo_id in ordered_ids] == list(
+    assert [db.photos.get_position(photo_id, sort=sort) for photo_id in ordered_ids] == list(
         range(len(ordered_ids))
     )
 
@@ -570,7 +570,7 @@ def test_dashboard_scope_rejects_foreign_collection(app_and_db):
 def test_api_photos_keyword_whole_word_option(app_and_db):
     """Browse keyword whole-word option excludes embedded token matches."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     western_id = photos[0]["id"]
     tern_id = photos[1]["id"]
     db.tag_photo(western_id, db.add_keyword("Western Gull"))
@@ -597,7 +597,7 @@ def test_api_photos_keyword_whole_word_option(app_and_db):
 def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
     """GET /api/photos/search?ids_only=1 returns all CLIP match IDs, not the page."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     by_name = {p["filename"]: p["id"] for p in photos}
     model_name = "test-clip"
 
@@ -687,7 +687,7 @@ def test_api_photos_filter_single_day(app_and_db):
 def test_api_photos_includes_all_detections(app_and_db):
     """GET /api/photos attaches a `detections` list with every box, not just primary."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
     db.save_detections(target['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
@@ -719,7 +719,7 @@ def test_api_photos_detections_honor_workspace_threshold(app_and_db):
     workspace filters on its own threshold when reading.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
 
     # Save two boxes: one above the default 0.2 threshold, one below it.
@@ -911,7 +911,7 @@ def test_api_photo_best_batch_ranks_capture_time_without_sequence(app_and_db):
 def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
     """Best Batch apply updates mixed flags as one atomic undo action."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_ids = [p["id"] for p in photos]
     best_id, reject_id, keep_reject_id = photo_ids
     db.photo_review.set_flag(reject_id, "flagged")
@@ -965,7 +965,7 @@ def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
 
 def test_api_best_batch_flags_rejects_best_photo_in_rejects(app_and_db):
     app, db = app_and_db
-    best_id = db.get_photos()[0]["id"]
+    best_id = db.photos.list_page()[0]["id"]
     client = app.test_client()
 
     resp = client.post(
@@ -985,7 +985,7 @@ def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
     config["sync_flags_to_xmp"] = True
     cfg.save(config)
 
-    target = [p for p in db.get_photos() if p["filename"] == "bird1.jpg"][0]
+    target = [p for p in db.photos.list_page() if p["filename"] == "bird1.jpg"][0]
 
     client = app.test_client()
     resp = client.post(f'/api/photos/{target["id"]}/flag', json={"flag": "flagged"})
@@ -1001,7 +1001,7 @@ def test_api_photo_detail(app_and_db):
     """GET /api/photos/<id> returns photo with keywords."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.get(f'/api/photos/{pid}')
@@ -1020,7 +1020,7 @@ def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
 
     resp = app.test_client().get(f'/api/photos/{pid}')
 
@@ -1034,7 +1034,7 @@ def test_api_photo_detail_reports_workspace_preview_size(app_and_db, preview_siz
     """The lightbox receives the workspace override rather than the global cap."""
     app, db = app_and_db
     db.workspaces.update(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
 
     data = app.test_client().get(f'/api/photos/{pid}').get_json()
 
@@ -1055,7 +1055,7 @@ def test_api_photo_detail_includes_on_disk_path(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
     folder_row = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (target['folder_id'],)
@@ -1076,7 +1076,7 @@ def test_photo_detail_life_list_lists_eligible_species(app_and_db):
     a representative action without page-local data."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
 
@@ -1095,7 +1095,7 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
     """is_current_photo is true once this photo is the species' representative."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.set_photo_preference("life_list", "American Robin", pid)
@@ -1115,7 +1115,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     photo then reports is_current_photo false (button, not selected star)."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
@@ -1138,7 +1138,7 @@ def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     shared context menu doesn't disable the item for a secondary rep."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
@@ -1172,7 +1172,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     current so detail menus do not offer a redundant representative action."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     p1, p2 = photos[0]["id"], photos[1]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(p1, kid)
@@ -1196,7 +1196,7 @@ def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
     """Plain (non-species) keywords never produce a lifelist entry."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Central Park", kw_type="location")
     db.tag_photo(pid, kid)
 
@@ -1209,7 +1209,7 @@ def test_photo_detail_life_list_includes_taxonomy_type_keyword(app_and_db):
     get_life_list_candidates, so the button and the list can't drift."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.conn.execute(
         "INSERT INTO keywords (name, type, is_species) VALUES ('Bald Eagle', 'taxonomy', 0)"
     )
@@ -1233,7 +1233,7 @@ def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
     """A photo with two species gets two entries, each with its own state."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.tag_photo(pid, db.add_keyword("American Robin", is_species=True))
     db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
     db.set_photo_preference("life_list", "Blue Jay", pid)
@@ -1248,7 +1248,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
     — matches _photo_can_be_life_list_preference, the POST-time backstop."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
     db.photo_review.set_flag(pid, "rejected")
@@ -1260,7 +1260,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
 def test_api_photos_by_ids_preserves_selection_order(app_and_db):
     """POST /api/photos/by-ids returns active-workspace photos in caller order."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     by_name = {p["filename"]: p["id"] for p in photos}
     ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"], by_name["bird3.jpg"]]
 
@@ -1292,7 +1292,7 @@ def test_api_photos_companion_count_sees_photos_browse_never_loaded(app_and_db):
     resolves.
     """
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     by_name = {p["filename"]: p["id"] for p in photos}
     with db.conn:
         db.conn.execute(
@@ -1352,7 +1352,7 @@ def test_api_photos_companion_count_scoped_to_active_workspace(app_and_db):
         )
     db.set_active_workspace(default_ws)
 
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     by_name = {p["filename"]: p["id"] for p in photos}
     with db.conn:
         db.conn.execute(
@@ -1382,7 +1382,7 @@ def test_api_photos_companion_count_scoped_to_active_workspace(app_and_db):
 def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     """Browse-selected review should return the same rich result shape as Pipeline Review."""
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     by_name = {p["filename"]: p["id"] for p in photos}
     ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"]]
 
@@ -1401,7 +1401,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
                 phash_crop=f"{pid:016x}",
             ),
         )
-        db.update_photo_quality(pid, subject_size=0.1)
+        db.photos.update_quality(pid, subject_size=0.1)
         det_id = db.save_detections(
             pid,
             [{"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9}],
@@ -1477,7 +1477,7 @@ def test_thumbnail_serving(app_and_db):
     """GET /thumbnails/<id>.jpg serves thumbnail from cache."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.get(f'/thumbnails/{pid}.jpg')
@@ -1547,7 +1547,7 @@ def test_api_photos_geo_caps_payload_and_preserves_focused_photo(
     import web.photos as photos_module
 
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     for index, photo in enumerate(photos):
         db.conn.execute(
             "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
@@ -1573,7 +1573,7 @@ def test_api_photos_geo_unplottable_focus_names_coordless_location(app_and_db):
     """A deep-linked photo that cannot be placed returns no markers and says
     why, naming the name-only location the user could link to a place."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     db.conn.execute(
         "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE filename='bird1.jpg'"
     )
@@ -1599,7 +1599,7 @@ def test_api_photos_geo_unplottable_focus_unavailable_and_not_found(app_and_db):
     """A photo with coordinates whose folder is offline, and an unknown id,
     get their own reasons rather than a misleading "no coordinates"."""
     app, db = app_and_db
-    photo = next(p for p in db.get_photos() if p["filename"] == "bird1.jpg")
+    photo = next(p for p in db.photos.list_page() if p["filename"] == "bird1.jpg")
     db.conn.execute(
         "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?",
         (photo["id"],),
@@ -1626,7 +1626,7 @@ def test_api_photos_geo_unplottable_focus_missing_folder_outranks_no_coordinates
     put it on the map while the folder-status filter still excludes it, so
     the notice must not offer that recovery."""
     app, db = app_and_db
-    photos = {p["filename"]: (p["id"], p["folder_id"]) for p in db.get_photos()}
+    photos = {p["filename"]: (p["id"], p["folder_id"]) for p in db.photos.list_page()}
     bird2_id, folder_id = photos["bird2.jpg"]
     lake = db.add_keyword("Laguna Lake", kw_type="location")
     db.tag_photo(bird2_id, lake)
@@ -1647,7 +1647,7 @@ def test_api_photos_geo_unplottable_focus_missing_folder_outranks_no_coordinates
 
 def test_api_photos_geo_plottable_focus_has_no_unplottable_notice(app_and_db):
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     db.conn.execute(
         "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?",
         (photo["id"],),
@@ -1767,7 +1767,7 @@ def test_add_keyword_with_type_override(app_and_db):
     """POST /api/photos/<id>/keywords with type param sets keyword type in DB."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/keywords',
@@ -1792,7 +1792,7 @@ def test_add_keyword_noop_when_already_tagged(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     # First add: real work — one pending change, one edit.
@@ -1842,7 +1842,7 @@ def test_batch_keyword_with_type_override(app_and_db):
     """POST /api/batch/keyword with type param sets keyword type in DB."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_ids = [p['id'] for p in photos]
 
     resp = client.post('/api/batch/keyword',
@@ -1867,7 +1867,7 @@ def test_preview_uses_working_copy(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Set a working copy path on the photo
@@ -2025,7 +2025,7 @@ def test_preview_falls_back_to_original(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Point folder to a writable tmp location and create a real image
@@ -2056,7 +2056,7 @@ def test_preview_sized_caches_per_size(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     from PIL import Image
@@ -2094,7 +2094,7 @@ def test_concurrent_preview_cache_misses_decode_once(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     source_dir = tmp_path / "preview-source"
     source_dir.mkdir()
@@ -2167,7 +2167,7 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     source_dir = tmp_path / "failed-preview-source"
     source_dir.mkdir()
@@ -2234,7 +2234,7 @@ def test_preview_returns_404_for_deleted_photo_even_with_stale_cache(app_and_db)
     """
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
 
     from PIL import Image
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -2256,7 +2256,7 @@ def test_preview_rejects_unsupported_size(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     resp = client.get(f"/photos/{pid}/preview?size=9999")
     assert resp.status_code == 400
     resp = client.get(f"/photos/{pid}/preview?size=abc")
@@ -2268,7 +2268,7 @@ def test_original_serves_full_res_working_copy(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Set photo dimensions to match working copy
@@ -2310,7 +2310,7 @@ def test_edited_original_retries_source_when_working_copy_is_evicted(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
 
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -2385,7 +2385,7 @@ def test_original_stamps_the_working_copy_it_serves(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.conn.execute(
         "UPDATE photos SET width=800, height=600 WHERE id=?", (pid,),
     )
@@ -2427,7 +2427,7 @@ def test_original_opens_full_res_working_copy_under_eviction_guard(
     from PIL import Image
 
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     working_dir = os.path.join(vireo_dir, "working")
     os.makedirs(working_dir, exist_ok=True)
@@ -2479,7 +2479,7 @@ def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
 
     source_dir = tmp_path / "raw-source"
@@ -2541,7 +2541,7 @@ def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
     with Image.open(io.BytesIO(first.data)) as rendered:
         assert rendered.getpixel((0, 0))[0] > 200
     assert open(working_path, "rb").read() == working_bytes
-    assert db.get_photo(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
+    assert db.photos.get(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
 
 
 def test_concurrent_original_cache_misses_extract_once(
@@ -2552,7 +2552,7 @@ def test_concurrent_original_cache_misses_extract_once(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     source_dir = tmp_path / "concurrent-original-source"
     source_dir.mkdir()
@@ -2627,7 +2627,7 @@ def test_concurrent_noncacheable_original_waiters_use_private_renditions(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     source_dir = tmp_path / "concurrent-transient-originals"
     source_dir.mkdir()
@@ -2734,7 +2734,7 @@ def test_failed_original_flight_releases_waiters_and_allows_retry(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     source_dir = tmp_path / "failed-original-source"
     source_dir.mkdir()
@@ -2821,7 +2821,7 @@ def test_unedited_raw_display_cache_survives_when_companion_is_newer_than_raw_ro
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
 
     source_dir = tmp_path / "raw-source"
@@ -2914,7 +2914,7 @@ def test_generated_rendition_is_not_born_at_the_head_of_the_eviction_queue(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
 
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -2988,7 +2988,7 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(
     # otherwise the embedded JPEG of 8256 would have been thumbnailed to 4096).
     cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Mark this photo as a RAW source so the embedded-JPEG-fallback
@@ -3045,7 +3045,7 @@ def test_original_does_not_trust_raw_working_copy_with_truncated_short_edge(app_
 
     cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     db.conn.execute(
@@ -3100,7 +3100,7 @@ def test_original_trusts_portrait_raw_working_copy_with_transposed_dims(app_and_
 
     cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     exif = json.dumps({"EXIF": {"Orientation": 6}})
@@ -3219,7 +3219,7 @@ def test_original_reextracts_stale_capped_jpeg_wc_after_cap_raised(app_and_db, t
     # User has lifted the cap.
     cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     db.conn.execute("UPDATE photos SET width=6000, height=4000 WHERE id=?", (pid,))
@@ -3267,7 +3267,7 @@ def test_original_reextracts_jpeg_just_above_cap(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Original is 4 pixels above the default 4096 cap.
@@ -3316,7 +3316,7 @@ def test_original_upgrades_capped_working_copy_to_full_res(app_and_db, tmp_path)
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Stored dimensions exceed the default cap (4096).
@@ -3365,7 +3365,7 @@ def test_transient_full_original_preserves_capped_working_copy(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     working_dir = os.path.join(vireo_dir, "working")
@@ -3433,7 +3433,7 @@ def test_transient_full_original_does_not_restore_concurrently_evicted_copy(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     working_dir = os.path.join(vireo_dir, "working")
@@ -3525,7 +3525,7 @@ def test_transient_original_reloads_quota_raised_during_extraction(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_id = photo["id"]
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     working_dir = os.path.join(vireo_dir, "working")
@@ -3613,7 +3613,7 @@ def test_original_serves_post_upgrade_working_copy_without_reextracting(app_and_
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Stored dims still exceed the default cap (4096), but the wc on disk
@@ -3655,7 +3655,7 @@ def test_original_serves_native_jpeg_directly(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Point folder to a writable tmp location and create a real JPEG
@@ -3685,7 +3685,7 @@ def test_crop_preview_uses_working_copy(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Create a working copy
@@ -3711,7 +3711,7 @@ def test_crop_preview_falls_back_to_original(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Point folder to a writable tmp location and create a real image
@@ -3745,7 +3745,7 @@ def test_crop_preview_retries_original_when_working_copy_is_evicted(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     photo_dir = tmp_path / "crop-race-originals"
     photo_dir.mkdir()
@@ -3797,7 +3797,7 @@ def test_edit_preview_retries_original_when_working_copy_is_evicted(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     photo_dir = tmp_path / "edit-race-originals"
     photo_dir.mkdir()
@@ -3855,7 +3855,7 @@ def test_edit_preview_pins_working_copy_when_original_is_offline(
     from PIL import Image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     offline_dir = tmp_path / "offline-edit-originals"
     db.conn.execute(
@@ -4057,7 +4057,7 @@ def test_bulk_apply_edit_recipe(app_and_db):
     """POST /api/photos/edit-recipe/apply applies one recipe to many photos."""
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
 
     resp = client.post(
         "/api/photos/edit-recipe/apply",
@@ -4075,7 +4075,7 @@ def test_bulk_apply_edit_recipe(app_and_db):
 def test_bulk_apply_records_single_undoable_batch(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
 
     client.post(
         "/api/photos/edit-recipe/apply",
@@ -4097,7 +4097,7 @@ def test_bulk_apply_records_single_undoable_batch(app_and_db):
 def test_bulk_apply_queues_xmp_sync_per_photo(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
 
     client.post(
         "/api/photos/edit-recipe/apply",
@@ -4112,7 +4112,7 @@ def test_bulk_apply_queues_xmp_sync_per_photo(app_and_db):
 def test_bulk_apply_skips_unknown_photo(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
 
     resp = client.post(
         "/api/photos/edit-recipe/apply",
@@ -4127,7 +4127,7 @@ def test_bulk_apply_skips_unknown_photo(app_and_db):
 def test_bulk_apply_validation_errors(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
 
     # Missing photo_ids.
     assert client.post(
@@ -4148,7 +4148,7 @@ def test_edit_page_routes_render(app_and_db):
     """Both /edit/<id> and the parameter-less /edit render the editor."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     assert client.get(f"/edit/{pid}").status_code == 200
     assert client.get("/edit").status_code == 200
 
@@ -9135,7 +9135,7 @@ def test_post_photo_location_with_valid_place_id(app_and_db, monkeypatch):
     # The route imports ``places`` at module level via ``import places``.
     monkeypatch.setattr(places, "place_details", fake_place_details)
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9192,7 +9192,7 @@ def test_post_photo_location_can_use_google_default_language(
         return _central_park_details()
 
     monkeypatch.setattr(places, "place_details", fake_place_details)
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
 
     response = app.test_client().post(
         f"/api/photos/{photo_id}/location",
@@ -9221,7 +9221,7 @@ def test_post_photo_location_accepts_client_place_details_without_server_lookup(
 
     monkeypatch.setattr(places, "place_details", fail_place_details)
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9253,7 +9253,7 @@ def test_post_photo_location_normalizes_non_string_client_place_id(app_and_db):
     place = _central_park_client_place()
     place["place_id"] = 12345
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9293,7 +9293,7 @@ def test_post_photo_location_client_place_types_drops_same_named_leaf_parent(
         ],
     }
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9313,7 +9313,7 @@ def test_post_photo_location_client_place_types_drops_same_named_leaf_parent(
 def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
     """Empty body / missing place_id is a 400 — never reaches Google."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9330,7 +9330,7 @@ def test_post_photo_location_returns_400_on_empty_api_key(app_and_db):
     # if a previous test left one behind in the same temp config file.
     cfg.save({**cfg.load(), "google_maps_api_key": ""})
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9357,7 +9357,7 @@ def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, mo
     cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
     monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9408,7 +9408,7 @@ def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatc
     monkeypatch.setattr(places, "place_details",
                         lambda place_id, key: _central_park_details())
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9530,7 +9530,7 @@ def test_post_photo_location_text_queues_cleanup_when_xmp_location_disabled(app_
     import config as cfg
     app, db = app_and_db
     cfg.save({**cfg.load(), "write_assigned_location_to_xmp": False})
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9561,7 +9561,7 @@ def test_post_photo_location_text_rejects_pipe_in_name(app_and_db):
     entirely.
     """
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9589,7 +9589,7 @@ def test_post_photo_location_text_rejects_pipe_in_name(app_and_db):
 def test_batch_location_text_rejects_pipe_in_name(app_and_db):
     """The batch endpoint applies the same assignment-time pipe rule."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     ids = [photos[0]["id"]]
 
     client = app.test_client()
@@ -9651,7 +9651,7 @@ def test_delete_photo_location_rejects_out_of_workspace_photo(app_and_db):
 def test_delete_photo_location_clears_links(app_and_db):
     """DELETE removes location keyword links but leaves the keyword row intact."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     # Set up an existing location link directly via DB methods (no Google
@@ -9696,7 +9696,7 @@ def test_post_photo_location_records_edit(app_and_db, monkeypatch):
     monkeypatch.setattr(places, "place_details",
                         lambda place_id, key: _central_park_details())
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     pre_history = db.edit_history.list_recent()
@@ -9730,7 +9730,7 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
 
     monkeypatch.setattr(places, "place_details", fail_place_details)
 
-    photo_ids = [p["id"] for p in db.get_photos()[:3]]
+    photo_ids = [p["id"] for p in db.photos.list_page()[:3]]
     client = app.test_client()
     resp = client.post(
         "/api/batch/location",
@@ -9775,7 +9775,7 @@ def test_map_review_assignment_repairs_legacy_california_taxonomy_node(
     county_id = db.add_keyword(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
 
     response = app.test_client().post(
         "/api/batch/location",
@@ -9825,7 +9825,7 @@ def test_map_review_assignment_repairs_legacy_california_taxonomy_node(
 def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
     """Batch free-text location POST stores one location across selected photos."""
     app, db = app_and_db
-    photo_ids = [p["id"] for p in db.get_photos()[:3]]
+    photo_ids = [p["id"] for p in db.photos.list_page()[:3]]
 
     client = app.test_client()
     resp = client.post(
@@ -9852,7 +9852,7 @@ def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
 def test_batch_photo_location_text_can_remember_reviewed_map_point(app_and_db):
     """Custom names created from map review become nearby saved suggestions."""
     app, db = app_and_db
-    photo_ids = [p["id"] for p in db.get_photos()[:2]]
+    photo_ids = [p["id"] for p in db.photos.list_page()[:2]]
 
     response = app.test_client().post(
         "/api/batch/location/text",
@@ -9882,7 +9882,7 @@ def test_delete_photo_location_records_edit(app_and_db):
     app, db = app_and_db
 
     leaf_id = db.upsert_place_chain(_central_park_details())
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     db.set_photo_location(pid, leaf_id)
 
@@ -9908,7 +9908,7 @@ def test_delete_photo_location_records_edit(app_and_db):
 def test_post_photo_location_text_creates_keyword_and_links(app_and_db):
     """Free-text POST creates a no-place_id keyword and links it to the photo."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9940,7 +9940,7 @@ def test_post_photo_location_text_creates_keyword_and_links(app_and_db):
 def test_post_photo_location_text_strips_whitespace(app_and_db):
     """Surrounding whitespace is stripped before the keyword is created."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9965,7 +9965,7 @@ def test_post_photo_location_text_strips_whitespace(app_and_db):
 def test_post_photo_location_text_400_on_missing_name(app_and_db):
     """Empty body / missing name is a 400."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9977,7 +9977,7 @@ def test_post_photo_location_text_400_on_missing_name(app_and_db):
 def test_post_photo_location_text_400_on_empty_name(app_and_db):
     """Whitespace-only name is rejected as 400."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -9992,7 +9992,7 @@ def test_post_photo_location_text_400_on_empty_name(app_and_db):
 def test_post_photo_location_text_replaces_existing_location(app_and_db):
     """A second free-text POST replaces (not adds to) the existing location link."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     client = app.test_client()
@@ -10020,7 +10020,7 @@ def test_post_photo_location_text_replaces_existing_location(app_and_db):
 def test_post_photo_location_text_records_edit(app_and_db):
     """Free-text POST adds a reversible location-history entry."""
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
 
     pre_history = db.edit_history.list_recent()
@@ -10413,7 +10413,7 @@ def test_location_review_preview_groups_coordinates_without_geocoding(
     import places
 
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     p1, p2, p3 = [p["id"] for p in photos]
     db.conn.executemany(
         "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
@@ -10460,7 +10460,7 @@ def test_location_review_preview_skips_assigned_and_reports_missing_gps(
     app_and_db,
 ):
     app, db = app_and_db
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     p1, p2, p3 = [p["id"] for p in photos]
     db.conn.execute(
         "UPDATE photos SET latitude = 33.255, longitude = -116.405 WHERE id = ?",
@@ -10498,7 +10498,7 @@ def test_location_review_saved_suggestions_are_nearby_and_workspace_used(
     app_and_db,
 ):
     app, db = app_and_db
-    p1, p2, _ = [p["id"] for p in db.get_photos(sort="name")]
+    p1, p2, _ = [p["id"] for p in db.photos.list_page(sort="name")]
     near_id = db._upsert_one_keyword(
         "Anza-Borrego Desert State Park", None,
         latitude=33.255, longitude=-116.405,
@@ -10535,7 +10535,7 @@ def test_batch_location_from_exif_preview_groups_without_linking(
     app, db = app_and_db
     cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
 
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     p1, p2, p3 = [p["id"] for p in photos]
     db.conn.execute(
         "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
@@ -10625,7 +10625,7 @@ def test_batch_location_from_exif_apply_assigns_per_photo_places(
     app, db = app_and_db
     cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
 
-    photos = db.get_photos(sort="name")
+    photos = db.photos.list_page(sort="name")
     p1, p2, p3 = [p["id"] for p in photos]
     db.conn.execute(
         "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
@@ -10705,7 +10705,7 @@ def test_post_keyword_link_place_attaches_metadata(app_and_db, monkeypatch):
 
     # Pre-create a free-text "Central Park" keyword and tag a photo with it.
     kw_id = db.get_or_create_text_location("Central Park")
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     pid = photo["id"]
     db.set_photo_location(pid, kw_id)
 
@@ -11177,7 +11177,7 @@ def test_api_photo_masks_lists_variants_and_active(app_and_db):
     """GET /api/photos/<id>/masks returns the photo's variants and the active one."""
     import os as _os
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
 
@@ -11200,7 +11200,7 @@ def test_api_photo_masks_lists_variants_and_active(app_and_db):
 def test_api_photo_masks_empty_when_no_masks(app_and_db):
     """GET /api/photos/<id>/masks returns an empty list and null active."""
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     client = app.test_client()
     resp = client.get(f"/api/photos/{pid}/masks")
     assert resp.status_code == 200
@@ -11214,7 +11214,7 @@ def test_api_serve_mask_png(app_and_db):
     import os as _os
 
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _seed_mask(db, masks_dir, pid, "sam2-small", body=b"\x89PNGFAKE")
 
@@ -11232,7 +11232,7 @@ def test_api_serve_mask_404_when_no_db_row(app_and_db):
     """
     import os as _os
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _os.makedirs(masks_dir, exist_ok=True)
     # File on disk, but no photo_masks row.
@@ -11247,7 +11247,7 @@ def test_api_serve_mask_404_when_no_db_row(app_and_db):
 def test_api_serve_mask_404_when_file_missing(app_and_db):
     """DB row exists but file missing → 404."""
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path="/nope/missing.png",
         detector_model="md", prompt=(0, 0, 0, 0),
@@ -11265,7 +11265,7 @@ def test_api_serve_mask_rejects_path_traversal(app_and_db):
     ``..`` or path separators must 404 — never reach the file system.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     client = app.test_client()
     # `..%2F` would decode to `../` — must not let us climb out.
     resp = client.get(f"/api/masks/{pid}/..%2Fevil.png")
@@ -11285,7 +11285,7 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
     """
     import os as _os
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _os.makedirs(masks_dir, exist_ok=True)
     legacy_path = _os.path.join(masks_dir, f"{pid}.png")
@@ -11315,7 +11315,7 @@ def test_legacy_serve_mask_falls_back_to_active_variant(app_and_db):
     import os as _os
 
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _seed_mask(db, masks_dir, pid, "sam2-small", body=b"ACTIVEPNG")
     db.set_active_mask_variant(pid, "sam2-small")
@@ -11336,7 +11336,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
     import os as _os
 
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     old_path = _seed_mask(
         db, masks_dir, pid, "sam2-small", body=b"PREDECESSOR",
@@ -11377,7 +11377,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
 def test_legacy_serve_mask_404_when_no_active_variant(app_and_db):
     """No file, no active variant → 404 (don't leak by serving any mask)."""
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     client = app.test_client()
     resp = client.get(f"/masks/{pid}.png")
     assert resp.status_code == 404
@@ -11387,7 +11387,7 @@ def test_legacy_serve_mask_direct_file_served_when_db_backed(app_and_db):
     """A literal ``{pid}.png`` is served when a ``photo_masks`` row owns it."""
     import os as _os
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _os.makedirs(masks_dir, exist_ok=True)
     mask_file = _os.path.join(masks_dir, f"{pid}.png")
@@ -11422,7 +11422,7 @@ def test_serve_mask_404s_a_file_no_db_row_claims(app_and_db):
     """
     import os as _os
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _os.makedirs(masks_dir, exist_ok=True)
     with open(_os.path.join(masks_dir, f"{pid}.png"), "wb") as fh:
@@ -11444,7 +11444,7 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     attacker-controlled DB row would be a directory-escape primitive.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"SECRET")
     db.masks_features.upsert_mask(
@@ -12296,7 +12296,7 @@ def test_api_photos_query_basic(app_and_db):
 
 def _seed_prediction_confidences(db, by_filename):
     """Give each named photo a single species prediction at that confidence."""
-    for photo in db.get_photos(sort="name"):
+    for photo in db.photos.list_page(sort="name"):
         confidence = by_filename.get(photo["filename"])
         if confidence is None:
             continue
@@ -12315,7 +12315,7 @@ def test_api_photos_by_ids_exposes_prediction_confidence(app_and_db):
     PR #1670)."""
     app, db = app_and_db
     _seed_prediction_confidences(db, {"bird1.jpg": 0.4})
-    ids = [p["id"] for p in db.get_photos(sort="name")]
+    ids = [p["id"] for p in db.photos.list_page(sort="name")]
 
     resp = app.test_client().post("/api/photos/by-ids",
                                   json={"photo_ids": ids})
@@ -12389,7 +12389,7 @@ def test_api_photos_query_stack_badge_is_the_score_that_placed_it(app_and_db):
     quality-ranked frame. The badge must report the score that decided the
     card's place, not the cover's own (Codex P2 on PR #1670)."""
     app, db = app_and_db
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     cover, lead = listed[0]["id"], listed[1]["id"]
     with db.conn:
         _seed_browse_burst(db, [cover, lead])
@@ -12425,7 +12425,7 @@ def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_d
     """Under any other sort nothing positioned the stack by confidence, so
     the badge falls back to describing the frame on the card."""
     app, db = app_and_db
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     cover, other = listed[0]["id"], listed[1]["id"]
     with db.conn:
         _seed_browse_burst(db, [cover, other])
@@ -12450,7 +12450,7 @@ def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_d
 
 def test_api_photos_query_browse_stacks(app_and_db):
     app, db = app_and_db
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     first, second = listed[0]["id"], listed[1]["id"]
     with db.conn:
         _seed_browse_burst(db, [first, second])
@@ -12499,7 +12499,7 @@ def test_api_photos_query_browse_stacks(app_and_db):
 @pytest.mark.parametrize("endpoint", ["init", "query", "collection"])
 def test_browse_stack_count_covers_all_pages(app_and_db, endpoint):
     app, db = app_and_db
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     with db.conn:
         _seed_browse_burst(db, [listed[0]["id"], listed[1]["id"]])
     collection_id = db.collections.add("All photos", "[]")
@@ -12777,7 +12777,9 @@ def test_api_photos_query_visual_focus_holds_one_read_snapshot(
     db_path = app.config["DB_PATH"]
     target = photos["bird2.jpg"]
 
-    original = Database.get_photos_by_ids
+    from repositories.photos import PhotoRepository
+
+    original = PhotoRepository.get_by_ids
     deleted = []
 
     def delete_between(self, ids, *args, **kwargs):
@@ -12790,7 +12792,7 @@ def test_api_photos_query_visual_focus_holds_one_read_snapshot(
             deleted.append(target)
         return original(self, ids, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "get_photos_by_ids", delete_between)
+    monkeypatch.setattr(PhotoRepository, "get_by_ids", delete_between)
 
     response = app.test_client().post("/api/photos/query", json={
         "rules": [],
@@ -12981,7 +12983,7 @@ def test_api_photos_query_offline_members_are_opt_in_and_read_only(app_and_db):
     """Browse can reveal offline collection members without selecting them."""
     app, db = app_and_db
     client = app.test_client()
-    available_before = db.count_photos()
+    available_before = db.photos.count()
     offline_folder = db.add_folder("/temporarily-offline", name="offline")
     offline_id = db.add_photo(
         folder_id=offline_folder,
@@ -13037,7 +13039,7 @@ def test_api_photos_query_offline_members_never_join_a_stack(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     online_a, online_b = listed[0]["id"], listed[1]["id"]
 
     offline_folder = db.add_folder("/temporarily-offline", name="offline")
@@ -13132,7 +13134,7 @@ def test_api_photos_query_offline_members_never_join_a_stack(app_and_db):
 def test_collapse_browse_stack_photo_ids_keeps_standalone_ids_singular(app_and_db):
     """The visual-search collapse helper honors the same offline rule."""
     _app, db = app_and_db
-    listed = db.get_photos(sort="name")
+    listed = db.photos.list_page(sort="name")
     first, second, third = (photo["id"] for photo in listed[:3])
     with db.conn:
         _seed_browse_burst(db, [first, second, third])
@@ -13248,7 +13250,7 @@ def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monk
     match, disagreeing with visual search (which loads only the active
     model's embeddings)."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     # bird1 has a stale embedding from a former model; bird2 has one from
     # the currently-active model. Only bird2 should satisfy the filter.
     db.conn.execute(
@@ -13310,7 +13312,7 @@ def test_api_photos_query_has_visual_index_fails_closed_without_active_model(
     search would disagree on what "has a visual index" means.
     """
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     # Every photo has a stale embedding — the previously-active model was
     # uninstalled but its rows remain in ``photo_embeddings``.
     for filename in photos:
@@ -13359,7 +13361,7 @@ def test_api_photos_query_timestamp_gt_preserves_subsecond(app_and_db):
     requested instant. Only bare ``YYYY-MM-DD`` values advance to end of
     day."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     db.conn.execute(
         "UPDATE photos SET timestamp='2024-01-01T12:00:00.500000' WHERE id=?",
         (photos["bird1.jpg"],),
@@ -13409,7 +13411,7 @@ def test_api_filter_fields_registry(app_and_db):
 
 def test_api_filter_values_counts(app_and_db):
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
                     (photos["bird1.jpg"], photos["bird3.jpg"]))
     db.conn.execute("UPDATE photos SET camera_model='Canon R5' WHERE id=?",
@@ -13447,7 +13449,7 @@ def test_api_filter_values_clamps_limit(app_and_db):
     """Zero/negative/oversized ``limit`` params must not produce unbounded
     queries (SQLite treats a negative ``LIMIT`` as "no limit")."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     # Populate enough distinct camera_model values that a working limit clamp
     # is observable — a limit of 0/-1 without the clamp would return them all.
     for i, filename in enumerate(sorted(photos)):
@@ -13513,7 +13515,7 @@ def test_api_filter_values_respects_scope(app_and_db):
     folder- or collection-restricted, and a pick can produce fewer visible
     grid rows than the count promised."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     folders = db.get_folder_tree()
     jan = [f for f in folders if f["name"] == "January"][0]
     db.conn.execute(
@@ -13562,7 +13564,7 @@ def test_api_photos_query_ids_only(app_and_db):
     })
     assert resp.status_code == 200
     data = resp.get_json()
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     assert data["ids"] == [photos["bird1.jpg"], photos["bird3.jpg"]]
     assert data["total"] == 2
 
@@ -13583,7 +13585,7 @@ def _seed_browse_summary_analysis(db):
     """bird1: two animal boxes, quality, eye and misses; bird2 (January):
     quality only, plus a person box and a below-threshold animal box; bird3:
     only the full-image placeholder row."""
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
     db.save_detections(photos["bird1.jpg"], [
         {"box": box, "confidence": 0.9, "category": "animal"},
@@ -13698,7 +13700,7 @@ def _stub_clip(monkeypatch, model_name="test-clip", model_type="bioclip"):
 
 
 def _seed_embeddings(db, model_name="test-clip"):
-    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page(sort="name")}
     for name, vec in [
         ("bird1.jpg", [0.95, 0.0]),
         ("bird2.jpg", [0.8, 0.0]),
@@ -13898,7 +13900,7 @@ def test_api_photos_query_visual_reports_offline_members(app_and_db, monkeypatch
     photos = _seed_embeddings(db)
     _stub_clip(monkeypatch)
     offline_id = photos["bird2.jpg"]
-    offline_folder = db.get_photo(offline_id)["folder_id"]
+    offline_folder = db.photos.get(offline_id)["folder_id"]
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?",
         (offline_folder,),
@@ -13973,7 +13975,7 @@ def test_api_summary_and_values_respect_visual(app_and_db, monkeypatch):
     app, db = app_and_db
     _seed_embeddings(db)
     _stub_clip(monkeypatch)
-    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page(sort="name")}
     db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
                     (photos["bird1.jpg"], photos["bird3.jpg"]))
     db.conn.commit()
@@ -13998,7 +14000,7 @@ def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
     than injecting outside-collection matches that get intersected away.
     """
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page(sort="name")}
     for name, vec in [("bird1.jpg", [0.95, 0.0]), ("bird2.jpg", [0.8, 0.0])]:
         db.upsert_photo_embedding(
             photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
@@ -14022,7 +14024,7 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
     """A broad rule tree passes every photo id as the candidate set; the
     embedding fetch must chunk below SQLITE_MAX_VARIABLE_NUMBER."""
     _, db = app_and_db
-    fid = db.get_photos()[0]["folder_id"]
+    fid = db.photos.list_page()[0]["folder_id"]
     ids = []
     rows = []
     for i in range(1200):
@@ -14045,7 +14047,7 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
 def test_api_photos_geo_accepts_rules(app_and_db):
     import json as _json
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     db.conn.execute(
         "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?)",
         (photos["bird1.jpg"], photos["bird3.jpg"]))
@@ -14068,7 +14070,7 @@ def test_api_photos_geo_accepts_rules(app_and_db):
 def test_api_photos_geo_selection_accounts_for_every_selected_photo(app_and_db):
     """A POSTed selection limits the map and says why each missing photo is missing."""
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     offline_folder = db.add_folder('/photos/offline', name='offline')
     offline_pid = db.add_photo(
         folder_id=offline_folder, filename='bird4.jpg', extension='.jpg',
@@ -14132,7 +14134,7 @@ def test_api_predictions_accepts_rules(app_and_db):
     import json as _json
     app, db = app_and_db
     from labels_fingerprint import TOL_SENTINEL
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     for name, species in [("bird1.jpg", "Cardinal"), ("bird3.jpg", "Blue Jay")]:
         det_ids = db.save_detections(photos[name], [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -14168,7 +14170,7 @@ def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
     import json as _json
     app, db = app_and_db
     from labels_fingerprint import TOL_SENTINEL
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     det_ids = db.save_detections(photos["bird1.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
@@ -14208,7 +14210,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
     """
     from labels_fingerprint import TOL_SENTINEL
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
 
     # bird1 has one prediction (accepted); bird2 has one rejected;
     # bird3 has no predictions at all — the photo-scoped `is not
@@ -14272,7 +14274,7 @@ def test_photos_query_classifier_model_is_not_includes_photos_without_prediction
     """
     from labels_fingerprint import TOL_SENTINEL
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
 
     det = db.save_detections(photos["bird1.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -14308,7 +14310,7 @@ def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
     """
     import json as _json
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     db.conn.execute(
         "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?, ?)",
         (photos["bird1.jpg"], photos["bird2.jpg"], photos["bird3.jpg"]))
@@ -14358,7 +14360,7 @@ def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
     """
     import json as _json
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     # Only bird3 is plottable — and only bird1 and bird2 (both
     # non-plottable in this test) carry embeddings. Without the
     # plottable-scoped candidate set, VisualScope.resolve would happily
@@ -14401,7 +14403,7 @@ def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
 
     from labels_fingerprint import TOL_SENTINEL
     app, db = app_and_db
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     for name, species in [("bird1.jpg", "Cardinal"),
                           ("bird2.jpg", "Sparrow"),
                           ("bird3.jpg", "Blue Jay")]:

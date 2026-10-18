@@ -92,7 +92,7 @@ def test_choice_remembered_when_detection_temporarily_disappears(db, subject_pho
 
 def test_subject_api_workspace_and_validation(app_and_db):
     app, db = app_and_db
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     ids = db.write_detection_batch(photo_id, "megadetector-v6", [{"box": {"x": .1, "y": .2, "w": .3, "h": .4}, "confidence": .9, "category": "animal"}])
     client = app.test_client()
     assert client.get(f"/api/photos/{photo_id}/subjects").get_json()["primary_detection_id"] == ids[0]
@@ -160,7 +160,7 @@ def test_purging_old_detection_projects_remaining_primary(db, subject_photo):
 
 def test_subject_routes_do_not_expose_other_workspaces(app_and_db):
     app, db = app_and_db
-    photo_id = db.get_photos()[0]['id']
+    photo_id = db.photos.list_page()[0]['id']
     client = app.test_client()
     other = db.create_workspace('Empty workspace')
     response = client.post(f'/api/workspaces/{other}/activate')

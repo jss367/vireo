@@ -176,7 +176,7 @@ def test_photo_review_follows_a_workspace_switch_between_accesses(db):
         db.photo_review.set_rating(a, 2)
     db.set_active_workspace(home)
     db.photo_review.set_rating(a, 2)
-    assert db.get_photo(a)["rating"] == 2
+    assert db.photos.get(a)["rating"] == 2
 
 
 def test_photo_review_has_no_forwarding_wrappers_on_database():

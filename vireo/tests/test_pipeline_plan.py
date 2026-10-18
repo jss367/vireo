@@ -78,7 +78,7 @@ def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
     pid_b1 = db.add_photo(folder_id=fid_b, filename="IMG_900.JPG",
                           extension=".jpg", file_size=1, file_mtime=1.0)
 
-    result = db.photos_by_paths([
+    result = db.photos.by_paths([
         "/cards/a/IMG_001.NEF",         # known
         "/cards/a/IMG_NEW.NEF",         # unknown (new file, same folder)
         "/cards/b/IMG_900.JPG",         # known (different folder)
@@ -95,7 +95,7 @@ def test_photos_by_paths_handles_empty_input(tmp_path):
     placeholders (which is malformed SQL)."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    assert db.photos_by_paths([]) == {}
+    assert db.photos.by_paths([]) == {}
 
 
 def test_photos_by_paths_ignores_workspace_membership(tmp_path):
@@ -112,7 +112,7 @@ def test_photos_by_paths_ignores_workspace_membership(tmp_path):
     # Active workspace has no folders (the import target is a fresh ws).
     db._active_workspace_id = db.create_workspace("Other")
 
-    assert db.photos_by_paths(["/cards/a/x.jpg"]) == {"/cards/a/x.jpg": pid}
+    assert db.photos.by_paths(["/cards/a/x.jpg"]) == {"/cards/a/x.jpg": pid}
 
 
 def test_workspace_unlinked_folder_count_counts_unlinked(tmp_path):

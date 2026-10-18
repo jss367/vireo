@@ -828,7 +828,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         from offline_cache import cache_photo_original, release_photo_original
 
         pid = data.draw(st.sampled_from(self._visible_photo_ids()))
-        photo = self.db.get_photo(pid)
+        photo = self.db.photos.get(pid)
         folder = self.db.get_folder(photo["folder_id"])
         # Keep generated cache files under the thumbnail root, which the
         # disk-copy invariant excludes; source files remain in its snapshot.

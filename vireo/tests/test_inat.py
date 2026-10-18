@@ -734,7 +734,7 @@ def test_api_inat_export_partial_failure_fails_job_and_keeps_counts(
     from inat_export import InatExportError
     from wait import wait_for_job_via_client
 
-    fid = db.get_photo(pid)["folder_id"]
+    fid = db.photos.get(pid)["folder_id"]
     other = db.add_photo(folder_id=fid, filename="heron.jpg", extension=".jpg",
                          file_size=1000, file_mtime=2.0)
     destination = str(tmp_path / "exports")

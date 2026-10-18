@@ -739,7 +739,7 @@ def test_stage_scope_ids_rolls_back_a_failed_stage(db, lib):
     assert [r[0] for r in rows] == [1, 2]
     assert db.conn.in_transaction
     db.conn.rollback()
-    assert db.get_photo(lib["p2"])["rating"] == 0
+    assert db.photos.get(lib["p2"])["rating"] == 0
 
 
 # -- workspace requirement, transactions, and query shape ------------------------------
