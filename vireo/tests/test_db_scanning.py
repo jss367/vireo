@@ -133,6 +133,49 @@ def test_owner_of_prefers_the_raw_with_a_stored_identity(db, tmp_path):
     assert db.companion_pairing.owner_of(fid, "IMG.jpg")["owner_id"] == vouched
 
 
+def test_delete_identities_forgets_only_the_owners_rows_without_commit(db, tmp_path):
+    fid = db.add_folder(str(tmp_path), name="p")
+    raw = _photo(db, fid, "IMG.cr3", companion_path="IMG.jpg")
+    other = _photo(db, fid, "OTHER.cr3", companion_path="OTHER.jpg")
+    db.companion_pairing.record_identity(raw, "IMG.jpg", 10, None, "h", 2.0)
+    db.companion_pairing.record_identity(other, "OTHER.jpg", 10, None, "h2", 2.0)
+    db.commit()
+
+    db.companion_pairing.delete_identities(raw)
+    assert db.in_transaction
+    assert len(_committed(db, "SELECT 1 FROM companion_identities")) == 2
+    db.commit()
+    assert [tuple(r) for r in _committed(
+        db, "SELECT photo_id FROM companion_identities")] == [(other,)]
+
+
+def test_update_photo_accepts_literal_assignments_without_commit(db, tmp_path):
+    """``capture_time`` resets the hash verdict with literal ``=NULL`` clauses."""
+    fid = db.add_folder(str(tmp_path), name="p")
+    pid = _photo(db, fid, "a.jpg", hash_status="ok", hash_checked_at="then")
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        db.scanning.update_photo(
+            pid,
+            ["file_hash=?", "file_size=?", "file_mtime=?",
+             "hash_status=NULL", "hash_checked_at=NULL"],
+            ("h", 5, 9.0),
+        )
+    finally:
+        db.conn.set_trace_callback(None)
+    assert any(
+        "UPDATE photos SET file_hash='h', file_size=5, file_mtime=9.0, "
+        "hash_status=NULL, hash_checked_at=NULL WHERE id=" in s
+        for s in statements
+    ), statements
+    assert db.in_transaction
+    db.commit()
+    assert tuple(_committed(
+        db, "SELECT file_hash, file_size, file_mtime, hash_status, hash_checked_at "
+        "FROM photos WHERE id=?", (pid,))[0]) == ("h", 5, 9.0, None, None)
+
+
 # -- db.working_copies -----------------------------------------------------------
 
 
@@ -266,3 +309,14 @@ def test_scanner_never_touches_the_connection():
             if isinstance(node, ast.Attribute) and node.attr == "conn":
                 offenders.append(f"{path.relative_to(VIREO)}:{node.lineno}")
     assert not offenders, offenders
+
+
+def test_capture_time_never_touches_the_connection():
+    """``capture_time`` reaches SQL through ``db.scanning`` and
+    ``db.companion_pairing`` and ends its writes with ``db.commit()`` /
+    ``db.rollback()``."""
+    tree = ast.parse((VIREO / "capture_time.py").read_text(encoding="utf-8"))
+    assert not [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "conn"
+    ]

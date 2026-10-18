@@ -48,7 +48,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 CONN_USE_LIMITS = {
     "app.py": 8,
     "audit.py": 10,
-    "capture_time.py": 7,
     "card_cleanup.py": 4,
     "computation_cache.py": 37,
     "culling.py": 6,
