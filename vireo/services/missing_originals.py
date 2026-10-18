@@ -20,15 +20,43 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 import dir_listing_cache
 from db import Database, MissingPhotosCancelled
 from photo_payload import attach_nested_edit_recipes
 
+if TYPE_CHECKING:
+    from jobs import JobRunner
+    from services.service_types import JobDict, JobResult, JsonDict
+
 log = logging.getLogger(__name__)
+
+# ``(db_path, workspace_id, folder_id)``: one Missing Originals scan scope.
+CacheKey = tuple[str, int | None, int | None]
+
+
+class CacheEntry(TypedDict):
+    """A finished scan's photo list in ``MissingOriginals.cache``."""
+
+    photos: list[JsonDict]
+    checked_at: str
+    set_at: float
+    # Entries written before scans recorded their start time lack it.
+    started_at: NotRequired[float]
+
+
+class ScanError(TypedDict):
+    """A failed scan and its backoff in ``MissingOriginals.errors``."""
+
+    error: str
+    checked_at: str
+    set_at: float
+    backoff_until: float
+
 
 STALE_SECONDS = 30 * 60
 BACKOFF_SECONDS = 30 * 60
@@ -77,11 +105,12 @@ HEAVY_JOB_TYPES = {
 }
 
 
-def _utc_iso_now():
+def _utc_iso_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def resolve_folder_id(db, folder_id):
+# Any: a raw query-string or JSON value; ``int()`` decides whether it is usable.
+def resolve_folder_id(db: Database, folder_id: Any) -> int | None:
     """Validate a raw ``folder_id`` scope against the active workspace.
 
     Returns ``None`` for a missing/empty value (workspace-wide scope) or the
@@ -100,7 +129,7 @@ def resolve_folder_id(db, folder_id):
     return folder_id
 
 
-def cache_key(db, folder_id):
+def cache_key(db: Database, folder_id: int | None) -> CacheKey:
     return (db._db_path, db.active_workspace_id, folder_id)
 
 
@@ -108,11 +137,11 @@ def cache_key(db, folder_id):
 class _ScanRun:
     """One started Missing Originals scan, as its work function sees it."""
 
-    key: tuple
+    key: CacheKey
     token: object
     generation: int
     started_at: float
-    runner: Any
+    runner: JobRunner
     ws_id: int | None
     db_file: str
     folder_id: int | None
@@ -120,10 +149,10 @@ class _ScanRun:
     scope_label: str
 
 
-def _scan_progress_callback(runner, job):
+def _scan_progress_callback(runner: JobRunner, job: JobDict) -> Callable[[JsonDict], None]:
     """Build the ``get_missing_photos`` progress callback for a scan job."""
 
-    def progress(payload):
+    def progress(payload: JsonDict) -> None:
         current = int(payload.get("photos_considered") or 0)
         total = int(payload.get("total_photos") or 0)
         missing_found = int(payload.get("missing_found") or 0)
@@ -156,22 +185,27 @@ class MissingOriginals:
     scan time) and ``get_runner`` returns the app's ``JobRunner``.
     """
 
-    def __init__(self, *, db_path, config, get_runner):
+    # Any: the Flask app config holds heterogeneous settings values.
+    def __init__(
+        self, *, db_path: str, config: Mapping[str, Any], get_runner: Callable[[], JobRunner],
+    ) -> None:
         self.db_path = db_path
         self._config = config
         self._get_runner = get_runner
         self.lock = threading.Lock()
-        self.cache = {}
-        self.inflight = {}
-        self.errors = {}
+        self.cache: dict[CacheKey, CacheEntry] = {}
+        # A started scan's placeholder token until ``runner.start`` returns
+        # its job id.
+        self.inflight: dict[CacheKey, object] = {}
+        self.errors: dict[CacheKey, ScanError] = {}
         # Monotonic per-key counter bumped whenever the cache is invalidated
         # while a scan is in flight. Each scan snapshots this at start; if
         # the counter has advanced by the time it finishes, the scan's
         # results are from a pre-invalidation view of the library and must
         # be discarded so deleted photos don't reappear in the banner/modal.
-        self.generation = {}
+        self.generation: dict[CacheKey, int] = {}
 
-    def payload(self, db, folder_id):
+    def payload(self, db: Database, folder_id: int | None) -> JsonDict:
         key = cache_key(db, folder_id)
         now = time.monotonic()
         with self.lock:
@@ -233,18 +267,18 @@ class MissingOriginals:
 
     def build_rows(
         self,
-        db,
-        folder_id=None,
-        progress_callback=None,
-        cancel_callback=None,
-        listing_pass=None,
-    ):
+        db: Database,
+        folder_id: int | None = None,
+        progress_callback: Callable[[JsonDict], None] | None = None,
+        cancel_callback: Callable[[], bool] | None = None,
+        listing_pass: dir_listing_cache.ListingPass | None = None,
+    ) -> list[JsonDict]:
         thumb_dir = self._config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
 
-        def check_cancelled():
+        def check_cancelled() -> None:
             if cancel_callback is not None and cancel_callback():
                 raise MissingPhotosCancelled("missing originals scan cancelled")
 
@@ -270,7 +304,7 @@ class MissingOriginals:
         except FileNotFoundError:
             pass  # cache dir hasn't been created yet — no previews
 
-        out = []
+        out: list[JsonDict] = []
         for row in db.get_missing_photos(
             folder_id=folder_id,
             progress_callback=progress_callback,
@@ -314,7 +348,7 @@ class MissingOriginals:
         attach_nested_edit_recipes(db, out)
         return out
 
-    def heavy_job_active(self):
+    def heavy_job_active(self) -> bool:
         for job in self._get_runner().list_jobs():
             if job.get("status") not in (
                 "running", "pausing", "paused", "queued",
@@ -324,7 +358,7 @@ class MissingOriginals:
                 return True
         return False
 
-    def invalidate(self, workspace_ids=None):
+    def invalidate(self, workspace_ids: Iterable[int] | None = None) -> None:
         """Drop cached Missing Originals results for this app's database.
 
         Photos are shared across workspaces (a folder can be linked into
@@ -362,7 +396,7 @@ class MissingOriginals:
                     self.generation.get(key, 0) + 1
                 )
 
-    def start_scan(self, db, folder_id=None, automatic=False):
+    def start_scan(self, db: Database, folder_id: int | None = None, automatic: bool = False) -> JsonDict:
         key = cache_key(db, folder_id)
         scan_started_at = time.monotonic()
         token = object()
@@ -400,7 +434,7 @@ class MissingOriginals:
             ),
         )
 
-        def work(job):
+        def work(job: JobDict) -> JobResult:
             return self._run_scan_job(job, scan)
 
         try:
@@ -428,7 +462,9 @@ class MissingOriginals:
             payload["status"] = "pending"
         return payload
 
-    def _skipped_scan_payload(self, db, key, folder_id, automatic, now):
+    def _skipped_scan_payload(
+        self, db: Database, key: CacheKey, folder_id: int | None, automatic: bool, now: float,
+    ) -> JsonDict | None:
         """The payload to answer with when no new scan should start, or None.
 
         A scan already in flight is reused; an automatic scan is skipped
@@ -483,7 +519,7 @@ class MissingOriginals:
             return payload
         return None
 
-    def _run_scan_job(self, job, scan):
+    def _run_scan_job(self, job: JobDict, scan: _ScanRun) -> JsonDict:
         """The ``missing_originals_scan`` work function."""
         key = scan.key
         runner = scan.runner
@@ -495,7 +531,7 @@ class MissingOriginals:
 
             progress = _scan_progress_callback(runner, job)
 
-            def cancel_check():
+            def cancel_check() -> bool:
                 return runner.is_cancelled(job["id"])
 
             # The 30-minute automatic check reuses the listing of every
@@ -560,7 +596,7 @@ class MissingOriginals:
                 ):
                     self.inflight.pop(key, None)
 
-    def _record_scan_error(self, scan, exc):
+    def _record_scan_error(self, scan: _ScanRun, exc: BaseException) -> None:
         """Record a failed scan and its backoff, unless invalidated since."""
         checked_at = _utc_iso_now()
         with self.lock:
@@ -576,7 +612,7 @@ class MissingOriginals:
                     ),
                 }
 
-    def folder_health_loop(self):
+    def folder_health_loop(self) -> None:
         """Periodically check folder health."""
         time.sleep(30)  # Initial delay
         while True:

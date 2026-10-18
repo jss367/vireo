@@ -38,13 +38,13 @@ def _committed(db, archive_id):
 def test_open_with_review_collection(db):
     ws = db.require_workspace_id()
     other = db.create_workspace("Other")
-    review = db.add_collection("Review", "[]")
+    review = db.collections.add("Review", "[]")
     _archive(db, "late", created_at="2026-02-01 00:00:00", collection_id=review)
     _archive(db, "early", created_at="2026-01-01 00:00:00", state="sending")
     _archive(db, "done", state="complete")
     _archive(db, "elsewhere", workspace_id=other)
     db.set_active_workspace(other)
-    foreign_collection = db.add_collection("Foreign", "[]")
+    foreign_collection = db.collections.add("Foreign", "[]")
     db.set_active_workspace(ws)
     _archive(db, "foreign-collection", created_at="2026-03-01 00:00:00",
              collection_id=foreign_collection)

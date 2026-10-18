@@ -31,6 +31,7 @@ from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
 )
+from repositories.masks_features import MaskQuality, PipelineFeatures
 from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
@@ -1026,7 +1027,7 @@ def create_job_launchers_blueprint(
         if not raw_ids and collection_id is not None:
             raw_ids = [
                 p["id"]
-                for p in db.get_collection_photos(collection_id, per_page=999999)
+                for p in db.collections.get_photos(collection_id, per_page=999999)
             ]
         if not raw_ids:
             return json_error("photo_ids or collection_id required")
@@ -1432,7 +1433,7 @@ def create_job_launchers_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         work_units = runtime_warning_work_units(
             "classify collection",
-            lambda: db.count_collection_photos(collection_id),
+            lambda: db.collections.count_photos(collection_id),
         )
         runtime_warning = build_cpu_runtime_warning(
             "classify",
@@ -1538,7 +1539,7 @@ def create_job_launchers_blueprint(
 
         work_units = runtime_warning_work_units(
             "extract-masks collection" if collection_id else "extract-masks workspace",
-            lambda: db.count_collection_photos(collection_id)
+            lambda: db.collections.count_photos(collection_id)
             if collection_id
             else db.count_photos(),
         )
@@ -1756,7 +1757,7 @@ class _MaskExtractionRun:
 
     def _collection_candidates(self):
         thread_db = self.thread_db
-        coll_photos = thread_db.get_collection_photos(
+        coll_photos = thread_db.collections.get_photos(
             self.collection_id, per_page=999999
         )
         photos = []
@@ -2009,21 +2010,20 @@ class _MaskExtractionRun:
             variant=self.sam2_variant,
             path=mask_path,
             detector_model=photo["detector_model"],
-            prompt_x=photo["prompt"][0],
-            prompt_y=photo["prompt"][1],
-            prompt_w=photo["prompt"][2],
-            prompt_h=photo["prompt"][3],
-            subject_size=mask_subject_size,
-            subject_tenengrad=mask_subject_tenengrad,
-            bg_tenengrad=mask_bg_tenengrad,
-            crop_complete=completeness,
-            quality_input_recipe=None,
-            subject_clip_high=features.pop("subject_clip_high", None),
-            subject_clip_low=features.pop("subject_clip_low", None),
-            subject_y_median=features.pop("subject_y_median", None),
-            bg_separation=features.pop("bg_separation", None),
-            phash_crop=features.pop("phash_crop", None),
-            noise_estimate=features.pop("noise_estimate", None),
+            prompt=photo["prompt"],
+            quality=MaskQuality(
+                subject_size=mask_subject_size,
+                subject_tenengrad=mask_subject_tenengrad,
+                bg_tenengrad=mask_bg_tenengrad,
+                crop_complete=completeness,
+                quality_input_recipe=None,
+                subject_clip_high=features.pop("subject_clip_high", None),
+                subject_clip_low=features.pop("subject_clip_low", None),
+                subject_y_median=features.pop("subject_y_median", None),
+                bg_separation=features.pop("bg_separation", None),
+                phash_crop=features.pop("phash_crop", None),
+                noise_estimate=features.pop("noise_estimate", None),
+            ),
             _commit=False,
         )
         thread_db.set_active_mask_variant(
@@ -2036,7 +2036,7 @@ class _MaskExtractionRun:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, **features, _commit=False,
+                photo_id, PipelineFeatures(**features), _commit=False,
             )
         thread_db.masks_features.update_embeddings(
             photo_id,
@@ -2560,7 +2560,7 @@ class _PreviewWarmup:
                     photos.append(scoped_photo)
             return photos
         if self.collection_id:
-            return thread_db.get_collection_photos(self.collection_id, per_page=999999)
+            return thread_db.collections.get_photos(self.collection_id, per_page=999999)
         return thread_db.get_photos(per_page=999999)
 
     def _warm_photo(self, photo):

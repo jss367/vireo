@@ -1,16 +1,21 @@
 // Legacy ?collection_id= / ?folder_id= deep links: resolving them into filter
 // rules, the fail-closed scope error, and the scope banner.
-// Classic page script; load boot.js after all definitions.
+// ES module.
 
-function clearLegacyScopeError() {
-  if (!legacyScopeError) return;
-  legacyScopeError = null;
+import { state } from './state.js';
+import { VireoFilter, showToast } from './shared.js';
+import { getSinceParam } from './helpers.js';
+import { setMissTuningDisabled } from './tuning.js';
+
+export function clearLegacyScopeError() {
+  if (!state.legacyScopeError) return;
+  state.legacyScopeError = null;
   // Keep the tuning controls (sliders, save-defaults, reset, Recompute)
   // disabled until the replacement expression has loaded. Re-enabling them
   // here would briefly let a slider nudge preview — or a fast Recompute
   // click — operate on the empty fail-closed snapshot, which the preview
   // endpoint would widen back to the whole workspace.
-  legacyScopeRecoveryPending = true;
+  state.legacyScopeRecoveryPending = true;
   renderMissScopeBanner();
 }
 
@@ -30,13 +35,13 @@ function clearLegacyScopeError() {
   }
 }
 
-/** @param {string} message */ function noteLegacyScopeError(message) {
+/** @param {string} message */ export function noteLegacyScopeError(message) {
   // Append when multiple deep-link params fail (e.g. a link with both a
   // missing collection and a missing folder) so the banner surfaces both.
-  legacyScopeError = legacyScopeError
-    ? legacyScopeError + ' ' + message
+  state.legacyScopeError = state.legacyScopeError
+    ? state.legacyScopeError + ' ' + message
     : message;
-  if (typeof showToast === 'function') showToast(message, 'error');
+  showToast(message, 'error');
   renderMissScopeBanner();
   // Freeze the whole tuning group — not just Recompute. Preview and reset
   // still call /api/misses/preview with the current (empty) rules, which
@@ -46,11 +51,11 @@ function clearLegacyScopeError() {
   setMissTuningDisabled(true);
 }
 
-function renderMissScopeBanner() {
+export function renderMissScopeBanner() {
   var b = /** @type {HTMLElement} */ (document.getElementById('scopeBanner'));
   if (!b) return;
   var since = getSinceParam();
-  var message = legacyScopeError || (since
+  var message = state.legacyScopeError || (since
     ? 'Showing only the current pipeline run.'
     : '');
   b.textContent = message ? message + ' ' : '';
@@ -78,7 +83,7 @@ function renderMissScopeBanner() {
   return { present: true, valid: true, value: value, raw: raw };
 }
 
-async function applyLegacyMissScopes() {
+export async function applyLegacyMissScopes() {
   var current = new URL(window.location.href).searchParams;
   var collectionParam = parseLegacyScopeParam(current, 'collection_id');
   var folderParam = parseLegacyScopeParam(current, 'folder_id');

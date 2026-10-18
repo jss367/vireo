@@ -1,77 +1,76 @@
 // Opening a miss in the shared lightbox or in Browse, the focused and selected
 // photo lookups, and pruning the selection to visible cards.
-// Classic page script; load boot.js after all definitions.
+// ES module.
+
+import { state, CATEGORY_ORDER } from './state.js';
+import { hasLightbox, openLightbox, requestLightboxFullscreen } from './shared.js';
+import { setFocused } from './keyboard.js';
 
 /* ---------- Open lightbox ---------- */
-/** @param {MissCategory | null} cat @param {number} idx @param {MouseEvent=} e */ function openMiss(cat, idx, e) {
+/** @param {MissCategory | null} cat @param {number} idx @param {MouseEvent=} e */ export function openMiss(cat, idx, e) {
   if (e && e.target instanceof Element && e.target.closest('button')) return;
-  if (cat === null) return; const category = cat; var photos = missesData[category];
+  if (cat === null) return; const category = cat; var photos = state.missesData[category];
   if (!photos || !photos[idx]) return;
   var p = photos[idx];
   setFocused(cat, idx);
-  missLightboxCategoryById = {};
+  state.missLightboxCategoryById = {};
   var photoList = photos.map(function(q) {
-    missLightboxCategoryById[q.id] = category;
+    state.missLightboxCategoryById[q.id] = category;
     return { id: q.id, filename: q.filename, missCategory: category };
   });
-  missLightboxCurrent = { photoId: p.id, category: category };
+  state.missLightboxCurrent = { photoId: p.id, category: category };
 
-  if (typeof openLightbox !== 'function') return;
-  // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
-  // and the mouseup zoom-out path sets it to true. Without resetting here, a stale
-  // true from a prior session would swallow the first click-to-zoom.
-  window._lightboxZoomHandled = false;
+  if (!hasLightbox()) return;
+  // shared.js resets the lightbox's click-to-zoom latch before opening.
   openLightbox(p.id, p.filename || '', photoList);
 }
 
-function bindMissLightboxTracking() {
+export function bindMissLightboxTracking() {
   document.addEventListener('lightbox:photochanged', function(e) {
     var photoId = e && e.detail ? e.detail.photoId : null;
-    var cat = photoId != null ? missLightboxCategoryById[photoId] : null;
-    missLightboxCurrent = cat && photoId != null ? { photoId: photoId, category: cat } : null;
+    var cat = photoId != null ? state.missLightboxCategoryById[photoId] : null;
+    state.missLightboxCurrent = cat && photoId != null ? { photoId: photoId, category: cat } : null;
   });
 
   document.addEventListener('lightbox:closed', function() {
-    missLightboxCurrent = null;
+    state.missLightboxCurrent = null;
   });
 }
 
 function getFocusedMiss() {
-  if (focusedCategory == null || focusedIndex < 0) return null;
-  return (missesData[focusedCategory] || [])[focusedIndex] || null;
+  if (state.focusedCategory == null || state.focusedIndex < 0) return null;
+  return (state.missesData[state.focusedCategory] || [])[state.focusedIndex] || null;
 }
 
-function getActiveSelection() {
-  if (selection.size > 0) return Array.from(selection);
+export function getActiveSelection() {
+  if (state.selection.size > 0) return Array.from(state.selection);
   var focused = getFocusedMiss();
   return focused ? [focused.id] : [];
 }
 
-/** @param {number} photoId */ function openPhotoInBrowse(photoId) {
+/** @param {number} photoId */ export function openPhotoInBrowse(photoId) {
   photoId = parseInt(String(photoId), 10);
   if (isNaN(photoId)) return;
   window.location.href = '/browse?photo_id=' + encodeURIComponent(photoId);
 }
 
-function openSelectionInBrowse() {
+export function openSelectionInBrowse() {
   var ids = getActiveSelection();
   if (ids.length !== 1) return;
   if (ids[0] !== undefined) openPhotoInBrowse(ids[0]);
 }
 
-function openFocusedMissInBrowse() {
+export function openFocusedMissInBrowse() {
   var focused = getFocusedMiss();
   if (!focused) return;
   openPhotoInBrowse(focused.id);
 }
 
-/** @param {boolean} fullscreen */ function openBrowseShortcutPhoto(fullscreen) {
+/** @param {boolean} fullscreen */ export function openBrowseShortcutPhoto(fullscreen) {
   var focused = getFocusedMiss();
   if (!focused) return false;
-  openMiss(focusedCategory, focusedIndex);
-  if (fullscreen && typeof requestLightboxFullscreen === 'function') {
-    requestLightboxFullscreen();
-  }
+  openMiss(state.focusedCategory, state.focusedIndex);
+  if (fullscreen) requestLightboxFullscreen();
   return true;
 }
 
@@ -80,12 +79,12 @@ function openFocusedMissInBrowse() {
  * bulk-reject section clear) so a follow-up bulk P/X/U via selection can't
  * silently act on photos the user no longer sees as selected. The async
  * loadMisses() prune doesn't cover this window. */
-function pruneSelectionToVisible() {
-  if (selection.size === 0) return;
-  selection.forEach(function(id) {
+export function pruneSelectionToVisible() {
+  if (state.selection.size === 0) return;
+  state.selection.forEach(function(id) {
     var stillVisible = CATEGORY_ORDER.some(function(c) {
-      return (missesData[c] || []).some(function(p) { return p.id === id; });
+      return (state.missesData[c] || []).some(function(p) { return p.id === id; });
     });
-    if (!stillVisible) selection.delete(id);
+    if (!stillVisible) state.selection.delete(id);
   });
 }

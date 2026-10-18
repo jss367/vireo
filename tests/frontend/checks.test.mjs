@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import {ESLint} from 'eslint';
 
@@ -48,3 +49,67 @@ test('third-party scripts are excluded from application lint', async () => {
   assert.equal(await eslint.isPathIgnored('vireo/static/vendor/fuse.min.js'), true);
   assert.equal(await eslint.isPathIgnored('vireo/static/browse/grid.js'), false);
 });
+
+// Module pages (frontend-module-pages.json): ES modules that share nothing
+// through globals. Every listed page gets these rules from eslint.config.mjs.
+const modulePages = JSON.parse(readFileSync(new URL('../../frontend-module-pages.json', import.meta.url), 'utf8'));
+
+for (const [page, contract] of Object.entries(modulePages)) {
+  const pageFile = `vireo/static/${page}/render.js`;
+  const shim = `vireo/static/${page}/shared.js`;
+
+  test(`${page}: module page files parse as modules and reject undeclared globals`, async () => {
+    const messages = await lint('import { a } from "./a.js"; export const b = a; escapeHtml(b);', pageFile);
+    assert.deepEqual(messages.map(message => message.ruleId), ['no-undef']);
+  });
+
+  test(`${page}: module page files may not assign globals`, async () => {
+    const messages = await lint(
+      'window.x = 1; window["y"] = 2; globalThis.z = 3; Object.assign(window, {});'
+        + ' window.location.href = "/"; document.title = "t";',
+      pageFile,
+    );
+    assert.deepEqual(messages.map(message => message.ruleId), Array(4).fill('no-restricted-syntax'));
+  });
+
+  test(`${page}: module page files may not use inline event handlers`, async () => {
+    const messages = await lint(
+      'export const a = \'<div onclick="go()">\'; export const b = `<b ondblclick="x">`;'
+        + ' document.body.onclick = null; document.body.setAttribute("onclick", "x");'
+        + ' export const c = "<button type=button>";',
+      pageFile,
+    );
+    assert.deepEqual(messages.map(message => message.ruleId), Array(4).fill('no-restricted-syntax'));
+  });
+
+  test(`${page}: shared.js writes only the listed hooks and shared latches`, async () => {
+    const allowed = [...contract.pageHooks, ...contract.sharedWrites]
+      .map(name => `window.${name} = null;`).join(' ');
+    assert.deepEqual(await lint(allowed, shim), []);
+    const messages = await lint(`window.notAHook = 1; window["${contract.pageHooks[0]}"] = 2;`, shim);
+    assert.deepEqual(messages.map(message => message.ruleId), ['no-restricted-syntax', 'no-restricted-syntax']);
+  });
+}
+
+
+for (const page of Object.keys(modulePages)) {
+  for (const file of ['render.js', 'shared.js']) {
+    test(`${page}/${file}: global mutation forms are rejected`, async () => {
+      const messages = await lint(
+        'window.x++; --globalThis.y; delete self.z; Reflect.set(window, "x", 1);'
+          + ' Reflect.defineProperty(self, "y", {}); Reflect.deleteProperty(globalThis, "z");',
+        `vireo/static/${page}/${file}`,
+      );
+      assert.deepEqual(messages.map(message => message.ruleId), Array(6).fill('no-restricted-syntax'));
+    });
+    test(`${page}/${file}: mixed-case inline handler forms are rejected`, async () => {
+      const messages = await lint(
+        'export const a = \'<div ONCLICK="go()">\'; export const b = `<b OnDblClick="x">`;'
+          + ' document.body.OnClick = null; document.body["ONCLICK"] = null;'
+          + ' document.body.setAttribute("OnClick", "x");',
+        `vireo/static/${page}/${file}`,
+      );
+      assert.deepEqual(messages.map(message => message.ruleId), Array(5).fill('no-restricted-syntax'));
+    });
+  }
+}

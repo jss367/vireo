@@ -1,0 +1,16 @@
+{
+  "misses": {
+    "route": "/misses",
+    "template": "misses.html",
+    "pageHooks": [
+      "afterHistoryChange",
+      "getActiveSelection",
+      "handleMissesLightboxFlagShortcut",
+      "loadMisses",
+      "openBrowseShortcutPhoto"
+    ],
+    "sharedWrites": [
+      "_lightboxZoomHandled"
+    ]
+  }
+}

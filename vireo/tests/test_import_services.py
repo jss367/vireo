@@ -56,7 +56,7 @@ def test_restart_in_place_reuses_catalog_and_restores_settings(import_service, t
     assert next(row["id"] for row in rows if row["filename"] == "saved.jpg") == saved_id
     assert set(job["result"]["photo_ids"]) == {row["id"] for row in rows}
     assert job["result"]["tagging"]["tagged_photos"] == 2
-    assert {photo["id"] for photo in db.get_collection_photos(
+    assert {photo["id"] for photo in db.collections.get_photos(
         job["result"]["collection_id"], per_page=100,
     )} == {row["id"] for row in rows}
 
@@ -547,7 +547,9 @@ def test_workspace_setup_failure_rolls_back_created_workspace(
     def broken(*args, **kwargs):
         raise RuntimeError("collections unavailable")
 
-    monkeypatch.setattr(db, "create_default_collections", broken)
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "create_defaults", broken)
     body = _source_body(tmp_path, method, "Half made")
     body["after_import"] = None
 

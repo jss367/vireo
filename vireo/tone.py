@@ -41,6 +41,10 @@ single-pass shader. Whites/Blacks remain point curves.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
+from typing import Any
+
 import numpy as np
 
 # --- constants (keep in sync with the live-preview shader) ---------------------
@@ -637,26 +641,59 @@ def _display_referred_ops(
     return disp
 
 
+@dataclass(frozen=True)
+class ToneAdjustments:
+    """The global tone and color controls of an edit recipe.
+
+    Each field is a recipe ``adjustments`` key; the defaults leave the
+    image unchanged. See :func:`apply_adjustments` for what each does.
+    """
+
+    exposure: float = 0.0
+    white_balance: Mapping[str, Any] | None = None
+    highlights: float = 0.0
+    shadows: float = 0.0
+    whites: float = 0.0
+    blacks: float = 0.0
+    contrast: float = 0.0
+    vibrance: float = 0.0
+    saturation: float = 0.0
+    tone_curve: Any = None
+    point_curves: Any = None
+    point_color: Any = None
+    hsl: Any = None
+    color_grading: Any = None
+
+    @classmethod
+    def from_mapping(cls, adjustments: Mapping[str, Any]) -> ToneAdjustments:
+        """The controls present in a recipe's ``adjustments`` dict.
+
+        Keys that are not tone controls are ignored; a missing key keeps the
+        field's default, the same as ``adjustments.get(name, default)``.
+        """
+        return cls(**{f.name: adjustments[f.name] for f in fields(cls) if f.name in adjustments})
+
+
+@dataclass(frozen=True)
+class LocalAdjustments:
+    """Mask-weighted deltas on top of a :class:`ToneAdjustments`.
+
+    ``weight`` is the per-pixel subject weight shaped like the image's
+    spatial dims; ``subject`` / ``background`` map control names (exposure,
+    highlights, shadows, contrast, saturation) to deltas applied at weight
+    ``w`` and ``1 - w``. With neither delta set the global path runs.
+    """
+
+    weight: Any
+    subject: Mapping[str, Any] | None = None
+    background: Mapping[str, Any] | None = None
+
+
 def apply_adjustments(
     rgb,
+    adjustments: ToneAdjustments | None = None,
     *,
-    exposure=0.0,
-    white_balance=None,
-    highlights=0.0,
-    shadows=0.0,
-    whites=0.0,
-    blacks=0.0,
-    contrast=0.0,
-    vibrance=0.0,
-    saturation=0.0,
-    tone_curve=None,
-    point_curves=None,
-    point_color=None,
-    hsl=None,
-    color_grading=None,
-    local_weight=None,
-    local_subject=None,
-    local_background=None,
+    local: LocalAdjustments | None = None,
     input_linear=False,
     range_radius=0,
 ):
@@ -665,6 +702,14 @@ def apply_adjustments(
     Args:
         rgb: float array shaped ``(..., 3)``. Normally sRGB-encoded [0,1];
             ``input_linear=True`` accepts scene-linear RAW data above white.
+        adjustments: the global controls (``ToneAdjustments``, fields below);
+            None leaves every control at its default.
+        local: mask-weighted deltas (``LocalAdjustments``), or None for the
+            global-only path; see below.
+        input_linear: True when ``rgb`` is scene-linear rather than sRGB.
+        range_radius: guided-filter radius in image pixels; zero uses point curves.
+
+    ``ToneAdjustments`` fields:
         exposure: stops of exposure (linear gain ``2 ** exposure``).
         white_balance: dict with ``temperature``/``tint`` in [-100, 100], or None.
         highlights: [-100, 100]; perceptual-luminance highlight adjustment.
@@ -679,14 +724,13 @@ def apply_adjustments(
         point_curves: composite and RGB channel [input, output] control points.
         point_color: sampled HSL colors with selection ranges and adjustments.
         color_grading: shadow/midtone/highlight hue and saturation tints.
-        range_radius: guided-filter radius in image pixels; zero uses point curves.
 
     Returns:
         float32 array, same shape, sRGB-encoded and clipped to [0,1].
 
-    Local (mask-weighted) adjustments: ``local_weight`` is a per-pixel
+    Local (mask-weighted) adjustments: ``local.weight`` is a per-pixel
     subject weight shaped ``(..., )`` matching the image's spatial dims;
-    ``local_subject`` / ``local_background`` are dicts of *deltas* on top of
+    ``local.subject`` / ``local.background`` are dicts of *deltas* on top of
     the global values (keys: exposure, highlights, shadows, contrast,
     saturation). Effective per-pixel amounts are
     ``global + subject·w + background·(1−w)``, clamped to each control's
@@ -696,47 +740,31 @@ def apply_adjustments(
     execution uses the global-only path.
     """
     rgb = np.asarray(rgb, dtype=np.float32)
+    if adjustments is None:
+        adjustments = ToneAdjustments()
 
-    subject = local_subject or {}
-    background = local_background or {}
-    if local_weight is not None and (subject or background):
+    if local is not None and local.weight is not None and (local.subject or local.background):
         return _apply_adjustments_weighted(
-            rgb,
-            weight=np.asarray(local_weight, dtype=np.float32),
-            subject=subject,
-            background=background,
-            exposure=exposure,
-            white_balance=white_balance,
-            highlights=highlights,
-            shadows=shadows,
-            whites=whites,
-            blacks=blacks,
-            contrast=contrast,
-            vibrance=vibrance,
-            saturation=saturation,
-            tone_curve=tone_curve,
-            point_curves=point_curves,
-            point_color=point_color,
-            hsl=hsl,
-            color_grading=color_grading,
+            rgb, adjustments, local,
             input_linear=input_linear,
             range_radius=range_radius,
         )
 
     # --- scene-referred ops, in linear light ---
     lin = _scene_referred_linear(
-        rgb, exposure=exposure, white_balance=white_balance,
+        rgb, exposure=adjustments.exposure, white_balance=adjustments.white_balance,
         input_linear=input_linear,
     )
 
     # --- perceptually placed range curves, reconstructed in linear RGB ---
-    if highlights or shadows or whites or blacks:
+    a = adjustments
+    if a.highlights or a.shadows or a.whites or a.blacks:
         lin = _apply_range_adjustments_linear(
             lin,
-            highlights=highlights,
-            shadows=shadows,
-            whites=whites,
-            blacks=blacks,
+            highlights=a.highlights,
+            shadows=a.shadows,
+            whites=a.whites,
+            blacks=a.blacks,
             range_radius=range_radius,
         )
 
@@ -744,20 +772,20 @@ def apply_adjustments(
     disp = linear_to_srgb(lin)
     disp = _display_referred_ops(
         disp,
-        contrast=contrast,
-        tone_curve=tone_curve,
-        point_curves=point_curves,
-        hsl=hsl,
-        color_grading=color_grading,
-        vibrance=vibrance,
-        saturation=saturation,
+        contrast=adjustments.contrast,
+        tone_curve=adjustments.tone_curve,
+        point_curves=adjustments.point_curves,
+        hsl=adjustments.hsl,
+        color_grading=adjustments.color_grading,
+        vibrance=adjustments.vibrance,
+        saturation=adjustments.saturation,
     )
 
     # Point Color samples this fully adjusted color, before spatial detail.
     # Keeping it last lets the picker render its exact input by omitting only
     # point_color and the detail controls from the current recipe.
-    if point_color:
-        disp = apply_point_color(disp, point_color)
+    if adjustments.point_color:
+        disp = apply_point_color(disp, adjustments.point_color)
     return np.clip(disp, 0.0, 1.0)
 
 
@@ -773,10 +801,8 @@ _LOCAL_CLAMPS = {
 
 
 def _apply_adjustments_weighted(
-    rgb, *, weight, subject, background, exposure, white_balance,
-    highlights, shadows, whites, blacks, contrast, vibrance, saturation,
-    tone_curve, point_curves, point_color, hsl, color_grading, input_linear=False,
-    range_radius=0,
+    rgb, adjustments: ToneAdjustments, local: LocalAdjustments, *,
+    input_linear=False, range_radius=0,
 ):
     """Local (mask-weighted) variant of :func:`apply_adjustments`.
 
@@ -784,7 +810,9 @@ def _apply_adjustments_weighted(
     path; controls with deltas run the identical formulas with a per-pixel
     amount map. The optional range filter shares the same image guide.
     """
-    w = weight[..., None]
+    a = adjustments
+    subject, background = local.subject or {}, local.background or {}
+    w = np.asarray(local.weight, dtype=np.float32)[..., None]
 
     def amount_map(name, global_value):
         """Per-pixel amount for a control, or None to use the scalar path."""
@@ -801,18 +829,18 @@ def _apply_adjustments_weighted(
     # --- scene-referred ops, in linear light ---
     lin_pre = rgb if input_linear else srgb_to_linear(rgb)
     lin = lin_pre
-    ev_map = amount_map("exposure", exposure)
+    ev_map = amount_map("exposure", a.exposure)
     if ev_map is not None:
         lin = lin * np.exp2(ev_map)
         max_gain = 2.0 ** float(np.max(ev_map))
     else:
-        exp_gain = 2.0 ** float(exposure)
-        if exposure:
+        exp_gain = 2.0 ** float(a.exposure)
+        if a.exposure:
             lin = lin * np.float32(exp_gain)
         max_gain = exp_gain
     gr = gg = gb = 1.0
-    if white_balance:
-        gr, gg, gb = white_balance_gains(white_balance)
+    if a.white_balance:
+        gr, gg, gb = white_balance_gains(a.white_balance)
         lin = lin * np.array([gr, gg, gb], dtype=np.float32)
     # Same push-gate and monotonicity clamp as the global path; with a
     # per-pixel gain the clamp is already per-pixel-correct, and gating on
@@ -824,51 +852,51 @@ def _apply_adjustments_weighted(
         lin = np.maximum(rolled, np.minimum(lin_pre, lin))
 
     # --- perceptually placed range curves, reconstructed in linear RGB ---
-    hi_amt = amount_map("highlights", highlights)
-    sh_amt = amount_map("shadows", shadows)
-    hi_arg = highlights if hi_amt is None else hi_amt
-    sh_arg = shadows if sh_amt is None else sh_amt
-    if np.any(hi_arg) or np.any(sh_arg) or whites or blacks:
+    hi_amt = amount_map("highlights", a.highlights)
+    sh_amt = amount_map("shadows", a.shadows)
+    hi_arg = a.highlights if hi_amt is None else hi_amt
+    sh_arg = a.shadows if sh_amt is None else sh_amt
+    if np.any(hi_arg) or np.any(sh_arg) or a.whites or a.blacks:
         lin = _apply_range_adjustments_linear(
             lin,
             highlights=hi_arg,
             shadows=sh_arg,
-            whites=whites,
-            blacks=blacks,
+            whites=a.whites,
+            blacks=a.blacks,
             range_radius=range_radius,
         )
 
     # --- display-referred ops, in sRGB ---
     disp = linear_to_srgb(lin)
-    c_amt = amount_map("contrast", contrast)
+    c_amt = amount_map("contrast", a.contrast)
     if c_amt is not None:
         disp = (disp - 0.5) * (1.0 + c_amt / 100.0) + 0.5
-    elif contrast:
-        c = np.float32(1.0 + float(contrast) / 100.0)
+    elif a.contrast:
+        c = np.float32(1.0 + float(a.contrast) / 100.0)
         disp = (disp - 0.5) * c + 0.5
-    if tone_curve:
-        disp = apply_tone_curve(disp, tone_curve)
-    if point_curves:
-        disp = apply_point_curves(disp, point_curves)
-    if hsl:
-        disp = apply_hsl_mixer(disp, hsl)
-    if color_grading:
-        disp = apply_color_grading(disp, color_grading)
-    if vibrance:
-        disp = apply_vibrance(disp, vibrance)
-    s_amt = amount_map("saturation", saturation)
+    if a.tone_curve:
+        disp = apply_tone_curve(disp, a.tone_curve)
+    if a.point_curves:
+        disp = apply_point_curves(disp, a.point_curves)
+    if a.hsl:
+        disp = apply_hsl_mixer(disp, a.hsl)
+    if a.color_grading:
+        disp = apply_color_grading(disp, a.color_grading)
+    if a.vibrance:
+        disp = apply_vibrance(disp, a.vibrance)
+    s_amt = amount_map("saturation", a.saturation)
     if s_amt is not None:
         s = np.maximum(0.0, 1.0 + s_amt / 100.0).astype(np.float32)
         luma = _luma(disp)
         disp = luma + (disp - luma) * s
-    elif saturation:
-        s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
+    elif a.saturation:
+        s = np.float32(max(0.0, 1.0 + float(a.saturation) / 100.0))
         luma = _luma(disp)
         disp = luma + (disp - luma) * s
 
     # Point Color samples this fully adjusted color, before spatial detail.
     # Keeping it last lets the picker render its exact input by omitting only
     # point_color and the detail controls from the current recipe.
-    if point_color:
-        disp = apply_point_color(disp, point_color)
+    if a.point_color:
+        disp = apply_point_color(disp, a.point_color)
     return np.clip(disp, 0.0, 1.0)
