@@ -4,6 +4,14 @@
             {
                 "code": "reportArgumentType",
                 "range": {
+                    "startColumn": 21,
+                    "endColumn": 32,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportArgumentType",
+                "range": {
                     "startColumn": 36,
                     "endColumn": 44,
                     "lineCount": 1
@@ -188,24 +196,6 @@
                 }
             }
         ],
-        "./vireo/services/gps_locations.py": [
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 36,
-                    "endColumn": 39,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./vireo/services/import_in_place.py": [
             {
                 "code": "reportArgumentType",
@@ -282,32 +272,6 @@
                 "range": {
                     "startColumn": 15,
                     "endColumn": 25,
-                    "lineCount": 1
-                }
-            }
-        ],
-        "./vireo/services/preview_workers.py": [
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 39,
-                    "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 46,
-                    "endColumn": 50,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 73,
-                    "endColumn": 77,
                     "lineCount": 1
                 }
             }

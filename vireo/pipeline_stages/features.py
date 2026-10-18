@@ -1037,7 +1037,7 @@ class _MaskPass:
         # Subject switching (subjects.sync_primary)
         # clears both active_mask_variant AND
         # dino_subject_embedding atomically inside
-        # ``_clear_primary_features``, so an
+        # ``db.subjects.clear_primary_features``, so an
         # active_mask_variant that still equals
         # sam2_variant is enough to prove the
         # denormalised subject state is fresh —
