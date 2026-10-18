@@ -148,7 +148,9 @@ def broad_handlers(tree):
                 visit(child, local, local)
             return
         if isinstance(node, ast.ClassDef):
-            local = _scope_bindings(node.body, bindings)
+            # Class namespaces are not enclosing lexical scopes for a nested
+            # class, just as they are not for methods.
+            local = _scope_bindings(node.body, lexical)
             for child in node.body:
                 visit(child, local, lexical)
             return
@@ -364,6 +366,9 @@ def test_documented_roots_exist():
     ("def f():\n    from contextlib import suppress as quiet\n    with quiet(Exception): pass\n", 1),
     ("from contextlib import suppress\nitems = [suppress for suppress in values]\nwith suppress(Exception): pass\n", 1),
     ("import contextlib as ctx\nitems = {ctx: 1 for ctx in values}\nwith ctx.suppress(Exception): pass\n", 1),
+    ("import contextlib as ctx\nclass Outer:\n    ctx = other\n    class Inner:\n        with ctx.suppress(Exception): pass\n", 1),
+    ("def f():\n    import contextlib as ctx\n    class Outer:\n        ctx = other\n        class Inner:\n            with ctx.suppress(Exception): pass\n", 1),
+    ("import contextlib as ctx\nclass Outer:\n    class Inner:\n        ctx = other\n        with ctx.suppress(Exception): pass\n", 0),
 ])
 def test_broad_handler_detection(source, count):
     assert len(broad_handlers(ast.parse(source))) == count
