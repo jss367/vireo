@@ -29,8 +29,6 @@
   "services/folder_moves.py:FolderMoves._run_move_job": 18,
   "services/folder_moves.py:FolderMoves.start_job": 20,
   "services/import_in_place.py:_admit_in_place_job": 17,
-  "tone.py:_apply_adjustments_weighted": 20,
-  "tone.py:apply_adjustments": 20,
   "web/export.py:_photo_export_work": 14,
   "web/imports.py:_DuplicateCheckStream.__init__": 13,
   "web/job_launchers.py:create_job_launchers_blueprint": 14
