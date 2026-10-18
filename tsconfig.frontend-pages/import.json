@@ -9,6 +9,7 @@
     "../vireo/static/import/form.js",
     "../vireo/static/import/jobs.js",
     "../vireo/static/import/loading.js",
+    "../vireo/static/import/locations.js",
     "../vireo/static/import/new-images.js",
     "../vireo/static/import/preview-grid.js",
     "../vireo/static/import/preview.js",

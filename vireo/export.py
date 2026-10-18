@@ -751,7 +751,7 @@ class _PhotoExportBatch:
     def _load_catalog(self, db):
         """Fetch catalog data once for the whole batch."""
         self.photos_map = db.photos.get_by_ids(self.photo_ids)
-        self.folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        self.folders = {f["id"]: f["path"] for f in db.folders.tree()}
         self.exif_data_map = _get_photo_exif_data(db, self.photo_ids)
         self.camera_data_map = (
             _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
@@ -1380,7 +1380,7 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
     if os.path.exists(new_subdir):
         # Target already exists — this is the merge case (e.g.
         # `/api/folders/<id>/relocate` routing through
-        # `db._merge_into_existing`). Move individual files into the
+        # `db.folders.merge_into_existing`). Move individual files into the
         # target so reassigned photos still resolve to their developed
         # render instead of being stranded under the old key. On
         # filename collision the target wins, matching the DB merge's
@@ -2181,7 +2181,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
     )
 
     photos_map = db.photos.get_by_ids(photo_ids)
-    folders = {folder["id"]: folder["path"] for folder in db.get_folder_tree()}
+    folders = {folder["id"]: folder["path"] for folder in db.folders.tree()}
     species_map = db.keywords.get_species_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)
     edit_recipes = db.edits.get_photo_recipes(photo_ids)

@@ -1,15 +1,18 @@
 """Bulk location assignment from EXIF GPS, and the reverse-geocode cache codec.
 
-``/api/batch/location/from-exif`` (preview and apply), the location-review
-EXIF suggestions and the post-import GPS location step all turn photos'
-EXIF coordinates into Google places the same way: skip photos that already
-carry a location keyword, reverse-geocode each remaining photo through the
-DB's ~110m grid cache (one lookup per grid cell per request), and group the
-photos by resolved ``place_id``.
+``/api/batch/location/from-exif`` (preview and apply) and the location-review
+EXIF suggestions turn photos' EXIF coordinates into Google places the same
+way: skip photos that already carry a location keyword, name each remaining
+photo's place (``places.reverse_geocode``: a nearby park or a named area,
+never a street address) through the DB's ~110m grid cache (one lookup per
+grid cell per request), and group the photos by resolved ``place_id``. The
+import page's suggestions (``services.import_locations``) share the cache
+through :func:`resolve_place_for_point`.
 
-The cache rows are tagged with the Google result language they were fetched
-under (``encode_cached_reverse_geocode`` / ``decode_cached_reverse_geocode``)
-so a change to the "prefer English" setting refreshes stale entries; the
+The cache rows are tagged with the Google result language and the place
+resolver they were fetched under (``encode_cached_reverse_geocode`` /
+``decode_cached_reverse_geocode``) so a change to the "prefer English"
+setting, or to how places are named, refreshes stale entries; the
 ``/api/places/reverse-geocode`` proxy uses the same codec.
 
 The flows that answer with an error response need the app's ``json_error``
@@ -45,8 +48,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 REVERSE_GEOCODE_CACHE_LANGUAGE_KEY = "_vireo_result_language"
-
-_REVERSE_GEOCODE_CACHE_LEGACY = object()
+REVERSE_GEOCODE_CACHE_RESOLVER_KEY = "_vireo_place_resolver"
+# Which ``places.reverse_geocode`` wrote a cache row. Bump it when the
+# resolver starts naming places differently, so stale names are refetched.
+REVERSE_GEOCODE_CACHE_RESOLVER = "named-place-1"
 
 
 class LocationEditErrors(Protocol):
@@ -73,17 +78,14 @@ def location_keyword_photo_ids(db: Database, photo_ids: Iterable[int]) -> set[in
 
 
 def decode_cached_reverse_geocode(cached: Mapping[str, str | None], language: str | None) -> tuple[bool, JsonDict]:
-    """Return ``(matches_language, details)`` for a cached response.
+    """Return ``(usable, details)`` for a cached response.
 
-    Rows written before the language field existed have no
-    ``_vireo_result_language`` key at all; treat those as compatible
-    with the current preference so a rollout does not silently
-    invalidate every previously cached lookup — and, when no API
-    key is configured, force the caller into the ``no_api_key``
-    branch instead of reusing the cached result. Post-PR writes
-    always include the key (``null`` for the opt-out preference,
-    ``"en"`` for the default), so subsequent preference changes
-    still invalidate correctly.
+    A row is usable only when it was written by the current place resolver
+    (``REVERSE_GEOCODE_CACHE_RESOLVER``) under the current result language.
+    Rows from the old resolver hold the nearest street address, so they are
+    refetched rather than served. The language key is always written
+    (``null`` for the opt-out preference), so a preference change
+    invalidates too.
     """
     try:
         details = json.loads(cached["response"] or "{}")
@@ -91,25 +93,18 @@ def decode_cached_reverse_geocode(cached: Mapping[str, str | None], language: st
         details = {}
     if not isinstance(details, dict):
         details = {}
-    cached_language = details.pop(
-        REVERSE_GEOCODE_CACHE_LANGUAGE_KEY,
-        _REVERSE_GEOCODE_CACHE_LEGACY,
-    )
-    if cached_language is _REVERSE_GEOCODE_CACHE_LEGACY:
-        return True, details
+    cached_language = details.pop(REVERSE_GEOCODE_CACHE_LANGUAGE_KEY, None)
+    resolver = details.pop(REVERSE_GEOCODE_CACHE_RESOLVER_KEY, None)
+    if resolver != REVERSE_GEOCODE_CACHE_RESOLVER:
+        return False, details
     return cached_language == language, details
 
 
 def encode_cached_reverse_geocode(details: object, language: str | None) -> str:
-    """Serialize details with the requested language for cache matching.
-
-    The language key is always written — including as ``null`` for
-    the opt-out preference — so the decoder can distinguish a
-    legacy untagged row from a row explicitly written under
-    ``language=None``.
-    """
+    """Serialize details with the language and resolver for cache matching."""
     payload = dict(details) if isinstance(details, dict) else {}
     payload[REVERSE_GEOCODE_CACHE_LANGUAGE_KEY] = language
+    payload[REVERSE_GEOCODE_CACHE_RESOLVER_KEY] = REVERSE_GEOCODE_CACHE_RESOLVER
     return json.dumps(payload)
 
 
@@ -135,7 +130,18 @@ def resolve_exif_place_for_photo(
         return None, "invalid_gps"
     if not (math.isfinite(lat) and math.isfinite(lng)):
         return None, "invalid_gps"
+    return resolve_place_for_point(db, lat, lng, api_key, language, grid_cache)
 
+
+def resolve_place_for_point(
+    db: Database, lat: float, lng: float, api_key: str, language: str | None,
+    grid_cache: dict[tuple[int, int], ExifPlaceResult],
+) -> ExifPlaceResult:
+    """Name the Google place at a finite (lat, lng) through the grid cache.
+
+    Returns ``(details, reason)`` as :func:`resolve_exif_place_for_photo`
+    does; ``grid_cache`` de-dupes lookups within one request.
+    """
     grid = Database._reverse_geocode_grid(lat, lng)
     if grid in grid_cache:
         return grid_cache[grid]
@@ -170,8 +176,7 @@ def resolve_exif_place_for_photo(
         )
     except places.PlacesTransientError:
         log.warning(
-            "bulk reverse_geocode transient failure for photo=%s lat=%s lng=%s",
-            photo["id"],
+            "bulk reverse_geocode transient failure for lat=%s lng=%s",
             lat,
             lng,
         )
@@ -209,7 +214,12 @@ def summarize_details(details: JsonDict | None) -> str:
         "JustALeaf"  # if no usable parent components
     """
     leaf = (details or {}).get("name", "") or ""
-    components = (details or {}).get("address_components") or []
+    # Postal and plus codes trail the place names in Google's list, and
+    # "92109" says nothing to a reader.
+    components = [
+        comp for comp in (details or {}).get("address_components") or []
+        if not {"postal_code", "postal_code_suffix", "plus_code"} & set((comp or {}).get("types") or [])
+    ]
 
     # Broadest 1-2 parents = last two components (Google orders broad-last).
     tail = components[-2:] if len(components) >= 2 else components[-1:]

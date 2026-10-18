@@ -280,6 +280,7 @@ POST         /api/import/check-duplicates
 POST         /api/import/collection-preview
 POST         /api/import/destination-preview
 POST         /api/import/folder-preview-stream
+POST         /api/import/location-suggestions
 POST         /api/import/new-images-preview
 POST         /api/import/orphaned-staging/verify
 POST         /api/import/pending-archives/<archive_id>/discard

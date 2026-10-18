@@ -49,7 +49,7 @@ def test_scan_discovers_folders(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     paths = [f['path'] for f in folders]
     assert root in paths
     assert os.path.join(root, '2024') in paths
@@ -290,7 +290,7 @@ def test_scan_skips_app_managed_library_bundles(tmp_path):
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
-    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    folder_paths = [f['path'] for f in db.folders.tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
     assert not any('.musiclibrary' in p for p in folder_paths)
     assert not any('Photo Booth Library' in p for p in folder_paths)
@@ -316,7 +316,7 @@ def test_scan_skips_excluded_root_itself(tmp_path):
     scan(root, db)
 
     assert db.photos.list_page(per_page=100) == []
-    assert db.get_folder_tree() == []
+    assert db.folders.tree() == []
 
 
 def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
@@ -341,7 +341,7 @@ def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
     scan(nested_root, db)
 
     assert db.photos.list_page(per_page=100) == []
-    assert db.get_folder_tree() == []
+    assert db.folders.tree() == []
 
 
 def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
@@ -376,7 +376,7 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
 
     photos = db.photos.list_page(per_page=100)
     assert {p['filename'] for p in photos} == {'real.jpg'}
-    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    folder_paths = [f['path'] for f in db.folders.tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
 
 
@@ -473,7 +473,7 @@ def test_scan_skips_symlinked_excluded_bundle_child(tmp_path):
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
-    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    folder_paths = [f['path'] for f in db.folders.tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
     assert not any('LibraryAlias' in p for p in folder_paths)
 
@@ -709,7 +709,7 @@ def test_scan_non_recursive_skips_bundle_children_before_stat(tmp_path):
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
-    folder_paths = [f['path'] for f in db.get_folder_tree()]
+    folder_paths = [f['path'] for f in db.folders.tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
     assert not any('LibraryAlias' in p for p in folder_paths)
 
@@ -847,7 +847,7 @@ def test_scan_updates_folder_counts(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     root_folder = [f for f in folders if f['path'] == root][0]
     sub_folder = [f for f in folders if f['name'] == 'sub'][0]
     assert root_folder['photo_count'] == 2
@@ -6019,7 +6019,7 @@ def test_scan_marks_folder_partial_on_unrecoverable_failure(tmp_path):
 def test_partial_folder_is_visible_in_folder_tree(tmp_path):
     """Folders flagged 'partial' must still render in the browse-page tree.
 
-    get_folder_tree() historically required status='ok'. After marking a
+    folders.tree() historically required status='ok'. After marking a
     folder partial we need it to STILL appear so the user can see the badge
     and initiate a rescan — otherwise 'partial' silently hides the folder.
     """
@@ -6030,7 +6030,7 @@ def test_partial_folder_is_visible_in_folder_tree(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
     db.conn.commit()
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     ids = {row["id"] for row in tree}
     assert fid in ids, "partial folder should still appear in get_folder_tree"
     # Status should be queryable so the UI can render the badge.
@@ -7134,7 +7134,7 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
     # cataloged descendant of the base into the workspace UI (unrelated
     # archive subtrees from prior scans / other workspaces). Now the
     # parent chain up to the scan root just exists in ``folders`` for
-    # ``parent_id`` integrity, and ``get_folder_tree`` walks up through
+    # ``parent_id`` integrity, and ``folders.tree`` walks up through
     # the non-visible base via its recursive CTE so the imported leaf
     # still renders as a top-level sidebar entry.
     assert root_paths == [imported]

@@ -479,7 +479,7 @@ def build_scan_work(
         thread_db = Database(db_path)
         thread_db.set_active_workspace(active_ws)
         # Check folder health before scanning to prevent duplicate imports
-        if thread_db.check_folder_health():
+        if thread_db.folders.check_health():
             invalidate_missing_originals()
 
         run = _ScanJobRun(

@@ -20,6 +20,7 @@ import sqlite3
 
 import pytest
 from db import Database
+from repositories.folders import FolderRepository
 
 
 @pytest.fixture
@@ -331,17 +332,17 @@ def test_move_folder_path_relinks_through_the_facade_after_paths_change(
     root = _folder(db, "/p/q", root=True)
     child = _folder(db, "/p/q/r", root)
     seen = []
-    real = db._relink_parents_by_path
+    real = FolderRepository.relink_parents_by_path
 
-    def recorder(ids):
+    def recorder(self, ids):
         paths = {
             r["id"]: r["path"] for r in db.conn.execute(
                 "SELECT id, path FROM folders WHERE id IN (?, ?)", (root, child))
         }
         seen.append((list(ids), paths))
-        return real(ids)
+        return real(self, ids)
 
-    monkeypatch.setattr(db, "_relink_parents_by_path", recorder)
+    monkeypatch.setattr(FolderRepository, "relink_parents_by_path", recorder)
     db.move_folder_path(root, "/z/q")
     assert seen == [([root, child], {root: "/z/q", child: "/z/q/r"})]
 
@@ -907,7 +908,7 @@ EMPTY_COUNTS = {"new_photos": 0, "new_folders": 0, "merged_folders": 0,
 def test_merge_missing_staged_root_returns_empty_counts_before_workspace(
         db, monkeypatch):
     calls = []
-    monkeypatch.setattr(db, "update_folder_counts", lambda: calls.append(1))
+    monkeypatch.setattr(FolderRepository, "update_counts", lambda self: calls.append(1))
     db.set_active_workspace(None)
     assert db.merge_staged_tree_into_archive(99999, "/arch") == EMPTY_COUNTS
     assert calls == []
@@ -961,14 +962,14 @@ def test_merge_commits_counts_and_invalidates_after_reparent(
     _queue(db, t["staged"], "rating", "4", "2026-01-01 00:00:00", token="tok")
     recorder = _CacheRecorder()
     order = []
-    real_counts = db.update_folder_counts
+    real_counts = FolderRepository.update_counts
 
-    def counts_recorder():
+    def counts_recorder(self):
         order.append(("counts", db.conn.in_transaction))
-        return real_counts()
+        return real_counts(self)
 
     monkeypatch.setattr(db, "_new_images_cache", recorder)
-    monkeypatch.setattr(db, "update_folder_counts", counts_recorder)
+    monkeypatch.setattr(FolderRepository, "update_counts", counts_recorder)
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1005,8 +1006,8 @@ def test_merge_rolls_back_every_reparent_on_error(db, tmp_path, monkeypatch):
         raise RuntimeError("transfer exploded")
 
     monkeypatch.setattr(db, "_transfer_review_state_for_merge", boom)
-    monkeypatch.setattr(db, "update_folder_counts",
-                        lambda: counts_calls.append(1))
+    monkeypatch.setattr(FolderRepository, "update_counts",
+                        lambda self: counts_calls.append(1))
     before_folders = [tuple(r) for r in db.conn.execute(
         "SELECT id, path, parent_id FROM folders ORDER BY id")]
     before_photos = [tuple(r) for r in db.conn.execute(
@@ -1718,7 +1719,6 @@ def test_merge_wires_every_callback_to_the_facade():
         "reconcile_keyword_edits": "_reconcile_conflicting_keyword_edits",
         "transfer_review_state": "_transfer_review_state_for_merge",
         "link_survivor_for_sibling_edits": "_link_survivor_for_sibling_edits",
-        "update_folder_counts": "update_folder_counts",
     }
     call = next(
         node for node in ast.walk(_method_ast("merge_staged_tree_into_archive"))
@@ -1732,13 +1732,16 @@ def test_merge_wires_every_callback_to_the_facade():
     }
     assert wired == expected
     others = {kw.arg for kw in call.keywords} - set(expected)
-    assert others == {"case_insensitive_root", "invalidate_new_images", "KEYWORD_SOURCE_CONFLICT_SQL"}
+    assert others == {"case_insensitive_root", "invalidate_new_images", "KEYWORD_SOURCE_CONFLICT_SQL",
+                      "update_folder_counts"}
+    counts = next(kw.value for kw in call.keywords if kw.arg == "update_folder_counts")
+    assert ast.unparse(counts) == "self.folders.update_counts"
     fold = next(kw.value for kw in call.keywords if kw.arg == "KEYWORD_SOURCE_CONFLICT_SQL")
     assert isinstance(fold, ast.Name) and fold.id == "KEYWORD_SOURCE_CONFLICT_SQL"
 
 
 @pytest.mark.parametrize("name,callback,target", [
-    ("move_folder_path", "relink_parents_by_path", "_relink_parents_by_path"),
+    ("move_folder_path", "relink_parents_by_path", "folders.relink_parents_by_path"),
     ("_reconcile_conflicting_keyword_edits", "carry_keyword_associations",
      "_carry_keyword_associations_for_merge"),
     ("_transfer_review_state_for_merge", "transfer_gps_review",

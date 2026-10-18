@@ -196,6 +196,22 @@ body {
 .staging-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .staging-details { margin: 8px 0 0 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); max-height: 120px; overflow: auto; }
 .import-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.import-location-panel { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.import-location-status { font-size: 13px; color: var(--text-secondary); }
+.import-location-group {
+  display: flex; gap: 10px; align-items: flex-start;
+  border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px;
+}
+.import-location-toggle { margin-top: 4px; }
+.import-location-thumbs { display: flex; gap: 4px; flex-shrink: 0; }
+.import-location-thumbs img {
+  width: 56px; height: 42px; object-fit: cover; border-radius: 3px;
+  background: var(--bg-tertiary);
+}
+.import-location-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.import-location-count { font-size: 13px; font-weight: 600; }
+.import-location-input { width: 100%; max-width: 420px; }
+.import-location-outcome { color: var(--text-primary); }
 .import-tag-chip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 7px; border: 1px solid var(--border-primary);
@@ -338,13 +354,15 @@ body {
       <div class="import-tag-list" id="importTagList"></div>
       <div class="section-divider">
         <label>
-          <input type="checkbox" id="chkLocationFromGps">
-          Add a location tag from each photo's GPS
+          <input type="checkbox" id="chkLocationFromGps" onchange="updateStartGate()">
+          Suggest locations from GPS
         </label>
         <div class="hint" id="locationGpsHint">
-          Vireo resolves each GPS coordinate to a saved place. Photos without
-          GPS or a confident match remain untagged; existing locations are kept.
+          Vireo reads each photo's GPS and suggests a place for each spot,
+          using places you have tagged before first. You see, and can change
+          or skip, every location before importing.
         </div>
+        <div id="importLocationPanel" class="import-location-panel" style="display:none;"></div>
       </div>
       <div class="hint">Tags above are added to every photo included in this import.</div>
     </div>
@@ -545,6 +563,7 @@ body {
 <script defer src="/static/import/jobs.js"></script>
 <script defer src="/static/import/results.js"></script>
 <script defer src="/static/import/new-images.js"></script>
+<script defer src="/static/import/locations.js"></script>
 <script defer src="/static/import/loading.js"></script>
 <script defer src="/static/import/boot.js"></script>
 </body>

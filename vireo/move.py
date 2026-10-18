@@ -2539,7 +2539,7 @@ class _PhotoMove:
         try:
             for i, pid in enumerate(photo_ids):
                 if pause_requested and pause_requested():
-                    db.update_folder_counts()
+                    db.folders.update_counts()
                     if pause_callback:
                         pause_callback()
                 if cancel_check and cancel_check():
@@ -2565,7 +2565,7 @@ class _PhotoMove:
             # Always update folder counts so they stay consistent even if an
             # exception interrupts the move loop after some photos were committed.
             if self.moved > 0:
-                db.update_folder_counts()
+                db.folders.update_counts()
 
         return {"moved": self.moved,
                 "already_in_place": preflight.already_in_place,
@@ -2729,7 +2729,7 @@ class _PhotoCatalogRewrite:
             # nests correctly in the browse tree instead of floating as a root.
             cur = db.moves_merge.insert_folder_if_absent(
                 destination, os.path.basename(destination),
-                db.nearest_ancestor_folder_id(destination),
+                db.folders.nearest_ancestor_id(destination),
             )
             db.commit()
             if cur.rowcount > 0:
@@ -4298,7 +4298,7 @@ class _FolderCatalogRewrite:
         else:
             db.move_folder_path(self.folder_id, self.target.catalog_path,
                                 new_name=self.landing_name)
-        db.update_folder_counts()
+        db.folders.update_counts()
 
     def apply_mtime_corrections(self, mtime_updates):
         """Only now that the rows live at the destination.

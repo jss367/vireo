@@ -3731,7 +3731,7 @@ def test_import_promotes_missing_destination_folder_to_ok(tmp_path):
     just-imported files never appear in the workspace, even though
     safe_to_format goes green.
 
-    Standalone scans run ``check_folder_health()`` as their preflight,
+    Standalone scans run ``folders.check_health()`` as their preflight,
     which handles this globally. The import path calls ``scanner.scan()``
     directly, and scan's success stamp only clears ``'partial'``. So a
     reattached archive drive whose folder rows still say ``'missing'``

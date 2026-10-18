@@ -215,7 +215,7 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
         progress_callback("Computing scene hashes...")
     folders_map = {
         r["id"]: r["path"]
-        for r in db.get_all_folders()
+        for r in db.folders.all_rows()
     }
     for pid in missing_phash:
         if pause_callback:

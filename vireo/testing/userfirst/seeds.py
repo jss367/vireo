@@ -258,7 +258,7 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
 
     Reproduces the condition that caused #597 — ``folders.parent_id`` points
     at a folder that is not linked to the active workspace. Before the
-    ``get_folder_tree`` fix, the child was invisible in the browse sidebar
+    ``folders.tree`` fix, the child was invisible in the browse sidebar
     (stranded under an unreachable parent bucket). After the fix, the
     child reparents to root and renders.
     """

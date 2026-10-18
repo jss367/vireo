@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from repositories.edit_history import EditHistoryRepository
     from repositories.edits import EditsRepository
     from repositories.exif_search import ExifSearchRepository
+    from repositories.folders import FolderRepository
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
@@ -1252,7 +1253,7 @@ class Database:
             ):
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
-        self.repair_missing_folder_parents()
+        self.folders.repair_missing_parents()
         self.repair_stale_folder_parents()
         self.ensure_default_workspace()
         # Idempotent default-keyword seed. Cheap warm-path (single
@@ -1490,10 +1491,6 @@ class Database:
             return False
         return repo.delete(process_id)
 
-    def repair_missing_folder_parents(self):
-        """Fill parent_id for legacy folder rows whose parent path is known."""
-        self._folder_repository(scoped=False).repair_missing_parents()
-
     def repair_stale_folder_parents(self):
         """Repair parent links left behind by older folder moves.
 
@@ -1503,9 +1500,7 @@ class Database:
         This runs on startup and is idempotent; no filesystem access or photo
         and workspace membership changes are needed, even for offline paths.
         """
-        updates = self._folder_repository(scoped=False).repair_stale_parents(
-            nearest_ancestor_id=self.nearest_ancestor_folder_id,
-        )
+        updates = self._folder_repository().repair_stale_parents()
         if updates:
             log.info("Repaired %d stale folder parent links", len(updates))
         return len(updates)
@@ -1850,39 +1845,6 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
         return cleanup_errors
 
-    def _folder_subtree_ids_by_path(self, folder_id):
-        """Return folder_id plus known descendants, using paths as fallback.
-
-        Older databases can contain child folders whose ``parent_id`` is NULL
-        even though their paths clearly live below a parent. Path-prefix
-        matching keeps recursive workspace roots working for those rows too.
-        Also includes folders whose ``local_folder_mappings.source_path`` lies
-        under the target: staging rebases a descendant's ``folders.path`` under
-        ``local-folders/``, so a pure ``folders.path`` walk would miss it and
-        leave a later ancestor link with no ``workspace_folders`` row for the
-        rebased descendant (:func:`workspace_local_root_ids` and
-        :func:`affected_workspace_ids` both key off that link).
-        """
-        return self._folder_repository(scoped=False).subtree_ids_by_path(
-            folder_id,
-            local_source_descendant_ids=self._local_source_descendant_ids,
-        )
-
-    def _local_source_descendant_ids(self, root_path):
-        """Return folder ids whose local_folder_mappings.source_path is under root_path.
-
-        Staging rebases a descendant folder's ``folders.path`` under
-        ``local-folders/`` but preserves the original location in
-        ``local_folder_mappings.source_path``. Callers that walk descendants by
-        ``folders.path`` (workspace folder linking / materialization) union
-        this in so an ancestor added *after* the rebase still discovers the
-        rebased descendant; otherwise later ``workspace_status``,
-        ``affected_workspace_ids``, and ``workspace_local_root_ids`` reads
-        would omit that workspace and the UI would report the ancestor root
-        as fully remote.
-        """
-        return self._folder_repository(scoped=False).local_source_descendant_ids(root_path)
-
     def _workspace_folder_repository(self):
         """Build the workspace-folder membership repository on this connection.
 
@@ -1952,7 +1914,7 @@ class Database:
         explicitly asks to restore them.
         """
         repo = self._workspace_folder_repository()
-        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        folder_ids = self.folders.subtree_ids_by_path(folder_id)
         if not restore_removed:
             removed = repo.removed_ids(workspace_id)
             # The directly imported/scanned folder is intentional. Known
@@ -2011,7 +1973,7 @@ class Database:
 
     def remove_workspace_folder_tree(self, workspace_id, folder_id):
         """Unlink a folder and its path descendants from a workspace."""
-        folder_ids = self._folder_subtree_ids_by_path(folder_id)
+        folder_ids = self.folders.subtree_ids_by_path(folder_id)
         self._remember_workspace_folder_removals(workspace_id, folder_ids, recursive=True)
         self._workspace_folder_repository().remove_tree(workspace_id, folder_ids)
         # The folder no longer contributes to this workspace's new-images
@@ -2030,7 +1992,7 @@ class Database:
         repo = self._workspace_folder_repository()
         candidate_ids = repo.unlinked_descendant_ids(workspace_id)
         for root_path in repo.linked_paths(workspace_id):
-            candidate_ids.update(self._local_source_descendant_ids(root_path))
+            candidate_ids.update(self.folders.local_source_descendant_ids(root_path))
         if candidate_ids:
             candidate_ids -= repo.linked_ids(workspace_id)
         candidate_ids -= repo.removed_ids(workspace_id)
@@ -2116,7 +2078,7 @@ class Database:
         Returns real ``workspace_folders`` roots only -- folders a workspace
         reaches solely through a ``workspace_photos`` grant are excluded,
         even when they would otherwise appear parentless in
-        ``get_folder_tree``. The audit treats the result as storage roots to
+        ``folders.tree``. The audit treats the result as storage roots to
         walk the filesystem under, and including a grant-only folder would
         let ``/api/audit/untracked`` surface hidden sibling files that
         ``/api/audit/import-untracked`` would then import under a real
@@ -2208,7 +2170,7 @@ class Database:
         moved_folder_ids = []
         seen_folder_ids = set()
         for fid in folder_ids:
-            for subtree_id in self._folder_subtree_ids_by_path(fid):
+            for subtree_id in self.folders.subtree_ids_by_path(fid):
                 if subtree_id in source_folder_ids and subtree_id not in seen_folder_ids:
                     seen_folder_ids.add(subtree_id)
                     moved_folder_ids.append(subtree_id)
@@ -2321,20 +2283,23 @@ class Database:
 
     # -- Folders --
 
-    def _folder_repository(self, *, scoped=True):
+    def _folder_repository(self):
         """Build the folder repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set) for the workspace-scoped reads;
-        catalog-wide methods pass ``scoped=False``. ``commit_with_retry`` and
-        the path helpers are looked up here, so monkeypatches of the ``db``
-        module functions still reach the moved SQL.
+        It receives ``self._ws_id`` uncalled: the workspace-scoped reads
+        (``tree``, ``subtree_ids``, ``missing``, ``count``,
+        ``with_quality_data``) resolve it before any SQL, raising
+        ``RuntimeError`` when none is set, and the catalog-wide methods never
+        resolve it. ``commit_with_retry`` and the path helpers are looked up
+        here, so monkeypatches of the ``db`` module functions still reach the
+        moved SQL. The merge's carries into other domains (the GPS-review
+        transfer and the embedded-keyword offers) are bound here too.
         """
         from repositories.folders import FolderRepository
 
         return FolderRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             commit_with_retry=commit_with_retry,
             path_for_subtree_match=_path_for_subtree_match,
             stored_parent_path=_stored_parent_path,
@@ -2342,7 +2307,22 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+            transfer_gps_review=self._transfer_gps_review_for_merge,
+            transfer_embedded_offered=self.keywords.transfer_embedded_offered_keys,
+            keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
+
+    @property
+    def folders(self) -> FolderRepository:
+        """The folder rows: ``db.folders.get(folder_id)``, ``db.folders.tree()`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_folder_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it never
+        needs a workspace; the workspace-scoped reads resolve the active one
+        when they run.
+        """
+        return self._folder_repository()
 
     def add_folder(self, path, name=None, parent_id=None, *,
                    workspace_root=True, link_to_workspace=True):
@@ -2362,7 +2342,7 @@ class Database:
 
         Returns the folder id.
         """
-        folder_id = self._folder_repository(scoped=False).add(path, name, parent_id)
+        folder_id = self._folder_repository().add(path, name, parent_id)
         # Auto-link to active workspace
         if link_to_workspace and self._active_workspace_id is not None:
             self.add_workspace_folder(
@@ -2372,23 +2352,6 @@ class Database:
                 restore_removed=False,
             )
         return folder_id
-
-    def get_folder_tree(self):
-        """Return folders for the active workspace.
-
-        Includes folders whose status is ``'ok'`` or ``'partial'`` — a
-        partially-scanned folder must stay in the tree so the browse sidebar
-        can render its badge and the user can trigger a rescan. ``'missing'``
-        folders are still excluded (they go through ``get_missing_folders``).
-
-        ``parent_id`` is rewritten to the nearest ancestor that is also linked
-        to the active workspace AND visible here. If no such ancestor exists,
-        ``parent_id`` is NULL. This keeps the returned set a well-formed tree:
-        callers that group by ``parent_id`` (notably the browse-page folder
-        sidebar) never leave a linked folder dangling under an ancestor that
-        was filtered out of the result.
-        """
-        return self._folder_repository().tree()
 
     def get_folder_subtree_ids(self, folder_id):
         """Return [folder_id, ...descendant_ids] restricted to the active workspace.
@@ -2402,32 +2365,6 @@ class Database:
         workspace will not expand into its active descendants.
         """
         return self._folder_repository().subtree_ids(folder_id)
-
-    def get_folder(self, folder_id):
-        """Return a single folder row by id, or None if not found.
-
-        Not scoped to the active workspace — callers that need workspace
-        scoping should additionally verify membership via
-        ``workspace_folders``.
-        """
-        return self._folder_repository(scoped=False).get(folder_id)
-
-    def get_folder_paths(self, folder_ids):
-        """``{folder_id: stored path}`` for the ids that exist, in any workspace."""
-        return self._folder_repository(scoped=False).paths_by_id(folder_ids)
-    def check_folder_health(self):
-        """Check all folders for existence on disk. Update status column.
-
-        ``'partial'`` is preserved while the path still exists on disk — only
-        a successful rescan clears it. Otherwise the 10-minute health loop
-        would auto-promote a partially-scanned folder back to ``'ok'`` and
-        users would lose the visible marker that tells them to rescan. If
-        the disk path is gone we still flip to ``'missing'`` regardless of
-        prior status, since rescanning won't recover data that isn't there.
-
-        Returns the number of folders whose status changed.
-        """
-        return self._folder_repository(scoped=False).check_health()
 
     # -- Library integrity verification --
 
@@ -2480,10 +2417,6 @@ class Database:
         """
         return self._card_cleanup_repository()
 
-    def get_missing_folders(self):
-        """Return missing folders in the active workspace with photo counts."""
-        return self._folder_repository().missing()
-
     def get_folder_health_version(self):
         """Return the monotonic version for folder-health-visible changes."""
         value = self.get_meta("folder_health_version")
@@ -2501,7 +2434,7 @@ class Database:
             # helper used by add_workspace_folder etc.) covers legacy rows
             # whose parent_id is NULL — a plain recursive walk over parent_id
             # would silently drop those subfolders.
-            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
+            subtree_ids = self.folders.subtree_ids_by_path(folder_id)
             if not subtree_ids:
                 return None
             if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
@@ -2529,7 +2462,7 @@ class Database:
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
-        ``'missing'`` — those are surfaced by ``get_missing_folders`` and
+        ``'missing'`` — those are surfaced by ``folders.missing`` and
         listing them per-photo would just duplicate that signal at high cost.
 
         When ``folder_id`` is given, the result is further restricted to
@@ -2537,7 +2470,7 @@ class Database:
         "rescan a specific folder" flow — the user asked about one folder,
         so the deleted-original review must not surface ghosts from unrelated
         parts of the library. Descendant discovery goes through
-        ``_folder_subtree_ids_by_path`` so legacy rows whose ``parent_id`` is
+        ``folders.subtree_ids_by_path`` so legacy rows whose ``parent_id`` is
         NULL still count as descendants of their path-prefixed root. ``None``
         (the default) keeps the whole-workspace behavior.
 
@@ -2577,84 +2510,12 @@ class Database:
         if subtree_clause is None:
             return []
         check_cancelled()
-        rows = self._folder_repository(scoped=False).photos_in_present_folders(
+        rows = self._folder_repository().photos_in_present_folders(
             subtree_clause, params,
         )
         check_cancelled()
         return _scan_missing_photos(
             rows, progress_callback, listing_pass, check_cancelled,
-        )
-
-    def nearest_ancestor_folder_id(self, path, exclude_id=None):
-        """Return the id of the folder whose stored path is the longest proper
-        ancestor of ``path`` (platform-neutral prefix match), or None if no
-        folder row is an ancestor.
-
-        Used to keep ``parent_id`` consistent with ``path`` after relocations
-        and moves. Those operations rewrite a folder's ``path`` but would
-        otherwise leave ``parent_id`` pinned to the OLD location's parent,
-        which mis-nests the folder in the browse tree (e.g. a date folder
-        moved onto another volume staying linked to its original parent).
-        Folder counts are small, so the linear scan is fine.
-        """
-        return self._folder_repository(scoped=False).nearest_ancestor_id(
-            path, exclude_id=exclude_id,
-        )
-
-    def _relink_parents_by_path(self, folder_ids):
-        """Re-derive ``parent_id`` from the current ``path`` for each folder.
-
-        Relocations and merges rewrite ``path`` but leave ``parent_id``
-        pinned to the pre-move parent, which mis-nests the folder in the
-        browse tree. Call this after path rewrites — all affected paths must
-        already be committed to the rows so ancestor lookup sees them.
-        """
-        self._folder_repository(scoped=False).relink_parents_by_path(
-            folder_ids, nearest_ancestor_id=self.nearest_ancestor_folder_id,
-        )
-
-    def relocate_folder(self, folder_id, new_path):
-        """Update folder path and set status to 'ok'.
-
-        Also checks if missing child folders exist at corresponding paths
-        under new_path. If they do, relocates them too.
-
-        If new_path is already tracked by another folder, merges photos from
-        the missing folder into the existing one and removes the missing folder.
-
-        Returns list of child folder dicts that were also relocated.
-        """
-        return self._folder_repository(scoped=False).relocate(
-            folder_id,
-            new_path,
-            merge_into_existing=self._merge_into_existing,
-            relink_parents_by_path=self._relink_parents_by_path,
-        )
-
-    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
-        """Merge photos from a missing folder into an existing folder at the same path.
-
-        - Photos with matching filenames in the target are dropped from source
-        - Other photos are reassigned to the target folder
-        - The source folder entry is deleted
-        - Missing child folders are cascade-relocated using old_path -> new_path
-
-        Returns list of child folder dicts that were also relocated (same as relocate_folder).
-
-        When ``commit`` is False the caller owns the surrounding transaction —
-        used by ``services.local_workspace._restore_catalog`` so the whole
-        catalog restore (merges + rebase + state-row cleanup) commits atomically.
-        """
-        return self._folder_repository(scoped=False).merge_into_existing(
-            source_folder_id,
-            target_folder_id,
-            new_path,
-            commit=commit,
-            transfer_gps_review=self._transfer_gps_review_for_merge,
-            transfer_embedded_offered=(
-                self.keywords.transfer_embedded_offered_keys),
-            relink_parents_by_path=self._relink_parents_by_path,
-            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     # -- Move operations --
@@ -2720,14 +2581,14 @@ class Database:
     def move_folder_path(self, folder_id, new_path, new_name=None):
         """Update a folder's path and cascade to all children.
 
-        Unlike relocate_folder (which only updates missing children),
+        Unlike folders.relocate (which only updates missing children),
         this updates ALL child folders regardless of status. ``new_name`` is
         used when the root folder is renamed as part of the move; descendants
         keep their existing names.
         """
         self._moves_merge_repository().move_folder_path(
             folder_id, new_path, new_name,
-            relink_parents_by_path=self._relink_parents_by_path,
+            relink_parents_by_path=self.folders.relink_parents_by_path,
         )
 
     def _active_ws_root_ancestor_exists(self, workspace_id, path):
@@ -3006,7 +2867,7 @@ class Database:
         workspace only, so without this a sibling workspace would be left
         holding a queued edit on a photo it cannot resolve:
         ``sync._resolve_xmp_paths`` builds its folder map from that
-        workspace's ``get_folder_tree``, and a missing folder resolves to an
+        workspace's ``folders.tree``, and a missing folder resolves to an
         empty path and fails every future sync as inaccessible — queued
         forever, with nothing saying why.
 
@@ -3174,7 +3035,7 @@ class Database:
             invalidate_new_images=lambda workspace_ids: (
                 self._new_images_cache.invalidate_workspaces(
                     self._db_path, workspace_ids)),
-            update_folder_counts=self.update_folder_counts,
+            update_folder_counts=self.folders.update_counts,
             KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -3205,19 +3066,6 @@ class Database:
             )
         return self._moves_merge_repository().query_rule_matches(criteria, workspace_id, move_min_conf)
 
-    def _folders_linked_in_other_workspace(self, folder_ids, active_ws):
-        """Return the subset of folder_ids that any workspace other than
-        active_ws has a workspace_folders link for (root or not).
-
-        Any foreign link — an explicit root import (is_root = 1) or a
-        scanner-materialized descendant of one (is_root = 0) — is evidence
-        the folder is still visible in that workspace, so it must never be
-        deleted, only unlinked. With active_ws None, any link qualifies.
-        """
-        return self._folder_repository(scoped=False).linked_in_other_workspace(
-            folder_ids, active_ws,
-        )
-
     def delete_folder(self, folder_id):
         """Delete a folder, its descendant folders, and all their photos/data.
 
@@ -3225,7 +3073,7 @@ class Database:
         action and the scanner registers every subdirectory with parent_id
         set, so deleting a non-leaf folder row alone trips the FK — and
         descendants of a deleted folder would be unreachable anyway. The
-        subtree is collected by path prefix (``_folder_subtree_ids_by_path``),
+        subtree is collected by path prefix (``folders.subtree_ids_by_path``),
         not a parent_id walk, so legacy rows whose parent_id is NULL but
         whose path lives under the target are deleted too — the same shape
         the workspace link/unlink paths already handle.
@@ -3262,11 +3110,9 @@ class Database:
             # Preserve catalog cleanup/unlink callers with no visible claim,
             # including physical ancestor aliases protected by foreign links.
             raise ValueError("Folder is not linked to the active workspace")
-        deleted_ids, files = self._folder_repository(scoped=False).delete(
+        deleted_ids, files = self._folder_repository().delete(
             folder_id,
             active_ws,
-            subtree_ids_by_path=self._folder_subtree_ids_by_path,
-            linked_in_other_workspace=self._folders_linked_in_other_workspace,
             delete_photos=self.delete_photos,
             remember_removals=self._remember_workspace_folder_removals,
         )
@@ -3641,30 +3487,6 @@ class Database:
         + " working_copy_failed_source"
     )
 
-    def count_folders(self):
-        """Return folder count for the active workspace."""
-        return self._folder_repository().count()
-
-    def count_all_folders(self):
-        """Every folder row in the catalog, in any workspace or status."""
-        return self._folder_repository(scoped=False).count_all()
-
-    def get_all_folders(self):
-        """Rows (``id``, ``path``, ``name``) for every folder, in any workspace or status."""
-        return self._folder_repository(scoped=False).all_rows()
-
-    def get_folder_id_by_path(self, path):
-        """The id of the folder stored at exactly ``path`` (any workspace), or None."""
-        return self._folder_repository(scoped=False).id_by_path(path)
-
-    def get_folder_source_path(self, folder_id):
-        """A folder's pre-staging path (its local-copy root mapping, else ``path``), or None."""
-        return self._folder_repository(scoped=False).source_path(folder_id)
-
-    def count_present_photos_under_path(self, path):
-        """Photos in ``ok``/``partial`` folders at ``path`` or below, in any workspace."""
-        return self._folder_repository(scoped=False).present_photo_count_under(path)
-
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and
@@ -3848,15 +3670,6 @@ class Database:
             min_conf, scope_sql, scope_params, photo_scope_sql,
             photo_scope_params, subtree, self._coverage_select_fragment(),
         )
-
-    def get_photo_ids_under_path(self, path):
-        """Ids of the photos in the folder stored at ``path`` and below it, in any workspace.
-
-        ``path`` is the catalog's spelling of the root (see
-        ``file_identity.catalog_scan_root``); descendants match by exact
-        stored-path prefix with ``\\`` folded to ``/``.
-        """
-        return self._folder_repository(scoped=False).photo_ids_under(path)
 
     def workspace_unlinked_folder_count(self, folder_paths):
         """Count distinct paths in ``folder_paths`` whose folders are not
@@ -6318,17 +6131,6 @@ class Database:
     # Reads the Highlights relabel snapshots before it moves any curation.
     # None of them commits.
 
-    def get_folders_with_quality_data(self):
-        """Return folders with at least one scored photo in their subtree.
-
-        Used to populate the folder dropdown on the highlights page.
-        ``photo_count`` is the count of scored photos across the folder and
-        all of its descendant folders (restricted to folders whose ``status``
-        is ``'ok'``) — matching the subtree scope of
-        :meth:`species_curation.get_highlights_candidates`.
-        """
-        return self._folder_repository().with_quality_data()
-
     def _refuse_cross_type_rename(self, new_name, parent_id, keyword_id):
         """Raise ValueError when a different-type keyword holds the target slot."""
         # No same-type peer, but a DIFFERENT-type peer at the
@@ -8765,10 +8567,6 @@ class Database:
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
         "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
     }
-
-    def update_folder_counts(self):
-        """Recalculate photo_count for all folders."""
-        self._folder_repository(scoped=False).update_counts()
 
     def _resolve_species_by_lineage(self, species_name, expected_ancestors):
         """Pick the species-rank taxon matching ``species_name`` and lineage.

@@ -364,7 +364,7 @@ def _score_sharpness_region(db, raw, vireo_dir):
     if not photo:
         return {"photo_id": photo_id, "sharpness": None, "error": "not found"}
 
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     if not folder:
         return {"photo_id": photo_id, "sharpness": None, "error": "folder not found"}
 
@@ -467,7 +467,7 @@ def _map_visible_photos(db, photos, focus_photo_id, selection_ids):
 def _attach_photo_file_fields(db, photo, result):
     """Add the on-disk path and XMP sidecar fields to a photo detail."""
     # Read XMP sidecar keywords
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     if folder:
         # Full on-disk path: mirrors the folder-join logic in
         # api_files_reveal. Exposed so the browse-grid "Copy Path"
@@ -1487,7 +1487,7 @@ def create_photos_blueprint(
                 photo = thread_db.photos.get(photo_id, verify_workspace=True)
                 if photo is None:
                     raise ValueError("Photo is no longer in this workspace")
-                folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+                folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
                 path = get_canonical_image_path(photo, vireo_dir, folders)
                 count = analyze_photo(thread_db, photo_id, path,
                                       checkpoint=lambda: ctx.checkpoint(job))
@@ -1530,7 +1530,7 @@ def create_photos_blueprint(
         db = get_db()
         run = _OpenExternal(
             db,
-            {f["id"]: f["path"] for f in db.get_folder_tree()},
+            {f["id"]: f["path"] for f in db.folders.tree()},
             os.path.dirname(config["THUMB_CACHE_DIR"]),
             json_error,
         )

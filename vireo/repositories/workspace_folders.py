@@ -15,7 +15,7 @@ active workspace.
 Callers reach the single-statement reads and writes as
 ``db.workspace_folders`` (a fresh repository per access, see
 ``Database.workspace_folders``). ``Database`` keeps the composition: subtree
-discovery (``_folder_subtree_ids_by_path``, ``_local_source_descendant_ids``),
+discovery (``folders.subtree_ids_by_path``, ``folders.local_source_descendant_ids``),
 the removal-set lookup that decides which descendants to link, workspace
 existence checks, and the new-images cache invalidation all run in the façade
 methods, so monkeypatches of those ``Database`` methods still apply. It also
@@ -553,7 +553,7 @@ class WorkspaceFolderRepository:
         its path as a storage root to walk the filesystem under. Folders a
         workspace reaches only through ``workspace_photos`` grants are
         deliberately excluded even when they would otherwise appear
-        parentless in ``get_folder_tree``, since the workspace does not own
+        parentless in ``folders.tree``, since the workspace does not own
         them as scan roots: including a grant-only folder here would let
         ``/api/audit/untracked`` enumerate hidden sibling files and
         ``/api/audit/import-untracked`` create a real ``workspace_folders``

@@ -77,7 +77,7 @@ class _InPlaceOptions:
     """The request's import options, validated before the workspace switch."""
 
     import_tags: list[str]
-    location_from_gps: bool
+    location_choices: list[JsonDict]
     explicit_after_import: bool
     """Whether the request named ``after_import``; when it did not, the
     import workspace's default process is resolved after the switch."""
@@ -126,7 +126,7 @@ def restart_import_in_place(service: ImportService, db: Database, job_id: str) -
         if not isinstance(config, dict):
             return ImportFailure("The original import settings are no longer available", 409)
         body = {key: config[key] for key in (
-            "recursive", "after_import", "tags", "location_from_gps", "allow_missing_exiftool",
+            "recursive", "after_import", "tags", "location_choices", "location_from_gps", "allow_missing_exiftool",
         ) if key in config}
         # Snapshot admission accepts the snapshot id OR explicit roots,
         # never both. Replaying roots would broaden a frozen file selection.
@@ -179,7 +179,7 @@ def enqueue_import_in_place(
         return sources_error
 
     recursive = bool(body.get("recursive", True))
-    import_tags, location_from_gps, tag_options_err = (
+    import_tags, location_choices, tag_options_err = (
         service._validate_import_tag_options(body)
     )
     if tag_options_err is not None:
@@ -217,7 +217,7 @@ def enqueue_import_in_place(
     # Each check above returned on its error, so the casts below hold.
     options = _InPlaceOptions(
         import_tags=cast("list[str]", import_tags),
-        location_from_gps=cast("bool", location_from_gps),
+        location_choices=cast("list[JsonDict]", location_choices),
         explicit_after_import=cast("bool", explicit_after_import),
         after_import=after_import,
         restart_config=restart_config,
@@ -391,7 +391,7 @@ def _admit_in_place_job(
         snapshot_exclusion=in_place_sources.snapshot_exclusion,
         recursive=in_place_sources.recursive,
         import_tags=options.import_tags,
-        location_from_gps=options.location_from_gps,
+        location_choices=options.location_choices,
         after_import=after_import,
         after_import_snapshot=after_import_snapshot,
         thumb_cache_dir=thumb_cache_dir,
@@ -655,7 +655,7 @@ class _InPlaceImportJob:
     snapshot_exclusion: _SnapshotExclusion | None
     recursive: bool
     import_tags: list[str]
-    location_from_gps: bool
+    location_choices: list[JsonDict]
     after_import: int | None
     after_import_snapshot: JsonDict | None
     thumb_cache_dir: str
@@ -673,7 +673,7 @@ class _InPlaceImportJob:
             "after_import": self.after_import,
             "after_import_snapshot": self.after_import_snapshot,
             "tags": self.import_tags,
-            "location_from_gps": self.location_from_gps,
+            "location_choices": self.location_choices,
             "allow_missing_exiftool": bool(
                 body.get("allow_missing_exiftool", False)
             ),
@@ -883,7 +883,7 @@ class _InPlaceImportRun:
     def _start(self, cfg: ModuleType) -> None:
         thread_db = self.thread_db
         thread_db.set_active_workspace(self.plan.active_ws)
-        if thread_db.check_folder_health():
+        if thread_db.folders.check_health():
             self.plan.service.invalidate_missing_originals()
         effective_cfg = thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = effective_cfg.get("pipeline", {})
@@ -1639,7 +1639,7 @@ class _InPlaceImportRun:
         plan = self.plan
         plan.service._apply_import_tags(
             plan.active_ws, self.photo_ids, plan.import_tags,
-            plan.location_from_gps, result, job=self.job, runner=self.runner,
+            plan.location_choices, result, job=self.job, runner=self.runner,
         )
 
     def _cancelled_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:

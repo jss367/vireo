@@ -1452,7 +1452,7 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
                 # IMMEDIATE opened above; a failure below still rolls back
                 # every merge/rebase together instead of leaving a
                 # partially-restored catalog with local-workspace state.
-                db._merge_into_existing(
+                db.folders.merge_into_existing(
                     conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
                 )
 
@@ -1478,12 +1478,12 @@ def _restore_catalog(db: Database, workspace_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db._merge_into_existing(row["id"], existing["id"], target, commit=False)
+                db.folders.merge_into_existing(row["id"], existing["id"], target, commit=False)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])
 
-        db._relink_parents_by_path(relinked)
+        db.folders.relink_parents_by_path(relinked)
         _delete_state_rows(db, workspace_id)
         db.commit()
     except BaseException:

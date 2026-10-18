@@ -8,7 +8,7 @@ file-type, time, pHash and filename signals it ranks on, and, for a photo
 with no stored pHash, the source identity the pHash backfill loads the image
 from; the backfill then stores the hash it computed. Embeddings come from
 ``db.masks_features.get_embedding`` and the folder paths from
-``Database.get_all_folders``.
+``FolderRepository.all_rows``.
 
 Photo rows and predictions are catalog-wide, so the repository takes no
 workspace id. ``set_phash`` does not commit: the backfill commits once per

@@ -153,7 +153,7 @@ class _DetectPass:
                 skipped_wildlife,
             )
         photos = [p for p in photos if p["id"] in kept_ids]
-        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
         self.photos = photos
         self.folders = folders
         self.total = len(photos)

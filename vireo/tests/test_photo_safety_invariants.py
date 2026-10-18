@@ -829,7 +829,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
 
         pid = data.draw(st.sampled_from(self._visible_photo_ids()))
         photo = self.db.photos.get(pid)
-        folder = self.db.get_folder(photo["folder_id"])
+        folder = self.db.folders.get(photo["folder_id"])
         # Keep generated cache files under the thumbnail root, which the
         # disk-copy invariant excludes; source files remain in its snapshot.
         cache_root = os.path.join(self.thumbs, "managed")

@@ -133,7 +133,7 @@ def local_copy_preflight(
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Folder scan cancelled")
         root_folder_id = int(raw_root_id)
-        row = db.get_folder(root_folder_id)
+        row = db.folders.get(root_folder_id)
         if row is None:
             raise LocalWorkspaceError(f"Folder {root_folder_id} was not found")
         source_path = row["path"]
@@ -273,14 +273,14 @@ def local_roots_under_folder(db: Database, folder_id: int) -> list[int]:
 
     Staging rebases the child folder row's ``folders.path`` under
     ``local-folders/``, so a subtree scan on ``folders.path`` (as
-    ``delete_folder``/``relocate_folder`` do) no longer sees it — while
+    ``delete_folder``/``folders.relocate`` do) no longer sees it — while
     ``local_folder_mappings.source_path`` still records the original
     location beneath the ancestor. Callers that must consider every
     affected descendant session (workspace status aggregation, ancestor
     unlink cleanup) use this; guards that only need to refuse on any
     match use :func:`local_root_under_folder` for a cheap short-circuit.
     """
-    row = db.get_folder(folder_id)
+    row = db.folders.get(folder_id)
     if row is None or not row["path"]:
         return []
     folder_path = row["path"]
@@ -523,7 +523,7 @@ def stage_pending_source_paths(
                 continue
         for root_id in sorted(root_ids):
             if root_id not in folder_paths:
-                row = db.get_folder(root_id)
+                row = db.folders.get(root_id)
                 folder_paths[root_id] = row["path"] if row and row["path"] else None
             path = folder_paths[root_id]
             if path and (path, job_ws, status) not in seen_sources:
@@ -641,7 +641,7 @@ def workspace_ids_for_folder_tree(db: Database, root_folder_id: int) -> list[int
     mapping rows are inserted, so stage validation can see jobs running in a
     different workspace that shares the source folder.
     """
-    root = db.get_folder(root_folder_id)
+    root = db.folders.get(root_folder_id)
     if root is None:
         return []
     workspace_ids: set[int] = set()
@@ -802,7 +802,7 @@ def _check_local_destination(
 def _catalog_records(
     db: Database, root_folder_id: int, local_base: Path, vireo_dir: str
 ) -> tuple[list[RootRecord], list[FolderMapping]]:
-    row = db.get_folder(root_folder_id)
+    row = db.folders.get(root_folder_id)
     if row is None:
         raise LocalWorkspaceError("Folder not found")
     source_path = row["path"]
@@ -1064,7 +1064,7 @@ def folder_status(db: Database, root_folder_id: int, vireo_dir: str) -> JsonDict
     root_folder_id = int(root_folder_id)
     covering = local_root_for_folder(db, root_folder_id)
     if covering is None:
-        row = db.get_folder(root_folder_id)
+        row = db.folders.get(root_folder_id)
         source_path = row["path"] if row else None
         workspace_ids = workspace_ids_for_folder_tree(db, root_folder_id)
         return {
@@ -1206,7 +1206,7 @@ def _derive_folder_name(path: str) -> str:
 
 
 def _folder_name_for(db: Database, folder_id: int, fallback_path: str) -> str:
-    row = db.get_folder(int(folder_id))
+    row = db.folders.get(int(folder_id))
     if row and row["name"]:
         return row["name"]
     return _derive_folder_name(fallback_path)
@@ -1214,13 +1214,13 @@ def _folder_name_for(db: Database, folder_id: int, fallback_path: str) -> str:
 
 def _nearest_visible_ancestor(db: Database, folder_id: int, workspace_id: int) -> int | None:
     """Return the nearest ancestor of ``folder_id`` that is linked to
-    ``workspace_id`` and would appear in ``get_folder_tree`` (status ok or
+    ``workspace_id`` and would appear in ``folders.tree`` (status ok or
     partial). Returns ``None`` if no such ancestor exists.
 
     The Browse folder tree drops rows whose status is ``missing`` (see
-    ``get_folder_tree``). A local session whose managed directory is deleted
+    ``folders.tree``). A local session whose managed directory is deleted
     or unmounted has its rebased ``folders.path`` marked missing by
-    ``check_folder_health``, so the requested folder ID vanishes from the
+    ``folders.check_health``, so the requested folder ID vanishes from the
     rendered tree. Callers can attach the LOCAL ISSUE recovery badge to this
     ancestor instead so users still see the affected subtree flagged.
     """
@@ -1239,7 +1239,7 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
         for mapping in mappings:
             conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
-                db._merge_into_existing(
+                db.folders.merge_into_existing(
                     conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
                 )
         for mapping in mappings:
@@ -1256,11 +1256,11 @@ def _restore_catalog(db: Database, root_folder_id: int) -> None:
             )
             existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
-                db._merge_into_existing(row["id"], existing["id"], target, commit=False)
+                db.folders.merge_into_existing(row["id"], existing["id"], target, commit=False)
             else:
                 db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])
-        db._relink_parents_by_path(relinked)
+        db.folders.relink_parents_by_path(relinked)
         _delete_state_rows(db, root_folder_id)
         db.commit()
     except BaseException:
