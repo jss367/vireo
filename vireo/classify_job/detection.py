@@ -5,16 +5,28 @@ detector runs), analyzes the retained subjects, and narrows the detections to
 the classifier's candidates.
 """
 
+from __future__ import annotations
+
 import math
 import os
 import sqlite3
 import time
+from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import compute_sharpness, detect_animals, get_primary_detection, log
 from resource_ledger import ResourceWaitCancelled
 
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Sequence
 
-def _stored_detection_list(db, photo_id, min_conf=None):
+    from classify_job.classify_types import DetectionDict, DetectionMap
+    from db import Database
+    from jobs import JobRunner
+    from services.service_types import JobDict
+
+
+def _stored_detection_list(db: Database, photo_id: int, min_conf: float | None = None) -> list[DetectionDict]:
     """Return a photo's stored detection rows as ``detection_map`` entries.
 
     ``min_conf`` is forwarded to ``db.get_detections`` (``None`` means the
@@ -59,8 +71,11 @@ class _DetectBatchRun:
     so both see the value the detection loop settled on.
     """
 
-    def __init__(self, photos, folders, job, reclassify, db,
-                 det_conf_threshold, already_detected_ids, cached_detections):
+    def __init__(
+        self, photos: Sequence[sqlite3.Row], folders: dict[int, str], job: JobDict,
+        reclassify: bool, db: Database, det_conf_threshold: float | None,
+        already_detected_ids: set[int], cached_detections: DetectionMap,
+    ) -> None:
         self.photos = photos
         self.folders = folders
         self.job = job
@@ -73,7 +88,7 @@ class _DetectBatchRun:
         self.detection_map = {}
         self.processed_ids: set[int] = set()
 
-    def sync_reclassified_subjects(self):
+    def sync_reclassified_subjects(self) -> None:
         # Reclassification already committed detection replacements (or a
         # clear in the standalone caller). Cleanup is required even on Stop;
         # it performs no image decoding or additional inference.
@@ -86,7 +101,7 @@ class _DetectBatchRun:
                 sync_primary(self.db, photo["id"], min_conf=self.det_conf_threshold)
                 self.db.commit_with_retry()
 
-    def analyze_subjects(self, runner, vireo_dir):
+    def analyze_subjects(self, runner: JobRunner | None, vireo_dir: str | None) -> None:
         """Analyze every retained subject after the detection loop.
 
         Includes cached detector runs from older libraries.
@@ -100,7 +115,7 @@ class _DetectBatchRun:
         # subject analyses after cancel would silently publish work past the
         # stop button, so probe before each photo and inside ``analyze_photo``'s
         # lock-guarded commit points via the checkpoint callback.
-        def _subject_analysis_checkpoint():
+        def _subject_analysis_checkpoint() -> None:
             if runner is not None and runner.is_cancelled(job["id"]):
                 raise ResourceWaitCancelled(
                     "Cancelled during subject analysis"
@@ -123,7 +138,7 @@ class _DetectBatchRun:
             )
             raise
 
-    def mark_cached_photos_for_analysis(self):
+    def mark_cached_photos_for_analysis(self) -> None:
         """Queue cached detector runs for subject analysis without a detector.
 
         Detector module unavailable. Skip the detection call itself,
@@ -149,7 +164,7 @@ class _DetectBatchRun:
                     photo["id"], exc_info=True,
                 )
 
-    def detect_photo(self, photo):
+    def detect_photo(self, photo: sqlite3.Row) -> None:
         """Detect one photo, or reuse its prior detector run."""
         folder_path = self.folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
@@ -216,7 +231,7 @@ class _DetectBatchRun:
 
         self.processed_ids.add(photo["id"])
 
-    def _reuse_prior_detections(self, photo):
+    def _reuse_prior_detections(self, photo: sqlite3.Row) -> None:
         # Prefer cached detections from an earlier model in this
         # same pipeline run so that model 2+ is bound to the
         # detection rows just produced, not stale rows from a
@@ -238,7 +253,7 @@ class _DetectBatchRun:
             self.detected += 1
         self.processed_ids.add(photo["id"])
 
-    def _resolve_threshold(self):
+    def _resolve_threshold(self) -> None:
         # Resolve workspace-effective threshold lazily on first actual
         # detection call so a batch where every photo hits the
         # cached/already-detected short-circuit doesn't need a working
@@ -254,7 +269,7 @@ class _DetectBatchRun:
             effective_cfg = self.db.get_effective_config(cfg.load())
             self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
 
-    def _portable_identity(self, photo, detector_runtime):
+    def _portable_identity(self, photo: sqlite3.Row, detector_runtime: str) -> tuple[str | None, str | None]:
         """Return ``(input_fingerprint, photo_hash)`` for a portable run.
 
         Both are ``None`` for the legacy runtime, companion-backed photos,
@@ -282,7 +297,9 @@ class _DetectBatchRun:
                     portable_photo_hash = None
         return portable_input, portable_photo_hash
 
-    def _publish_portable_result(self, photo, detector_runtime, portable_photo_hash):
+    def _publish_portable_result(
+        self, photo: sqlite3.Row, detector_runtime: str, portable_photo_hash: str | None,
+    ) -> None:
         """Publish the committed detector result as a portable artifact.
 
         Publication follows the database commit.  A store failure must
@@ -341,7 +358,9 @@ class _DetectBatchRun:
                 photo["id"], exc_info=True,
             )
 
-    def _detection_list(self, photo, detections, det_ids):
+    def _detection_list(
+        self, photo: sqlite3.Row, detections: list[dict[str, Any]], det_ids: list[int],
+    ) -> list[DetectionDict]:
         """Build the ``detection_map`` entries with database IDs.
 
         Content-addressed IDs can collapse near-duplicate detector outputs
@@ -378,7 +397,7 @@ class _DetectBatchRun:
                 })
         return det_list
 
-    def _score_subject_quality(self, photo, image_path, detections):
+    def _score_subject_quality(self, photo: sqlite3.Row, image_path: str, detections: list[dict[str, Any]]) -> None:
         """Score subject quality from the primary detection."""
         db = self.db
         # Use highest-confidence detection as primary for quality scoring
@@ -443,9 +462,12 @@ class _DetectBatchRun:
         )
 
 
-def _detect_batch(photos, folders, runner, job, reclassify, db,
-                   det_conf_threshold=None, already_detected_ids=None,
-                   cached_detections=None, vireo_dir=None):
+def _detect_batch(
+    photos: Sequence[sqlite3.Row], folders: dict[int, str], runner: JobRunner | None, job: JobDict,
+    reclassify: bool, db: Database, det_conf_threshold: float | None = None,
+    already_detected_ids: set[int] | None = None, cached_detections: DetectionMap | None = None,
+    vireo_dir: str | None = None,
+) -> tuple[DetectionMap, int, set[int]]:
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -492,7 +514,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     try:
         if detect_animals is None or get_primary_detection is None:
             run.mark_cached_photos_for_analysis()
-            detection_photos: list = []
+            detection_photos: Sequence[sqlite3.Row] = []
         else:
             detection_photos = photos
 
@@ -530,7 +552,9 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     return run.detection_map, run.detected, run.processed_ids
 
 
-def _attach_partial_detect_result(exc, detection_map, detected, processed_ids):
+def _attach_partial_detect_result(
+    exc: BaseException, detection_map: DetectionMap, detected: int, processed_ids: set[int],
+) -> None:
     """Record ``_detect_batch``'s committed work on a propagating cancel.
 
     A ``ResourceWaitCancelled`` unwinds past the ``return``, so without this
@@ -539,12 +563,15 @@ def _attach_partial_detect_result(exc, detection_map, detected, processed_ids):
     ``(detection_map, detected_count, processed_ids)`` triple a normal
     return yields.
     """
-    exc.partial_detect_result = (detection_map, detected, processed_ids)
+    # An ad-hoc attribute on the propagating exception, read back with getattr.
+    setattr(exc, "partial_detect_result", (detection_map, detected, processed_ids))  # noqa: B010
 
 
-def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
-                      cached_detections, processed_ids, vireo_dir,
-                      checkpoint):
+def _analyze_subjects(
+    photos: Sequence[sqlite3.Row], folders: dict[int, str], db: Database, reclassify: bool,
+    det_conf_threshold: float | None, cached_detections: DetectionMap, processed_ids: set[int],
+    vireo_dir: str | None, checkpoint: Callable[[], None],
+) -> None:
     """Subject-analysis pass of ``_detect_batch`` (see its comments)."""
     from subjects import analyze_photo
 
@@ -601,7 +628,10 @@ class _DetectSubjectsRun:
     first batch and read back when narrowing to classifier candidates.
     """
 
-    def __init__(self, photos, folders, runner, job, reclassify, db, vireo_dir):
+    def __init__(
+        self, photos: Sequence[sqlite3.Row], folders: dict[int, str], runner: JobRunner,
+        job: JobDict, reclassify: bool, db: Database, vireo_dir: str | None,
+    ) -> None:
         self.photos = photos
         self.folders = folders
         self.runner = runner
@@ -629,7 +659,7 @@ class _DetectSubjectsRun:
         self.detection_map = {}
         self.detected = 0
 
-    def resolve_cached_detector_runs(self):
+    def resolve_cached_detector_runs(self) -> None:
         # Resolve cached-detection state before running MegaDetector so we can skip
         # the weight download entirely when every photo already has a detector_runs
         # row (including empty-scene rows with box_count=0).
@@ -653,13 +683,13 @@ class _DetectSubjectsRun:
         )
         self.job["_detector_runtime_fingerprint"] = detector_runtime
 
-    def reset_job_detect_state(self):
+    def reset_job_detect_state(self) -> None:
         job = self.job
         job["_detect_reused_ids"] = self.reused_stored_ids
         job["_detect_cancelled"] = False
         job["_non_animal_photo_ids"] = set()
 
-    def backfill_cached_subject_analysis(self):
+    def backfill_cached_subject_analysis(self) -> None:
         """Run ``_detect_batch``'s detector-less cached-row pass."""
         import config as cfg
         effective_cfg = self.db.get_effective_config(cfg.load())
@@ -672,7 +702,7 @@ class _DetectSubjectsRun:
             vireo_dir=self.vireo_dir,
         )
 
-    def ensure_detector_weights(self):
+    def ensure_detector_weights(self) -> bool:
         """Download the MegaDetector weights when a photo needs detection.
 
         Returns False when a Stop arrived before the download started.
@@ -713,7 +743,7 @@ class _DetectSubjectsRun:
             )
         return True
 
-    def _weights_download_progress(self, phase, current, total_steps):
+    def _weights_download_progress(self, phase: str, current: int, total_steps: int) -> None:
         self.runner.push_event(
             self.job["id"],
             "progress",
@@ -725,7 +755,7 @@ class _DetectSubjectsRun:
             },
         )
 
-    def detect_photos(self):
+    def detect_photos(self) -> None:
         """Detect each photo in turn, reporting per-photo progress."""
         runner, job, db = self.runner, self.job, self.db
         runner.push_event(
@@ -769,7 +799,7 @@ class _DetectSubjectsRun:
             skipped_det,
         )
 
-    def _detect_photo(self, i, photo, start_time):
+    def _detect_photo(self, i: int, photo: sqlite3.Row, start_time: float) -> int:
         """Detect one photo; truthy when a cached detector run was reused."""
         runner, job, reclassify = self.runner, self.job, self.reclassify
         runner.update_step(
@@ -834,7 +864,7 @@ class _DetectSubjectsRun:
 
         return was_cached and batch_detected
 
-    def _with_stored_boxes(self, photo, batch_map):
+    def _with_stored_boxes(self, photo: sqlite3.Row, batch_map: DetectionMap) -> DetectionMap:
         # Redetection failed for this photo (``detect_animals``
         # returned None, or ``_detect_batch`` swallowed an
         # error) and its stored boxes were left untouched.
@@ -850,7 +880,7 @@ class _DetectSubjectsRun:
             self.reused_stored_ids.add(photo["id"])
         return batch_map
 
-    def report_detection_unavailable(self, e):
+    def report_detection_unavailable(self, e: Exception) -> None:
         """Record an ImportError/RuntimeError and drop to full-image classification."""
         runner, job = self.runner, self.job
         msg = str(e)
@@ -892,7 +922,7 @@ class _DetectSubjectsRun:
         self.detection_map = {}
         self.detected = 0
 
-    def report_detection_failed(self, e):
+    def report_detection_failed(self, e: Exception) -> None:
         """Record an unexpected detection failure and drop to full-image classification."""
         self.runner.push_event(
             self.job["id"],
@@ -909,7 +939,10 @@ class _DetectSubjectsRun:
         self.detected = 0
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+def _detect_subjects(
+    photos: Sequence[sqlite3.Row], folders: dict[int, str], runner: JobRunner, job: JobDict,
+    reclassify: bool, db: Database, vireo_dir: str | None = None,
+) -> tuple[DetectionMap, int]:
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
@@ -995,8 +1028,9 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
 
     detection_map, detected = run.detection_map, run.detected
     if detection_map:
+        # ``detect_photos`` resolves the threshold before it fills the map.
         detection_map, non_animal_ids = _classifier_candidates(
-            detection_map, run.det_conf_threshold,
+            detection_map, cast("float", run.det_conf_threshold),
         )
         job["_non_animal_photo_ids"] = non_animal_ids
         detected = len(detection_map)
@@ -1005,7 +1039,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
     return detection_map, detected
 
 
-def _classifier_candidates(detection_map, floor):
+def _classifier_candidates(detection_map: DetectionMap, floor: float) -> tuple[DetectionMap, set[int]]:
     """Narrow ``detection_map`` to the boxes the classifier should see.
 
     A fresh ``_detect_batch`` run returns every box above the detector's

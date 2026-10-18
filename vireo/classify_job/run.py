@@ -1,16 +1,24 @@
 """The classify job's entry point, ``run_classify_job``, and its phase driver."""
 
+from __future__ import annotations
+
 import time
+from typing import TYPE_CHECKING
 
 from classify_job.common import log
 from classify_job.job_run import _ClassifyJobRun
 from db import Database
 
+if TYPE_CHECKING:
+    from classify_job.common import ClassifyParams
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
+
 
 def run_classify_job(
-    job, runner, db_path, workspace_id, params, vireo_dir=None,
-    computation_cache_dir=None,
-):
+    job: JobDict, runner: JobRunner, db_path: str, workspace_id: int, params: ClassifyParams,
+    vireo_dir: str | None = None, computation_cache_dir: str | None = None,
+) -> JsonDict:
     """Execute classification job. Called by JobRunner in a background thread.
 
     Args:
@@ -64,7 +72,9 @@ def run_classify_job(
         thread_db.close()
 
 
-def _run_classify_phases(classify, job, runner, params):
+def _run_classify_phases(
+    classify: _ClassifyJobRun, job: JobDict, runner: JobRunner, params: ClassifyParams,
+) -> JsonDict:
     """Run ``run_classify_job``'s phases in order and return its result.
 
     Each early return ends the job there: no photos, a cancel before an

@@ -1,11 +1,17 @@
 """Helpers of the classify job run: empty results, the cache peek, heal re-arming."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from classify_job.common import log
 
+if TYPE_CHECKING:
+    from classify_job.classify_types import LabelSetMeta, ModelSpec
 
-def _empty_classify_result(total, detected=0):
+
+def _empty_classify_result(total: int, detected: int = 0) -> dict[str, int]:
     """The result of a run that stored no predictions."""
     return {
         "total": total,
@@ -18,7 +24,7 @@ def _empty_classify_result(total, detected=0):
     }
 
 
-def _rearm_label_desc_heal(peek_model):
+def _rearm_label_desc_heal(peek_model: ModelSpec | None) -> None:
     """Re-arm any pending background self-heal.
 
     Called before the cached-only shortcut returns. The shortcut skips classifier acquisition entirely, so
@@ -54,7 +60,7 @@ def _rearm_label_desc_heal(peek_model):
 class _CachePeek:
     """What the cached-only shortcut checks a run's cached results against."""
 
-    peek_model: dict | None = None
+    peek_model: ModelSpec | None = None
     desired_classifier_model: str | None = None
     # ``model_id_missing`` distinguishes "the requested model really is
     # gone from the catalog" (a stale job referencing a deleted model)
@@ -65,10 +71,10 @@ class _CachePeek:
     model_id_missing: bool = False
     desired_labels_fingerprint: str | None = None
     desired_labels_fingerprint_full: str | None = None
-    peek_labels: list | None = None
+    peek_labels: list[str] | None = None
     peek_use_tol: bool = False
-    peek_label_metas: list[dict] = field(default_factory=list)
+    peek_label_metas: list[LabelSetMeta] = field(default_factory=list)
     peek_succeeded: bool = False
-    desired_model_identity: dict | None = None
+    desired_model_identity: dict[str, Any] | None = None
     detector_confidence: float | None = None
     taxonomy_identity: str | None = None

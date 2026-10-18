@@ -5,15 +5,23 @@ predictions instead of loading a model; the SQL lives in
 ``ModelRunsRepository``.
 """
 
+from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from db import Database
+    from repositories.model_runs import CacheRunFilter
 
 
 def _all_photos_cache_satisfied(
-    db, photo_ids, classifier_model=None, labels_fingerprint=None,
-    detector_confidence=0.0,
-    model_identity=None, labels_fingerprint_full=None,
-    taxonomy_identity="no-tax",
-):
+    db: Database, photo_ids: Sequence[int], classifier_model: str | None = None, labels_fingerprint: str | None = None,
+    detector_confidence: float = 0.0,
+    model_identity: dict[str, Any] | None = None, labels_fingerprint_full: str | None = None,
+    taxonomy_identity: str = "no-tax",
+) -> bool:
     """True when every classifiable detection already has a matching run.
 
     Used to short-circuit model resolution when a bundle import (or an
@@ -107,9 +115,9 @@ def _all_photos_cache_satisfied(
 
 
 def _cache_run_filter(
-    db, photo_ids, classifier_model, labels_fingerprint,
-    model_identity, labels_fingerprint_full, taxonomy_identity,
-):
+    db: Database, photo_ids: Sequence[int], classifier_model: str | None, labels_fingerprint: str | None,
+    model_identity: dict[str, Any] | None, labels_fingerprint_full: str | None, taxonomy_identity: str,
+) -> CacheRunFilter:
     """The classifier_runs filters ``_all_photos_cache_satisfied`` joins on.
 
     Returns ``(filter_sql, filter_args, runtime_clause, runtime_args)``:
@@ -128,8 +136,9 @@ def _cache_run_filter(
 
 
 def _expected_classifier_runtimes(
-    db, photo_ids, model_identity, labels_fingerprint_full, taxonomy_identity,
-):
+    db: Database, photo_ids: Sequence[int], model_identity: dict[str, Any] | None,
+    labels_fingerprint_full: str | None, taxonomy_identity: str,
+) -> set[str]:
     """The classifier runtime_fingerprints a current run would carry.
 
     A classifier runtime encodes (model_identity, labels_full,
@@ -163,7 +172,7 @@ def _expected_classifier_runtimes(
     return expected_runtimes
 
 
-def _accepts_legacy_runtime(model_identity):
+def _accepts_legacy_runtime(model_identity: dict[str, Any] | None) -> bool:
     """Whether ``runtime_fingerprint = 'legacy'`` rows still satisfy the cache.
 
     Only consulted when the coverage queries filter by expected runtimes.
@@ -201,8 +210,9 @@ def _accepts_legacy_runtime(model_identity):
 
 
 def _chunk_has_mixed_identities(
-    db, chunk, run_filter, detector_confidence, distinct_identities,
-):
+    db: Database, chunk: Sequence[int], run_filter: CacheRunFilter, detector_confidence: float,
+    distinct_identities: set[tuple[str, str]],
+) -> bool:
     """Add this chunk's covering (model, fp) pairs; True once two are seen.
 
     Track how many distinct (model, fp) pairs cover this chunk's

@@ -1,7 +1,10 @@
 """``_ClassifyJobRun``: the state and phases of one classify job."""
 
+from __future__ import annotations
+
 import contextlib
 import time
+from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.cache_coverage import _all_photos_cache_satisfied
 from classify_job.cached_only import _finalize_cached_only, _finalize_remaining_steps, _finalize_summary
@@ -19,6 +22,15 @@ from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_
 from classify_job.store_predictions import _store_grouped_predictions
 from models import get_active_model, get_models
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from classify_job.classify_types import AnyClassifier
+    from classify_job.common import ClassifyParams
+    from db import Database
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
+
 
 class _ClassifyJobRun:
     """Run-wide state for one ``run_classify_job`` call.
@@ -29,8 +41,9 @@ class _ClassifyJobRun:
     """
 
     def __init__(
-        self, job, runner, db, params, vireo_dir, computation_cache_dir,
-    ):
+        self, job: JobDict, runner: JobRunner, db: Database, params: ClassifyParams,
+        vireo_dir: str | None, computation_cache_dir: str | None,
+    ) -> None:
         self.job = job
         self.runner = runner
         self.db = db
@@ -40,7 +53,7 @@ class _ClassifyJobRun:
         self.classifier_cache_handle = None
         self.finish_cleared_only = False
 
-    def _progress(self, current, total, current_file, phase, **extra):
+    def _progress(self, current: int, total: int, current_file: str, phase: str, **extra: object) -> None:
         self.runner.push_event(
             self.job["id"],
             "progress",
@@ -54,7 +67,7 @@ class _ClassifyJobRun:
             },
         )
 
-    def cancelled_before_start(self, step_ids):
+    def cancelled_before_start(self, step_ids: Iterable[str]) -> dict[str, int]:
         """Close the not-yet-run steps and report a run that stored nothing."""
         _finalize_remaining_steps(
             self.runner, self.job["id"], step_ids,
@@ -64,7 +77,7 @@ class _ClassifyJobRun:
 
     # -- Phase 1: photos -----------------------------------------------
 
-    def load_photos(self):
+    def load_photos(self) -> None:
         """Phase 1: Get photos from collection.
 
         Runs before model resolution so that a collection fully filtered
@@ -138,7 +151,7 @@ class _ClassifyJobRun:
             summary=f"{self.total} photos",
         )
 
-    def finish_without_photos(self):
+    def finish_without_photos(self) -> dict[str, int]:
         """Skip every later step when filtering left no photos."""
         log.info(
             "Classify job: no photos to process after filtering; "
@@ -155,7 +168,7 @@ class _ClassifyJobRun:
         )
         return _empty_classify_result(0)
 
-    def apply_local_computation_cache(self):
+    def apply_local_computation_cache(self) -> None:
         """Apply the local computation cache before model resolution.
 
         Photos may have been cataloged after a bundle import. Apply any
@@ -186,7 +199,7 @@ class _ClassifyJobRun:
 
     # -- cached-only shortcut ------------------------------------------
 
-    def peek_cache_constraints(self):
+    def peek_cache_constraints(self) -> _CachePeek:
         """Resolve what cached results must match to stand in for this run."""
         peek = _CachePeek()
         self._peek_requested_classifier(peek)
@@ -225,7 +238,7 @@ class _ClassifyJobRun:
         _rearm_label_desc_heal(peek.peek_model)
         return peek
 
-    def _peek_requested_classifier(self, peek):
+    def _peek_requested_classifier(self, peek: _CachePeek) -> None:
         """Resolve the requested classifier, downloaded or not."""
         params = self.params
         try:
@@ -285,7 +298,7 @@ class _ClassifyJobRun:
                 peek.desired_classifier_model = None
                 peek.model_id_missing = False
 
-    def _peek_labels(self, peek):
+    def _peek_labels(self, peek: _CachePeek) -> None:
         """Compute labels_fingerprint from the user-selected label sources.
 
         Done so a cache built from a DIFFERENT label set does not silently
@@ -333,7 +346,7 @@ class _ClassifyJobRun:
             )
             peek.desired_labels_fingerprint = None
 
-    def _peek_model_identity(self, peek):
+    def _peek_model_identity(self, peek: _CachePeek) -> None:
         """Resolve the installed classifier's portable identity.
 
         Done so the cache check can filter classifier_runs by
@@ -368,18 +381,20 @@ class _ClassifyJobRun:
         except (OSError, ValueError):
             peek.desired_model_identity = None
 
-    def cache_satisfied(self, peek):
+    def cache_satisfied(self, peek: _CachePeek) -> bool:
+        # ``peek_cache_constraints`` fills ``detector_confidence`` and
+        # ``taxonomy_identity`` on every peek it returns.
         return _all_photos_cache_satisfied(
             self.db, [p["id"] for p in self.photos],
             classifier_model=peek.desired_classifier_model,
             labels_fingerprint=peek.desired_labels_fingerprint,
-            detector_confidence=peek.detector_confidence,
+            detector_confidence=cast("float", peek.detector_confidence),
             model_identity=peek.desired_model_identity,
             labels_fingerprint_full=peek.desired_labels_fingerprint_full,
-            taxonomy_identity=peek.taxonomy_identity,
+            taxonomy_identity=cast("str", peek.taxonomy_identity),
         )
 
-    def finalize_cached_only(self, peek):
+    def finalize_cached_only(self, peek: _CachePeek) -> JsonDict:
         return _finalize_cached_only(
             self.db, self.runner, self.job, self.params, self.photos,
             classifier_model=peek.desired_classifier_model,
@@ -389,12 +404,12 @@ class _ClassifyJobRun:
             peek_use_tol=peek.peek_use_tol,
             peek_label_metas=peek.peek_label_metas,
             peek_succeeded=peek.peek_succeeded,
-            detector_confidence=peek.detector_confidence,
+            detector_confidence=cast("float", peek.detector_confidence),
         )
 
     # -- Phases 2-4: model, taxonomy, labels, classifier ---------------
 
-    def resolve_model(self):
+    def resolve_model(self) -> None:
         """Resolve model (deferred until we know there is work to do)."""
         params = self.params
         if params.model_id:
@@ -421,7 +436,7 @@ class _ClassifyJobRun:
 
         self.folders = {f["id"]: f["path"] for f in self.db.folders.tree()}
 
-    def load_taxonomy_and_labels(self):
+    def load_taxonomy_and_labels(self) -> None:
         """Phase 2: Load taxonomy. Phase 3: Load labels and fingerprint them."""
         job, runner, thread_db = self.job, self.runner, self.db
         runner.update_step(job["id"], "load_taxonomy", status="running")
@@ -489,7 +504,7 @@ class _ClassifyJobRun:
             self.total, self.effective_name, self.model_str,
         )
 
-    def _factory_cancel_check(self):
+    def _factory_cancel_check(self) -> bool:
         """Pure-cancel probe for the classifier factory.
 
         The factory runs under ``ModelCache._Entry.load_lock``; parking
@@ -506,7 +521,7 @@ class _ClassifyJobRun:
             return probe(self.job["id"])
         return self.runner.is_cancelled(self.job["id"])
 
-    def _factory_pause_check(self):
+    def _factory_pause_check(self) -> bool:
         """Non-parking pause probe for the same factory.
 
         When it reports a pause, the classifier checkpoints the label
@@ -518,7 +533,7 @@ class _ClassifyJobRun:
         probe = getattr(self.runner, "pause_requested", None)
         return bool(probe is not None and probe(self.job["id"]))
 
-    def _emb_progress(self, current, emb_total):
+    def _emb_progress(self, current: int, emb_total: int) -> None:
         self.runner.update_step(
             self.job["id"], "load_model",
             progress={"current": current, "total": emb_total},
@@ -529,25 +544,25 @@ class _ClassifyJobRun:
             "Step 3/5: Computing embeddings",
         )
 
-    def _cancel_model_load(self):
+    def _cancel_model_load(self) -> dict[str, int]:
         self.runner.update_step(
             self.job["id"], "load_model",
             status="cancelled", summary="Cancelled",
         )
         return self.cancelled_before_start(["detect", "classify", "finalize"])
 
-    def _classifier_factory(self, _factory_cancel_check):
+    def _classifier_factory(self, _factory_cancel_check: Callable[[], bool]) -> Callable[[], AnyClassifier]:
         """The ``factory`` ``acquire_cached_classifier`` builds on a cache miss."""
         model_type, model_str = self.model_type, self.model_str
         weights_path, labels, use_tol = self.weights_path, self.labels, self.use_tol
         tax, thread_db = self.tax, self.db
         if model_type == "timm":
-            def _construct_classifier():
+            def _construct_classifier() -> AnyClassifier:
                 if _factory_cancel_check():
                     raise ClassificationCancelled("classification cancelled")
                 return TimmClassifier(model_str, taxonomy=tax)
         else:
-            def _construct_classifier():
+            def _construct_classifier() -> AnyClassifier:
                 if _factory_cancel_check():
                     raise ClassificationCancelled("classification cancelled")
                 if not use_tol:
@@ -562,7 +577,7 @@ class _ClassifyJobRun:
                 )
         return _construct_classifier
 
-    def load_classifier(self):
+    def load_classifier(self) -> dict[str, int] | None:
         """Phase 4: Initialize classifier.
 
         Returns the job result when a cancel lands before the classifier
@@ -654,7 +669,7 @@ class _ClassifyJobRun:
             return self._cancel_model_load()
         return None
 
-    def record_loaded_classifier(self):
+    def record_loaded_classifier(self) -> None:
         """Close the load step and stamp what the classifier actually read."""
         job, runner, clf = self.job, self.runner, self.clf
         runner.update_step(
@@ -700,7 +715,7 @@ class _ClassifyJobRun:
 
     # -- Phase 5: detection --------------------------------------------
 
-    def detect_subjects(self):
+    def detect_subjects(self) -> dict[str, int] | None:
         """Phase 5: Detect subjects.
 
         Returns the job result when a cancel ends the run here, else
@@ -770,7 +785,7 @@ class _ClassifyJobRun:
         )
         return _empty_classify_result(self.total, detected=detected)
 
-    def reapply_local_computation_cache(self):
+    def reapply_local_computation_cache(self) -> None:
         """Reapply the local computation cache now that detection has run.
 
         Classification artifacts whose detector dependency was absent at
@@ -835,7 +850,9 @@ class _ClassifyJobRun:
                 exc_info=True,
             )
 
-    def _anchor_empty_scene_photos(self, full_runtime, source_input):
+    def _anchor_empty_scene_photos(
+        self, full_runtime: str, source_input: Callable[[str, str], tuple[dict[str, Any], str]],
+    ) -> None:
         """Pre-create full-image anchors for empty-scene photos.
 
         For photos that already carry a legacy full-image detection
@@ -907,7 +924,7 @@ class _ClassifyJobRun:
                     input_fingerprint=full_input,
                 )
 
-    def _known_classifier_runtimes(self, local_runtime, full_runtime):
+    def _known_classifier_runtimes(self, local_runtime: str | None, full_runtime: str) -> set[str]:
         """Compute the classifier runtimes this job would produce.
 
         Done so cached classifications from other machines that match are
@@ -943,7 +960,7 @@ class _ClassifyJobRun:
 
     # -- Phases 6-7: classification and storage ------------------------
 
-    def classify_photos(self):
+    def classify_photos(self) -> None:
         """Phase 6: Classify each photo.
 
         The per-detection classifier_runs gate inside _classify_photos
@@ -1026,7 +1043,7 @@ class _ClassifyJobRun:
                 summary=", ".join(parts),
             )
 
-    def store_predictions(self):
+    def store_predictions(self) -> dict[str, int]:
         """Phase 7: Group and store predictions, then build the job result."""
         job, runner, thread_db = self.job, self.runner, self.db
         total, raw_results = self.total, self.raw_results

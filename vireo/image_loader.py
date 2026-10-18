@@ -944,7 +944,7 @@ def _load_working_copy_image(wc_path, max_size, record_access):
 
 
 def load_working_image(
-    photo, vireo_dir, max_size=1024, folders=None, *, return_source=False,
+    photo, vireo_dir, max_size: int | None = 1024, folders=None, *, return_source=False,
     record_access=False,
 ):
     """Load a photo's working image — the fast path for all pixel operations.
