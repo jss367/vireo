@@ -1,10 +1,17 @@
 // Deleting the selected photos through the shared delete dialog.
-// Classic page script; load boot.js after all definitions.
+// ES module.
+
+import { state, CATEGORY_ORDER } from './state.js';
+import { hasDeleteDialog, showDeleteDialog, showToast } from './shared.js';
+import { loadMisses } from './loading.js';
+import { render } from './render.js';
+import { pruneSelectionToVisible } from './photo-open.js';
+import { updateSelectionBar } from './selection.js';
 
 /** @param {number[]} ids */ function removePhotosFromMissesData(ids) {
   var deleted = new Set(ids);
   CATEGORY_ORDER.forEach(function(cat) {
-    missesData[cat] = (missesData[cat] || []).filter(function(p) {
+    state.missesData[cat] = (state.missesData[cat] || []).filter(function(p) {
       return !deleted.has(p.id);
     });
   });
@@ -14,15 +21,15 @@
 function getSelectedPhotoRows() {
   /** @type {Record<number,MissPhoto>} */ var rowsById = {};
   CATEGORY_ORDER.forEach(function(cat) {
-    (missesData[cat] || []).forEach(function(p) {
-      if (selection.has(p.id) && !rowsById[p.id]) rowsById[p.id] = p;
+    (state.missesData[cat] || []).forEach(function(p) {
+      if (state.selection.has(p.id) && !rowsById[p.id]) rowsById[p.id] = p;
     });
   });
   return Object.values(rowsById);
 }
 
-async function deleteSelectedMisses() {
-  if (selection.size === 0) return;
+export async function deleteSelectedMisses() {
+  if (state.selection.size === 0) return;
   var rows = getSelectedPhotoRows();
   var ids = rows.map(function(p) { return p.id; });
   var companionCount = rows.filter(function(p) { return !!p.companion_path; }).length;
@@ -37,14 +44,14 @@ async function deleteSelectedMisses() {
     // Match browse.html: retained IDs stay selected so the user can retry
     // immediately. clearSelection() would drop everything, including the
     // rows they still need to act on.
-    actuallyDeleted.forEach(function(id) { selection.delete(id); });
+    actuallyDeleted.forEach(function(id) { state.selection.delete(id); });
     removePhotosFromMissesData(actuallyDeleted);
     render();
     updateSelectionBar();
     loadMisses();
   };
 
-  if (typeof showDeleteDialog === 'function') {
+  if (hasDeleteDialog()) {
     showDeleteDialog(ids, companionCount, afterDelete);
     return;
   }
@@ -60,6 +67,6 @@ async function deleteSelectedMisses() {
     var data = await r.json();
     afterDelete(data);
   } catch (err) {
-    if (typeof showToast === 'function') showToast('Delete failed', 'error');
+    showToast('Delete failed', 'error');
   }
 }
