@@ -10078,6 +10078,7 @@ def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
     lat, lng = 40.7828, -73.9654
     cached_details = _central_park_geocode_response()
     cached_details["_vireo_result_language"] = "en"
+    cached_details["_vireo_place_resolver"] = "named-place-1"
     db.reverse_geocode_cache_put(
         lat, lng,
         place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
@@ -10216,34 +10217,33 @@ def test_reverse_geocode_setting_change_refreshes_other_language_cache(
     assert requested_languages == [None, "en"]
 
 
-def test_reverse_geocode_legacy_cache_entry_is_served_without_language_tag(
+def test_reverse_geocode_old_resolver_cache_entry_is_looked_up_again(
     app_and_db, monkeypatch,
 ):
-    """Untagged legacy rows (pre-language-preference) must still be served.
-
-    Rolling the language preference out with the default "en" preference would
-    otherwise discard every existing cache row and — when no API key is
-    configured — fall through to ``no_api_key``, silently invalidating the
-    entire cache on upgrade.
-    """
+    """Rows the old resolver wrote hold the nearest street address, so they
+    are refetched and replaced instead of served."""
     import json
 
+    import config as cfg
     import places
     app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
 
-    lat, lng = 40.7828, -73.9654
-    legacy_details = _central_park_geocode_response()
-    # Intentionally NO "_vireo_result_language" — simulates a pre-upgrade row.
+    lat, lng = 32.7549, -117.2404
     db.reverse_geocode_cache_put(
         lat, lng,
-        place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
-        response_json=json.dumps(legacy_details),
+        place_id="street",
+        response_json=json.dumps({
+            "place_id": "street",
+            "name": "2525 Bacon St, San Diego, CA 92107, USA",
+            "_vireo_result_language": "en",
+        }),
     )
 
     def fake_reverse_geocode(lat_, lng_, key, *, language="en"):
-        raise AssertionError(
-            "legacy cache row should be served without calling Google",
-        )
+        return {"place_id": "ocean-beach", "name": "Ocean Beach", "types": ["neighborhood"],
+                "lat": lat_, "lng": lng_, "source": "area",
+                "address_components": [{"name": "San Diego", "types": ["locality"]}]}
 
     monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
 
@@ -10251,8 +10251,9 @@ def test_reverse_geocode_legacy_cache_entry_is_served_without_language_tag(
     resp = client.get(f"/api/places/reverse-geocode?lat={lat}&lng={lng}")
     assert resp.status_code == 200, resp.get_json()
     data = resp.get_json()
-    assert data["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
-    assert "Central Park" in data["summary"]
+    assert data["place_id"] == "ocean-beach"
+    assert data["summary"] == "Ocean Beach · San Diego"
+    assert db.reverse_geocode_cache_get(lat, lng)["place_id"] == "ocean-beach"
 
 
 def test_reverse_geocode_cache_miss_caches_negative_when_google_returns_none(

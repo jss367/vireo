@@ -2172,7 +2172,6 @@ def _register_job_blueprints(app, w):
             invalidate_missing_originals=missing_originals.invalidate,
             enqueue_process_job=w.pipeline_chain.enqueue_process_job,
             chain_after_move=w.pipeline_chain.chain_after_move,
-            bulk_gps_location_payload=w.bulk_gps_locations.payload,
             guard_move_folder=w.folder_moves.guard_error,
             sync_job_lock=app._sync_job_lock,
         )

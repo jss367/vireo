@@ -2113,7 +2113,7 @@ def test_failed_import_result_offers_preconfigured_retry(live_server, page):
               trust_likely_duplicates: true,
               after_import: 1,
               tags: ['trip'],
-              location_from_gps: true,
+              location_choices: [{cells: ['1,1'], kind: 'new', name: 'Trip spot', latitude: null, longitude: null}],
               allow_missing_exiftool: false,
               remote_target_id: null,
               remote_subpath: null,
@@ -2220,7 +2220,7 @@ def test_failed_import_retry_preserves_parent_include_paths(live_server, page):
               trust_likely_duplicates: false,
               after_import: null,
               tags: [],
-              location_from_gps: false,
+              location_choices: [],
               allow_missing_exiftool: false,
               remote_target_id: null,
               remote_subpath: null,
@@ -2349,51 +2349,111 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     assert "after_import" not in body
 
 
-def test_import_start_sends_common_tags_and_gps_location_option(
-    live_server, page,
+def _location_suggestion_stream(card):
+    """An SSE body for /api/import/location-suggestions over three spots."""
+    a, b, c, d = (str(card / f"DSC_000{i}.JPG") for i in range(1, 5))
+    frames = [
+        {"reading": 0, "total": 4},
+        {"reading": 4, "total": 4},
+        {
+            "done": True,
+            "groups": [
+                {"key": "keyword:779", "cells": ["32755,-117240"], "file_count": 2,
+                 "latitude": 32.755, "longitude": -117.240, "sample_paths": [a, b],
+                 "unresolved_reasons": {},
+                 "suggestion": {"kind": "keyword", "keyword_id": 779, "name": "San Diego River",
+                                "parents": ["San Diego"], "source": "your_photos",
+                                "photo_count": 340}},
+                {"key": "google:dog-beach", "cells": ["32754,-117250"], "file_count": 1,
+                 "latitude": 32.7541, "longitude": -117.2504, "sample_paths": [c],
+                 "unresolved_reasons": {},
+                 "suggestion": {"kind": "google", "place_id": "dog-beach",
+                                "name": "Ocean Beach - Dog Beach",
+                                "summary": "Ocean Beach - Dog Beach · San Diego",
+                                "source": "google_park"}},
+                {"key": "none", "cells": ["40785,-73968"], "file_count": 1,
+                 "latitude": 40.785, "longitude": -73.968, "sample_paths": [d],
+                 "unresolved_reasons": {"no_match": 1}, "suggestion": None},
+            ],
+            "file_cells": {a: "32755,-117240", b: "32755,-117240",
+                           c: "32754,-117250", d: "40785,-73968"},
+            "no_gps_paths": [],
+            "location_options": [
+                {"id": 779, "name": "San Diego River", "label": "San Diego River"},
+                {"id": 12, "name": "Laguna Lake", "label": "Laguna Lake · San Diego"},
+            ],
+        },
+    ]
+    return "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+
+
+def test_import_location_suggestions_become_the_chosen_location_choices(
+    live_server, page, tmp_path,
 ):
+    """Each spot shows its suggestion and source; Start sends exactly the
+    choices on screen: accepted, renamed, and left blank (skipped)."""
+    from PIL import Image
+
     url = live_server["url"]
+    card = tmp_path / "card"
+    card.mkdir()
+    for i in range(1, 5):
+        Image.new("RGB", (16, 16), "green").save(card / f"DSC_000{i}.JPG")
     captured = {}
 
     def config_route(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "google_maps_api_key": "configured-for-test",
-                "pipeline": {"default_process_id": None},
-            }),
-        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "google_maps_api_key": "configured-for-test",
+            "pipeline": {"default_process_id": None},
+        }))
+
+    def suggestions(route):
+        captured["suggestion_paths"] = json.loads(route.request.post_data or "{}")["paths"]
+        route.fulfill(status=200, content_type="text/event-stream",
+                      body=_location_suggestion_stream(card))
 
     def start_import(route):
         captured["body"] = json.loads(route.request.post_data or "{}")
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"job_id": "import-tags-test"}),
-        )
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"job_id": "import-locations-test"}))
 
     page.route("**/api/config", config_route)
+    page.route("**/api/import/location-suggestions", suggestions)
     page.route("**/api/jobs/import-in-place", start_import)
     page.goto(f"{url}/import")
-
-    page.locator("#sourceInput").fill("/tmp/card-a")
-    page.locator("#btnAddSource").click()
-    page.locator("#importTagInput").fill("Kenya trip")
-    page.locator("#importTagInput").press("Enter")
-    page.locator("#importTagInput").fill("Portfolio")
-    page.locator("#btnAddImportTag").click()
-    expect(page.locator("#importTagList .import-tag-chip")).to_have_count(2)
     page.locator("#chkLocationFromGps").check()
+    page.locator("#sourceInput").fill(str(card))
+    page.locator("#btnAddSource").click()
 
+    groups = page.locator(".import-location-group")
+    expect(groups).to_have_count(3, timeout=15000)
+    assert sorted(captured["suggestion_paths"]) == sorted(
+        str(card / f"DSC_000{i}.JPG") for i in range(1, 5))
+    expect(page.locator("#importLocationStatus")).to_contain_text("4 photos to import have GPS, in 3 groups")
+    river, beach, unknown = groups.nth(0), groups.nth(1), groups.nth(2)
+    expect(river.locator(".import-location-count")).to_have_text("2 photos")
+    expect(river.locator("input[type=text]")).to_have_value("San Diego River")
+    expect(river).to_contain_text("340 of your photos taken here have this location.")
+    expect(river).to_contain_text("Will add your location “San Diego River”.")
+    expect(beach).to_contain_text("Nearest well-known park on Google Maps")
+    expect(unknown).to_contain_text("Type a name to tag these photos")
+    expect(unknown.locator("input[type=checkbox]")).not_to_be_checked()
+
+    beach.locator("input[type=text]").fill("Dog Beach")
+    expect(beach).to_contain_text("Will create a new location “Dog Beach”.")
+    expect(page.locator("#btnStart")).to_be_enabled()
     page.locator("#btnStart").click()
     expect(page.locator("#progressCard")).to_be_visible()
 
-    assert captured["body"]["tags"] == ["Kenya trip", "Portfolio"]
-    assert captured["body"]["location_from_gps"] is True
+    assert captured["body"]["location_choices"] == [
+        {"kind": "keyword", "keyword_id": 779, "name": "San Diego River",
+         "cells": ["32755,-117240"]},
+        {"kind": "new", "name": "Dog Beach", "latitude": 32.7541, "longitude": -117.2504,
+         "cells": ["32754,-117250"]},
+    ]
 
 
-def test_import_gps_location_option_explains_missing_api_key(live_server, page):
+def test_import_location_suggestions_work_without_an_api_key(live_server, page):
     url = live_server["url"]
 
     def config_route(route):
@@ -2409,9 +2469,9 @@ def test_import_gps_location_option_explains_missing_api_key(live_server, page):
     page.route("**/api/config", config_route)
     page.goto(f"{url}/import")
 
-    expect(page.locator("#chkLocationFromGps")).to_be_disabled()
+    expect(page.locator("#chkLocationFromGps")).to_be_enabled()
     expect(page.locator("#locationGpsHint")).to_contain_text(
-        "Add a Google Maps API key in Settings"
+        "suggestions come only from places you have tagged before"
     )
 
 
