@@ -1357,44 +1357,6 @@ def test_count_catalog_photos_counts_every_folder_status(db, lib):
     assert db.count_catalog_photos() == 4
 
 
-# -- export's catalog-wide reads ----------------------------------------------
-
-
-def test_exif_and_camera_data_by_ids(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="photos")
-    pid = _photo(db, folder, "a.jpg")
-    bare = _photo(db, folder, "b.jpg")
-    db.conn.execute(
-        "UPDATE photos SET exif_data = ?, camera_make = 'Canon', camera_model = 'R5', "
-        "lens = 'RF 100-500', focal_length = 500, aperture = 7.1, "
-        "shutter_speed = '1/2000', iso = 1600 WHERE id = ?",
-        ('{"Make": "Canon"}', pid),
-    )
-    db.conn.commit()
-
-    assert db.photos.exif_data_by_ids([pid, bare, 999999]) == {
-        pid: '{"Make": "Canon"}', bare: None,
-    }
-    camera = db.photos.camera_data_by_ids([pid])
-    assert camera == {pid: {
-        "id": pid, "camera_make": "Canon", "camera_model": "R5", "lens": "RF 100-500",
-        "focal_length": 500, "aperture": 7.1, "shutter_speed": "1/2000", "iso": 1600,
-    }}
-    assert db.photos.exif_data_by_ids([]) == {}
-
-
-def test_exif_data_by_ids_chunks_at_999(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="photos")
-    pid = _photo(db, folder, "a.jpg")
-    statements = _trace(db)
-    try:
-        result = db.photos.exif_data_by_ids([pid, *range(10**6, 10**6 + 999)])
-    finally:
-        db.conn.set_trace_callback(None)
-    assert list(result) == [pid]
-    assert len(_sql(statements, "SELECT id, exif_data FROM photos")) == 2
-
-
 # -- structure -----------------------------------------------------------------
 
 MOVED = [

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from repositories.model_runs import ModelRunsRepository
     from repositories.pending_archives import PendingArchiveRepository
     from repositories.photo_labels import PhotoLabelRepository
+    from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
@@ -6625,6 +6626,23 @@ class Database:
         catalog-wide, so it needs no active workspace.
         """
         return self._exif_search_repository()
+
+    def _photo_metadata_repository(self):
+        """Build the (catalog-wide) photo camera-metadata reads on this connection."""
+        from repositories.photo_metadata import PhotoMetadataRepository
+
+        return PhotoMetadataRepository(self.conn)
+
+    @property
+    def photo_metadata(self) -> PhotoMetadataRepository:
+        """Export's camera-metadata reads: ``db.photo_metadata.exif_data_by_ids(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_metadata_repository``, so the connection
+        is resolved per use. The reads are catalog-wide, so unlike
+        ``db.photos`` it never needs an active workspace.
+        """
+        return self._photo_metadata_repository()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.

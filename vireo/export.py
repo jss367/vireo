@@ -990,14 +990,14 @@ def _get_photo_exif_data(db, photo_ids):
     # Closed databases and test fakes have no connection: nothing to read.
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    return db.photos.exif_data_by_ids(photo_ids)
+    return db.photo_metadata.exif_data_by_ids(photo_ids)
 
 
 def _get_photo_camera_data(db, photo_ids):
     """Return promoted camera/exposure fields for an export selection."""
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    return db.photos.camera_data_by_ids(photo_ids)
+    return db.photo_metadata.camera_data_by_ids(photo_ids)
 
 
 def _photo_value(photo, key, default=None):

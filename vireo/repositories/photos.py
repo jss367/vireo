@@ -357,44 +357,6 @@ class PhotoRepository:
             result.update({r["id"]: r for r in rows})
         return result
 
-    # Export reads its selection in chunks of 999 ids (its own limit, kept so
-    # the statements are the ones export always ran). Not workspace-scoped;
-    # callers pass ids they have already resolved.
-
-    def exif_data_by_ids(self, photo_ids):
-        """``{photo_id: exif_data}`` (the raw JSON text) for ``photo_ids``."""
-        out = {}
-        for i in range(0, len(photo_ids), 999):
-            chunk = photo_ids[i:i + 999]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"SELECT id, exif_data FROM photos WHERE id IN ({placeholders})",
-                list(chunk),
-            ).fetchall()
-            for row in rows:
-                out[row["id"]] = row["exif_data"]
-        return out
-
-    def camera_data_by_ids(self, photo_ids):
-        """``{photo_id: dict}`` of the promoted camera and exposure columns.
-
-        Each dict carries ``id``, ``camera_make``, ``camera_model``, ``lens``,
-        ``focal_length``, ``aperture``, ``shutter_speed`` and ``iso``.
-        """
-        out = {}
-        for i in range(0, len(photo_ids), 999):
-            chunk = photo_ids[i:i + 999]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT id, camera_make, camera_model, lens, focal_length,
-                           aperture, shutter_speed, iso
-                    FROM photos WHERE id IN ({placeholders})""",
-                list(chunk),
-            ).fetchall()
-            for row in rows:
-                out[row["id"]] = dict(row)
-        return out
-
     def in_workspace_folders(self, folder_ids, workspace_id):
         """Rows (``id``, ``folder_id``, ``filename``) of the workspace's photos in ``folder_ids``.
 
