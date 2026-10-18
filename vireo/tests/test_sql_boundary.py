@@ -27,8 +27,10 @@ active-workspace state:
   scans every first-party Python file, including tests, the harness, ``db.py``
   itself, ``tools/`` and root-level modules.
 
-``canonical_schema.py`` is part of the data layer, and ``vireo/testing/`` is
-the test harness, so neither is scanned for the first two rules.
+``canonical_schema.py`` and ``schema.py`` (whose migration runner hands each
+numbered migration the raw connection it owns the transaction for) are part
+of the data layer, and ``vireo/testing/`` is the test harness, so none of them
+is scanned for the first two rules.
 """
 import ast
 from pathlib import Path
@@ -37,7 +39,7 @@ import pytest
 
 VIREO = Path(__file__).resolve().parents[1]
 
-DATA_LAYER = {"db.py", "canonical_schema.py"}
+DATA_LAYER = {"db.py", "canonical_schema.py", "schema.py"}
 SKIPPED_DIRS = {"repositories", "tests", "testing"}
 
 PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
@@ -45,9 +47,7 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 # ``<expr>.conn`` uses per module (path relative to vireo/). A module not
 # listed here may have none. Lower an entry (or delete it at zero) when you
 # move a module's SQL into a repository; never raise one.
-CONN_USE_LIMITS = {
-    "schema.py": 1,
-}
+CONN_USE_LIMITS: dict[str, int] = {}
 
 
 REPO = VIREO.parent
