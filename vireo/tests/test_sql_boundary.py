@@ -50,7 +50,6 @@ CONN_USE_LIMITS = {
     "audit.py": 10,
     "capture_time.py": 7,
     "card_cleanup.py": 4,
-    "computation_cache.py": 37,
     "culling.py": 6,
     "duplicate_scan.py": 1,
     "export.py": 2,

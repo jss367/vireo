@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from repositories.caches import CachesRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
+    from repositories.computation_cache import ComputationCacheRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -8202,6 +8203,25 @@ class Database:
         resolve the workspace's detector floor stay there too.
         """
         return self._model_runs_repository()
+
+    def _computation_cache_repository(self):
+        """Build the (catalog-wide) computation-cache repository on this connection."""
+        from repositories.computation_cache import ComputationCacheRepository
+
+        return ComputationCacheRepository(self.conn)
+
+    @property
+    def computation_cache(self) -> ComputationCacheRepository:
+        """The portable computation cache's catalog SQL: ``db.computation_cache.run_predictions(...)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_computation_cache_repository``, exactly as a
+        forwarding wrapper called at that moment would. Every table it reads
+        or writes is catalog-wide, so no method needs an active workspace, and
+        none commits: ``computation_cache`` commits or rolls back through
+        ``db.commit()`` / ``db.rollback()``.
+        """
+        return self._computation_cache_repository()
 
     def detector_run_is_pinned(self, photo_id, detector_model):
         """Return whether any workspace manually reviewed this detector output.
