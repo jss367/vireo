@@ -251,6 +251,22 @@ def test_preview_get_returns_row_or_none(db):
     assert db.caches.preview_get(pid + 1, 1920) is None
 
 
+def test_mark_preview_invalidated_is_idempotent_and_uncommitted(db):
+    pid = _photo(db)
+    db.caches.mark_preview_invalidated(pid, 1920)
+    db.caches.mark_preview_invalidated(pid, 1920)
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        assert reader.execute("SELECT COUNT(*) FROM preview_cache_invalidations").fetchone()[0] == 0
+        db.commit()
+        assert [tuple(r) for r in reader.execute(
+            "SELECT photo_id, size FROM preview_cache_invalidations"
+        ).fetchall()] == [(pid, 1920)]
+    finally:
+        reader.close()
+
+
 # -- offline_originals --------------------------------------------------------
 
 
@@ -636,6 +652,27 @@ def test_preview_invalidated_reads_the_marker(db):
     assert db.caches.preview_invalidated(pid, 2560) is False
 
 
+def test_thumbnail_path_writes_stay_in_the_callers_transaction(db):
+    a = _photo(db, "a.jpg")
+    b = _photo(db, "b.jpg")
+    db.set_photo_thumb_path(b, f"{b}.jpg")
+    assert {r["id"]: r["thumb_path"] for r in db.caches.thumbnail_path_rows()} == {
+        a: None, b: f"{b}.jpg",
+    }
+    db.caches.set_thumbnail_paths([(f"{a}.jpg", a)])
+    db.caches.clear_thumbnail_paths([(b,)])
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        committed = dict(reader.execute("SELECT id, thumb_path FROM photos").fetchall())
+        assert committed == {a: None, b: f"{b}.jpg"}
+        db.commit()
+        committed = dict(reader.execute("SELECT id, thumb_path FROM photos").fetchall())
+        assert committed == {a: f"{a}.jpg", b: None}
+    finally:
+        reader.close()
+
+
 # -- structure ----------------------------------------------------------------
 
 
@@ -725,3 +762,9 @@ def test_caches_repository_imports_no_db_code():
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
     assert "db" not in imported
+
+
+def test_photo_exists_reads_the_catalog_photo(db):
+    photo_id = _photo(db)
+    assert db.caches.photo_exists(photo_id) is True
+    assert db.caches.photo_exists(photo_id + 1000) is False

@@ -10,6 +10,7 @@ import sys
 
 import numpy as np
 from PIL import Image
+from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,9 +47,11 @@ def test_update_photo_pipeline_features(tmp_path):
 
     db.masks_features.update_pipeline_features(
         pid,
-        mask_path="/masks/1.png",
-        crop_complete=0.95,
-        subject_clip_high=0.02,
+        PipelineFeatures(
+            mask_path="/masks/1.png",
+            crop_complete=0.95,
+            subject_clip_high=0.02,
+        ),
     )
 
     row = db.conn.execute(
@@ -86,7 +89,7 @@ def test_get_photos_missing_masks(tmp_path):
     db.save_detections(pid3, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
     ], detector_model="megadetector")
-    db.masks_features.update_pipeline_features(pid3, mask_path="/masks/3.png")
+    db.masks_features.update_pipeline_features(pid3, PipelineFeatures(mask_path="/masks/3.png"))
 
     photos = db.get_photos_missing_masks()
     assert len(photos) == 1

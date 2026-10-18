@@ -404,16 +404,16 @@
 
   <div class="misses-selection-bar" id="missesSelectionBar">
     <span class="misses-selection-count" id="missesSelectionCount">0 selected</span>
-    <button class="misses-selection-btn" id="missesSelectionBrowseBtn" type="button" onclick="openSelectionInBrowse()">
+    <button class="misses-selection-btn" id="missesSelectionBrowseBtn" type="button">
       Open in Browse
     </button>
-    <button class="misses-selection-btn" id="missesSelectionUnflagBtn" type="button" onclick="bulkUnflagSelection()">
+    <button class="misses-selection-btn" id="missesSelectionUnflagBtn" type="button">
       Unmark missed
     </button>
-    <button class="misses-selection-btn danger" type="button" onclick="deleteSelectedMisses()">
+    <button class="misses-selection-btn danger" id="missesSelectionDeleteBtn" type="button">
       Delete selected
     </button>
-    <button class="misses-selection-btn" type="button" onclick="clearSelection()">
+    <button class="misses-selection-btn" id="missesSelectionClearBtn" type="button">
       Clear
     </button>
   </div>
@@ -468,10 +468,10 @@
       </div>
     </div>
     <div class="misses-tuning-actions">
-      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" onclick="recomputeMisses()" disabled>
+      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" disabled>
         Recompute misses
       </button>
-      <button class="misses-tuning-btn" id="missResetPreviewBtn" type="button" onclick="resetMissThresholds()" disabled>
+      <button class="misses-tuning-btn" id="missResetPreviewBtn" type="button" disabled>
         Reset preview
       </button>
       <label class="misses-tuning-check">
@@ -487,21 +487,7 @@
   </div>
 </div>
 
-<script src="/static/misses/state.js"></script>
-<script src="/static/misses/helpers.js"></script>
-<script src="/static/misses/filters.js"></script>
-<script src="/static/misses/scope.js"></script>
-<script src="/static/misses/tuning.js"></script>
-<script src="/static/misses/loading.js"></script>
-<script src="/static/misses/render.js"></script>
-<script src="/static/misses/photo-open.js"></script>
-<script src="/static/misses/flagging.js"></script>
-<script src="/static/misses/selection.js"></script>
-<script src="/static/misses/context-menu.js"></script>
-<script src="/static/misses/delete.js"></script>
-<script src="/static/misses/keyboard.js"></script>
-<script src="/static/misses/badges.js"></script>
-<script src="/static/misses/boot.js"></script>
+<script type="module" src="/static/misses/boot.js"></script>
 
 </body>
 </html>

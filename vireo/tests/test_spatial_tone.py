@@ -8,7 +8,7 @@ import pytest
 from float_image import FloatImage
 from image_edits import apply_recipe_to_loaded_image
 from PIL import Image
-from tone import RANGE_RADIUS, apply_adjustments, srgb_to_linear
+from tone import RANGE_RADIUS, LocalAdjustments, ToneAdjustments, apply_adjustments, srgb_to_linear
 
 
 def _texture(center, amplitude=0.005, period=8, width=256, height=96):
@@ -23,8 +23,8 @@ def _contrast(rgb):
 @pytest.mark.parametrize("settings,center", [({"shadows": 100}, 0.325), ({"highlights": -100}, 0.675)])
 def test_range_adjustment_preserves_texture_at_same_average_brightness(settings, center):
     src = _texture(center)
-    point = apply_adjustments(src, **settings)
-    spatial = apply_adjustments(src, range_radius=RANGE_RADIUS, **settings)
+    point = apply_adjustments(src, ToneAdjustments(**settings))
+    spatial = apply_adjustments(src, ToneAdjustments(**settings), range_radius=RANGE_RADIUS)
     # Relative luminance contrast measures texture independently of its new
     # brightness. Both controls should preserve most of it without sharpening.
     retention = _contrast(spatial) / _contrast(src)
@@ -37,8 +37,8 @@ def test_range_adjustment_preserves_texture_at_same_average_brightness(settings,
 def test_hard_subject_edge_has_no_visible_bright_or_dark_rim(settings):
     src = np.full((64, 512, 3), 0.8, dtype=np.float32)
     src[:, :256] = 0.2
-    point = apply_adjustments(src, **settings)
-    spatial = apply_adjustments(src, range_radius=RANGE_RADIUS, **settings)
+    point = apply_adjustments(src, ToneAdjustments(**settings))
+    spatial = apply_adjustments(src, ToneAdjustments(**settings), range_radius=RANGE_RADIUS)
     # A flat field on either side has no texture to restore. Keep even the
     # worst edge-adjacent deviation below a tenth of an 8-bit display step.
     assert np.max(np.abs(spatial - point)) < 0.1 / 255
@@ -47,7 +47,7 @@ def test_hard_subject_edge_has_no_visible_bright_or_dark_rim(settings):
 def test_extreme_range_combinations_keep_ramps_ordered_and_endpoints_anchored():
     ramp = np.broadcast_to(np.linspace(0, 1, 1025, dtype=np.float32)[None, :, None], (1, 1025, 3))
     for shadows, highlights in itertools.product((-100, 0, 100), repeat=2):
-        out = apply_adjustments(ramp, shadows=shadows, highlights=highlights, range_radius=RANGE_RADIUS)
+        out = apply_adjustments(ramp, ToneAdjustments(shadows=shadows, highlights=highlights), range_radius=RANGE_RADIUS)
         assert np.isfinite(out).all()
         assert np.min(np.diff(out[0, :, 0])) >= -2e-6
         np.testing.assert_allclose(out[:, [0, -1]], ramp[:, [0, -1]], atol=1e-6)
@@ -56,14 +56,14 @@ def test_extreme_range_combinations_keep_ramps_ordered_and_endpoints_anchored():
 def test_deep_shadow_noise_is_not_boosted_by_detail_restoration():
     rng = np.random.default_rng(7)
     src = np.repeat(rng.uniform(0, 0.012, (64, 128, 1)), 3, axis=-1).astype(np.float32)
-    point = apply_adjustments(src, shadows=100)
-    spatial = apply_adjustments(src, shadows=100, range_radius=RANGE_RADIUS)
+    point = apply_adjustments(src, ToneAdjustments(shadows=100))
+    spatial = apply_adjustments(src, ToneAdjustments(shadows=100), range_radius=RANGE_RADIUS)
     np.testing.assert_allclose(spatial, point, atol=2e-7)
 
 
 def test_spatial_shadow_lift_preserves_in_gamut_color_ratios():
     linear = srgb_to_linear(_texture(0.325)) * np.array([1.2, 0.9, 0.6], dtype=np.float32)
-    out = apply_adjustments(linear, input_linear=True, shadows=100, range_radius=RANGE_RADIUS)
+    out = apply_adjustments(linear, ToneAdjustments(shadows=100), input_linear=True, range_radius=RANGE_RADIUS)
     mapped = srgb_to_linear(out)
     np.testing.assert_allclose(mapped[..., 0] / mapped[..., 1], linear[..., 0] / linear[..., 1], atol=1e-6)
     np.testing.assert_allclose(mapped[..., 2] / mapped[..., 1], linear[..., 2] / linear[..., 1], atol=1e-6)
@@ -74,7 +74,9 @@ def test_local_range_adjustment_leaves_unselected_texture_unchanged():
     weight = np.zeros(src.shape[:2], dtype=np.float32)
     weight[:, :128] = 1
     spatial = apply_adjustments(
-        src, local_weight=weight, local_subject={"shadows": 100}, range_radius=RANGE_RADIUS,
+        src,
+        local=LocalAdjustments(weight=weight, subject={"shadows": 100}),
+        range_radius=RANGE_RADIUS,
     )
     np.testing.assert_allclose(spatial[:, 128:], src[:, 128:], atol=2e-7)
     assert spatial[:, :128].mean() > src[:, :128].mean() + 0.1
@@ -123,8 +125,8 @@ def test_neutral_range_controls_keep_existing_render_exact():
     src = _texture(0.325)
     for settings in ({}, {"exposure": 0.5}, {"whites": -50, "blacks": 50}):
         np.testing.assert_array_equal(
-            apply_adjustments(src, **settings),
-            apply_adjustments(src, range_radius=RANGE_RADIUS, **settings),
+            apply_adjustments(src, ToneAdjustments(**settings)),
+            apply_adjustments(src, ToneAdjustments(**settings), range_radius=RANGE_RADIUS),
         )
 
 
@@ -184,7 +186,7 @@ def test_native_width_bounds_repeated_halo_work(monkeypatch):
     image = Image.new('RGB', (8288, 300), (50, 80, 110))
     processed_pixels = []
 
-    def counted_tone(rgb, **kwargs):
+    def counted_tone(rgb, adjustments=None, **kwargs):
         processed_pixels.append(rgb.shape[0] * rgb.shape[1])
         return rgb
 

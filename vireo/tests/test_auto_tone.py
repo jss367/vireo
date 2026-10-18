@@ -8,7 +8,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import auto_tone
-from tone import apply_adjustments, linear_to_srgb
+from tone import ToneAdjustments, apply_adjustments, linear_to_srgb
 
 H, W = 120, 180
 
@@ -28,7 +28,7 @@ def _ramp(lo, hi, seed=0):
 
 def _render(rgb, adjustments, input_linear=False):
     adj = {k: v for k, v in adjustments.items() if v}
-    return apply_adjustments(rgb, input_linear=input_linear, **adj)
+    return apply_adjustments(rgb, ToneAdjustments(**adj), input_linear=input_linear)
 
 
 def _luma(rgb):

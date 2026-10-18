@@ -15,6 +15,8 @@ import json
 
 from flask import Blueprint, jsonify, request
 from highlights_payload import (
+    HighlightsQuery,
+    TextMatch,
     apply_highlight_preferences,
     apply_ordered_highlights,
     bucket_best_score,
@@ -711,8 +713,7 @@ def create_highlights_blueprint(get_db, json_error):
     @blueprint.route("/api/highlights")
     def api_highlights():
         db = get_db()
-        payload = build_highlights_payload(
-            db,
+        payload = build_highlights_payload(db, HighlightsQuery(
             scope=request.args.get("scope", "folder"),
             folder_id=request.args.get("folder_id", type=int),
             min_quality=request.args.get("min_quality", 0.0, type=float),
@@ -720,18 +721,22 @@ def create_highlights_blueprint(get_db, json_error):
                 "confidence_threshold", 0.70, type=float
             ),
             limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
-            species_filter=request.args.get("species") or "",
-            species_match_case=request_bool_arg("species_match_case"),
-            species_whole_word=request_bool_arg("species_whole_word"),
-            search_query=request.args.get("q") or "",
-            search_match_case=request_bool_arg("q_match_case"),
-            search_whole_word=request_bool_arg("q_whole_word"),
+            species=TextMatch(
+                request.args.get("species") or "",
+                match_case=request_bool_arg("species_match_case"),
+                whole_word=request_bool_arg("species_whole_word"),
+            ),
+            search=TextMatch(
+                request.args.get("q") or "",
+                match_case=request_bool_arg("q_match_case"),
+                whole_word=request_bool_arg("q_whole_word"),
+            ),
             confirmation_filter=request.args.get("confirmation") or "all",
             highlight_filter=request.args.get("highlight_selection") or "all",
             representative_filter=(
                 request.args.get("species_representative") or "all"
             ),
-        )
+        ))
         return jsonify(payload)
 
     @blueprint.route("/api/highlights/confirm", methods=["POST"])
@@ -1034,7 +1039,7 @@ def create_highlights_blueprint(get_db, json_error):
             return json_error("name required")
 
         rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
-        cid = db.add_collection(name, rules)
+        cid = db.collections.add(name, rules)
         return jsonify({"ok": True, "id": cid})
 
     return blueprint

@@ -23,6 +23,7 @@ from pipeline_job import (
     _weighted_progress,
     run_pipeline_job,
 )
+from repositories.masks_features import PipelineFeatures
 
 
 @pytest.fixture(autouse=True)
@@ -568,7 +569,7 @@ def test_archive_stage_rejects_retired_import_archive_params_late(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Empty", "[]")
+    col_id = db.collections.add("Empty", "[]")
     params = PipelineParams(
         collection_id=col_id,
         skip_classify=True,
@@ -593,7 +594,7 @@ def test_pipeline_job_with_collection_skips_scan(tmp_path):
     db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection so classify has something to query
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     params = PipelineParams(
         collection_id=col_id,
@@ -741,7 +742,7 @@ def test_pipeline_scan_thumbnail_collection_stages(tmp_path):
     # Verify collection exists in DB
     db2 = Database(db_path)
     db2.set_active_workspace(ws_id)
-    photos = db2.get_collection_photos(result["collection_id"], per_page=999999)
+    photos = db2.collections.get_photos(result["collection_id"], per_page=999999)
     assert len(photos) == 3
 
 
@@ -836,7 +837,7 @@ def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
     )
     db.conn.commit()
 
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Repair me",
         json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
     )
@@ -1021,7 +1022,7 @@ def test_pipeline_skips_scan_with_collection_id(tmp_path):
     """When collection_id is given, no scan-phase events should be emitted."""
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", json.dumps([]))
+    col_id = db.collections.add("Test", json.dumps([]))
 
     params = PipelineParams(
         collection_id=col_id,
@@ -1070,7 +1071,7 @@ def test_pipeline_result_has_duration(tmp_path):
     """Pipeline result dict should always contain a positive duration."""
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Empty", json.dumps([]))
+    col_id = db.collections.add("Empty", json.dumps([]))
 
     params = PipelineParams(
         collection_id=col_id,
@@ -1122,7 +1123,7 @@ def test_pipeline_collection_created_after_scan(tmp_path):
     # Verify the collection exists in the DB and has the right photos
     db2 = Database(db_path)
     db2.set_active_workspace(ws_id)
-    photos = db2.get_collection_photos(result["collection_id"], per_page=999999)
+    photos = db2.collections.get_photos(result["collection_id"], per_page=999999)
     assert len(photos) == 3
 
 
@@ -1132,7 +1133,7 @@ def test_pipeline_previews_stage_runs(tmp_path):
     db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection so classify has something to query
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     # Patch scanner, thumbnails, etc. to be no-ops — we just need to verify
     # the previews stage appears in the result
@@ -1242,7 +1243,7 @@ def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypa
         height=600,
     )
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Edited",
         json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
     )
@@ -2312,7 +2313,7 @@ def test_pipeline_collection_mode_marks_scan_skipped(tmp_path):
     db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection to reference
-    coll_id = db.add_collection("test collection", json.dumps([]))
+    coll_id = db.collections.add("test collection", json.dumps([]))
 
     params = PipelineParams(
         collection_id=coll_id,
@@ -2415,7 +2416,7 @@ def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
     )
     coll_id = result["collection_id"]
 
-    photo = db.get_collection_photos(coll_id, per_page=999999)[0]
+    photo = db.collections.get_photos(coll_id, per_page=999999)[0]
     working_dir = tmp_path / "working"
     working_dir.mkdir()
     Image.new("RGB", (100, 100), "blue").save(str(working_dir / f"{photo['id']}.jpg"))
@@ -2565,7 +2566,7 @@ def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2615,7 +2616,7 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
     import model_verify
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2670,7 +2671,7 @@ def test_pipeline_preflight_accepts_unverified_model(tmp_path, monkeypatch):
     import model_verify
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2721,7 +2722,7 @@ def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2766,7 +2767,7 @@ def test_pipeline_cancellation_takes_precedence_over_failure(tmp_path, monkeypat
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2799,7 +2800,7 @@ def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -2861,7 +2862,7 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
     import classify_job
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(
@@ -2913,7 +2914,7 @@ def test_pipeline_pause_during_classifier_load_parks_and_resumes(
     from classifier import ClassifierLoadPaused
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -2986,7 +2987,7 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -3040,7 +3041,7 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
         folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "empty.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "No detections",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3174,7 +3175,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
         folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "empty.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "No detections",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3305,7 +3306,7 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
         folder_id, "bird-in-branches.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "bird-in-branches.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Raw noise box",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3416,7 +3417,7 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
         folder_id, "hiker.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "hiker.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Confident person",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3533,7 +3534,7 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
         folder_id, "faint-warbler.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "faint-warbler.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Noise only",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3659,7 +3660,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     # Helper installs a no-op download_taxonomy stub; override it AFTER the
     # helper so this test's recording stub wins. Order matters: the helper's
@@ -3712,7 +3713,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     # Override the helper's no-op download stub AFTER calling the helper, so
     # this test's recording stub wins. See sibling test above.
@@ -3780,7 +3781,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
         detector_model="MegaDetector",
     )
     # Static collection containing exactly that one photo.
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -3920,7 +3921,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "bird.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -4028,7 +4029,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     }], detector_model="megadetector-v6")[0]
     db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
     db.model_runs.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
-    collection = db.add_collection("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    collection = db.collections.add("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
     model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
     monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
@@ -4110,7 +4111,7 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
         )
         photo_ids.append(photo_id)
 
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Weak bridge",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -4185,7 +4186,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     )
     assert prior_det_ids, "setup sanity: prior detection was inserted"
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -4265,7 +4266,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     )
     prior_id = prior[0]
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
@@ -4357,7 +4358,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     db.save_detections(photo_id, [], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=0)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -4476,7 +4477,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     )
     assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
     )
@@ -4597,7 +4598,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     )
     assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
     )
@@ -4686,7 +4687,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -4878,7 +4879,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
             labels_fingerprint="legacy",
         )
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -5014,7 +5015,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
         photo_ids.append(pid)
         detection_ids.append(det_ids[0])
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -5176,7 +5177,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -5318,7 +5319,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -5425,7 +5426,7 @@ def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
     import models
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     model_dir = tmp_path / "models" / model_id
@@ -5499,7 +5500,7 @@ def test_onnx_load_failure_skips_sentinel_when_files_verify_ok(
     import model_verify
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     model_dir = tmp_path / "models" / model_id
@@ -5561,7 +5562,7 @@ def test_pipeline_continues_when_first_model_fails(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5645,7 +5646,7 @@ def test_pipeline_continues_when_secondary_model_fails(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -5716,7 +5717,7 @@ def test_pipeline_single_model_still_aborts_on_failure(tmp_path, monkeypatch):
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -5784,7 +5785,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
     )
     _drop_jpeg(folder_path, "hawk.jpg")
     _drop_jpeg(folder_path, "empty.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([
             {"field": "photo_ids", "value": [photo_with_det, photo_without_det]}
@@ -5946,7 +5947,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "empty.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6048,7 +6049,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6150,7 +6151,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     )
     db.model_runs.record_detector_run(masked_id, "megadetector-v6", box_count=1)
     db.masks_features.update_pipeline_features(
-        masked_id, mask_path=str(tmp_path / "mask_a.png"),
+        masked_id, PipelineFeatures(mask_path=str(tmp_path / "mask_a.png")),
     )
 
     # Photo B: no mask, only sub-threshold detection → should be flagged.
@@ -6164,7 +6165,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     )
     db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [masked_id, lowconf_id]}]),
     )
@@ -6249,7 +6250,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
         detector_model="megadetector-v6",
     )
     db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [lowconf_id]}]),
     )
 
@@ -6329,7 +6330,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
                       timestamp="2026-01-01T12:00:01")
     _drop_jpeg(folder_path, "a.jpg")
     _drop_jpeg(folder_path, "b.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
@@ -6432,7 +6433,7 @@ def test_pipeline_step_defs_include_detect_and_per_model_classify(
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
@@ -6491,7 +6492,7 @@ def test_pipeline_step_defs_cover_every_requested_id_on_partial_resolution(
     """
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     # Install the first model as downloaded; second is requested but not
     # downloaded, so resolution raises partway through.
@@ -6532,7 +6533,7 @@ def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6585,7 +6586,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
         photo_ids.append(
             db.add_photo(folder_id, f"p{i}.jpg", ".jpg", 1000 + i, 1_000_000.0)
         )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -6693,7 +6694,7 @@ def test_pipeline_one_model_fails_to_load_other_model_still_runs(
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "x.jpg"))
     photo_id = db.add_photo(folder_id, "x.jpg", ".jpg", 1000, 1_000_000.0)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6782,7 +6783,7 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
     photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6848,7 +6849,7 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6924,7 +6925,7 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
     folder_id = db.add_folder(str(photo_dir))
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
     photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -6989,7 +6990,7 @@ def test_pipeline_loader_abort_finalizes_detect_and_classify_rows(
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -7053,7 +7054,7 @@ def test_pipeline_loader_failure_marks_classify_rows_failed_not_skipped(
     import classifier as classifier_mod
 
     db_path, db, ws_id = _open_db(tmp_path)
-    col_id = db.add_collection("Test", "[]")
+    col_id = db.collections.add("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -7183,7 +7184,6 @@ def test_pipeline_collection_failure_fails_job(tmp_path, monkeypatch):
     stage failed, so every downstream stage read "Skipped" and the run was
     recorded as completed with nothing processed.
     """
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
     photo_dir = tmp_path / "photos"
@@ -7193,7 +7193,9 @@ def test_pipeline_collection_failure_fails_job(tmp_path, monkeypatch):
     def locked(self, *args, **kwargs):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(Database, "add_collection", locked)
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "add", locked)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -8687,7 +8689,7 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         detection_ids[-1], right_species, 0.9, "inat21",
     )
 
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Weak mask bridge",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -8746,7 +8748,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -8908,7 +8910,7 @@ def test_extract_masks_source_lost_midrun_fails_stage(tmp_path, monkeypatch):
         _add_photo_with_detection(db, folder_id, folder_path, f"bird{i}.jpg")
         for i in range(3)
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Lost source",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -8986,7 +8988,7 @@ def test_extract_masks_offline_folder_does_not_stop_healthy_folder(
         _add_photo_with_detection(db, dead_folder, dead_path, "gone1.jpg"),
         _add_photo_with_detection(db, live_folder, live_path, "here0.jpg"),
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Mixed reachability",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -9055,7 +9057,7 @@ def test_extract_masks_mount_outage_still_processes_other_sources(
         _add_photo_with_detection(db, share_folder, share_path, "aa0.jpg"),
         _add_photo_with_detection(db, share_folder, share_path, "aa1.jpg"),
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Volume plus local disk",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -9135,7 +9137,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
 
     uncached = _add_photo_with_detection(db, folder_id, folder_path, "a.jpg")
     cached = _add_photo_with_detection(db, folder_id, folder_path, "b.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Partly cached",
         json.dumps([{"field": "photo_ids", "value": [uncached, cached]}]),
     )
@@ -9152,8 +9154,11 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(
-        cached, sam2_variant, mask_file, "MegaDetector",
-        0.1, 0.1, 0.5, 0.5,
+        cached,
+        sam2_variant,
+        mask_file,
+        "MegaDetector",
+        (0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(cached, sam2_variant)
     db.conn.execute(
@@ -9209,7 +9214,7 @@ def test_extract_masks_preflight_offline_photos_are_counted_unreadable(
         _add_photo_with_detection(db, folder_id, folder_path, f"bird{i}.jpg")
         for i in range(3)
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Gone before we started",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -9257,7 +9262,7 @@ def test_extract_masks_single_unreadable_file_is_reported_not_skipped(
         _add_photo_with_detection(db, folder_id, folder_path, f"bird{i}.jpg")
         for i in range(3)
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "One corrupt file",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -9310,7 +9315,7 @@ def test_extract_masks_no_subject_still_counts_as_benign_skip(
         _add_photo_with_detection(db, folder_id, folder_path, f"bird{i}.jpg")
         for i in range(2)
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "No subject",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -9404,7 +9409,7 @@ def _run_extract_masks_for_test(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
 
@@ -9482,7 +9487,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
     monkeypatch.setattr(masking, "generate_mask", lambda *a, **k: np.ones((64, 64), dtype=bool))
     linear = np.random.default_rng(7).uniform(0.005, 0.02, (64, 64, 3)).astype(np.float32)
     monkeypatch.setattr(raw_analysis, "decode_linear", lambda *a: linear)
-    collection_id = db.get_collections()[0]["id"]
+    collection_id = db.collections.list_all()[0]["id"]
 
     def run(enabled):
         run_pipeline_job(_make_job(), FakeRunner(), str(tmp_path / "test.db"), db._active_workspace_id,
@@ -10453,7 +10458,7 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10560,7 +10565,7 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10636,7 +10641,7 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10704,7 +10709,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10777,7 +10782,7 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10885,7 +10890,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -10950,7 +10955,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11018,7 +11023,7 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11103,7 +11108,7 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11214,7 +11219,7 @@ def _run_eye_keypoints_download_failure_through_runner(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11332,7 +11337,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11453,7 +11458,7 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11535,7 +11540,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11623,7 +11628,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11693,7 +11698,7 @@ def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11768,7 +11773,7 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11839,7 +11844,7 @@ def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -11909,7 +11914,7 @@ def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -12577,7 +12582,7 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
-    collection_id = db.add_collection("Test", json.dumps([]))
+    collection_id = db.collections.add("Test", json.dumps([]))
 
     def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
         os.makedirs(cache_dir, exist_ok=True)
@@ -12662,7 +12667,7 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
         (f"working/{photo_id}.jpg", photo_id),
     )
     db.conn.commit()
-    collection_id = db.add_collection("Test", json.dumps([]))
+    collection_id = db.collections.add("Test", json.dumps([]))
 
     def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
         os.makedirs(cache_dir, exist_ok=True)
@@ -13475,7 +13480,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json_mod.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -13738,7 +13743,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
             detector_model="MegaDetector",
         )
         photo_ids.append(pid)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Resume test",
         json_mod.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -14677,7 +14682,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -14844,7 +14849,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15035,7 +15040,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15211,7 +15216,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15308,7 +15313,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15455,7 +15460,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15667,7 +15672,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
         photo_ids.append(pid)
         healthy_photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15847,7 +15852,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -15969,7 +15974,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
         detector_model="MegaDetector",
     )
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -16085,7 +16090,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -16267,7 +16272,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
         photo_ids.append(pid)
         healthy_photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -16450,7 +16455,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         detector_model="MegaDetector",
     )
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids",
                      "value": [gone_photo_id, healthy_photo_id]}]),
@@ -16688,7 +16693,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         detector_model="MegaDetector",
     )
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids",
                      "value": [gone_photo_id, healthy_photo_id]}]),
@@ -16876,7 +16881,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17057,7 +17062,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
     )
     photo_ids = [pid]
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17271,7 +17276,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
         os.remove(os.path.join(gone_folder_path, entry))
     os.rmdir(gone_folder_path)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17435,7 +17440,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17555,7 +17560,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17678,7 +17683,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
         )
         photo_ids.append(pid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17842,7 +17847,7 @@ def test_extract_masks_outage_rollup_counts_only_offline_photos(
         ),
         _add_photo_with_detection(db, share_folder, share_path, "zz0.jpg"),
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "One corrupt file, one dead volume",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17906,7 +17911,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
 
     unmasked = _add_photo_with_detection(db, folder_id, folder_path, "a.jpg")
     masked = _add_photo_with_detection(db, folder_id, folder_path, "b.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Half already masked",
         json.dumps([{"field": "photo_ids", "value": [unmasked, masked]}]),
     )
@@ -17921,7 +17926,11 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(
-        masked, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
+        masked,
+        sam2_variant,
+        mask_file,
+        "MegaDetector",
+        (0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(masked, sam2_variant)
     db.conn.execute(
@@ -17976,7 +17985,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
         _add_photo_with_detection(db, folder_id, folder_path, f"b{i}.jpg")
         for i in range(2)
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "All already masked",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -17992,7 +18001,11 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
         mask_file = str(mask_dir / f"{pid}.{sam2_variant}.png")
         Image.new("L", (4, 4), 255).save(mask_file)
         db.masks_features.upsert_mask(
-            pid, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
+            pid,
+            sam2_variant,
+            mask_file,
+            "MegaDetector",
+            (0.1, 0.1, 0.5, 0.5),
         )
         db.set_active_mask_variant(pid, sam2_variant)
         db.conn.execute(
@@ -18047,7 +18060,7 @@ def test_extract_masks_cancelled_total_covers_preflight_drops(
         _add_photo_with_detection(db, dead_folder, dead_path, "aa1.jpg"),
         _add_photo_with_detection(db, live_folder, live_path, "zz0.jpg"),
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Cancelled after an outage",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -18115,7 +18128,7 @@ def test_extract_masks_cancelled_step_warning_covers_unreadable(
         _add_photo_with_detection(db, dead_folder, dead_path, "aa1.jpg"),
         _add_photo_with_detection(db, live_folder, live_path, "zz0.jpg"),
     ]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Cancel-after-outage warning count",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -18208,7 +18221,7 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
         _drop_jpeg(live_path, filename)
         photo_ids.append(pid)
 
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Mixed detections plus outage",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -18258,7 +18271,7 @@ def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
     os.makedirs(mask_dir, exist_ok=True)
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
-    db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
+    db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, prompt)
     db.conn.execute(
         "UPDATE photos SET mask_path=?, active_mask_variant=?, "
         "dino_embedding_variant=? WHERE id=?",
@@ -18286,7 +18299,7 @@ def test_extract_masks_preflight_stale_cached_mask_is_still_at_risk(
     folder_id = db.add_folder(folder_path)
 
     pid = _add_photo_with_detection(db, folder_id, folder_path, "moved.jpg")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Stale prompt",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -18337,7 +18350,7 @@ def test_extract_masks_preflight_ignores_photos_with_no_detection(
     Image.new("RGB", (16, 16), "black").save(
         os.path.join(folder_path, "nodet.jpg")
     )
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "No mask candidates",
         json.dumps([{"field": "photo_ids", "value": [no_det]}]),
     )
@@ -18478,7 +18491,7 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
         detection_ids[-1], "Great-tailed Grackle", 0.9, "inat21",
     )
 
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Rescued weak burst",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -18543,7 +18556,7 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
           "confidence": 0.15, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Isolated weak frame",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )

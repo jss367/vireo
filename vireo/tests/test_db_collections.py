@@ -58,7 +58,7 @@ def _photo(db, folder_id, filename, **cols):
 
 
 def _ids(db, rules, **kwargs):
-    return db.query_photo_ids(rules, sort="name", **kwargs)
+    return db.collections.query_photo_ids(rules, sort="name", **kwargs)
 
 
 def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"):
@@ -78,7 +78,7 @@ def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"
 
 
 def test_add_collection_commits_and_returns_id(db):
-    cid = db.add_collection("Best", json.dumps([{"field": "all"}]), '{"prompt": "x"}')
+    cid = db.collections.add("Best", json.dumps([{"field": "all"}]), '{"prompt": "x"}')
     with _reader(db) as other:
         row = other.execute(
             "SELECT name, rules, workspace_id, visual_json FROM collections WHERE id = ?",
@@ -93,33 +93,33 @@ def test_add_collection_commits_and_returns_id(db):
 
 
 def test_get_collections_is_workspace_scoped_and_name_ordered(db):
-    db.add_collection("b", "[]")
-    db.add_collection("a", "[]", "{}")
+    db.collections.add("b", "[]")
+    db.collections.add("a", "[]", "{}")
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    db.add_collection("elsewhere", "[]")
+    db.collections.add("elsewhere", "[]")
     db.set_active_workspace(1)
-    rows = db.get_collections()
+    rows = db.collections.list_all()
     assert [tuple(r.keys()) for r in rows] == [("id", "name", "rules", "visual_json")] * 2
     assert [(r["name"], r["visual_json"]) for r in rows] == [("a", "{}"), ("b", None)]
 
 
 def test_delete_collection_commits_and_ignores_other_workspace(db):
-    keep = db.add_collection("keep", "[]")
+    keep = db.collections.add("keep", "[]")
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    foreign = db.add_collection("foreign", "[]")
+    foreign = db.collections.add("foreign", "[]")
     db.set_active_workspace(1)
-    db.delete_collection(keep)
-    db.delete_collection(foreign)
+    db.collections.delete(keep)
+    db.collections.delete(foreign)
     with _reader(db) as other:
         names = [r["name"] for r in other.execute("SELECT name FROM collections")]
     assert names == ["foreign"]
 
 
 def test_rename_collection_commits(db):
-    cid = db.add_collection("old", "[]")
-    db.rename_collection(cid, "new")
+    cid = db.collections.add("old", "[]")
+    db.collections.rename(cid, "new")
     assert not db.conn.in_transaction
     with _reader(db) as other:
         assert other.execute(
@@ -130,12 +130,12 @@ def test_rename_collection_commits(db):
 def test_rename_collection_missing_or_foreign_raises(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    foreign = db.add_collection("foreign", "[]")
+    foreign = db.collections.add("foreign", "[]")
     db.set_active_workspace(1)
     with pytest.raises(ValueError, match="^collection not found$"):
-        db.rename_collection(foreign, "stolen")
+        db.collections.rename(foreign, "stolen")
     with pytest.raises(ValueError, match="^collection not found$"):
-        db.rename_collection(9999, "x")
+        db.collections.rename(9999, "x")
     db.conn.rollback()
     assert db.conn.execute(
         "SELECT name FROM collections WHERE id = ?", (foreign,)
@@ -145,14 +145,14 @@ def test_rename_collection_missing_or_foreign_raises(db):
 def test_rename_collection_needs_active_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.rename_collection(1, "x")
+        db.collections.rename(1, "x")
 
 
 def test_duplicate_collection_names_copies_incrementally(db):
-    cid = db.add_collection("Birds", '[{"field": "all"}]', '{"prompt": "owl"}')
-    first = db.duplicate_collection(cid)
-    second = db.duplicate_collection(cid)
-    third = db.duplicate_collection(cid)
+    cid = db.collections.add("Birds", '[{"field": "all"}]', '{"prompt": "owl"}')
+    first = db.collections.duplicate(cid)
+    second = db.collections.duplicate(cid)
+    third = db.collections.duplicate(cid)
     with _reader(db) as other:
         rows = {
             r["id"]: dict(r) for r in other.execute(
@@ -168,18 +168,18 @@ def test_duplicate_collection_names_copies_incrementally(db):
 
 def test_duplicate_collection_missing_raises(db):
     with pytest.raises(ValueError, match="^collection not found$"):
-        db.duplicate_collection(9999)
+        db.collections.duplicate(9999)
 
 
 def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
-    b = db.add_collection("b", "[]")
-    upper_a = db.add_collection("A", "[]", "{}")
-    lower_a = db.add_collection("a", "[]")
+    b = db.collections.add("b", "[]")
+    upper_a = db.collections.add("A", "[]", "{}")
+    lower_a = db.collections.add("a", "[]")
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    db.add_collection("elsewhere", "[]")
+    db.collections.add("elsewhere", "[]")
     db.set_active_workspace(1)
-    rows = db.get_collections_for_picker()
+    rows = db.collections.list_for_picker()
     assert [tuple(r.keys()) for r in rows] == [("id", "name", "rules", "visual_json")] * 3
     # get_collections() would put "A" before "a" before "b" by binary order;
     # here "A"/"a" tie on NOCASE and fall back to id.
@@ -188,24 +188,24 @@ def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
 
 
 def test_get_collection_is_workspace_scoped(db):
-    cid = db.add_collection("Mine", '[{"field": "all"}]', '{"prompt": "owl"}')
+    cid = db.collections.add("Mine", '[{"field": "all"}]', '{"prompt": "owl"}')
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    foreign = db.add_collection("foreign", "[]")
+    foreign = db.collections.add("foreign", "[]")
     db.set_active_workspace(1)
-    assert dict(db.get_collection(cid)) == {
+    assert dict(db.collections.get(cid)) == {
         "id": cid, "name": "Mine", "rules": '[{"field": "all"}]',
         "visual_json": '{"prompt": "owl"}',
     }
-    assert db.get_collection(foreign) is None
-    assert db.get_collection(9999) is None
+    assert db.collections.get(foreign) is None
+    assert db.collections.get(9999) is None
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_collection(cid)
+        db.collections.get(cid)
 
 
 def test_update_collection_writes_only_the_given_columns_and_commits(db):
-    cid = db.add_collection("old", '[{"field": "all"}]', '{"prompt": "owl"}')
+    cid = db.collections.add("old", '[{"field": "all"}]', '{"prompt": "owl"}')
 
     def stored():
         with _reader(db) as other:
@@ -214,24 +214,24 @@ def test_update_collection_writes_only_the_given_columns_and_commits(db):
                 (cid,),
             ).fetchone())
 
-    db.update_collection(cid, name="new")
+    db.collections.update(cid, name="new")
     assert not db.in_transaction
     assert stored() == {
         "name": "new", "rules": '[{"field": "all"}]', "visual_json": '{"prompt": "owl"}',
     }
-    db.update_collection(cid, rules_json="[]")
+    db.collections.update(cid, rules_json="[]")
     assert stored()["rules"] == "[]"
     # An explicit None clears the visual clause; omitting it leaves it alone.
-    db.update_collection(cid, name="newer", rules_json='[{"field": "flag"}]', visual_json=None)
+    db.collections.update(cid, name="newer", rules_json='[{"field": "flag"}]', visual_json=None)
     assert stored() == {"name": "newer", "rules": '[{"field": "flag"}]', "visual_json": None}
 
 
 def test_update_collection_with_nothing_runs_no_statement(db):
-    cid = db.add_collection("old", "[]")
+    cid = db.collections.add("old", "[]")
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.update_collection(cid)
+        db.collections.update(cid)
     finally:
         db.conn.set_trace_callback(None)
     assert statements == []
@@ -240,9 +240,9 @@ def test_update_collection_with_nothing_runs_no_statement(db):
 def test_update_collection_ignores_other_workspace(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(other_ws)
-    foreign = db.add_collection("foreign", "[]")
+    foreign = db.collections.add("foreign", "[]")
     db.set_active_workspace(1)
-    db.update_collection(foreign, name="stolen", rules_json='[{"field": "all"}]')
+    db.collections.update(foreign, name="stolen", rules_json='[{"field": "all"}]')
     with _reader(db) as other:
         row = other.execute(
             "SELECT name, rules FROM collections WHERE id = ?", (foreign,)
@@ -250,7 +250,7 @@ def test_update_collection_ignores_other_workspace(db):
     assert dict(row) == {"name": "foreign", "rules": "[]"}
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.update_collection(foreign, name="x")
+        db.collections.update(foreign, name="x")
 
 
 # -- Rules engine ------------------------------------------------------------
@@ -267,7 +267,7 @@ def test_rules_engine_rejects_malformed_trees(db):
         rules = rule if "mode" in rule else [rule]
         assert db.rules_resolvable(rules) is False
         with pytest.raises(ValueError, match=message):
-            db.count_photos_for_rules(rules)
+            db.collections.count_photos_for_rules(rules)
 
 
 @pytest.mark.parametrize("value, op", [
@@ -283,13 +283,13 @@ def test_rules_engine_rejects_malformed_trees(db):
 def test_life_list_uncounted_rejects_invalid_tokens(db, value, op):
     rules = [{"field": "life_list_uncounted", "op": op, "value": value}]
     with pytest.raises(ValueError, match="^invalid Life List identification filter$"):
-        db.count_photos_for_rules(rules)
+        db.collections.count_photos_for_rules(rules)
 
 
 def test_life_list_uncounted_wraps_json_error(db):
     rules = [{"field": "life_list_uncounted", "op": "equals", "value": "{bad"}]
     with pytest.raises(ValueError) as excinfo:
-        db.count_photos_for_rules(rules)
+        db.collections.count_photos_for_rules(rules)
     assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
 
 
@@ -687,9 +687,9 @@ def test_rules_engine_rejects_malformed_groups_and_metadata(db):
     with pytest.raises(ValueError, match="^rule group rules must be a list$"):
         db._build_query_from_rules({"mode": "all", "rules": [{"rules": "x"}]})
     with pytest.raises(ValueError, match="metadata search requires contains/not_contains"):
-        db.count_photos_for_rules([{"field": "metadata", "op": "equals", "value": "x"}])
+        db.collections.count_photos_for_rules([{"field": "metadata", "op": "equals", "value": "x"}])
     with pytest.raises(ValueError, match="metadata search is limited to 4,096 characters"):
-        db.count_photos_for_rules(
+        db.collections.count_photos_for_rules(
             [{"field": "metadata", "op": "contains", "value": "x" * 4097}]
         )
 
@@ -734,16 +734,16 @@ def test_rule_queries_and_restrictions_with_a_where_clause(db, folder, tmp_path)
     nested = _photo(db, sub, "b.jpg", rating=5)
     _photo(db, sub, "c.jpg", rating=1)
     rated = [{"field": "rating", "op": ">=", "value": 4}]
-    cid = db.add_collection("Rated", json.dumps(rated))
-    rows = db.get_collection_photos(cid, photo_ids=[nested, top])
+    cid = db.collections.add("Rated", json.dumps(rated))
+    rows = db.collections.get_photos(cid, photo_ids=[nested, top])
     assert sorted(r["id"] for r in rows) == [top, nested]
-    assert db.count_collection_photo_availability(cid) == {
+    assert db.collections.count_photo_availability(cid) == {
         "total": 2, "available": 2, "offline": 0,
     }
     has_name = [{"field": "filename", "op": "contains", "value": "."}]
-    assert db.count_photos_for_rules(has_name, collection_id=cid, folder_id=sub) == 1
-    assert db.query_photo_ids(has_name, collection_id=cid) == [top, nested]
-    rows = db.query_photos(rated, folder_id=sub, include_offline_folders=True)
+    assert db.collections.count_photos_for_rules(has_name, collection_id=cid, folder_id=sub) == 1
+    assert db.collections.query_photo_ids(has_name, collection_id=cid) == [top, nested]
+    rows = db.collections.query_photos(rated, folder_id=sub, include_offline_folders=True)
     assert [(r["id"], r["folder_status"]) for r in rows] == [(nested, "ok")]
 
 
@@ -753,11 +753,11 @@ def test_offline_photos_stay_single_in_stacks(db, folder, tmp_path):
     b = _photo(db, offline_folder, "b.jpg", file_hash="h")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (offline_folder,))
     db.conn.commit()
-    rows = db.query_browse_stacks([], sort="name", include_offline_folders=True)
+    rows = db.collections.query_browse_stacks([], sort="name", include_offline_folders=True)
     assert [(r["id"], r["_browse_stack_kind"], r["folder_status"]) for r in rows] == [
         (a, None, "ok"), (b, None, "missing"),
     ]
-    assert db.browse_stack_totals([], include_offline_folders=True) == {
+    assert db.collections.browse_stack_totals([], include_offline_folders=True) == {
         "total": 2, "stack_count": 0,
     }
 
@@ -765,22 +765,22 @@ def test_offline_photos_stay_single_in_stacks(db, folder, tmp_path):
 def test_private_helpers_stay_callable_on_the_facade(db, folder):
     a = _photo(db, folder, "a.jpg", timestamp="2024-01-01T00:00:00")
     assert db.rules_resolvable([{"field": "all"}]) is True
-    assert db._stack_sort_spec("bogus") == db._stack_sort_spec("date")
-    assert db._stack_sort_clause("name") == "_stack_lead_filename ASC, _stack_lead_id ASC"
-    assert db._append_folder_restriction(None, "WHERE x", [1]) == ("WHERE x", [1])
-    assert db._append_collection_restriction(None, "", []) == ("", [])
-    where, params = db._append_folder_restriction(folder, "WHERE (a) OR (b)", [7])
+    assert db.collections._stack_sort_spec("bogus") == db.collections._stack_sort_spec("date")
+    assert db.collections._stack_sort_clause("name") == "_stack_lead_filename ASC, _stack_lead_id ASC"
+    assert db.collections._append_folder_restriction(None, "WHERE x", [1]) == ("WHERE x", [1])
+    assert db.collections._append_collection_restriction(None, "", []) == ("", [])
+    where, params = db.collections._append_folder_restriction(folder, "WHERE (a) OR (b)", [7])
     assert where == "WHERE ((a) OR (b)) AND p.folder_id IN (?)"
     assert params == [7, folder]
-    ctes, params = db._browse_stack_query_parts([])
+    ctes, params = db.collections._browse_stack_query_parts([])
     assert "keyed AS" in ctes
     assert params[0] == db._active_workspace_id
-    ranked, ranked_params = db._ranked_stack_query([], sort="name")
+    ranked, ranked_params = db.collections._ranked_stack_query([], sort="name")
     assert ranked.startswith(ctes)
     assert ranked_params == params
-    assert db._burst_keys_for_ids([a]) == {}
+    assert db.collections._burst_keys_for_ids([a]) == {}
     folder_join, join, where, params = db._build_query_from_rules([])
-    assert db._folder_filter_values(folder_join, join, where, params, q=None, limit=5) == [
+    assert db.collections._folder_filter_values(folder_join, join, where, params, q=None, limit=5) == [
         {"value": db.get_folder(folder)["path"], "count": 1},
     ]
 
@@ -789,34 +789,34 @@ def test_private_helpers_stay_callable_on_the_facade(db, folder):
 
 
 def test_missing_collection_short_circuits(db):
-    assert db.get_collection_photos(9999) == []
-    assert db.get_collection_photo_ids(9999) == []
-    assert db.count_collection_photos(9999) == 0
-    assert db.count_collection_photo_availability(9999) == {
+    assert db.collections.get_photos(9999) == []
+    assert db.collections.get_photo_ids(9999) == []
+    assert db.collections.count_photos(9999) == 0
+    assert db.collections.count_photo_availability(9999) == {
         "total": 0, "available": 0, "offline": 0,
     }
-    assert db.collection_photo_ids(9999) == set()
+    assert db.collections.photo_ids(9999) == set()
     with pytest.raises(ValueError, match="^collection not found in active workspace$"):
-        db.count_photos_for_rules([], collection_id=9999)
+        db.collections.count_photos_for_rules([], collection_id=9999)
 
 
 def test_get_collection_photos_narrowed_by_photo_ids(db, folder):
     a = _photo(db, folder, "a.jpg")
     b = _photo(db, folder, "b.jpg")
-    cid = db.add_collection("All", json.dumps([{"field": "all"}]))
-    assert db.get_collection_photos(cid, photo_ids=[]) == []
-    rows = db.get_collection_photos(cid, photo_ids=[b, b])
+    cid = db.collections.add("All", json.dumps([{"field": "all"}]))
+    assert db.collections.get_photos(cid, photo_ids=[]) == []
+    rows = db.collections.get_photos(cid, photo_ids=[b, b])
     assert [r["id"] for r in rows] == [b]
-    assert sorted(db.collection_photo_ids(cid)) == [a, b]
+    assert sorted(db.collections.photo_ids(cid)) == [a, b]
 
 
 def test_collection_queries_sql_shape(db, folder):
     _photo(db, folder, "a.jpg")
-    cid = db.add_collection("All", json.dumps([{"field": "all"}]))
+    cid = db.collections.add("All", json.dumps([{"field": "all"}]))
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.count_collection_photos(cid)
+        db.collections.count_photos(cid)
     finally:
         db.conn.set_trace_callback(None)
     ws = db._active_workspace_id
@@ -833,20 +833,20 @@ def test_collection_queries_sql_shape(db, folder):
 
 def test_stack_position_first_none_when_no_candidate_matches(db, folder):
     a = _photo(db, folder, "a.jpg")
-    assert db.query_browse_stack_position_first(
+    assert db.collections.query_browse_stack_position_first(
         [{"field": "photo_ids", "value": [a]}], [a + 100]
     ) is None
-    assert db.query_browse_stack_position_first([], []) is None
+    assert db.collections.query_browse_stack_position_first([], []) is None
 
 
 def test_photo_position_first_empty_ids(db):
-    assert db.query_photo_position_first([], []) is None
+    assert db.collections.query_photo_position_first([], []) is None
 
 
 def test_collapse_stack_ids_empty_and_single(db, folder):
     a = _photo(db, folder, "a.jpg", timestamp="2024-01-01T00:00:00")
-    assert db.collapse_browse_stack_photo_ids([]) == []
-    assert db.collapse_browse_stack_photo_ids([a]) == [
+    assert db.collections.collapse_browse_stack_photo_ids([]) == []
+    assert db.collections.collapse_browse_stack_photo_ids([a]) == [
         {"cover_id": a, "kind": None, "member_ids": [a]},
     ]
 
@@ -856,7 +856,7 @@ def test_collapse_stack_ids_duplicates_and_standalone(db, folder):
     dup_b = _photo(db, folder, "b.jpg", file_hash="h1", quality_score=0.9)
     offline = _photo(db, folder, "c.jpg", file_hash="h1", quality_score=1.0)
     solo = _photo(db, folder, "d.jpg")
-    items = db.collapse_browse_stack_photo_ids(
+    items = db.collections.collapse_browse_stack_photo_ids(
         [solo, dup_a, offline, dup_b, 9999], standalone_ids=[offline],
     )
     assert items == [
@@ -869,7 +869,7 @@ def test_collapse_stack_ids_duplicates_and_standalone(db, folder):
 def test_burst_keys_drop_the_temp_scope(db, folder):
     a = _photo(db, folder, "a.jpg", timestamp="2024-01-01T00:00:00")
     b = _photo(db, folder, "b.jpg", timestamp="2024-01-01T00:00:01")
-    items = db.collapse_browse_stack_photo_ids([a, b])
+    items = db.collections.collapse_browse_stack_photo_ids([a, b])
     assert [(i["kind"], i["member_ids"]) for i in items] == [("burst", [a, b])]
     assert db.conn.execute(
         "SELECT name FROM temp.sqlite_master WHERE name = '_burst_scope'"
@@ -887,19 +887,19 @@ def test_keyword_filter_values(db, folder):
     db.tag_photo(a, kid)
     db.tag_photo(b, kid)
     db.tag_photo(b, other)
-    assert db.get_filter_field_values("keyword", q="sun") == [
+    assert db.collections.get_filter_field_values("keyword", q="sun") == [
         {"value": "Sunset", "count": 2},
         {"value": "Sunrise", "count": 1},
     ]
     with pytest.raises(ValueError, match="does not support value suggestions"):
-        db.get_filter_field_values("rating")
+        db.collections.get_filter_field_values("rating")
 
 
 # -- Default collections and migrations ------------------------------------------
 
 
 def test_create_default_collections_commits(db):
-    db.create_default_collections()
+    db.collections.create_defaults()
     with _reader(db) as other:
         rows = {
             r["name"]: json.loads(r["rules"]) for r in other.execute(
@@ -915,7 +915,7 @@ def test_create_default_collections_commits(db):
 def test_create_default_collections_for_explicit_workspace_skips_active(db):
     other_ws = db.create_workspace("other")
     db.set_active_workspace(None)
-    db.create_default_collections(workspace_id=other_ws)
+    db.collections.create_defaults(workspace_id=other_ws)
     count = db.conn.execute(
         "SELECT COUNT(*) FROM collections WHERE workspace_id = ?", (other_ws,)
     ).fetchone()[0]
@@ -925,7 +925,9 @@ def test_create_default_collections_for_explicit_workspace_skips_active(db):
 # -- structure ----------------------------------------------------------------
 
 
-_DELEGATING_COLLECTION_METHODS = (
+# The forwarding wrappers this domain used to have on ``Database``; callers
+# reach the same methods through ``db.collections`` now.
+_REMOVED_COLLECTION_WRAPPERS = (
     "add_collection",
     "get_collections_for_picker",
     "get_collection",
@@ -935,8 +937,6 @@ _DELEGATING_COLLECTION_METHODS = (
     "rename_collection",
     "duplicate_collection",
     "_build_collection_query",
-    "_build_query_from_rules",
-    "_top_prediction_confidence_params",
     "_photo_sort_clause",
     "get_collection_photos",
     "get_collection_photo_ids",
@@ -965,8 +965,16 @@ _DELEGATING_COLLECTION_METHODS = (
     "create_default_collections",
 )
 
-# No SQL of their own: they compose other façade methods, so monkeypatches of
-# those (``query_photo_position_first``, ``workspaces.list_all``, ...) still apply.
+# Still forwarders on ``Database``: ``PredictionRepository`` binds them from
+# the façade under these names (``repositories.predictions.FACADE_METHODS``),
+# so monkeypatches of them keep reaching the prediction SQL.
+_DELEGATING_COLLECTION_METHODS = (
+    "_build_query_from_rules",
+    "_top_prediction_confidence_params",
+)
+
+# No SQL of their own: they compose collection reads, so class-level patches
+# of the repository methods (``query_photo_position_first``, ...) still apply.
 _COMPOSING_COLLECTION_METHODS = {
     "rules_resolvable": "_build_query_from_rules",
     "query_photo_position": "query_photo_position_first",
@@ -974,7 +982,7 @@ _COMPOSING_COLLECTION_METHODS = {
     "count_browse_stacks": "browse_stack_totals",
     "get_collection_photo_ids_stacked": "_stacked_photo_ids",
     "query_photo_ids_stacked": "_stacked_photo_ids",
-    "create_default_collections_for_all_workspaces": "create_default_collections",
+    "create_default_collections_for_all_workspaces": "create_defaults",
 }
 
 
@@ -990,6 +998,20 @@ def _self_attrs(name):
     }
 
 
+def _accessor_calls(name):
+    """Methods ``Database.<name>`` calls as ``self.collections.<method>``."""
+    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+    return {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "collections"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+    }
+
+
 @pytest.mark.parametrize("name", _DELEGATING_COLLECTION_METHODS)
 def test_collection_method_delegates_to_repository(name):
     attrs = _self_attrs(name)
@@ -999,6 +1021,39 @@ def test_collection_method_delegates_to_repository(name):
     assert "_collection_repository" in attrs, (
         f"Database.{name} no longer delegates to CollectionRepository"
     )
+
+
+def test_collections_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.collections``; Database keeps no aliases."""
+    from repositories.collections import CollectionRepository
+
+    for name in _REMOVED_COLLECTION_WRAPPERS:
+        assert not hasattr(Database, name), (
+            f"Database.{name} came back; call db.collections"
+        )
+    accessor = Database.__dict__["collections"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_collection_repository" in attrs
+    assert "conn" not in attrs
+    for name in _COMPOSING_COLLECTION_METHODS.values():
+        assert callable(getattr(CollectionRepository, name)), name
+
+
+def test_collections_is_a_fresh_repository_per_access(db):
+    from repositories.collections import CollectionRepository
+
+    first, second = db.collections, db.collections
+    assert isinstance(first, CollectionRepository)
+    assert first is not second
+    assert first.conn is db.conn
 
 
 def test_candidate_preference_case_delegates_to_repository():
@@ -1016,7 +1071,7 @@ def test_collection_composition_stays_on_facade(name, callee):
     attrs = _self_attrs(name)
     assert "conn" not in attrs
     assert "_collection_repository" not in attrs
-    assert callee in attrs
+    assert callee in attrs | _accessor_calls(name)
 
 
 def test_collection_repository_wiring(db, monkeypatch):
@@ -1040,7 +1095,7 @@ def test_collection_repository_wiring(db, monkeypatch):
     # Module constants are read when the repository is built, so a patch of
     # the ``db`` module still reaches the moved SQL.
     monkeypatch.setattr(db_module, "BURST_GAP_TOLERANCE_SECONDS", 99)
-    assert db._burst_run_ctes({"split_mode": "break", "time_gap": 1})[1] == [100]
+    assert db.collections._burst_run_ctes({"split_mode": "break", "time_gap": 1})[1] == [100]
 
 
 def test_collection_repository_imports_no_db_code():
@@ -1060,28 +1115,34 @@ def test_collection_repository_imports_no_db_code():
     assert "db" not in imported
 
 
-def test_collection_facade_signatures_unchanged():
-    sig = {n: str(inspect.signature(getattr(Database, n)))
-           for n in (*_DELEGATING_COLLECTION_METHODS, *_COMPOSING_COLLECTION_METHODS)}
-    assert sig["add_collection"] == "(self, name, rules_json, visual_json=None)"
-    assert sig["_build_query_from_rules"] == (
+def test_collection_signatures_unchanged():
+    from repositories.collections import CollectionRepository
+
+    facade = {n: str(inspect.signature(getattr(Database, n)))
+              for n in (*_DELEGATING_COLLECTION_METHODS, *_COMPOSING_COLLECTION_METHODS)}
+    assert facade["_build_query_from_rules"] == (
         "(self, rules, include_offline_folders=False, row_scoped=False)"
     )
-    assert sig["get_collection_photos"] == (
+
+    def sig(name):
+        return str(inspect.signature(getattr(CollectionRepository, name)))
+
+    assert sig("add") == "(self, name, rules_json, visual_json=None)"
+    assert sig("get_photos") == (
         "(self, collection_id, page=1, per_page=50, photo_ids=None, sort='date', "
         "include_offline_folders=False)"
     )
-    assert sig["query_browse_stacks"] == (
+    assert sig("query_browse_stacks") == (
         "(self, rules, sort='date', page=1, per_page=50, collection_id=None, "
         "folder_id=None, include_offline_folders=False, stack_config=None)"
     )
-    assert sig["get_filter_field_values"] == (
+    assert sig("get_filter_field_values") == (
         "(self, field, rules=None, q=None, limit=20, folder_id=None, collection_id=None)"
     )
-    assert sig["collapse_browse_stack_photo_ids"] == (
+    assert sig("collapse_browse_stack_photo_ids") == (
         "(self, photo_ids, standalone_ids=None, stack_config=None)"
     )
-    assert sig["create_default_collections"] == "(self, workspace_id=None)"
+    assert sig("create_defaults") == "(self, workspace_id=None)"
 
 
 def test_top_predicted_species_matches_summary(db, folder):

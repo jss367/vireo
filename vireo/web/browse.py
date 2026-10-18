@@ -58,18 +58,18 @@ def _first_paint_photos(
     try:
         if stacks:
             stack_cfg = db.browse_stack_settings(cfg.load())
-            photos = db.query_browse_stacks(
+            photos = db.collections.query_browse_stacks(
                 [], folder_id=folder_id, collection_id=collection_id,
                 page=page, per_page=per_page, sort=sort,
                 stack_config=stack_cfg,
             )
-            stack_totals = db.browse_stack_totals(
+            stack_totals = db.collections.browse_stack_totals(
                 [], folder_id=folder_id, collection_id=collection_id,
                 stack_config=stack_cfg,
             )
             total = stack_totals["total"]
             stack_count = stack_totals["stack_count"]
-            underlying_total = db.count_photos_for_rules(
+            underlying_total = db.collections.count_photos_for_rules(
                 [], folder_id=folder_id, collection_id=collection_id,
             )
         else:
@@ -376,7 +376,7 @@ def _is_visual_collection(db, collection_id):
     # review on PR #1343). Folders/keywords/collections are still returned
     # so the sidebar bootstraps.
     if collection_id is not None:
-        coll_row = db.get_collection(collection_id)
+        coll_row = db.collections.get(collection_id)
         if coll_row is not None and coll_row["visual_json"] is not None:
             return True
     return False
@@ -471,7 +471,7 @@ def create_browse_blueprint(
                 return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
-        collections = db.get_collections()
+        collections = db.collections.list_all()
 
         photo_dicts = prepare_browse_photo_dicts(db, photos)
         collection_dicts = _first_paint_collection_dicts(db, collections)
@@ -625,7 +625,7 @@ def create_browse_blueprint(
         except ValueError as exc:
             return json_error(str(exc), 400)
         try:
-            values = db.get_filter_field_values(
+            values = db.collections.get_filter_field_values(
                 field, rules=rules, q=q, limit=limit,
                 folder_id=folder_id, collection_id=collection_id,
             )

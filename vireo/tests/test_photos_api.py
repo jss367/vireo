@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from page_scripts import page_with_scripts
+from repositories.masks_features import PipelineFeatures
 from testing.waits import synchronization_timeout
 
 
@@ -202,7 +203,7 @@ def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
     """Dashboard drill-down parameters preserve collection/date intersections."""
     app, db = app_and_db
     photos = db.get_photos(sort="name")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Two dates",
         json.dumps([{
             "field": "photo_ids",
@@ -501,9 +502,9 @@ def test_dashboard_options_flags_degraded_collections(app_and_db):
     """Collections whose rules can't compile are flagged so the scope
     picker can disable them instead of 400ing /api/stats and /api/coverage."""
     app, db = app_and_db
-    healthy = db.add_collection("Healthy", "[]")
-    bad_json = db.add_collection("Broken JSON", "{not json")
-    bad_rules = db.add_collection(
+    healthy = db.collections.add("Healthy", "[]")
+    bad_json = db.collections.add("Broken JSON", "{not json")
+    bad_rules = db.collections.add(
         "Unresolvable rules",
         json.dumps([{"field": "no_such_field", "op": "equals", "value": 1}]),
     )
@@ -528,8 +529,8 @@ def test_dashboard_options_flags_visual_collections(app_and_db):
     /api/coverage resolve collection_id through ``_build_collection_query``
     (rules-only). Codex review r3620636595."""
     app, db = app_and_db
-    plain = db.add_collection("Plain", "[]")
-    visual = db.add_collection(
+    plain = db.collections.add("Plain", "[]")
+    visual = db.collections.add(
         "Visual",
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -557,7 +558,7 @@ def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     app, db = app_and_db
     other_workspace = db.create_workspace("Other")
     db.set_active_workspace(other_workspace)
-    foreign_collection = db.add_collection("Foreign", "[]")
+    foreign_collection = db.collections.add("Foreign", "[]")
     db.set_active_workspace(db.workspaces.list_all()[0]["id"])
 
     client = app.test_client()
@@ -636,12 +637,12 @@ def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
 
 def test_api_photo_search_rejects_visual_collection(app_and_db):
     """``/api/photos/search?collection_id=<visual>`` expands the scope via
-    ``db.get_collection_photo_ids(...)`` which evaluates ``rules`` only.
+    ``db.collections.get_photo_ids(...)`` which evaluates ``rules`` only.
     A visual collection would silently widen the CLIP-scored candidate set
     to every metadata match instead of the visually-matched subset
     (Codex review r3621094501)."""
     app, db = app_and_db
-    visual = db.add_collection(
+    visual = db.collections.add(
         "Visual",
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -1388,15 +1389,17 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     for idx, pid in enumerate(ordered_ids):
         db.masks_features.update_pipeline_features(
             pid,
-            mask_path=f"/masks/{pid}.png",
-            subject_tenengrad=250 + idx * 25,
-            bg_tenengrad=30,
-            crop_complete=0.9,
-            bg_separation=40.0,
-            subject_clip_high=0.01,
-            subject_clip_low=0.01,
-            subject_y_median=120.0,
-            phash_crop=f"{pid:016x}",
+            PipelineFeatures(
+                mask_path=f"/masks/{pid}.png",
+                subject_tenengrad=250 + idx * 25,
+                bg_tenengrad=30,
+                crop_complete=0.9,
+                bg_separation=40.0,
+                subject_clip_high=0.01,
+                subject_clip_low=0.01,
+                subject_y_median=120.0,
+                phash_crop=f"{pid:016x}",
+            ),
         )
         db.update_photo_quality(pid, subject_size=0.1)
         det_id = db.save_detections(
@@ -11165,7 +11168,7 @@ def _seed_mask(db, masks_dir, pid, variant, body=b"PNGBYTES"):
         fh.write(body)
     db.masks_features.upsert_mask(
         photo_id=pid, variant=variant, path=path,
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     return path
 
@@ -11247,7 +11250,7 @@ def test_api_serve_mask_404_when_file_missing(app_and_db):
     pid = db.get_photos()[0]["id"]
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path="/nope/missing.png",
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
     client = app.test_client()
     resp = client.get(f"/api/masks/{pid}/sam2-small.png")
@@ -11291,7 +11294,7 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
     db.masks_features.upsert_mask(
         photo_id=pid, variant="unknown", path=legacy_path,
         detector_model="unknown",
-        prompt_x=-1, prompt_y=-1, prompt_w=-1, prompt_h=-1,
+        prompt=(-1, -1, -1, -1),
     )
 
     client = app.test_client()
@@ -11355,10 +11358,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
                 variant="sam2-small",
                 path=new_path,
                 detector_model="md",
-                prompt_x=0,
-                prompt_y=0,
-                prompt_w=0,
-                prompt_h=0,
+                prompt=(0, 0, 0, 0),
             )
             _os.unlink(old_path)
             raise FileNotFoundError(old_path)
@@ -11395,7 +11395,7 @@ def test_legacy_serve_mask_direct_file_served_when_db_backed(app_and_db):
         fh.write(b"LEGACYDIRECT")
     db.masks_features.upsert_mask(
         photo_id=pid, variant="legacy", path=mask_file,
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     client = app.test_client()
@@ -11449,7 +11449,7 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     outside.write_bytes(b"SECRET")
     db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path=str(outside),
-        detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
+        detector_model="md", prompt=(0, 0, 0, 0),
     )
 
     client = app.test_client()
@@ -11681,8 +11681,11 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
     arr[:, : width // 2] = 255
     PILImage.fromarray(arr, "L").save(path, "PNG")
     db.masks_features.upsert_mask(
-        photo_id, "sam2-small", path, "megadetector-v6",
-        0.0, 0.0, 0.5, 1.0,
+        photo_id,
+        "sam2-small",
+        path,
+        "megadetector-v6",
+        (0.0, 0.0, 0.5, 1.0),
     )
     db.set_active_mask_variant(photo_id, "sam2-small")
     return path
@@ -11766,10 +11769,7 @@ def test_local_mask_snapshot_retries_predecessor_cleanup(
                 "sam2-small",
                 new_path,
                 "megadetector-v6",
-                0.0,
-                0.0,
-                0.5,
-                1.0,
+                (0.0, 0.0, 0.5, 1.0),
             )
             os.unlink(old_path)
             raise FileNotFoundError(old_path)
@@ -12228,7 +12228,11 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     arr[:300, :] = 255
     PILImage.fromarray(arr, "L").save(path2, "PNG")
     db.masks_features.upsert_mask(
-        pid2, "sam2-small", path2, "megadetector-v6", 0.0, 0.0, 1.0, 0.5,
+        pid2,
+        "sam2-small",
+        path2,
+        "megadetector-v6",
+        (0.0, 0.0, 1.0, 0.5),
     )
     db.set_active_mask_variant(pid2, "sam2-small")
 
@@ -12498,7 +12502,7 @@ def test_browse_stack_count_covers_all_pages(app_and_db, endpoint):
     listed = db.get_photos(sort="name")
     with db.conn:
         _seed_browse_burst(db, [listed[0]["id"], listed[1]["id"]])
-    collection_id = db.add_collection("All photos", "[]")
+    collection_id = db.collections.add("All photos", "[]")
     client = app.test_client()
 
     def fetch(stacks):
@@ -12705,7 +12709,9 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
     # Position 5 of 12; at three a page that is the last row of page 2.
     target = ids[5]
 
-    original = Database.query_photo_position_first
+    from repositories.collections import CollectionRepository
+
+    original = CollectionRepository.query_photo_position_first
     inserted = []
 
     def insert_between(self, *args, **kwargs):
@@ -12727,7 +12733,7 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
 
     # The endpoint resolves focus through the list form, so that is where a
     # mid-request commit has to land to exercise the snapshot.
-    monkeypatch.setattr(Database, "query_photo_position_first", insert_between)
+    monkeypatch.setattr(CollectionRepository, "query_photo_position_first", insert_between)
 
     response = app.test_client().post("/api/photos/query", json={
         "rules": [],
@@ -13131,13 +13137,13 @@ def test_collapse_browse_stack_photo_ids_keeps_standalone_ids_singular(app_and_d
     with db.conn:
         _seed_browse_burst(db, [first, second, third])
 
-    grouped = db.collapse_browse_stack_photo_ids([first, second, third])
+    grouped = db.collections.collapse_browse_stack_photo_ids([first, second, third])
     assert len(grouped) == 1
     assert sorted(grouped[0]["member_ids"]) == sorted([first, second, third])
 
     # Marking one id standalone drops it out of the burst tally and keeps it
     # in relevance order as its own item.
-    split = db.collapse_browse_stack_photo_ids(
+    split = db.collections.collapse_browse_stack_photo_ids(
         [first, second, third], standalone_ids=[second],
     )
     assert [item["cover_id"] for item in split].count(second) == 1
@@ -13471,15 +13477,15 @@ def test_api_filter_values_folder_uses_subtree_cap(app_and_db):
     matching folders see valid paths silently disappear from the picker
     (Codex review r4209417965)."""
     app, _db = app_and_db
-    import db as db_module
-    original = db_module.Database.get_filter_field_values
+    from repositories.collections import CollectionRepository
+    original = CollectionRepository.get_filter_field_values
     captured = []
 
     def wrapper(self, field, **kwargs):
         captured.append((field, kwargs.get("limit")))
         return original(self, field, **kwargs)
 
-    db_module.Database.get_filter_field_values = wrapper
+    CollectionRepository.get_filter_field_values = wrapper
     try:
         client = app.test_client()
         # The folder facet client requests ``limit=10000``; the route must
@@ -13492,7 +13498,7 @@ def test_api_filter_values_folder_uses_subtree_cap(app_and_db):
         resp = client.get('/api/filters/values?field=camera_model&limit=10000')
         assert resp.status_code == 200
     finally:
-        db_module.Database.get_filter_field_values = original
+        CollectionRepository.get_filter_field_values = original
 
     folder_limits = [lim for f, lim in captured if f == "folder"]
     camera_limits = [lim for f, lim in captured if f == "camera_model"]
@@ -13531,7 +13537,7 @@ def test_api_filter_values_respects_scope(app_and_db):
     assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
 
     # collection_id narrows to only the two picked photos (bird1 + bird3 — Sony A1).
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Two Sonys",
         json.dumps([{
             "field": "photo_ids",
@@ -13998,7 +14004,7 @@ def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
             photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
         )
     # bird3 (the only photo in the collection) has no embedding.
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Only bird3",
         json.dumps([{"field": "photo_ids", "value": [photos["bird3.jpg"]]}]),
     )
@@ -14232,8 +14238,8 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
 
     # count_photos_for_rules and query_photo_ids share the same
     # _build_query_from_rules path — both should behave the same.
-    assert db.count_photos_for_rules(rules) == 2
-    assert set(db.query_photo_ids(rules)) == {
+    assert db.collections.count_photos_for_rules(rules) == 2
+    assert set(db.collections.query_photo_ids(rules)) == {
         photos["bird1.jpg"], photos["bird3.jpg"],
     }
 
@@ -14280,7 +14286,7 @@ def test_photos_query_classifier_model_is_not_includes_photos_without_prediction
               "value": "model-a"}]
     # bird1 is the only classified photo (with model-a) and must be
     # excluded; bird2 and bird3 have no predictions and must remain.
-    assert set(db.query_photo_ids(rules)) == {
+    assert set(db.collections.query_photo_ids(rules)) == {
         photos["bird2.jpg"], photos["bird3.jpg"],
     }
 

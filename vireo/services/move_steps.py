@@ -8,8 +8,16 @@ full for the whole byte-for-byte verify of a large NAS transfer and read as
 a hang.
 """
 
+from __future__ import annotations
+
 import threading
 import time
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from jobs import JobRunner
+    from services.service_types import JobDict
 
 # move_folder's phase name -> step id. A phase renamed in move.py must be
 # renamed here too, or its progress stops reaching the step list.
@@ -30,7 +38,7 @@ _TERMINAL = ("completed", "failed", "cancelled")
 _EVENT_INTERVAL = 0.25
 
 
-def folder_move_steps(*, remote, verify_contents):
+def folder_move_steps(*, remote: bool, verify_contents: bool) -> list[dict[str, str]]:
     """The steps ``move_folder`` runs through, in order.
 
     A remote move has no timestamp pass (``plan_mtime_corrections`` only runs
@@ -61,27 +69,32 @@ class MoveSteps:
     open.
     """
 
-    def __init__(self, runner, job, steps, phases=FOLDER_MOVE_PHASES):
+    def __init__(
+        self, runner: JobRunner, job: JobDict, steps: Sequence[Mapping[str, str]],
+        phases: Mapping[str, str] = FOLDER_MOVE_PHASES,
+    ) -> None:
         self._runner = runner
         self._job_id = job["id"]
         self._order = [step["id"] for step in steps]
         self._status = {step_id: "pending" for step_id in self._order}
-        self._errors = {}
+        self._errors: dict[str, str] = {}
         self._phases = phases
-        self._active = None
+        self._active: str | None = None
         self._last_event = 0.0
         self._lock = threading.Lock()
         runner.set_steps(self._job_id, steps)
 
-    def start(self):
+    def start(self) -> None:
         """Open the first step, for setup the work does before its first
         progress callback."""
         with self._lock:
             self._enter(self._order[0])
 
-    def report(self, current, total, filename, phase):
+    def report(self, current: int, total: int, filename: str, phase: str) -> bool | int:
         """Record one progress callback. Returns True when the caller should
-        push a progress event now, False when the event can be skipped."""
+        push a progress event now, False when the event can be skipped.
+        (A zero ``total`` can make the falsy answer ``0``; callers only test
+        its truth.)"""
         step_id = self._phases.get(phase)
         if step_id is None:
             return True
@@ -99,14 +112,14 @@ class MoveSteps:
                 self._last_event = now
             return due
 
-    def finish(self, step_id=None, *, summary=None, error=None):
+    def finish(self, step_id: str | None = None, *, summary: str | None = None, error: str | None = None) -> None:
         """Complete the open steps. A ``step_id`` gets ``summary`` and
         ``error`` (a warning on a completed step)."""
         with self._lock:
             if self._active is not None:
                 self._close(self._active, "completed")
             if step_id is not None:
-                fields = {}
+                fields: dict[str, object] = {}
                 if summary:
                     fields["summary"] = summary
                 if error:
@@ -115,7 +128,7 @@ class MoveSteps:
                 if fields:
                     self._runner.update_step(self._job_id, step_id, **fields)
 
-    def fail(self, message, *, status="failed"):
+    def fail(self, message: str, *, status: str = "failed") -> None:
         """Mark the active step failed, or retain a visible post-transfer error.
 
         Completed physical work stays completed if later bookkeeping fails;
@@ -138,7 +151,7 @@ class MoveSteps:
             self._set_status(step_id, status, error=message, error_count=1)
             self._active = None
 
-    def _enter(self, step_id):
+    def _enter(self, step_id: str) -> bool:
         if step_id == self._active:
             return False
         if self._status.get(step_id) in _TERMINAL:
@@ -150,13 +163,13 @@ class MoveSteps:
         self._active = step_id
         return True
 
-    def _close(self, step_id, status):
+    def _close(self, step_id: str, status: str) -> None:
         if self._status[step_id] in _TERMINAL:
             return
         self._set_status(step_id, status)
         if self._active == step_id:
             self._active = None
 
-    def _set_status(self, step_id, status, **fields):
+    def _set_status(self, step_id: str, status: str, **fields: object) -> None:
         self._status[step_id] = status
         self._runner.update_step(self._job_id, step_id, status=status, **fields)

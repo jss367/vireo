@@ -957,7 +957,7 @@ def _retry_thumbnail_with_companion(
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
         try:
-            thread_db.working_copies.mark_source_decode_failed(
+            thread_db.working_copies.mark_raw_decode_failed(
                 photo_id, file_mtime,
             )
             thread_db.commit_with_retry()
@@ -1001,7 +1001,7 @@ def _retry_thumbnail_with_working_copy(
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
         try:
-            thread_db.working_copies.mark_source_decode_failed(
+            thread_db.working_copies.mark_raw_decode_failed(
                 photo_id, file_mtime,
             )
             thread_db.commit_with_retry()
@@ -2008,20 +2008,26 @@ def _wire_scan_stages(run, shared, *, skip_scan, snapshot_paths,
     """Bind the scan, collection, thumbnail and preview stages to this run."""
     scanner_stage = partial(
         scanning.scanner_stage, run=run,
-        _SENTINEL=_SENTINEL,
-        _filter_excluded=shared.filter_excluded,
-        _find_broken_metadata_folders=_find_broken_metadata_folders,
-        _missing_archive_mount_root=_missing_archive_mount_root,
-        _put_scan_item=shared.put_scan_item,
-        _prepare_scan_item=shared.prepare_scan_item,
+        settings=scanning.ScanStageSettings(
+            skip_scan=skip_scan,
+            snapshot_paths=snapshot_paths,
+            final_destination=final_destination,
+            remote_archive=remote_archive,
+            effective_vireo_dir=effective_vireo_dir,
+            effective_thumb_cache_dir=effective_thumb_cache_dir,
+        ),
+        hooks=scanning.ScanStageHooks(
+            filter_excluded=shared.filter_excluded,
+            find_broken_metadata_folders=_find_broken_metadata_folders,
+            missing_archive_mount_root=_missing_archive_mount_root,
+            missing_originals_invalidator=missing_originals_invalidator,
+        ),
+        handoff=scanning.ScanHandoff(
+            put_scan_item=shared.put_scan_item,
+            sentinel=_SENTINEL,
+            prepare_scan_item=shared.prepare_scan_item,
+        ),
         collected_photo_ids=shared.collected_photo_ids,
-        effective_thumb_cache_dir=effective_thumb_cache_dir,
-        effective_vireo_dir=effective_vireo_dir,
-        final_destination=final_destination,
-        missing_originals_invalidator=missing_originals_invalidator,
-        remote_archive=remote_archive,
-        skip_scan=skip_scan,
-        snapshot_paths=snapshot_paths,
     )
 
     _collection_stage_body = partial(
