@@ -174,7 +174,7 @@ ignore = [
 # Type checking starts on the service and repository layers and widens one
 # directory at a time. Modules import each other as top-level names
 # (``import config``), so ``vireo`` is on the search path.
-include = ["vireo/services", "vireo/repositories", "vireo/pipeline_stages", "tests/typecheck"]
+include = ["vireo/services", "vireo/repositories", "vireo/pipeline_stages", "vireo/import_job", "tests/typecheck"]
 extraPaths = ["vireo"]
 pythonVersion = "3.14"
 typeCheckingMode = "basic"

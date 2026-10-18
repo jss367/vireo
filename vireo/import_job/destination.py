@@ -2,11 +2,21 @@
 probes, and the source-root guard that keeps writes off the card.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from import_job.state import _fail
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from pathlib import Path
+
+    from db import Database
+    from import_job.state import ImportParams, _ImportRunState
 
 # Case-folded matching is unconditional on darwin/win32 (the OS enforces
 # case-insensitive filesystems). On Linux we probe each source's actual
@@ -16,7 +26,7 @@ from import_job.state import _fail
 _CASE_INSENSITIVE_PLATFORM = sys.platform in ("darwin", "win32")
 
 
-def _fs_is_case_insensitive(path):
+def _fs_is_case_insensitive(path: str) -> bool:
     """Probe whether the filesystem at ``path`` treats case as insensitive.
 
     List an entry inside ``path`` and check whether accessing it under a
@@ -60,7 +70,7 @@ def _fs_is_case_insensitive(path):
     return True
 
 
-def _build_source_root_guard(sources):
+def _build_source_root_guard(sources: Iterable[str]) -> Callable[[str | Path], bool]:
     """Return ``path_under_any_source(path) -> bool`` for the given roots.
 
     Shared by both the local and remote duplicate gates to reject
@@ -71,7 +81,7 @@ def _build_source_root_guard(sources):
     ``safe_to_format`` green while the card holds the only bytes. Only an
     off-card twin can back a duplicate skip. See PR #1107 review.
     """
-    def _norm(s):
+    def _norm(s: str) -> tuple[str, bool]:
         try:
             real = os.path.realpath(s)
         except OSError:
@@ -81,7 +91,7 @@ def _build_source_root_guard(sources):
 
     roots = [_norm(s) for s in sources]
 
-    def path_under_any_source(path):
+    def path_under_any_source(path: str | Path) -> bool:
         try:
             real = os.path.realpath(path)
         except OSError:
@@ -98,7 +108,7 @@ def _build_source_root_guard(sources):
     return path_under_any_source
 
 
-def _is_source_backed_dest(ctx, source_file, dest_path):
+def _is_source_backed_dest(ctx: _DestContext, source_file: Path, dest_path: str) -> bool:
     """True when ``dest_path`` IS the source file or resolves under any
     source root — i.e. writing to it, or adopting it, would attest bytes
     the card still owns.
@@ -157,7 +167,9 @@ def _is_source_backed_dest(ctx, source_file, dest_path):
     return ctx.path_under_any_source(dest_path)
 
 
-def _reject_source_backed_dest(state, ctx, *, rel, source_file, dest_file):
+def _reject_source_backed_dest(
+    state: _ImportRunState, ctx: _DestContext, *, rel: str, source_file: Path, dest_file: str,
+) -> bool:
     """Per-file dest-safety guard (spec decision 12): fail a ``dest_file``
     that IS the source file or resolves under any source root. Returns
     True when the file was rejected (booked failed; the caller skips it).
@@ -203,13 +215,13 @@ class _DestContext:
     on the local path until PR 7 merges the loops.
     """
     destination: str
-    mount_baseline: dict  # mount-root candidate -> was-live-at-run-start
-    path_under_any_source: object  # callable(path) -> bool
-    path_under_destination: object  # callable(path) -> bool
-    fold_basename: object  # callable(name) -> str
+    mount_baseline: dict[str, bool]  # mount-root candidate -> was-live-at-run-start
+    path_under_any_source: Callable[[str | Path], bool]
+    path_under_destination: Callable[[str], bool]
+    fold_basename: Callable[[str], str]
 
 
-def _build_destination_context(db, params):
+def _build_destination_context(db: Database, params: ImportParams) -> _DestContext:
     """Normalize the destination and derive the run-scoped guards.
 
     ORDERING IS LOAD-BEARING: normalize first, capture the live-mount
@@ -282,7 +294,7 @@ def _build_destination_context(db, params):
     )
 
 
-def _normalize_destination(params):
+def _normalize_destination(params: ImportParams) -> str:
     """The run's destination: normalized, then ``realpath``-resolved."""
     # Normalize once — the raw destination string is passed as ``root`` to
     # both the copy layout (``os.path.normpath(os.path.join(destination,
@@ -312,7 +324,7 @@ def _normalize_destination(params):
     return destination
 
 
-def _destination_case_guards(destination):
+def _destination_case_guards(destination: str) -> tuple[Callable[[str], bool], Callable[[str], str]]:
     """``(path_under_destination, fold_basename)`` for the normalized
     ``destination``, case-folded when its filesystem is case-insensitive.
     """
@@ -332,7 +344,7 @@ def _destination_case_guards(destination):
     # linked to the workspace — otherwise ``safe_to_format`` can go
     # green while the imported photo stays invisible in the active
     # workspace. See PR #1107 review.
-    def _probe_dir_case_insensitive(path):
+    def _probe_dir_case_insensitive(path: str) -> bool:
         p = os.path.normpath(path)
         while True:
             if os.path.isdir(p):
@@ -347,7 +359,7 @@ def _destination_case_guards(destination):
         destination.casefold() if _dest_ci else destination
     ).rstrip(os.sep)
 
-    def _path_under_destination(path):
+    def _path_under_destination(path: str) -> bool:
         if not _dest_root_norm:
             return False
         try:
@@ -366,7 +378,7 @@ def _destination_case_guards(destination):
     # numeric suffixes, instead of being sent to the same effective
     # receiver path where ``--ignore-existing`` would silently drop it and
     # the later catalog/hash validation would fail. See PR #1113 review.
-    def _fold_basename(name):
+    def _fold_basename(name: str) -> str:
         return name.casefold() if _dest_ci else name
 
     return _path_under_destination, _fold_basename

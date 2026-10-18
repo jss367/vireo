@@ -1,7 +1,10 @@
 """The per-batch import loop shared by both transports."""
 
+from __future__ import annotations
+
 import functools
 import os
+from typing import TYPE_CHECKING
 
 from import_job.cataloging import (
     _catalog_scan_and_prescan,
@@ -22,8 +25,21 @@ from import_job.state import _fail, _ImportBatchState, _reclassify_landed_failed
 from import_job.transports import _ENQ_CANCELLED
 from import_job.twins import _link_twins_and_emit
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
-def _make_stop_check(runner, job):
+    from db import Database
+    from import_job.destination import _DestContext
+    from import_job.import_types import Emit, ImportBatch, ScanFunction, StopCheck
+    from import_job.planning import _ImportPlan
+    from import_job.state import ImportParams, _ImportRunState
+    from import_job.transports import _LocalTransport, _RsyncTransport
+    from jobs import JobRunner
+    from services.service_types import JobDict
+
+
+def _make_stop_check(runner: JobRunner, job: JobDict) -> StopCheck:
     """Build the nonblocking stop probe shared by both import paths.
 
     Threaded through every destination-side hash read so a Stop can
@@ -35,7 +51,7 @@ def _make_stop_check(runner, job):
     UI says the job is paused. Mirrors the rsync watchdog's use of
     ``cancellation_requested`` for the same reason.
     """
-    def _stop_requested():
+    def _stop_requested() -> bool:
         return runner.cancellation_requested(job["id"])
     return _stop_requested
 
@@ -118,9 +134,13 @@ class _ImportBatchLoop:
     are somewhere on disk".
     """
 
-    def __init__(self, *, job, runner, db, workspace_id, params, ctx,
-                 transport, state, emit, plan, scan, unmounted_since_baseline,
-                 missing_root_check):
+    def __init__(
+        self, *, job: JobDict, runner: JobRunner, db: Database, workspace_id: int,
+        params: ImportParams, ctx: _DestContext, transport: _LocalTransport | _RsyncTransport,
+        state: _ImportRunState, emit: Emit, plan: _ImportPlan, scan: ScanFunction,
+        unmounted_since_baseline: Callable[[dict[str, bool]], str | None],
+        missing_root_check: Callable[[], str | None],
+    ) -> None:
         self._job = job
         self._runner = runner
         self._db = db
@@ -147,10 +167,10 @@ class _ImportBatchLoop:
         # constant for the run.
         self.attests_bytes = transport.attests_bytes
 
-    def _is_cancelled(self):
+    def _is_cancelled(self) -> bool:
         return self._runner.is_cancelled(self._job["id"])
 
-    def run(self, batches):
+    def run(self, batches: list[ImportBatch]) -> None:
         """Copy, verify and catalog every batch until done or stopped."""
         for rel, batch in batches:
             if self._is_cancelled():
@@ -159,7 +179,7 @@ class _ImportBatchLoop:
             if self._run_batch(rel, batch):
                 break
 
-    def _run_batch(self, rel, batch):
+    def _run_batch(self, rel: str, batch: list[Path]) -> bool:
         """Import one destination batch; return True to stop the run."""
         state = self._state
         # Shared guard chain (ordering is the 2026-07-30 incident
@@ -203,7 +223,7 @@ class _ImportBatchLoop:
         self._publish_batch_scope(batch_st)
         return state.cancelled
 
-    def _feed_file(self, batch_st, rel, dest_folder, source_file):
+    def _feed_file(self, batch_st: _ImportBatchState, rel: str, dest_folder: str, source_file: Path) -> bool:
         """Gate and enqueue one card file; return False to stop the batch."""
         state = self._state
         if self._is_cancelled():
@@ -271,7 +291,7 @@ class _ImportBatchLoop:
         # bytes were queued for ``flush_batch`` — next file either way.
         return verdict is not _ENQ_CANCELLED
 
-    def _recheck_mount_and_roll_back(self, batch_st, rel):
+    def _recheck_mount_and_roll_back(self, batch_st: _ImportBatchState, rel: str) -> None:
         """Probe the mount after the last file; roll the batch back if lost.
 
         The per-file probe runs BEFORE each copy, so it cannot see a
@@ -326,7 +346,7 @@ class _ImportBatchLoop:
                 workspace_id=self._workspace_id,
             )
 
-    def _catalog_batch(self, batch_st, rel):
+    def _catalog_batch(self, batch_st: _ImportBatchState, rel: str) -> None:
         """Record, catalog, validate and stamp this batch's landings.
 
         Runs even when cancelled mid-batch: what landed on disk must be
@@ -414,7 +434,7 @@ class _ImportBatchLoop:
         # predicate then skips.
         _fill_wc_overrides(state, batch_st, params)
 
-    def _record_landings_or_fail(self, batch_st, rel):
+    def _record_landings_or_fail(self, batch_st: _ImportBatchState, rel: str) -> None:
         """Record this batch's landings for a resume before cataloging them.
 
         A Stop while waiting to record them books them failed and empties
@@ -441,7 +461,7 @@ class _ImportBatchLoop:
                 )
             batch_st.landed = []
 
-    def _publish_batch_scope(self, batch_st):
+    def _publish_batch_scope(self, batch_st: _ImportBatchState) -> None:
         """Publish the end-of-batch resume scope.
 
         A rejected landing is removed from ``state.landed_files`` in

@@ -2,16 +2,28 @@
 and the recovery of an interrupted parent's landings.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from import_dedup import compute_file_hash
 from import_job.snapshots import _capture_photo_fingerprints, _chunks
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from db import Database
+    from import_job.import_types import LandedIdentity, SourceSnapshot
+    from import_job.state import ImportParams, _ImportBatchState, _ImportRunState
+    from jobs import JobRunner
+    from services.service_types import JobDict
+
 log = logging.getLogger(__name__)
 
 
-def _landed_identity(path):
+def _landed_identity(path: str) -> list[int] | None:
     """``[size, mtime_ns]`` of the file at ``path``, or None if unreadable."""
     try:
         st = os.stat(path)
@@ -20,7 +32,9 @@ def _landed_identity(path):
     return [st.st_size, st.st_mtime_ns]
 
 
-def _is_parent_landing(folder, name, file_hash, landed):
+def _is_parent_landing(
+    folder: str, name: str | None, file_hash: str | None, landed: Mapping[str, LandedIdentity],
+) -> bool:
     """Whether ``folder/name`` still holds bytes the parent landed.
 
     ``landed`` maps a recorded path to ``[size, mtime_ns, hash]``. A
@@ -48,7 +62,10 @@ def _is_parent_landing(folder, name, file_hash, landed):
     return _landed_identity(path) == list(identity[:2])
 
 
-def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
+def _record_landed_files(
+    job: JobDict, db: Database, state: _ImportRunState, batch_st: _ImportBatchState,
+    source_snapshots: dict[str, SourceSnapshot], runner: JobRunner,
+) -> bool:
     """Record this batch's landed files before cataloging it.
 
     Recorded first, so an interrupted row never lacks a landing whose photo
@@ -69,8 +86,11 @@ def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
     )
 
 
-def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
-                          require_flush=False):
+def _publish_resume_scope(
+    job: JobDict, db: Database, state: _ImportRunState,
+    source_snapshots: dict[str, SourceSnapshot] | None, runner: JobRunner | None = None,
+    require_flush: bool = False,
+) -> bool:
     """Publish what a Resume needs if Vireo dies before this run finishes.
 
     The runner checkpoints ``partial_result`` onto the job's history row
@@ -106,7 +126,7 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         # row's result with an error and lose the scope earlier batches
         # recorded, so wait for the database; Stop ends the wait (the
         # caller then leaves the batch uncataloged).
-        def cancel_check():
+        def cancel_check() -> bool:
             return runner.is_cancelled(job["id"])
         waiting = False
         while not runner.flush_partial_result(job, cancel_check=cancel_check):
@@ -133,7 +153,7 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
     return True
 
 
-def _recover_parent_landings(state, params, db):
+def _recover_parent_landings(state: _ImportRunState, params: ImportParams, db: Database) -> None:
     """Find the catalog rows an interrupted parent import landed.
 
     A resume skips (or, with duplicate skipping off, adopts) the parent's
@@ -155,7 +175,7 @@ def _recover_parent_landings(state, params, db):
                 state.recovered_photo_ids.add(row["id"])
 
 
-def _add_carried_working_copy_folders(state, params, db):
+def _add_carried_working_copy_folders(state: _ImportRunState, params: ImportParams, db: Database) -> None:
     """Put the folders of carried photos still lacking a working copy into
     the deferred extraction scope. A parent interrupted before (or during)
     its working-copy pass left them without one, and this run skips their
