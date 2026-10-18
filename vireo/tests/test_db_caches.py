@@ -762,3 +762,9 @@ def test_caches_repository_imports_no_db_code():
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
     assert "db" not in imported
+
+
+def test_photo_exists_reads_the_catalog_photo(db):
+    photo_id = _photo(db)
+    assert db.caches.photo_exists(photo_id) is True
+    assert db.caches.photo_exists(photo_id + 1000) is False
