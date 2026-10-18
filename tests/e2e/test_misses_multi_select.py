@@ -32,7 +32,7 @@ def _wait_for_flag(db, photo_id, expected, timeout=3.0):
     deadline = time.time() + timeout
     flag = None
     while time.time() < deadline:
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         flag = photo["flag"] if photo else None
         if flag == expected:
             return flag
@@ -469,7 +469,7 @@ def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page)
     page.once("dialog", lambda dialog: dialog.accept())
     page.locator("[data-testid='miss-reject-no_subject']").click()
     assert _wait_for_flag(db, pids[0], "rejected") == "rejected"
-    assert all(db.get_photo(pid)["flag"] != "rejected" for pid in pids[1:])
+    assert all(db.photos.get(pid)["flag"] != "rejected" for pid in pids[1:])
     page.evaluate("window.releaseHeldFilterLoad()")
 
 
@@ -672,7 +672,7 @@ def test_x_with_selection_bulk_rejects(live_server, page):
     assert f2 == "rejected", f"pids[2]: expected 'rejected', got {f2!r}"
 
     # The non-selected photo must remain unflagged.
-    untouched = db.get_photo(pids[1])
+    untouched = db.photos.get(pids[1])
     assert untouched["flag"] in (None, "none"), f"pids[1] was modified: {untouched['flag']!r}"
 
     # Selection cleared after bulk apply.
@@ -1059,8 +1059,8 @@ def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
         f" && !document.querySelector('[data-testid=\"miss-card-clipped-{b}\"]')",
         timeout=3000,
     )
-    assert db.get_photo(a) is None
-    assert db.get_photo(b) is None
+    assert db.photos.get(a) is None
+    assert db.photos.get(b) is None
 
 
 def test_selection_bar_opens_selected_miss_in_browse(live_server, page):

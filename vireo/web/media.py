@@ -451,7 +451,7 @@ def _preparation_publication(db, photo_id, prepare_source, captured_recipe=_UNSE
     check_recipe = captured_recipe is not _UNSET
 
     def check_source():
-        if not photo_source_matches(prepare_source, db.get_photo(photo_id)):
+        if not photo_source_matches(prepare_source, db.photos.get(photo_id)):
             raise _source_changed_response()
         if check_recipe and db.get_photo_edit_recipe(photo_id) != captured_recipe:
             raise _source_changed_response()
@@ -1657,7 +1657,7 @@ class _OriginalPhotoRequest:
 
     def _commit_generated_original(self, uw, uh, *, tracked):
         photo = self.photo
-        self.db.record_generated_original(
+        self.db.photos.record_generated_original(
             self.photo_id,
             self.wc_rel,
             tracked=tracked,
@@ -1677,7 +1677,7 @@ class _OriginalPhotoRequest:
         # file that no longer exists.
         # Only non-RAW primaries get here, so ``wc_rel`` is never None.
         preserve_existing_copy = bool(
-            self.db.get_photo_working_copy_path(self.photo_id) == self.wc_rel
+            self.db.photos.working_copy_path(self.photo_id) == self.wc_rel
             and os.path.isfile(self.wc_abs)
         )
         self._commit_generated_original(
@@ -2298,7 +2298,7 @@ class _ThumbnailRequest:
         if self.pair_source or self.served_from_regen_sidecar:
             return
         try:
-            self.db.set_photo_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
+            self.db.photos.set_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
         except Exception:
             # Coverage column drift is recoverable via the backfill job;
             # don't fail the request if the UPDATE racks up a transient
@@ -2986,7 +2986,7 @@ def create_media_blueprint(
         # ``os.path.join('', photo['filename'])`` — a CWD-relative
         # path that could read or persist a thumbnail derived from an
         # unrelated same-named file.)
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             # Stale URL — the photo was deleted, or it lives in a folder
             # that isn't linked to this workspace. 404 is the right
@@ -3018,7 +3018,7 @@ def create_media_blueprint(
         db = get_db()
         if not db.duplicates.is_group_member(photo_id):
             return "", 404
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         if not photo:
             return "", 404
         return _serve_photo_thumbnail(db, photo_id, photo, filename)
@@ -3145,7 +3145,7 @@ def create_media_blueprint(
         pid = int(id_match.group(1))
         # Same boundary as /api/masks/<pid>/<variant>.png: a mask is only
         # served for a photo the active workspace can see.
-        if get_db().get_photo(pid, verify_workspace=True) is None:
+        if get_db().photos.get(pid, verify_workspace=True) is None:
             return "", 404
         if os.path.exists(mask_path) and _mask_file_is_db_backed(
             filename, mask_path,
@@ -3201,7 +3201,7 @@ def create_media_blueprint(
             return "", 404
         for _attempt in range(3):
             db = get_db()
-            if db.get_photo(pid, verify_workspace=True) is None:
+            if db.photos.get(pid, verify_workspace=True) is None:
                 return "", 404
             mask = db.masks_features.get_mask(pid, variant)
             if mask is None or not mask.get("path"):
@@ -3229,7 +3229,7 @@ def create_media_blueprint(
         returned variant plus a default "active" option.
         """
         db = get_db()
-        if db.get_photo(pid, verify_workspace=True) is None:
+        if db.photos.get(pid, verify_workspace=True) is None:
             return photo_not_found_error()
         masks = db.masks_features.list_masks_for_photo(pid)
         active = db.masks_features.active_variant(pid)
@@ -3343,7 +3343,7 @@ def create_media_blueprint(
         db = get_db()
         # verify_workspace: don't serve image bytes for photos hidden from
         # the active workspace (mirrors serve_thumbnail).
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
 
@@ -3470,7 +3470,7 @@ def create_media_blueprint(
         from scoring import _normalize_scoring_config
 
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
         try:
@@ -3825,7 +3825,7 @@ def create_media_blueprint(
         # keeps cross-workspace photos from being served here at all
         # (mirrors serve_thumbnail).
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
         if _prepare_source is not None:
@@ -3970,7 +3970,7 @@ def create_media_blueprint(
         the ``feather`` arg, so Show Mask works before any local edit.
         """
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
         try:
@@ -4073,7 +4073,7 @@ def create_media_blueprint(
         import config as cfg
 
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
         try:
@@ -4173,7 +4173,7 @@ def create_media_blueprint(
         import auto_tone
 
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return json_error("Photo not found", 404)
         try:
@@ -4247,7 +4247,7 @@ def create_media_blueprint(
 
         # verify_workspace: mirrors serve_thumbnail — full-res bytes must not
         # leak across workspaces.
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
 

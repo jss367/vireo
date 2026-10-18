@@ -383,7 +383,7 @@ class _BatchDeleteRun:
         that fails, its primary is left untouched and its row remains
         retryable.
         """
-        resolved = self.db.resolve_photos_for_delete(
+        resolved = self.db.photos.resolve_for_delete(
             photo_ids, include_companions=include_companions,
         )
         files = resolved["files"]

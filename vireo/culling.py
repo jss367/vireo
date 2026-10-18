@@ -92,7 +92,7 @@ def analyze_for_culling(
     if collection_id:
         photos = db.collections.get_photos(collection_id, per_page=999999)
     else:
-        photos = db.get_photos(per_page=999999)
+        photos = db.photos.list_page(per_page=999999)
 
     photo_ids = [p["id"] for p in photos]
     if not photo_ids:

@@ -68,7 +68,7 @@ def _wait_for_flag(db, photo_id, expected, timeout=3.0):
     deadline = time.time() + timeout
     flag = None
     while time.time() < deadline:
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         flag = photo["flag"] if photo else None
         if flag == expected:
             return flag

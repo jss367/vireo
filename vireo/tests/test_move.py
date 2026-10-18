@@ -113,8 +113,8 @@ def test_move_photos_leaves_photos_already_in_destination_alone(move_env):
     assert result["already_in_place"] == 1
     assert (env["dst"] / "owl.jpg").exists()
     assert (env["dst"] / "owl.xmp").exists()
-    assert db.get_photo(in_place)["folder_id"] == env["fid_dst"]
-    assert db.get_photo(env["p1"])["folder_id"] == env["fid_dst"]
+    assert db.photos.get(in_place)["folder_id"] == env["fid_dst"]
+    assert db.photos.get(env["p1"])["folder_id"] == env["fid_dst"]
 
 
 @pytest.mark.skipif(not _TMP_FOLDS_CASE, reason="needs a case-folding filesystem")
@@ -134,7 +134,7 @@ def test_move_photos_in_place_check_matches_other_case_spelling(move_env):
     assert result["moved"] == 0
     assert result["already_in_place"] == 1
     assert (env["src"] / "bird1.jpg").exists()
-    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+    assert env["db"].photos.get(env["p1"])["folder_id"] == env["fid_src"]
 
 
 def test_move_photos_in_place_check_matches_alias_folder_row(move_env):
@@ -167,7 +167,7 @@ def test_move_photos_updates_db(move_env):
 
     env = move_env
     move_photos(db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]))
-    photo = env["db"].get_photo(env["p1"])
+    photo = env["db"].photos.get(env["p1"])
     assert photo["folder_id"] == env["fid_dst"]
 
 
@@ -451,7 +451,7 @@ def test_move_photos_rejects_stale_developed_render_at_destination(move_env):
     # Source photo file and catalog row untouched.
     assert (env["src"] / "bird1.jpg").exists()
     assert not (env["dst"] / "bird1.jpg").exists()
-    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+    assert env["db"].photos.get(env["p1"])["folder_id"] == env["fid_src"]
 
 
 def test_move_photos_rejects_stale_default_developed_render_at_destination(
@@ -496,7 +496,7 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
     assert (src / "bird.cr3").exists()
     assert not (dst / "bird.cr3").exists()
     assert (stale_dev_dir / "bird.jpg").read_bytes() == b"stale-dev"
-    assert db.get_photo(pid)["folder_id"] == fid_src
+    assert db.photos.get(pid)["folder_id"] == fid_src
 
 
 def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
@@ -530,7 +530,7 @@ def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
     assert source_file.exists()
     assert not (dst / source_file.name).exists()
     assert blocked.read_bytes() == b"not-a-directory"
-    assert db.get_photo(pid)["folder_id"] == fid_src
+    assert db.photos.get(pid)["folder_id"] == fid_src
 
 
 def test_move_photos_rejects_case_folded_stale_developed_render(
@@ -571,7 +571,7 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
     assert "developed render" in result["errors"][0]
     assert incoming.exists()
     assert not (dst / incoming.name).exists()
-    assert db.get_photo(pid)["folder_id"] == fid_src
+    assert db.photos.get(pid)["folder_id"] == fid_src
 
 
 def test_move_photos_out_of_developed_folder_ignores_source_original(
@@ -603,7 +603,7 @@ def test_move_photos_out_of_developed_folder_ignores_source_original(
     assert result["errors"] == []
     assert (destination / "bird.jpg").read_bytes() == b"original"
     assert not source_file.exists()
-    assert db.get_photo(pid)["folder_id"] == destination_id
+    assert db.photos.get(pid)["folder_id"] == destination_id
 
 
 def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
@@ -943,8 +943,8 @@ def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
     assert (second_src / "IMG.NEF").read_bytes() == b"second-raw"
     assert (second_src / "developed" / "IMG.jpg").read_bytes() \
         == b"second-render"
-    assert db.get_photo(first_pid)["folder_id"] != first_fid
-    assert db.get_photo(second_pid)["folder_id"] == second_fid
+    assert db.photos.get(first_pid)["folder_id"] != first_fid
+    assert db.photos.get(second_pid)["folder_id"] == second_fid
 
 
 def test_move_folder_by_date_lists_developed_dir_once_per_source(
@@ -1421,7 +1421,7 @@ def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
     planned_ids = {pid for group in plan for pid in group["photo_ids"]}
     assert len(planned_ids) == 1
     only_id = next(iter(planned_ids))
-    only_photo = db.get_photo(only_id)
+    only_photo = db.photos.get(only_id)
     assert only_photo["filename"] == "target.jpg"
 
 
@@ -1612,7 +1612,7 @@ def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
         folder_id=db.add_folder(str(src), name="src"),
         filename=raw.name, extension=".cr3", file_size=3, file_mtime=1.0,
     )
-    source_fid = db.get_photo(raw_pid)["folder_id"]
+    source_fid = db.photos.get(raw_pid)["folder_id"]
     jpeg_pid = db.add_photo(
         folder_id=source_fid, filename=jpeg.name, extension=".jpg",
         file_size=4, file_mtime=2.0,
@@ -1665,7 +1665,7 @@ def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
     assert "developed render stem" in result["errors"][0]
     assert incoming.read_bytes() == b"unrelated-raw"
     assert existing.read_bytes() == b"existing-jpeg"
-    assert db.get_photo(incoming_pid)["folder_id"] == source_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == source_fid
 
 
 def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
@@ -1698,7 +1698,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
     assert first["errors"] == []
-    dest_fid = db.get_photo(original_pid)["folder_id"]
+    dest_fid = db.photos.get(original_pid)["folder_id"]
     assert dest_fid != original_fid
 
     # Drop the original source folder. SQLite is now free to reuse its
@@ -1734,7 +1734,7 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == original_fid
 
 
 def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
@@ -1826,7 +1826,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == replacement_fid
 
 
 def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing(tmp_path):
@@ -1932,7 +1932,7 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == replacement_fid
 
 
 def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
@@ -2025,7 +2025,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming.exists()
-    assert db.get_photo(incoming_pid)["folder_id"] == replacement_id
+    assert db.photos.get(incoming_pid)["folder_id"] == replacement_id
 
 
 def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
@@ -2118,7 +2118,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == replacement_fid
 
 
 def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
@@ -2184,7 +2184,7 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == src_fid
 
 
 def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
@@ -2246,7 +2246,7 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming.exists()
-    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == src_fid
 
 
 def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
@@ -2404,7 +2404,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == replacement_fid
 
 
 def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_path):
@@ -2509,7 +2509,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
-    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+    assert db.photos.get(incoming_pid)["folder_id"] == original_fid
 
 
 def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
@@ -2565,8 +2565,8 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     # The winning photo is the one processed first.
-    assert db.get_photo(pid_a)["folder_id"] != fid_a
-    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert db.photos.get(pid_a)["folder_id"] != fid_a
+    assert db.photos.get(pid_b)["folder_id"] == fid_b
     assert file_b.read_bytes() == b"raw-b"
 
 
@@ -2621,8 +2621,8 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
     assert result["moved"] == 1
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
-    assert db.get_photo(pid_a)["folder_id"] != fid_a
-    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert db.photos.get(pid_a)["folder_id"] != fid_a
+    assert db.photos.get(pid_b)["folder_id"] == fid_b
     assert file_b.exists()
 
 
@@ -2675,7 +2675,7 @@ def test_move_photos_rejects_same_source_case_only_stem_collision(
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert (source / "img.NEF").exists()
-    assert db.get_photo(pids["img.NEF"])["folder_id"] == fid
+    assert db.photos.get(pids["img.NEF"])["folder_id"] == fid
 
 
 def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
@@ -2759,7 +2759,7 @@ def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     assert any("not a directory" in err for err in result["errors"])
     # The photo row stays at the original folder and the on-disk source
     # file is untouched.
-    assert db.get_photo(pid)["folder_id"] == fid
+    assert db.photos.get(pid)["folder_id"] == fid
     assert (src / "photo.jpg").exists()
     assert blocked.read_bytes() == b"not a directory"
 
@@ -2915,8 +2915,8 @@ def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     assert (env["dst"] / "bird1.jpg").exists()
     assert (env["dst"] / "bird2.jpg").exists()
     # Catalog points at the new folder for both.
-    p1_row = env["db"].get_photo(env["p1"])
-    p2_row = env["db"].get_photo(env["p2"])
+    p1_row = env["db"].photos.get(env["p1"])
+    p2_row = env["db"].photos.get(env["p2"])
     assert p1_row["folder_id"] == env["fid_dst"]
     assert p2_row["folder_id"] == env["fid_dst"]
 

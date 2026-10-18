@@ -39,7 +39,7 @@ class PhotoReviewService:
         self.db = db
 
     def set_rating(self, photo_id, rating):
-        old = self.db.get_photo(photo_id)
+        old = self.db.photos.get(photo_id)
         old_rating = old["rating"] if old else 0
         self.db.photo_review.set_rating(photo_id, rating)
         self.db.queue_change(photo_id, "rating", str(rating))
@@ -58,7 +58,7 @@ class PhotoReviewService:
         self._write_flags([photo_id], flag, source=source, reason=reason, is_batch=False)
 
     def set_ratings(self, photo_ids, rating):
-        photos_map = self.db.get_photos_by_ids(photo_ids)
+        photos_map = self.db.photos.get_by_ids(photo_ids)
         old_values = {
             photo_id: photos_map[photo_id]["rating"]
             for photo_id in photo_ids
@@ -90,7 +90,7 @@ class PhotoReviewService:
 
     def _write_flags(self, photo_ids, flag, *, source, reason, is_batch):
         with self.db.photo_review.flag_write() as owns_transaction:
-            photos = self.db.get_photos_by_ids(photo_ids)
+            photos = self.db.photos.get_by_ids(photo_ids)
             old_values = {pid: photos[pid]["flag"] for pid in photo_ids if pid in photos}
             if not old_values:
                 if not is_batch:

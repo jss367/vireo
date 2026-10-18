@@ -159,11 +159,11 @@ def _unplottable_map_focus(db, photo_id):
     puts it on the map, when the map's folder-status filter would keep it
     off regardless.
     """
-    photo = db.get_photo(photo_id, verify_workspace=True)
+    photo = db.photos.get(photo_id, verify_workspace=True)
     if photo is None:
         return {"id": photo_id, "reason": "not_found"}
     focus = {"id": photo_id, "filename": photo["filename"]}
-    folder_status = db.get_photo_folder_statuses([photo_id]).get(photo_id)
+    folder_status = db.photos.get_folder_statuses([photo_id]).get(photo_id)
     if folder_status not in ("ok", "partial"):
         focus["reason"] = "unavailable"
         return focus
@@ -210,7 +210,7 @@ def _text_search_response(db, emb_pairs, query_vec, *, threshold, limit,
         top_indices = ranked_indices[:limit]
         top_pids = [filtered_ids[idx] for idx in top_indices]
         top_sims = [float(filtered_sims[idx]) for idx in top_indices]
-        photos_map = db.get_photos_by_ids(top_pids)
+        photos_map = db.photos.get_by_ids(top_pids)
         photo_dicts = []
         sims_by_pid = {}
         for pid, sim in zip(top_pids, top_sims, strict=False):
@@ -279,7 +279,7 @@ def _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars):
         except (TypeError, ValueError):
             skipped += 1
             continue
-        row = db.get_photo_file_in_workspace(pid, ws_id)
+        row = db.photos.file_in_workspace(pid, ws_id)
         if not row:
             skipped += 1
             continue
@@ -359,7 +359,7 @@ def _score_sharpness_region(db, raw, vireo_dir):
             "sharpness": None,
             "error": "invalid photo_id",
         }
-    photo = db.get_photo(photo_id, verify_workspace=True)
+    photo = db.photos.get(photo_id, verify_workspace=True)
     if not photo:
         return {"photo_id": photo_id, "sharpness": None, "error": "not found"}
 
@@ -601,7 +601,7 @@ def create_photos_blueprint(
             except (TypeError, ValueError):
                 skipped += 1
                 continue
-            row = db.get_photo_file_in_workspace(pid, ws_id)
+            row = db.photos.file_in_workspace(pid, ws_id)
             if not row:
                 skipped += 1
                 continue
@@ -744,7 +744,7 @@ def create_photos_blueprint(
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
-        # Rules-only path: ``db.get_photos``'s collection restriction is
+        # Rules-only path: ``db.photos.list_page``'s collection restriction is
         # built by ``_build_collection_query`` and evaluates ``rules`` alone.
         # ``/api/v1/photos`` aliases this view, so a headless caller that
         # scopes to a visual collection here would silently widen to every
@@ -767,7 +767,7 @@ def create_photos_blueprint(
             return json_error(str(e), 400)
 
         try:
-            photos = db.get_photos(
+            photos = db.photos.list_page(
                 folder_id=folder_id,
                 collection_id=collection_id,
                 page=page,
@@ -788,10 +788,10 @@ def create_photos_blueprint(
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
         if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            total = db.count_photos()
+            total = db.photos.count()
         else:
             try:
-                total = db.count_filtered_photos(
+                total = db.photos.count_filtered(
                     folder_id=folder_id,
                     collection_id=collection_id,
                     rating_min=rating_min,
@@ -931,7 +931,7 @@ def create_photos_blueprint(
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
-        # Rules-only path — see ``api_photos``. ``db.get_photo_ids`` also
+        # Rules-only path — see ``api_photos``. ``db.photos.get_ids`` also
         # goes through ``_build_collection_query``, so a visual collection
         # id would silently widen to every metadata match (Codex review
         # r3621634298).
@@ -952,7 +952,7 @@ def create_photos_blueprint(
             return json_error(str(e), 400)
 
         try:
-            photo_ids = db.get_photo_ids(
+            photo_ids = db.photos.get_ids(
                 folder_id=folder_id,
                 collection_id=collection_id,
                 sort=sort,
@@ -996,7 +996,7 @@ def create_photos_blueprint(
         except ValueError as e:
             return json_error(str(e), 400)
         try:
-            data = db.get_calendar_data(
+            data = db.photos.get_calendar_data(
                 year=year, folder_id=folder_id,
                 collection_id=collection_id,
                 rules=rules,
@@ -1011,7 +1011,7 @@ def create_photos_blueprint(
         # verify_workspace: this response exposes the absolute path and
         # xmp_path, so a photo outside the active workspace must 404 —
         # mirrors serve_thumbnail / api_files_reveal.
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
 
@@ -1112,7 +1112,7 @@ def create_photos_blueprint(
 
         photos = []
         for pid in photo_ids:
-            photo = db.get_photo(pid, verify_workspace=True)
+            photo = db.photos.get(pid, verify_workspace=True)
             if photo:
                 photos.append(dict(photo))
         attach_location_statuses(db, photos)
@@ -1145,7 +1145,7 @@ def create_photos_blueprint(
             if isinstance(raw, bool) or not isinstance(raw, int):
                 return json_error("photo_ids must be integers", 400)
             photo_ids.append(raw)
-        return jsonify({"count": db.count_photos_with_companions(photo_ids)})
+        return jsonify({"count": db.photos.count_with_companions(photo_ids)})
 
     @blueprint.route("/api/photos/<int:photo_id>/best-batch")
     def api_photo_best_batch(photo_id):
@@ -1365,7 +1365,7 @@ def create_photos_blueprint(
         except ValueError as e:
             return json_error(str(e), 400)
 
-        total_photos = db.count_photos()
+        total_photos = db.photos.count()
         total_without_coordinates = db.count_photos_without_coordinates()
         total_geolocated = total_photos - total_without_coordinates
 
@@ -1416,7 +1416,7 @@ def create_photos_blueprint(
         excluded = body.get("excluded")
         if not isinstance(excluded, bool):
             return json_error("excluded must be a boolean")
-        old = db.get_photo(photo_id)
+        old = db.photos.get(photo_id)
         if not old:
             return photo_not_found_error(legacy_error="not found")
         old_value = "1" if old["wildlife_excluded"] else "0"
@@ -1465,7 +1465,7 @@ def create_photos_blueprint(
     def api_photo_subjects(photo_id):
         from subjects import payload
         db = get_db()
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
         return jsonify(payload(db, photo_id))
 
@@ -1473,7 +1473,7 @@ def create_photos_blueprint(
     @background_job
     def api_analyze_photo_subjects(ctx, photo_id):
         db = get_db()
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
@@ -1483,7 +1483,7 @@ def create_photos_blueprint(
             thread_db = ctx.thread_db()
             try:
                 ctx.checkpoint(job)
-                photo = thread_db.get_photo(photo_id, verify_workspace=True)
+                photo = thread_db.photos.get(photo_id, verify_workspace=True)
                 if photo is None:
                     raise ValueError("Photo is no longer in this workspace")
                 folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
@@ -1500,7 +1500,7 @@ def create_photos_blueprint(
     def api_primary_subject(photo_id):
         from subjects import payload, select_primary
         db = get_db()
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or "detection_id" not in body:
@@ -1620,7 +1620,7 @@ def create_photos_blueprint(
             # the legacy per-field scope params were removed in Phase 5
             # (no caller sends them; visual search runs through
             # /api/photos/query).
-            candidate_photo_ids = db.get_photo_ids(folder_id=folder_id)
+            candidate_photo_ids = db.photos.get_ids(folder_id=folder_id)
 
         if candidate_photo_ids == []:
             if ids_only:
@@ -1712,7 +1712,7 @@ def create_photos_blueprint(
         top_indices = np.argsort(similarities)[::-1][:limit]
         top_pids = [photo_ids[idx] for idx in top_indices]
         top_sims = [float(similarities[idx]) for idx in top_indices]
-        photos_map = db.get_photos_by_ids(top_pids)
+        photos_map = db.photos.get_by_ids(top_pids)
 
         results = []
         for pid, sim in zip(top_pids, top_sims, strict=False):
@@ -1930,7 +1930,7 @@ class _PhotosQuery:
         folder_statuses = None
         if self.include_offline or self.include_availability:
             inventory_ids = ordered_ids
-            folder_statuses = self.db.get_photo_folder_statuses(inventory_ids)
+            folder_statuses = self.db.photos.get_folder_statuses(inventory_ids)
             available_ids = [
                 pid for pid in inventory_ids
                 if folder_statuses.get(pid) in ("ok", "partial")
@@ -2035,7 +2035,7 @@ class _PhotosQuery:
         per_page = self.per_page
         start = (self.page - 1) * per_page
         page_ids = logical_ids[start:start + per_page]
-        photos_map = db.get_photos_by_ids(page_ids)
+        photos_map = db.photos.get_by_ids(page_ids)
         page_stack_items = (
             stack_items[start:start + per_page]
             if stack_items is not None else None
@@ -2269,7 +2269,7 @@ class _OpenExternal:
     def photo_paths(self, photo_ids):
         photo_paths = []
         for pid in photo_ids:
-            photo = self.db.get_photo(pid)
+            photo = self.db.photos.get(pid)
             if not photo:
                 continue
             folder_path = self.folders.get(photo["folder_id"], "")

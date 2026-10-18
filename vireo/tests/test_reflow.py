@@ -44,7 +44,7 @@ def _setup_db(tmp_path):
             dino_subject_embedding=embedding_to_blob(emb),
             dino_global_embedding=embedding_to_blob(emb),
         )
-        db.update_photo_quality(
+        db.photos.update_quality(
             pid,
             subject_size=0.1,
         )

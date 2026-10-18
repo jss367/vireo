@@ -480,7 +480,7 @@ class _ScanPass:
         if thread_db is None:
             return path
         try:
-            filenames = thread_db.get_photo_filenames([photo_id])
+            filenames = thread_db.photos.get_filenames([photo_id])
         except Exception:
             log.exception(
                 "Failed to resolve canonical filename for photo %s", photo_id,
@@ -1691,7 +1691,7 @@ def _collection_stage_body(
         with run.database_factory(run.db_path) as resolver_db:
             resolver_db.set_active_workspace(run.workspace_id)
             snapshot_photo_ids = set(
-                resolver_db.get_photo_ids_at_paths(snapshot_paths)
+                resolver_db.photos.ids_at_paths(snapshot_paths)
             )
 
         missing = len(snapshot_paths) - len(snapshot_photo_ids)

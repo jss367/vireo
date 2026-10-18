@@ -1,14 +1,18 @@
 """Persistence for core photo rows: insert, lookups, listing and deletion.
 
-Photo rows are global; the workspace only decides which folders are
-visible. Methods that read through ``workspace_folders`` use the
-``workspace_id`` the façade resolved (``Database._photos_repository()``),
-while the catalog-wide ones are built with ``workspace_id=None``.
+Callers reach it through the ``db.photos`` accessor, which builds a fresh
+repository per access. Photo rows are global; the workspace only decides
+which folders are visible. The repository gets ``Database._ws_id`` uncalled:
+methods that read through ``workspace_folders`` resolve the active workspace
+(``workspace_id``) before any SQL and raise when none is active, while the
+catalog-wide ones never read it.
 
-``Database`` keeps the composition. The listing reads take the façade's
-folder-subtree, collection, rules, location-filter and sort helpers as
-callbacks, so patches of those ``Database`` methods still apply and the
-calls happen at the same point as before. ``delete_photos`` keeps the
+``Database`` keeps the composition. The listing reads use the façade's
+folder-subtree, rules and location-filter helpers, bound when the façade
+builds the repository so patches of those ``Database`` methods still apply,
+and the collection-rules SQL and sort clauses from a ``CollectionRepository``
+built when they are needed; the calls happen at the same point as before.
+``delete_photos`` keeps the
 companion resolution, the new-images cache invalidation and the pipeline
 cache prune on the façade; ``add_photo`` keeps the duplicate auto-resolve
 hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
@@ -28,19 +32,30 @@ class PhotoRepository:
     def __init__(
         self,
         conn,
-        workspace_id=None,
+        resolve_workspace_id,
         *,
         chunk_size=800,
+        filter_subject_chunk=800,
         photo_cols,
         photo_detail_cols,
         execute_with_retry,
         commit_with_retry,
         inclusive_date_to,
         keyword_token_clause,
+        get_folder_subtree_ids,
+        build_query_from_rules,
+        append_location_status_filter,
+        collection_repository,
     ):
         self.conn = conn
-        self.workspace_id = workspace_id
+        # ``Database._ws_id``, uncalled: the workspace-scoped reads resolve
+        # the active workspace before any SQL, and the catalog-wide ones
+        # never do, so one repository serves both.
+        self._resolve_workspace_id = resolve_workspace_id
         self.chunk_size = chunk_size
+        # ``Database._FILTER_SUBJECT_CHUNK``, read when the façade builds
+        # this repository so patches of it still apply.
+        self.filter_subject_chunk = filter_subject_chunk
         # ``Database.PHOTO_COLS`` / ``PHOTO_DETAIL_COLS``: the column lists
         # stay on the façade, where the collection reads use them too.
         self.photo_cols = photo_cols
@@ -51,6 +66,26 @@ class PhotoRepository:
         self.commit_with_retry = commit_with_retry
         self.inclusive_date_to = inclusive_date_to
         self.keyword_token_clause = keyword_token_clause
+        # Façade helpers the listing reads consult, bound from ``Database``
+        # so patches of those methods still apply, and the collection
+        # repository factory for the collection-rules SQL and sort clauses.
+        self.get_folder_subtree_ids = get_folder_subtree_ids
+        self.build_query_from_rules = build_query_from_rules
+        self.append_location_status_filter = append_location_status_filter
+        self._collection_repository = collection_repository
+
+    @property
+    def workspace_id(self):
+        """The active workspace id, resolved at each read (raises if none)."""
+        return self._resolve_workspace_id()
+
+    def _build_collection_query(self, collection_id):
+        """A collection's rules as SQL parts, or None (``CollectionRepository``)."""
+        return self._collection_repository()._build_collection_query(collection_id)
+
+    def _photo_sort_clause(self, sort):
+        """The photo-list ORDER BY for ``sort`` (``CollectionRepository``)."""
+        return self._collection_repository()._photo_sort_clause(sort)
 
     def _chunks(self, values, size=None):
         """Yield ``values`` in lists of at most ``size`` (default chunk_size)."""
@@ -62,13 +97,13 @@ class PhotoRepository:
 
     # -- rows and lookups ----------------------------------------------------
 
-    def filter_out_wildlife_excluded(self, photo_ids, chunk_size):
-        """Return ``photo_ids`` minus the wildlife-excluded ones, in order."""
+    def filter_out_wildlife_excluded(self, photo_ids):
+        """Return ``photo_ids`` minus the ones explicitly excluded from wildlife classification, in order."""
         if not photo_ids:
             return []
         photo_ids_list = list(photo_ids)
         excluded = set()
-        for chunk in self._chunks(photo_ids_list, chunk_size):
+        for chunk in self._chunks(photo_ids_list, self.filter_subject_chunk):
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"""SELECT id FROM photos
@@ -131,10 +166,14 @@ class PhotoRepository:
         return row["id"], False
 
     def get(self, photo_id, verify_workspace=False):
-        """Return one photo row (detail columns), or None.
+        """Return a single photo by id, including full metadata.
 
-        With ``verify_workspace`` the row must sit in a folder of
-        ``workspace_id``; the repository must then be workspace-scoped.
+        Args:
+            photo_id: the photo's primary key.
+            verify_workspace: if True, only return the photo when it belongs
+                to a folder visible in the active workspace.  Callers in
+                route handlers should pass True; background jobs that already
+                scope their photo lists can leave it False.
         """
         if verify_workspace:
             return self.conn.execute(
@@ -149,7 +188,13 @@ class PhotoRepository:
         ).fetchone()
 
     def get_filenames(self, photo_ids):
-        """Return {photo_id: (folder_id, filename)} for the ids that exist."""
+        """Return {photo_id: (folder_id, filename)} for the ids that exist.
+
+        Path resolution needs two columns; selecting whole photo rows for
+        thousands of photos drags along ``exif_data`` and every measurement
+        column for nothing. Ids with no photo row are simply absent, which is
+        how callers detect a deleted photo.
+        """
         if not photo_ids:
             return {}
         result = {}
@@ -178,7 +223,12 @@ class PhotoRepository:
         return found
 
     def get_by_ids(self, photo_ids, *, include_exif=False):
-        """Return {photo_id: Row} (list columns, optionally exif_data)."""
+        """Return photos for a list of IDs.
+
+        Returns a dict mapping photo_id -> Row for efficient lookup. Large
+        id lists are chunked so the IN-clause stays under SQLite's
+        bound-parameter cap (999 on legacy builds, 32766 modern).
+        """
         if not photo_ids:
             return {}
         result = {}
@@ -376,7 +426,13 @@ class PhotoRepository:
         return photos
 
     def count(self):
-        """Return the workspace's photo count, skipping missing folders."""
+        """Return photo count for the active workspace.
+
+        Filters out photos whose folder is flagged ``'missing'`` so callers
+        like browse/cull/move see only photos they can actually act on. For
+        a total inventory that survives an unmounted drive (e.g. the
+        dashboard's headline number), use ``count_in_workspace``.
+        """
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
@@ -386,7 +442,16 @@ class PhotoRepository:
         ).fetchone()[0]
 
     def count_in_workspace(self):
-        """Return the workspace's photo count, including missing folders."""
+        """Return total photo count for the active workspace, including
+        photos in folders flagged ``'missing'``.
+
+        The dashboard wants this number — when a drive unmounts, the photos
+        are still part of the workspace's inventory, just temporarily
+        inaccessible. Falling back to ``count`` (which filters out
+        missing folders) makes the dashboard say "0 photos" for an
+        established workspace, hiding the fact that the data is fine and
+        only the volume is offline.
+        """
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
@@ -399,7 +464,18 @@ class PhotoRepository:
         return self.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
     def by_paths(self, paths):
-        """Return {abs_path: photo_id} for any of ``paths`` already in DB."""
+        """Return {abs_path: photo_id} for any of ``paths`` already in DB.
+
+        Photos are global (not workspace-scoped), so the import-mode plan
+        can ask "do these files already exist in Vireo?" without caring
+        which workspace owns the folder. Paths missing from the result are
+        genuinely new and the next pipeline run will create photo rows for
+        them — that's what makes "Will run (N)" honest in import mode.
+
+        Splits the input by directory so the SQL stays a single
+        ``WHERE f.path = ? AND p.filename IN (...)`` per directory and
+        respects SQLite's parameter cap.
+        """
         if not paths:
             return {}
         by_dir = {}
@@ -472,12 +548,13 @@ class PhotoRepository:
         folder_id=None,
         collection_id=None,
         rules=None,
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        build_query_from_rules,
     ):
-        """Return daily photo counts for ``year`` plus the workspace's year bounds."""
+        """Return daily photo counts for a given year, scoped to active workspace.
+
+        Metadata filtering arrives exclusively as a universal-filter ``rules``
+        tree (the legacy per-field params were removed in Phase 5 once the
+        filter bar became the only caller).
+        """
         ws = self.workspace_id
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
                       "substr(p.timestamp, 1, 4) = ?"]
@@ -485,7 +562,7 @@ class PhotoRepository:
         where_params = [ws, str(year)]
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
-                build_query_from_rules(rules)
+                self.build_query_from_rules(rules)
             )
             conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -501,7 +578,7 @@ class PhotoRepository:
         # unfiltered workspace data (which would mislead users into thinking
         # the collection contains those photos).
         if collection_id is not None:
-            parts = build_collection_query(collection_id)
+            parts = self._build_collection_query(collection_id)
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             coll_folder_join, coll_join_clause, coll_where, coll_params = parts
@@ -516,7 +593,7 @@ class PhotoRepository:
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
 
         if folder_id is not None:
-            subtree = get_folder_subtree_ids(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
@@ -568,11 +645,6 @@ class PhotoRepository:
         color_label=None,
         flag=None,
         location_status=None,
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        append_location_status_filter,
-        photo_sort_clause,
     ):
         """Return one page of the workspace's filtered photo list."""
         conditions = ["wf.workspace_id = ?"]
@@ -580,12 +652,12 @@ class PhotoRepository:
         join_params = []
 
         if folder_id is not None:
-            subtree = get_folder_subtree_ids(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
         if collection_id is not None:
-            parts = build_collection_query(collection_id)
+            parts = self._build_collection_query(collection_id)
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             coll_folder_join, coll_join_clause, coll_where, coll_params = parts
@@ -607,7 +679,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        append_location_status_filter(conditions, location_status)
+        self.append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -633,7 +705,7 @@ class PhotoRepository:
 
         where = "WHERE " + " AND ".join(conditions)
 
-        order, order_params = photo_sort_clause(sort)
+        order, order_params = self._photo_sort_clause(sort)
 
         page = max(1, page)
         offset = (page - 1) * per_page
@@ -665,11 +737,6 @@ class PhotoRepository:
         color_label=None,
         flag=None,
         location_status=None,
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        append_location_status_filter,
-        photo_sort_clause,
     ):
         """Return every filtered photo id in the workspace, in sort order."""
         conditions = ["wf.workspace_id = ?"]
@@ -677,12 +744,12 @@ class PhotoRepository:
         join_params = []
 
         if folder_id is not None:
-            subtree = get_folder_subtree_ids(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
         if collection_id is not None:
-            parts = build_collection_query(collection_id)
+            parts = self._build_collection_query(collection_id)
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             coll_folder_join, coll_join_clause, coll_where, coll_params = parts
@@ -704,7 +771,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        append_location_status_filter(conditions, location_status)
+        self.append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -727,7 +794,7 @@ class PhotoRepository:
         params = join_params + where_params
         where = "WHERE " + " AND ".join(conditions)
 
-        order, order_params = photo_sort_clause(sort)
+        order, order_params = self._photo_sort_clause(sort)
         params = params + order_params
         distinct = "DISTINCT " if keyword is not None else ""
         query = f"""
@@ -744,22 +811,18 @@ class PhotoRepository:
         folder_id=None,
         collection_id=None,
         sort="date",
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        photo_sort_clause,
     ):
         """Return a photo's zero-based position, or None when not listed."""
         conditions = ["wf.workspace_id = ?"]
         params = [self.workspace_id]
 
         if folder_id is not None:
-            subtree = get_folder_subtree_ids(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             params.extend(subtree)
         if collection_id is not None:
-            parts = build_collection_query(collection_id)
+            parts = self._build_collection_query(collection_id)
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             coll_folder_join, coll_join_clause, coll_where, coll_params = parts
@@ -770,7 +833,7 @@ class PhotoRepository:
             conditions.append(f"p.id IN ({coll_subquery})")
             params.extend(coll_params)
 
-        order, order_params = photo_sort_clause(sort)
+        order, order_params = self._photo_sort_clause(sort)
         where = "WHERE " + " AND ".join(conditions)
         # The ORDER BY lives inside the select list here, so its parameters
         # bind *before* the WHERE's — unlike the paged reads above, where the
@@ -806,10 +869,6 @@ class PhotoRepository:
         color_label=None,
         flag=None,
         location_status=None,
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        append_location_status_filter,
     ):
         """Return how many workspace photos match the filters."""
         conditions = ["wf.workspace_id = ?"]
@@ -817,12 +876,12 @@ class PhotoRepository:
         join_params = []
 
         if folder_id is not None:
-            subtree = get_folder_subtree_ids(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
         if collection_id is not None:
-            parts = build_collection_query(collection_id)
+            parts = self._build_collection_query(collection_id)
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             coll_folder_join, coll_join_clause, coll_where, coll_params = parts
@@ -844,7 +903,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        append_location_status_filter(conditions, location_status)
+        self.append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -935,9 +994,6 @@ class PhotoRepository:
         collection_id=None,
         rules=None,
         *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        build_query_from_rules,
         detector_confidence,
     ):
         """Return the browse panel's totals, classified count, top species
@@ -949,8 +1005,8 @@ class PhotoRepository:
         ws = self.workspace_id
 
         conditions, join_params, where_params = self._browse_summary_scope(
-            ws, folder_id, collection_id, rules, get_folder_subtree_ids,
-            build_collection_query, build_query_from_rules,
+            ws, folder_id, collection_id, rules, self.get_folder_subtree_ids,
+            self._build_collection_query, self.build_query_from_rules,
         )
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
@@ -1089,7 +1145,23 @@ class PhotoRepository:
     # -- companions and deletion ---------------------------------------------
 
     def count_with_companions(self, photo_ids):
-        """How many of ``photo_ids`` in the workspace carry a companion file."""
+        """How many of ``photo_ids`` carry a companion file in the active
+        workspace.
+
+        The delete dialog offers "Also delete N companion files" off this
+        number, and the browser cannot compute it: a Browse selection can
+        hold photos it has never loaded — every frame of a collapsed stack,
+        or a Select-all that reaches past the loaded page — and a count taken
+        over only the loaded ones hides the checkbox, so a disk delete leaves
+        the companions of the rest behind. Counted here, where every row is
+        known. Chunked for the same reason as ``resolve_for_delete``:
+        callers pass whole selections.
+
+        Ids whose folder is not visible in the active workspace do not count:
+        this endpoint sits next to ``/api/photos/by-ids``, which explicitly
+        scopes its ids to the caller's workspace, and metadata about other
+        workspaces' photos must not leak here either.
+        """
         total = 0
         ws_id = self.workspace_id
         for chunk in self._chunks(list(dict.fromkeys(photo_ids or []))):
@@ -1106,7 +1178,17 @@ class PhotoRepository:
         return total
 
     def resolve_for_delete(self, photo_ids, include_companions=False):
-        """Read-only: the rows, ids and file records a delete would remove."""
+        """Resolve photo ids to the rows and paths a delete would remove.
+
+        This is intentionally read-only. Disk-delete callers use it to move
+        originals to Trash *before* deleting their catalog rows, so a failed
+        filesystem operation leaves the photo visible and retryable in Vireo.
+
+        Returns a dict with ``ids``, ``files``, and the private ``_rows`` used
+        by :meth:`delete_photos`. ``files`` retains the long-standing cleanup
+        shape and additionally includes ``folder_id`` for callers that need to
+        group related paths.
+        """
         if not photo_ids:
             return {"ids": [], "files": [], "_rows": []}
 

@@ -197,7 +197,7 @@ def export_inat_photo(
     developed_dir: str = "",
 ) -> str:
     """Render one photo, add selected metadata, and return its final path."""
-    photo = db.get_photo(photo_id, verify_workspace=True)
+    photo = db.photos.get(photo_id, verify_workspace=True)
     if not photo:
         raise InatExportError("Photo not found in the active workspace")
 

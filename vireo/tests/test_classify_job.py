@@ -1247,7 +1247,7 @@ def test_detect_batch_skips_quality_score_when_primary_below_threshold(
     # Pre-populate stale quality fields to confirm the fix also clears
     # rotten state from prior runs (self-healing — see CLAUDE.md memory
     # "App self-heals broken state").
-    db.update_photo_quality(
+    db.photos.update_quality(
         photo_id,
         subject_sharpness=2900.0,
         subject_size=0.98,
@@ -1393,7 +1393,7 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
           "confidence": 0.9, "category": "animal"}],
     )
 
-    photo = dict(db.get_photo(photo_id))
+    photo = dict(db.photos.get(photo_id))
     photos = [photo]
     folders = {folder_id: offline_dir}
     already_detected_ids = db.model_runs.get_detector_run_photo_ids("megadetector-v6")

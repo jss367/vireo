@@ -461,7 +461,7 @@ def create_highlights_blueprint(get_db, json_error):
         return photo_ids, None
 
     def _validate_highlight_photo_ids(db, photo_ids):
-        found_ids = db.get_existing_photo_ids(photo_ids)
+        found_ids = db.photos.existing_ids(photo_ids)
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
             return f"Unknown photo_ids: {missing}", 404

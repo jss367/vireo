@@ -12,7 +12,7 @@ from wait import wait_for_job_via_client
 
 def cache_fixture(fixture, *, sidecars=False):
     app, db, pid = fixture
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.get_folder(photo["folder_id"])
     source = Path(folder["path"]) / photo["filename"]
     if sidecars:
@@ -21,7 +21,7 @@ def cache_fixture(fixture, *, sidecars=False):
         companion.write_bytes(b"companion image")
         db.conn.execute("UPDATE photos SET companion_path=? WHERE id=?", (companion.name, pid))
         db.commit()
-        photo = db.get_photo(pid)
+        photo = db.photos.get(pid)
     base = Path(app.config["THUMB_CACHE_DIR"]).parent
     cache_photo_original(db, photo, str(base), {folder["id"]: folder["path"]})
     return base, source, dict(db.caches.offline_original_get(pid))
@@ -41,7 +41,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     db.set_photo_edit_recipe(pid, {"rotation": 90})
     keyword = db.add_keyword("Hawk")
     db.tag_photo(pid, keyword)
-    before = dict(db.get_photo(pid))
+    before = dict(db.photos.get(pid))
     thumb = Path(app.config["THUMB_CACHE_DIR"]) / f"{pid}.jpg"
     thumb.write_bytes(b"keep thumbnail")
     source_bytes = source.read_bytes()
@@ -52,7 +52,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     assert job["result"]["bytes"] == row["bytes"]
     assert db.caches.offline_original_get(pid) is None
     assert db.caches.offline_original_total_bytes() == 0
-    assert dict(db.get_photo(pid)) == before
+    assert dict(db.photos.get(pid)) == before
     assert thumb.read_bytes() == b"keep thumbnail"
     assert source.read_bytes() == source_bytes
     assert source.with_suffix(".xmp").read_text() == "source metadata"
@@ -60,7 +60,7 @@ def test_release_preserves_sources_metadata_and_generated_assets(client_with_pho
     for column in ("original_path", "xmp_path", "companion_path"):
         assert not (base / row[column]).exists()
     resolved, offline = resolve_original_path(
-        db, db.get_photo(pid), str(base), {before["folder_id"]: str(source.parent)},
+        db, db.photos.get(pid), str(base), {before["folder_id"]: str(source.parent)},
         prefer_cached=True,
     )
     assert resolved == str(source)
@@ -164,7 +164,7 @@ def test_release_rechecks_photo_identity_after_network_probes(client_with_photo,
 def test_release_does_not_act_on_a_replaced_selection(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
-    selected = dict(db.get_photo(pid))
+    selected = dict(db.photos.get(pid))
     selected["filename"] = "older-photo.jpg"
     result = release_photo_original(db, pid, str(base), selected_photo=selected)
     assert result["status"] == "kept"
@@ -189,11 +189,11 @@ def test_release_keeps_copy_if_source_is_unreadable(client_with_photo, monkeypat
 def test_release_cancel_keeps_unprocessed_copies(client_with_photo, monkeypatch):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
-    folder_id = db.get_photo(pid)["folder_id"]
+    folder_id = db.photos.get(pid)["folder_id"]
     second = source.with_name("second.jpg")
     second.write_bytes(source.read_bytes())
     second_id = db.add_photo(folder_id, second.name, ".jpg", file_size=second.stat().st_size, file_mtime=second.stat().st_mtime)
-    cache_photo_original(db, db.get_photo(second_id), str(base), {folder_id: str(source.parent)})
+    cache_photo_original(db, db.photos.get(second_id), str(base), {folder_id: str(source.parent)})
     push = app._job_runner.push_event
 
     def cancel_after_first(job_id, event_type, data):
@@ -259,7 +259,7 @@ def test_release_selection_rejects_other_workspace_photos(client_with_photo):
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
     response = client.post("/api/jobs/release-local-originals", json={"photo_ids": [pid]})
     assert response.status_code == 403
-    response = client.post("/api/jobs/release-local-originals", json={"folder_id": db.get_photo(pid)["folder_id"]})
+    response = client.post("/api/jobs/release-local-originals", json={"folder_id": db.photos.get(pid)["folder_id"]})
     assert response.status_code == 403
     assert (base / row["original_path"]).is_file()
     # Storage's explicit all-cached action includes other workspaces.
@@ -277,7 +277,7 @@ def test_release_selection_reports_pathless_missing_source_as_not_cached(
     inflating the released count with zero-byte "releases".
     """
     app, db, pid = client_with_photo
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     db.caches.offline_original_upsert(
         pid, original_path=None, xmp_path=None, companion_path=None,
         bytes_=0, source_size=photo["file_size"],
@@ -311,7 +311,7 @@ def test_release_caps_kept_reasons_sample_but_keeps_total_count(
     from web.job_launchers import _MAX_KEPT_REASONS
 
     app, db, pid = client_with_photo
-    folder_id = db.get_photo(pid)["folder_id"]
+    folder_id = db.photos.get(pid)["folder_id"]
     extras = _MAX_KEPT_REASONS + 10
     photo_ids = [pid]
     for i in range(extras):
@@ -349,7 +349,7 @@ def test_release_caps_error_reasons_sample_but_keeps_total_count(
     from web.job_launchers import _MAX_ERROR_REASONS
 
     app, db, pid = client_with_photo
-    folder_id = db.get_photo(pid)["folder_id"]
+    folder_id = db.photos.get(pid)["folder_id"]
     extras = _MAX_ERROR_REASONS + 10
     photo_ids = [pid]
     for i in range(extras):
@@ -387,7 +387,7 @@ def test_release_cancellation_after_cap_still_publishes_errors_total(
     from web.job_launchers import _MAX_ERROR_REASONS
 
     app, db, pid = client_with_photo
-    folder_id = db.get_photo(pid)["folder_id"]
+    folder_id = db.photos.get(pid)["folder_id"]
     # Exceed the cap by a visible margin so ``errors_total`` must track the
     # live total, not the capped slice length.
     extras = _MAX_ERROR_REASONS + 10
@@ -434,14 +434,14 @@ def test_release_cancellation_after_cap_still_publishes_errors_total(
 def test_release_folder_includes_cached_descendants_only(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
-    root_id = db.get_photo(pid)["folder_id"]
+    root_id = db.photos.get(pid)["folder_id"]
     child = source.parent / "nested"
     child.mkdir()
     image = child / "nested.jpg"
     image.write_bytes(source.read_bytes())
     folder_id = db.add_folder(str(child), parent_id=root_id)
     second_id = db.add_photo(folder_id, image.name, ".jpg", file_size=image.stat().st_size, file_mtime=image.stat().st_mtime)
-    cache_photo_original(db, db.get_photo(second_id), str(base), {folder_id: str(child)})
+    cache_photo_original(db, db.photos.get(second_id), str(base), {folder_id: str(child)})
     job = run_release(app, {"folder_id": root_id})
     assert job["result"]["released"] == 2
     assert job["result"]["total"] == 2

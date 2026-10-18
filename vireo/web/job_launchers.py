@@ -1102,7 +1102,7 @@ def create_job_launchers_blueprint(
             if error is not None:
                 return error
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        selected_photos = db.get_photos_by_ids(photo_ids)
+        selected_photos = db.photos.get_by_ids(photo_ids)
 
         def work(job):
             from offline_cache import release_photo_original
@@ -1186,7 +1186,7 @@ def create_job_launchers_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         # Preserve the selected source identity even if SQLite recycles its
         # numeric ID before this job reaches it.
-        selected_photos = db.get_photos_by_ids(photo_ids)
+        selected_photos = db.photos.get_by_ids(photo_ids)
         # The worker renders through the app object from a job
         # thread, which has no application context of its own.
         flask_app = current_app._get_current_object()
@@ -1540,7 +1540,7 @@ def create_job_launchers_blueprint(
             "extract-masks collection" if collection_id else "extract-masks workspace",
             lambda: db.collections.count_photos(collection_id)
             if collection_id
-            else db.count_photos(),
+            else db.photos.count(),
         )
         runtime_warning = build_cpu_runtime_warning(
             "extract-masks",
@@ -2199,7 +2199,7 @@ class _FullResolutionPreparation:
         # Re-read each photo: deletion may have run while this
         # job was preparing earlier selections.
         photo = self.selected_photos.get(photo_id)
-        current_photo = thread_db.get_photo(photo_id)
+        current_photo = thread_db.photos.get(photo_id)
         filename = photo["filename"] if photo else f"Photo {photo_id}"
         is_pair = _photo_is_raw_jpeg_pair(photo)
         error = None
@@ -2233,7 +2233,7 @@ class _FullResolutionPreparation:
                 error = cache_status or "source could not be cached"
 
             if error is None and self.photo_source_matches(
-                photo, thread_db.get_photo(photo_id),
+                photo, thread_db.photos.get(photo_id),
             ):
                 error = self._warm_renders(photo_id, photo, is_pair)
                 # Eviction can delete a just-warmed
@@ -2251,7 +2251,7 @@ class _FullResolutionPreparation:
         except Exception as exc:
             thread_db.rollback()
             error = str(exc) or exc.__class__.__name__
-            if self.photo_source_matches(photo, thread_db.get_photo(photo_id)):
+            if self.photo_source_matches(photo, thread_db.photos.get(photo_id)):
                 log.warning(
                     "Full-resolution preparation failed for %s: %s",
                     filename, exc, exc_info=True,
@@ -2358,7 +2358,7 @@ class _FullResolutionPreparation:
         # work, leaving replacements found before our turn alone.
         with thread_db.transaction():
             thread_db.begin_immediate()
-            current_photo = thread_db.get_photo(photo_id)
+            current_photo = thread_db.photos.get(photo_id)
             if not attempted or not self.photo_source_matches(photo, current_photo):
                 from preview_cache import cleanup_cached_files_for_deleted_photos
 
@@ -2426,7 +2426,7 @@ class _FullResolutionPreparation:
         if not (self.preview_sizes and self.pending_ready_meta):
             return
         for photo_id, info in self.pending_ready_meta.items():
-            current_photo = self.thread_db.get_photo(photo_id)
+            current_photo = self.thread_db.photos.get(photo_id)
             missing_size, missing_kind = self._missing_tier(
                 photo_id, current_photo, info["is_pair"],
             )
@@ -2553,7 +2553,7 @@ class _PreviewWarmup:
         if self.requested_photo_ids is not None:
             photos = []
             for photo_id in self.requested_photo_ids:
-                scoped_photo = thread_db.get_photo(
+                scoped_photo = thread_db.photos.get(
                     photo_id, verify_workspace=True,
                 )
                 if scoped_photo is not None:
@@ -2561,7 +2561,7 @@ class _PreviewWarmup:
             return photos
         if self.collection_id:
             return thread_db.collections.get_photos(self.collection_id, per_page=999999)
-        return thread_db.get_photos(per_page=999999)
+        return thread_db.photos.list_page(per_page=999999)
 
     def _warm_photo(self, photo):
         """Warm one photo's preview.
@@ -2570,7 +2570,7 @@ class _PreviewWarmup:
         (an existing preview that is kept).
         """
         thread_db = self.thread_db
-        detail_photo = thread_db.get_photo(photo["id"]) or photo
+        detail_photo = thread_db.photos.get(photo["id"]) or photo
         cache_path = os.path.join(
             self.preview_dir, f'{photo["id"]}_{self.max_size}.jpg',
         )
@@ -2676,7 +2676,7 @@ def _run_develop(ctx, job, photo_ids, settings):
 
     photos = []
     for pid in photo_ids:
-        p = thread_db.get_photo(pid, verify_workspace=True)
+        p = thread_db.photos.get(pid, verify_workspace=True)
         if p:
             photos.append(p)
 
@@ -2786,7 +2786,7 @@ def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
     from offline_cache import cache_photo_original
 
     thread_db = ctx.thread_db()
-    photos_map = thread_db.get_photos_by_ids(photo_ids)
+    photos_map = thread_db.photos.get_by_ids(photo_ids)
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
 
     cached = 0

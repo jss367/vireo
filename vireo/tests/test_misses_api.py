@@ -249,8 +249,8 @@ def test_api_misses_actions_accept_universal_filter_rules(
 
     assert reject.status_code == 200
     assert reject.get_json()["rejected"] == 1
-    assert db.get_photo(ids["clipped"])["flag"] == "rejected"
-    assert db.get_photo(ids["no_subject"])["flag"] != "rejected"
+    assert db.photos.get(ids["clipped"])["flag"] == "rejected"
+    assert db.photos.get(ids["no_subject"])["flag"] != "rejected"
 
 
 def test_api_misses_rejects_malformed_universal_rules(client):

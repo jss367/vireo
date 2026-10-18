@@ -164,18 +164,18 @@ def test_add_photo_uses_retry_helpers(db, monkeypatch):
 
 
 def test_get_photo_returns_detail_columns(db, lib):
-    row = db.get_photo(lib["a"])
+    row = db.photos.get(lib["a"])
     assert set(row.keys()) == {
         c.strip() for c in Database.PHOTO_DETAIL_COLS.split(",")
     }
     assert row["filename"] == "a.jpg"
-    assert db.get_photo(999999) is None
+    assert db.photos.get(999999) is None
 
 
 def test_get_photo_sql_is_byte_identical(db, lib):
     statements = _trace(db)
-    db.get_photo(lib["a"])
-    db.get_photo(lib["a"], verify_workspace=True)
+    db.photos.get(lib["a"])
+    db.photos.get(lib["a"], verify_workspace=True)
     db.conn.set_trace_callback(None)
     detail = Database.PHOTO_DETAIL_COLS
     assert statements == [
@@ -188,25 +188,25 @@ def test_get_photo_sql_is_byte_identical(db, lib):
 
 
 def test_get_photo_verify_workspace_scopes_to_active_workspace(db, lib):
-    assert db.get_photo(lib["f"])["filename"] == "f.jpg"
-    assert db.get_photo(lib["f"], verify_workspace=True) is None
-    assert db.get_photo(lib["a"], verify_workspace=True)["filename"] == "a.jpg"
+    assert db.photos.get(lib["f"])["filename"] == "f.jpg"
+    assert db.photos.get(lib["f"], verify_workspace=True) is None
+    assert db.photos.get(lib["a"], verify_workspace=True)["filename"] == "a.jpg"
 
 
 def test_get_photo_needs_workspace_only_when_verifying(db, lib):
     db.set_active_workspace(None)
-    assert db.get_photo(lib["a"])["filename"] == "a.jpg"
+    assert db.photos.get(lib["a"])["filename"] == "a.jpg"
     with pytest.raises(RuntimeError):
-        db.get_photo(lib["a"], verify_workspace=True)
+        db.photos.get(lib["a"], verify_workspace=True)
 
 
 # -- id lookups ------------------------------------------------------------------
 
 
 def test_get_photo_filenames(db, lib):
-    assert db.get_photo_filenames([]) == {}
-    assert db.get_photo_filenames(None) == {}
-    got = db.get_photo_filenames({lib["a"], lib["c"], 999999})
+    assert db.photos.get_filenames([]) == {}
+    assert db.photos.get_filenames(None) == {}
+    got = db.photos.get_filenames({lib["a"], lib["c"], 999999})
     assert got == {lib["a"]: (lib["root"], "a.jpg"),
                    lib["c"]: (lib["child"], "c.jpg")}
 
@@ -214,48 +214,48 @@ def test_get_photo_filenames(db, lib):
 def test_get_photo_filenames_chunks(db, lib):
     ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    got = db.get_photo_filenames(ids)
+    got = db.photos.get_filenames(ids)
     db.conn.set_trace_callback(None)
     assert got == {lib["a"]: (lib["root"], "a.jpg")}
     assert len(_sql(statements, "SELECT id, folder_id, filename")) == 2
 
 
 def test_get_existing_photo_ids_spans_workspaces_and_chunks(db, lib):
-    assert db.get_existing_photo_ids([]) == set()
+    assert db.photos.existing_ids([]) == set()
     # Photo rows are global: the foreign workspace's photo exists too.
-    assert db.get_existing_photo_ids([lib["a"], lib["f"], 999999]) == {lib["a"], lib["f"]}
+    assert db.photos.existing_ids([lib["a"], lib["f"], 999999]) == {lib["a"], lib["f"]}
     ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    assert db.get_existing_photo_ids(ids) == {lib["a"]}
+    assert db.photos.existing_ids(ids) == {lib["a"]}
     db.conn.set_trace_callback(None)
     assert len(_sql(statements, "SELECT id FROM photos WHERE id IN")) == 2
 
 
 def test_get_photos_by_ids(db, lib):
-    assert db.get_photos_by_ids([]) == {}
-    got = db.get_photos_by_ids([lib["a"], lib["b"], 999999])
+    assert db.photos.get_by_ids([]) == {}
+    got = db.photos.get_by_ids([lib["a"], lib["b"], 999999])
     assert sorted(got) == sorted([lib["a"], lib["b"]])
     cols = {c.strip() for c in Database.PHOTO_COLS.split(",")}
     assert set(got[lib["a"]].keys()) == cols
-    with_exif = db.get_photos_by_ids([lib["a"]], include_exif=True)
+    with_exif = db.photos.get_by_ids([lib["a"]], include_exif=True)
     assert set(with_exif[lib["a"]].keys()) == cols | {"exif_data"}
 
 
 def test_get_photos_by_ids_chunks(db, lib):
     ids = [lib["b"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    got = db.get_photos_by_ids(ids)
+    got = db.photos.get_by_ids(ids)
     db.conn.set_trace_callback(None)
     assert list(got) == [lib["b"]]
     assert len(_sql(statements, "FROM photos WHERE id IN")) == 2
 
 
 def test_get_photo_folder_statuses(db, lib):
-    assert db.get_photo_folder_statuses([]) == {}
+    assert db.photos.get_folder_statuses([]) == {}
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (lib["child"],),
     )
-    got = db.get_photo_folder_statuses(
+    got = db.photos.get_folder_statuses(
         [lib["a"], lib["c"], lib["a"], 999999]
     )
     assert got == {lib["a"]: "ok", lib["c"]: "missing"}
@@ -264,35 +264,35 @@ def test_get_photo_folder_statuses(db, lib):
 def test_get_photo_folder_statuses_dedupes_before_chunking(db, lib):
     ids = [lib["a"]] * (_SQLITE_PARAM_CHUNK_SIZE + 5)
     statements = _trace(db)
-    assert db.get_photo_folder_statuses(ids) == {lib["a"]: "ok"}
+    assert db.photos.get_folder_statuses(ids) == {lib["a"]: "ok"}
     db.conn.set_trace_callback(None)
     assert len(_sql(statements, "SELECT p.id, f.status")) == 1
 
 
 def test_get_photo_with_folder_path(db, lib, tmp_path):
-    row = db.get_photo_with_folder_path(lib["c"])
+    row = db.photos.get_with_folder_path(lib["c"])
     assert row["filename"] == "c.jpg"
     assert row["folder_path"] == str(tmp_path / "lib" / "c")
     # The whole row, BLOB columns included, from any workspace.
     assert "dino_global_embedding" in set(row.keys())
-    assert db.get_photo_with_folder_path(lib["f"])["filename"] == "f.jpg"
-    assert db.get_photo_with_folder_path(999999) is None
+    assert db.photos.get_with_folder_path(lib["f"])["filename"] == "f.jpg"
+    assert db.photos.get_with_folder_path(999999) is None
 
 
 def test_get_photo_file_in_workspace(db, lib, tmp_path):
     ws = db.active_workspace_id
-    row = db.get_photo_file_in_workspace(lib["c"], ws)
+    row = db.photos.file_in_workspace(lib["c"], ws)
     assert dict(row) == {
         "filename": "c.jpg", "folder_path": str(tmp_path / "lib" / "c"),
     }
     # The workspace is the argument, not the active one.
-    assert db.get_photo_file_in_workspace(lib["f"], ws) is None
-    assert db.get_photo_file_in_workspace(lib["f"], lib["other_ws"])["filename"] == "f.jpg"
-    assert db.get_photo_file_in_workspace(999999, ws) is None
+    assert db.photos.file_in_workspace(lib["f"], ws) is None
+    assert db.photos.file_in_workspace(lib["f"], lib["other_ws"])["filename"] == "f.jpg"
+    assert db.photos.file_in_workspace(999999, ws) is None
     # None matches nothing instead of raising, with or without an active one.
-    assert db.get_photo_file_in_workspace(lib["a"], None) is None
+    assert db.photos.file_in_workspace(lib["a"], None) is None
     db.set_active_workspace(None)
-    assert db.get_photo_file_in_workspace(lib["a"], ws)["filename"] == "a.jpg"
+    assert db.photos.file_in_workspace(lib["a"], ws)["filename"] == "a.jpg"
 
 
 def test_get_best_batch_rows_by_ids(db, lib):
@@ -324,14 +324,14 @@ def test_get_best_batch_rows_by_ids(db, lib):
 
 
 def test_get_photo_flags_ratings_and_eyes(db, lib):
-    assert db.get_photo_flags_ratings_and_eyes([]) == {}
+    assert db.photos.flags_ratings_and_eyes([]) == {}
     db.photo_review.set_flag(lib["b"], "flagged")
     db.conn.execute(
         "UPDATE photos SET rating = 3, eye_x = 0.25, eye_y = 0.5, eye_conf = 0.9,"
         " eye_tenengrad = 12.0 WHERE id = ?",
         (lib["a"],),
     )
-    got = db.get_photo_flags_ratings_and_eyes([lib["a"], lib["b"], lib["f"], 999999])
+    got = db.photos.flags_ratings_and_eyes([lib["a"], lib["b"], lib["f"], 999999])
     assert sorted(got) == sorted([lib["a"], lib["b"], lib["f"]])
     assert dict(got[lib["a"]]) == {
         "id": lib["a"], "flag": "none", "rating": 3,
@@ -344,16 +344,16 @@ def test_get_photo_flags_ratings_and_eyes(db, lib):
 def test_get_photo_flags_ratings_and_eyes_chunks(db, lib):
     ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    got = db.get_photo_flags_ratings_and_eyes(ids)
+    got = db.photos.flags_ratings_and_eyes(ids)
     db.conn.set_trace_callback(None)
     assert list(got) == [lib["a"]]
     assert len(_sql(statements, "SELECT id, flag, rating")) == 2
 
 
 def test_get_workspace_photos_in_folders(db, lib):
-    assert db.get_workspace_photos_in_folders([]) == []
-    rows = db.get_workspace_photos_in_folders(
-        [lib["root"], lib["child"], lib["foreign"]],
+    assert db.photos.in_workspace_folders([], db.active_workspace_id) == []
+    rows = db.photos.in_workspace_folders(
+        [lib["root"], lib["child"], lib["foreign"]], db.active_workspace_id,
     )
     got = {(r["id"], r["folder_id"], r["filename"]) for r in rows}
     # The foreign folder's photo is in another workspace.
@@ -367,19 +367,19 @@ def test_get_workspace_photos_in_folders(db, lib):
         "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
         (db.active_workspace_id, lib["f"]),
     )
-    rows = db.get_workspace_photos_in_folders([lib["foreign"]])
+    rows = db.photos.in_workspace_folders([lib["foreign"]], db.active_workspace_id)
     assert [r["id"] for r in rows] == [lib["f"]]
 
 
 def test_get_workspace_photos_in_folders_without_workspace_is_empty(db, lib):
     db.set_active_workspace(None)
-    assert db.get_workspace_photos_in_folders([lib["root"]]) == []
+    assert db.photos.in_workspace_folders([lib["root"]], db.active_workspace_id) == []
 
 
 def test_get_workspace_photos_in_folders_chunks(db, lib):
     ids = [lib["root"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    rows = db.get_workspace_photos_in_folders(ids)
+    rows = db.photos.in_workspace_folders(ids, db.active_workspace_id)
     db.conn.set_trace_callback(None)
     assert sorted(r["id"] for r in rows) == sorted([lib["a"], lib["b"]])
     assert len(_sql(statements, "JOIN photo_workspace_visibility pv")) == 2
@@ -389,22 +389,22 @@ def test_get_workspace_photos_in_folders_chunks(db, lib):
 
 
 def test_count_photos_excludes_missing_folders_and_other_workspaces(db, lib):
-    assert db.count_photos() == 3
-    assert db.count_photos_in_workspace() == 3
+    assert db.photos.count() == 3
+    assert db.photos.count_in_workspace() == 3
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (lib["child"],),
     )
-    assert db.count_photos() == 2
-    assert db.count_photos_in_workspace() == 3
+    assert db.photos.count() == 2
+    assert db.photos.count_in_workspace() == 3
     db.conn.execute(
         "UPDATE folders SET status = 'partial' WHERE id = ?", (lib["child"],),
     )
-    assert db.count_photos() == 3
+    assert db.photos.count() == 3
 
 
 def test_counts_require_active_workspace(db, lib):
     db.set_active_workspace(None)
-    for fn in (db.count_photos, db.count_photos_in_workspace):
+    for fn in (db.photos.count, db.photos.count_in_workspace):
         with pytest.raises(RuntimeError):
             fn()
 
@@ -413,12 +413,12 @@ def test_counts_require_active_workspace(db, lib):
 
 
 def test_photos_by_paths(db, lib, tmp_path):
-    assert db.photos_by_paths([]) == {}
+    assert db.photos.by_paths([]) == {}
     a_path = str(tmp_path / "lib" / "a.jpg")
     c_path = str(tmp_path / "lib" / "c" / "c.jpg")
     f_path = str(tmp_path / "foreign" / "f.jpg")
     new_path = str(tmp_path / "lib" / "new.jpg")
-    got = db.photos_by_paths([a_path, c_path, f_path, new_path, a_path])
+    got = db.photos.by_paths([a_path, c_path, f_path, new_path, a_path])
     # Photos are global, so the foreign-workspace photo is found too.
     assert got == {a_path: lib["a"], c_path: lib["c"], f_path: lib["f"]}
 
@@ -430,7 +430,7 @@ def test_photos_by_paths_batches_filenames_per_directory(db, tmp_path):
         str(tmp_path / "big" / f"n{i}.jpg") for i in range(805)
     ] + [str(tmp_path / "elsewhere" / "keep.jpg")]
     statements = _trace(db)
-    got = db.photos_by_paths(paths)
+    got = db.photos.by_paths(paths)
     db.conn.set_trace_callback(None)
     assert got == {str(tmp_path / "big" / "keep.jpg"): pid}
     # 806 names in one directory -> 2 batches of <=800; one more directory.
@@ -446,12 +446,12 @@ def test_get_photo_ids_at_paths(db, lib, tmp_path):
     f_path = str(tmp_path / "foreign" / "f.jpg")
     new_path = str(tmp_path / "lib" / "new.jpg")
     # Photos are global; an unknown path matches nothing.
-    got = db.get_photo_ids_at_paths([a_path, c_path, f_path, new_path])
+    got = db.photos.ids_at_paths([a_path, c_path, f_path, new_path])
     assert sorted(got) == sorted([lib["a"], lib["c"], lib["f"]])
     # Same filename in another directory does not match.
-    assert db.get_photo_ids_at_paths([str(tmp_path / "foreign" / "a.jpg")]) == []
+    assert db.photos.ids_at_paths([str(tmp_path / "foreign" / "a.jpg")]) == []
     # The temp table is reset per call and dropped afterwards.
-    assert db.get_photo_ids_at_paths([c_path]) == [lib["c"]]
+    assert db.photos.ids_at_paths([c_path]) == [lib["c"]]
     assert db.conn.execute(
         "SELECT name FROM sqlite_temp_master WHERE name = '_imported_paths'"
     ).fetchone() is None
@@ -464,22 +464,22 @@ def test_get_photo_ids_at_paths_is_one_statement_for_many_paths(db, tmp_path):
         str(tmp_path / "big" / f"n{i}.jpg") for i in range(1200)
     ]
     statements = _trace(db)
-    got = db.get_photo_ids_at_paths(paths)
+    got = db.photos.ids_at_paths(paths)
     db.conn.set_trace_callback(None)
     assert got == [pid]
     assert len(_sql(statements, "JOIN _imported_paths")) == 1
 
 
 def test_get_photo_ids_in_folders(db, lib):
-    assert sorted(db.get_photo_ids_in_folders([lib["root"], lib["foreign"]])) == sorted(
+    assert sorted(db.photos.ids_in_folders([lib["root"], lib["foreign"]])) == sorted(
         [lib["a"], lib["b"], lib["f"]])
-    assert db.get_photo_ids_in_folders([]) == []
+    assert db.photos.ids_in_folders([]) == []
 
 
 def test_get_photo_ids_in_folders_chunks(db, lib):
     folder_ids = [lib["child"]] + list(range(10_000, 10_000 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    got = db.get_photo_ids_in_folders(folder_ids)
+    got = db.photos.ids_in_folders(folder_ids)
     db.conn.set_trace_callback(None)
     assert got == [lib["c"]]
     assert len(_sql(statements, "WHERE folder_id IN")) == 2
@@ -489,22 +489,22 @@ def test_get_photo_ids_in_folders_chunks(db, lib):
 
 
 def test_filter_out_wildlife_excluded(db, lib):
-    assert db.filter_out_wildlife_excluded([]) == []
-    assert db.filter_out_wildlife_excluded(None) == []
+    assert db.photos.filter_out_wildlife_excluded([]) == []
+    assert db.photos.filter_out_wildlife_excluded(None) == []
     db.conn.execute(
         "UPDATE photos SET wildlife_excluded = 1 WHERE id = ?", (lib["b"],),
     )
     ids = [lib["c"], lib["b"], lib["a"], lib["c"]]
-    assert db.filter_out_wildlife_excluded(ids) == [lib["c"], lib["a"], lib["c"]]
+    assert db.photos.filter_out_wildlife_excluded(ids) == [lib["c"], lib["a"], lib["c"]]
     # Accepts any iterable; never needs an active workspace.
     db.set_active_workspace(None)
-    assert db.filter_out_wildlife_excluded(iter([lib["b"], lib["a"]])) == [lib["a"]]
+    assert db.photos.filter_out_wildlife_excluded(iter([lib["b"], lib["a"]])) == [lib["a"]]
 
 
 def test_filter_out_wildlife_excluded_reads_instance_chunk_size(db, lib, monkeypatch):
     monkeypatch.setattr(db, "_FILTER_SUBJECT_CHUNK", 2)
     statements = _trace(db)
-    db.filter_out_wildlife_excluded([lib["a"], lib["b"], lib["c"]])
+    db.photos.filter_out_wildlife_excluded([lib["a"], lib["b"], lib["c"]])
     db.conn.set_trace_callback(None)
     assert len(_sql(statements, "wildlife_excluded = 1")) == 2
 
@@ -513,20 +513,20 @@ def test_filter_out_wildlife_excluded_reads_instance_chunk_size(db, lib, monkeyp
 
 
 def test_get_photos_pages_and_scopes(db, lib):
-    rows = db.get_photos()
+    rows = db.photos.list_page()
     assert [r["filename"] for r in rows] == ["c.jpg", "a.jpg", "b.jpg"]
     assert set(rows[0].keys()) == {
         c.strip() for c in Database.PHOTO_COLS.split(",")
     }
-    assert [r["filename"] for r in db.get_photos(page=2, per_page=2)] == ["b.jpg"]
+    assert [r["filename"] for r in db.photos.list_page(page=2, per_page=2)] == ["b.jpg"]
     # page < 1 is clamped to the first page.
-    assert [r["filename"] for r in db.get_photos(page=0, per_page=1)] == ["c.jpg"]
-    assert [r["filename"] for r in db.get_photos(sort="name")] == [
+    assert [r["filename"] for r in db.photos.list_page(page=0, per_page=1)] == ["c.jpg"]
+    assert [r["filename"] for r in db.photos.list_page(sort="name")] == [
         "a.jpg", "b.jpg", "c.jpg",
     ]
-    assert [r["filename"] for r in db.get_photos(folder_id=lib["child"])] == ["c.jpg"]
-    assert db.get_photo_ids() == [lib["c"], lib["a"], lib["b"]]
-    assert db.count_filtered_photos() == 3
+    assert [r["filename"] for r in db.photos.list_page(folder_id=lib["child"])] == ["c.jpg"]
+    assert db.photos.get_ids() == [lib["c"], lib["a"], lib["b"]]
+    assert db.photos.count_filtered() == 3
 
 
 def test_listing_filters_agree(db, lib):
@@ -557,17 +557,17 @@ def test_listing_filters_agree(db, lib):
         ({"folder_id": lib["root"]}, [lib["c"], lib["a"], lib["b"]]),
     ]
     for kwargs, expected in cases:
-        assert [r["id"] for r in db.get_photos(**kwargs)] == expected, kwargs
-        assert db.get_photo_ids(**kwargs) == expected, kwargs
-        assert db.count_filtered_photos(**kwargs) == len(expected), kwargs
+        assert [r["id"] for r in db.photos.list_page(**kwargs)] == expected, kwargs
+        assert db.photos.get_ids(**kwargs) == expected, kwargs
+        assert db.photos.count_filtered(**kwargs) == len(expected), kwargs
 
 
 def test_listing_keyword_uses_distinct_and_color_join_param_order(db, lib):
     db.photo_labels.set(lib["a"], "red")
     statements = _trace(db)
-    db.get_photos(keyword="x", color_label="red")
-    db.get_photo_ids(keyword="x", color_label="red")
-    db.get_photos(color_label="red")
+    db.photos.list_page(keyword="x", color_label="red")
+    db.photos.get_ids(keyword="x", color_label="red")
+    db.photos.list_page(color_label="red")
     db.conn.set_trace_callback(None)
     selects = [s for s in statements if "FROM photos p" in s]
     assert "SELECT DISTINCT p.id" in selects[0]
@@ -581,45 +581,50 @@ def test_listing_collection_restriction(db, lib):
     cid = db.collections.add(
         "Just A", json.dumps([{"field": "photo_ids", "value": [lib["a"]]}]),
     )
-    assert [r["id"] for r in db.get_photos(collection_id=cid)] == [lib["a"]]
-    assert db.get_photo_ids(collection_id=cid) == [lib["a"]]
-    assert db.count_filtered_photos(collection_id=cid) == 1
-    assert db.get_photo_position(lib["a"], collection_id=cid) == 0
-    assert db.get_photo_position(lib["b"], collection_id=cid) is None
+    assert [r["id"] for r in db.photos.list_page(collection_id=cid)] == [lib["a"]]
+    assert db.photos.get_ids(collection_id=cid) == [lib["a"]]
+    assert db.photos.count_filtered(collection_id=cid) == 1
+    assert db.photos.get_position(lib["a"], collection_id=cid) == 0
+    assert db.photos.get_position(lib["b"], collection_id=cid) is None
     summary = db.get_browse_summary(collection_id=cid)
     assert summary["total"] == 3
     assert summary["filtered_total"] == 1
-    assert db.get_calendar_data(2024, collection_id=cid)["days"] == {
+    assert db.photos.get_calendar_data(2024, collection_id=cid)["days"] == {
         "2024-01-05": 1,
     }
 
 
+def _listing(db, method):
+    """``get_browse_summary`` stays on the façade; the rest are on ``db.photos``."""
+    return getattr(db, method) if method == "get_browse_summary" else getattr(db.photos, method)
+
+
 @pytest.mark.parametrize("method,args", [
-    ("get_photos", ()),
-    ("get_photo_ids", ()),
-    ("count_filtered_photos", ()),
-    ("get_photo_position", (1,)),
+    ("list_page", ()),
+    ("get_ids", ()),
+    ("count_filtered", ()),
+    ("get_position", (1,)),
     ("get_browse_summary", ()),
     ("get_calendar_data", (2024,)),
 ])
 def test_listing_missing_collection_raises(db, lib, method, args):
     with pytest.raises(ValueError, match="collection not found in active workspace"):
-        getattr(db, method)(*args, collection_id=987654)
+        _listing(db, method)(*args, collection_id=987654)
 
 
 @pytest.mark.parametrize("method,args", [
-    ("get_photos", ()),
-    ("get_photo_ids", ()),
-    ("count_filtered_photos", ()),
-    ("get_photo_position", (1,)),
+    ("list_page", ()),
+    ("get_ids", ()),
+    ("count_filtered", ()),
+    ("get_position", (1,)),
     ("get_browse_summary", ()),
     ("get_calendar_data", (2024,)),
-    ("count_photos_with_companions", ([1],)),
+    ("count_with_companions", ([1],)),
 ])
 def test_listing_requires_active_workspace(db, lib, method, args):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        getattr(db, method)(*args)
+        _listing(db, method)(*args)
 
 
 def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
@@ -648,12 +653,12 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
     monkeypatch.setattr(CollectionRepository, "_build_collection_query", coll)
     monkeypatch.setattr(CollectionRepository, "_photo_sort_clause", sort)
     cid = db.collections.add("All", json.dumps([{"field": "all"}]))
-    db.get_photos(folder_id=lib["root"], collection_id=cid, sort="name")
-    db.get_photo_ids(folder_id=lib["root"], collection_id=cid)
-    db.count_filtered_photos(folder_id=lib["root"], collection_id=cid)
-    db.get_photo_position(lib["a"], folder_id=lib["root"], collection_id=cid)
+    db.photos.list_page(folder_id=lib["root"], collection_id=cid, sort="name")
+    db.photos.get_ids(folder_id=lib["root"], collection_id=cid)
+    db.photos.count_filtered(folder_id=lib["root"], collection_id=cid)
+    db.photos.get_position(lib["a"], folder_id=lib["root"], collection_id=cid)
     db.get_browse_summary(folder_id=lib["root"], collection_id=cid)
-    db.get_calendar_data(2024, folder_id=lib["root"], collection_id=cid)
+    db.photos.get_calendar_data(2024, folder_id=lib["root"], collection_id=cid)
     root = lib["root"]
     assert calls == [
         ("subtree", root), ("coll", cid), ("sort", "name"),
@@ -669,36 +674,36 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
 
 
 def test_get_photo_position(db, lib):
-    assert db.get_photo_position(lib["c"]) == 0
-    assert db.get_photo_position(lib["b"]) == 2
-    assert db.get_photo_position(lib["b"], sort="name") == 1
-    assert db.get_photo_position(lib["b"], folder_id=lib["root"]) == 2
-    assert db.get_photo_position(lib["f"]) is None
-    assert db.get_photo_position(999999) is None
+    assert db.photos.get_position(lib["c"]) == 0
+    assert db.photos.get_position(lib["b"]) == 2
+    assert db.photos.get_position(lib["b"], sort="name") == 1
+    assert db.photos.get_position(lib["b"], folder_id=lib["root"]) == 2
+    assert db.photos.get_position(lib["f"]) is None
+    assert db.photos.get_position(999999) is None
 
 
 # -- get_calendar_data ---------------------------------------------------------
 
 
 def test_get_calendar_data(db, lib):
-    data = db.get_calendar_data(2024)
+    data = db.photos.get_calendar_data(2024)
     assert data == {
         "year": 2024,
         "days": {"2024-01-05": 1, "2024-03-07": 1},
         "min_year": 2023,
         "max_year": 2024,
     }
-    assert db.get_calendar_data(2023, folder_id=lib["child"])["days"] == {
+    assert db.photos.get_calendar_data(2023, folder_id=lib["child"])["days"] == {
         "2023-06-01": 1,
     }
     db.photo_review.set_rating(lib["b"], 4)
-    assert db.get_calendar_data(
+    assert db.photos.get_calendar_data(
         2024, rules=[{"field": "rating", "op": ">=", "value": 4}],
     )["days"] == {"2024-03-07": 1}
 
 
 def test_get_calendar_data_year_bounds_default_to_requested_year(db):
-    data = db.get_calendar_data(2031)
+    data = db.photos.get_calendar_data(2031)
     assert data == {"year": 2031, "days": {}, "min_year": 2031, "max_year": 2031}
 
 
@@ -797,9 +802,9 @@ def test_count_photos_with_companions(db, lib):
         "UPDATE photos SET companion_path = '' WHERE id = ?", (lib["b"],),
     )
     ids = [lib["a"], lib["a"], lib["b"], lib["c"], lib["f"]]
-    assert db.count_photos_with_companions(ids) == 1
-    assert db.count_photos_with_companions([]) == 0
-    assert db.count_photos_with_companions(None) == 0
+    assert db.photos.count_with_companions(ids) == 1
+    assert db.photos.count_with_companions([]) == 0
+    assert db.photos.count_with_companions(None) == 0
 
 
 def test_count_photos_with_companions_chunks(db, lib):
@@ -808,7 +813,7 @@ def test_count_photos_with_companions_chunks(db, lib):
     )
     ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    assert db.count_photos_with_companions(ids) == 1
+    assert db.photos.count_with_companions(ids) == 1
     db.conn.set_trace_callback(None)
     assert len(_sql(statements, "SELECT COUNT(*) AS n")) == 2
 
@@ -817,11 +822,11 @@ def test_count_photos_with_companions_chunks(db, lib):
 
 
 def test_resolve_photos_for_delete(db, lib, tmp_path):
-    assert db.resolve_photos_for_delete([]) == {"ids": [], "files": [], "_rows": []}
-    assert db.resolve_photos_for_delete([999999]) == {
+    assert db.photos.resolve_for_delete([]) == {"ids": [], "files": [], "_rows": []}
+    assert db.photos.resolve_for_delete([999999]) == {
         "ids": [], "files": [], "_rows": [],
     }
-    got = db.resolve_photos_for_delete([lib["a"], lib["a"]])
+    got = db.photos.resolve_for_delete([lib["a"], lib["a"]])
     assert got["ids"] == [lib["a"]]
     assert got["files"] == [{
         "photo_id": lib["a"],
@@ -832,7 +837,7 @@ def test_resolve_photos_for_delete(db, lib, tmp_path):
     }]
     assert [r["id"] for r in got["_rows"]] == [lib["a"]]
     # Read-only: nothing is deleted and no transaction is left open.
-    assert db.get_photo(lib["a"]) is not None
+    assert db.photos.get(lib["a"]) is not None
     assert not db.conn.in_transaction
 
 
@@ -845,13 +850,13 @@ def test_resolve_photos_for_delete_companions(db, lib):
         "UPDATE photos SET companion_path = 'gone.cr3' WHERE id = ?", (lib["b"],),
     )
     db.conn.commit()
-    without = db.resolve_photos_for_delete([lib["a"]])
+    without = db.photos.resolve_for_delete([lib["a"]])
     assert without["ids"] == [lib["a"]]
-    got = db.resolve_photos_for_delete([lib["a"], lib["b"]], include_companions=True)
+    got = db.photos.resolve_for_delete([lib["a"], lib["b"]], include_companions=True)
     assert sorted(got["ids"]) == sorted([lib["a"], lib["b"], raw])
     assert [f["photo_id"] for f in got["files"]] == [lib["a"], lib["b"], raw]
     # A companion the caller already selected is not added twice.
-    both = db.resolve_photos_for_delete([lib["a"], raw], include_companions=True)
+    both = db.photos.resolve_for_delete([lib["a"], raw], include_companions=True)
     assert [f["photo_id"] for f in both["files"]] == [lib["a"], raw]
 
 
@@ -902,14 +907,16 @@ def test_delete_photos_nothing_to_delete(db, lib, cache, monkeypatch):
 
 
 def test_delete_photos_goes_through_facade_resolver(db, lib, monkeypatch):
+    from repositories.photos import PhotoRepository
+
     seen = []
-    real = db.resolve_photos_for_delete
+    real = PhotoRepository.resolve_for_delete
 
-    def resolver(photo_ids, include_companions=False):
+    def resolver(repo, photo_ids, include_companions=False):
         seen.append((list(photo_ids), include_companions))
-        return real(photo_ids, include_companions=include_companions)
+        return real(repo, photo_ids, include_companions=include_companions)
 
-    monkeypatch.setattr(db, "resolve_photos_for_delete", resolver)
+    monkeypatch.setattr(PhotoRepository, "resolve_for_delete", resolver)
     db.delete_photos([lib["b"]], include_companions=True)
     assert seen == [([lib["b"]], True)]
 
@@ -1018,7 +1025,7 @@ def test_delete_photos_commit_false_joins_outer_transaction(db, lib, cache, monk
     assert pruned == []
     assert len(cache.invalidated) == 1
     db.conn.rollback()
-    assert db.get_photo(lib["a"]) is not None
+    assert db.photos.get(lib["a"]) is not None
 
 
 def test_delete_photos_rolls_back_on_error_and_still_invalidates(db, lib, cache, monkeypatch):
@@ -1167,7 +1174,7 @@ def test_prune_pipeline_cache_for_ids_swallows_errors_but_not_interrupts(db, mon
 
 
 def test_update_photo_sharpness_commits(db, lib):
-    db.update_photo_sharpness(lib["a"], 12.5)
+    db.photos.update_sharpness(lib["a"], 12.5)
     assert not db.conn.in_transaction
     with _reader(db) as r:
         assert r.execute(
@@ -1176,7 +1183,7 @@ def test_update_photo_sharpness_commits(db, lib):
 
 
 def test_update_photo_quality_commits_and_overwrites_all_fields(db, lib):
-    db.update_photo_quality(lib["a"], subject_sharpness=1.0, subject_size=2.0,
+    db.photos.update_quality(lib["a"], subject_sharpness=1.0, subject_size=2.0,
                             quality_score=3.0, sharpness=4.0)
     with _reader(db) as r:
         row = r.execute(
@@ -1184,7 +1191,7 @@ def test_update_photo_quality_commits_and_overwrites_all_fields(db, lib):
             "FROM photos WHERE id = ?", (lib["a"],),
         ).fetchone()
     assert tuple(row) == (1.0, 2.0, 3.0, 4.0)
-    db.update_photo_quality(lib["a"], quality_score=9.0)
+    db.photos.update_quality(lib["a"], quality_score=9.0)
     row = db.conn.execute(
         "SELECT subject_sharpness, subject_size, quality_score, sharpness "
         "FROM photos WHERE id = ?", (lib["a"],),
@@ -1202,8 +1209,8 @@ def test_quality_writers_use_commit_with_retry(db, lib, monkeypatch):
         db_module, "commit_with_retry",
         lambda conn, *a, **kw: (commits.append(1), real(conn, *a, **kw))[1],
     )
-    db.update_photo_sharpness(lib["a"], 1.0)
-    db.update_photo_quality(lib["a"], sharpness=2.0)
+    db.photos.update_sharpness(lib["a"], 1.0)
+    db.photos.update_quality(lib["a"], sharpness=2.0)
     assert commits == [1, 1]
 
 
@@ -1219,10 +1226,10 @@ def _working_copy_state(db, pid):
 
 
 def test_get_photo_working_copy_path(db, lib):
-    assert db.get_photo_working_copy_path(lib["a"]) is None
-    db.record_generated_original(lib["a"], "working/1.jpg", tracked=True)
-    assert db.get_photo_working_copy_path(lib["a"]) == "working/1.jpg"
-    assert db.get_photo_working_copy_path(99999) is None
+    assert db.photos.working_copy_path(lib["a"]) is None
+    db.photos.record_generated_original(lib["a"], "working/1.jpg", tracked=True)
+    assert db.photos.working_copy_path(lib["a"]) == "working/1.jpg"
+    assert db.photos.working_copy_path(99999) is None
 
 
 def test_record_generated_original_tracked_stores_path_and_clears_eviction(db, lib):
@@ -1231,19 +1238,19 @@ def test_record_generated_original_tracked_stores_path_and_clears_eviction(db, l
         "height = 6 WHERE id = ?", (lib["a"],),
     )
     db.conn.commit()
-    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
     assert not db.conn.in_transaction
     assert _working_copy_state(db, lib["a"]) == ("working/a.jpg", None, 5, 6)
 
 
 def test_record_generated_original_untracked_marks_evicted_at_source_mtime(db, lib):
-    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
-    db.record_generated_original(lib["a"], "ignored", tracked=False,
+    db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    db.photos.record_generated_original(lib["a"], "ignored", tracked=False,
                                  dimensions=(40, 30))
     assert _working_copy_state(db, lib["a"]) == (None, 1.0, 40, 30)
     db.conn.execute("UPDATE photos SET file_mtime = NULL WHERE id = ?", (lib["b"],))
     db.conn.commit()
-    db.record_generated_original(lib["b"], None, tracked=False)
+    db.photos.record_generated_original(lib["b"], None, tracked=False)
     assert _working_copy_state(db, lib["b"])[:2] == (None, -1)
 
 
@@ -1251,16 +1258,16 @@ def test_record_generated_original_commits_the_callers_transaction(db, lib):
     # A plain commit, like the ``db.conn.commit()`` it replaced: it ends a
     # transaction the caller opened, and honors ``_commits_held``.
     db.begin_immediate()
-    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    db.photos.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
     assert not db.in_transaction
     with db._commits_held():
-        db.record_generated_original(lib["b"], "working/b.jpg", tracked=True)
+        db.photos.record_generated_original(lib["b"], "working/b.jpg", tracked=True)
         assert db.in_transaction
     assert _working_copy_state(db, lib["b"])[0] == "working/b.jpg"
 
 
 def test_set_photo_thumb_path_commits(db, lib):
-    db.set_photo_thumb_path(lib["a"], f"{lib['a']}.jpg")
+    db.photos.set_thumb_path(lib["a"], f"{lib['a']}.jpg")
     assert not db.conn.in_transaction
     with _reader(db) as r:
         assert r.execute(
@@ -1278,17 +1285,17 @@ def _thumb_paths(db):
 
 def test_clear_all_photo_thumb_paths_commits(db, lib):
     for pid in (lib["a"], lib["f"]):
-        db.set_photo_thumb_path(pid, f"{pid}.jpg")
-    db.clear_all_photo_thumb_paths()
+        db.photos.set_thumb_path(pid, f"{pid}.jpg")
+    db.photos.clear_all_thumb_paths()
     assert not db.conn.in_transaction
     assert set(_thumb_paths(db).values()) == {None}
 
 
 def test_clear_photo_thumb_paths_clears_only_named_photos_in_chunks_of_900(db, lib):
     for pid in (lib["a"], lib["b"], lib["f"]):
-        db.set_photo_thumb_path(pid, f"{pid}.jpg")
+        db.photos.set_thumb_path(pid, f"{pid}.jpg")
     statements = _trace(db)
-    db.clear_photo_thumb_paths([lib["a"]] + list(range(100_000, 100_899)) + [lib["f"]])
+    db.photos.clear_thumb_paths([lib["a"]] + list(range(100_000, 100_899)) + [lib["f"]])
     db.conn.set_trace_callback(None)
     assert not db.conn.in_transaction
     assert len(_sql(statements, "SET thumb_path = NULL")) == 2
@@ -1299,10 +1306,10 @@ def test_clear_photo_thumb_paths_clears_only_named_photos_in_chunks_of_900(db, l
 
 
 def test_count_catalog_photos_spans_every_workspace(db, lib):
-    assert db.count_catalog_photos() == 4
-    assert db.count_photos_in_workspace() == 3
+    assert db.photos.count_all() == 4
+    assert db.photos.count_in_workspace() == 3
     db.set_active_workspace(None)
-    assert db.count_catalog_photos() == 4
+    assert db.photos.count_all() == 4
 
 
 def _failure_state(db, pid):
@@ -1337,7 +1344,7 @@ def test_clear_working_copy_evictions_resets_evicted_rows(db, lib, monkeypatch):
         lambda conn, *a, **kw: (commits.append(conn), real(conn, *a, **kw))[1],
     )
 
-    db.clear_working_copy_evictions()
+    db.photos.clear_working_copy_evictions()
 
     assert commits == [db.conn]
     assert not db.in_transaction
@@ -1355,21 +1362,26 @@ def test_count_catalog_photos_counts_every_folder_status(db, lib):
         "UPDATE folders SET status = 'missing' WHERE id = ?", (lib["child"],),
     )
     db.conn.commit()
-    assert db.count_photos_in_workspace() == 3
-    assert db.count_catalog_photos() == 4
+    assert db.photos.count_in_workspace() == 3
+    assert db.photos.count_all() == 4
 
 
 # -- structure -----------------------------------------------------------------
 
-MOVED = [
-    "filter_out_wildlife_excluded", "add_photo", "get_photo",
+# Coordinated work that stays on ``Database`` and builds the repository itself.
+COORDINATED = ["add_photo", "get_browse_summary", "delete_photos"]
+
+# The forwarding wrappers this domain used to have on ``Database``; callers
+# reach the same methods through ``db.photos`` now.
+REMOVED_PHOTO_WRAPPERS = [
+    "filter_out_wildlife_excluded", "get_photo",
     "get_photo_filenames", "get_existing_photo_ids", "get_photos_by_ids",
     "get_photo_folder_statuses",
     "count_photos", "count_photos_in_workspace", "photos_by_paths",
     "get_calendar_data", "get_photos", "get_photo_ids", "get_photo_position",
-    "count_filtered_photos", "get_browse_summary",
+    "count_filtered_photos",
     "count_photos_with_companions", "resolve_photos_for_delete",
-    "delete_photos", "update_photo_sharpness", "update_photo_quality",
+    "update_photo_sharpness", "update_photo_quality",
     "get_photo_with_folder_path", "get_photo_flags_ratings_and_eyes",
     "get_photo_file_in_workspace",
     "get_workspace_photos_in_folders",
@@ -1382,8 +1394,9 @@ MOVED = [
 ]
 
 
-def _self_attrs(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+def _self_attrs(name_or_fn):
+    fn_obj = getattr(Database, name_or_fn) if isinstance(name_or_fn, str) else name_or_fn
+    source = textwrap.dedent(inspect.getsource(fn_obj))
     fn = ast.parse(source).body[0]
     return {
         node.attr
@@ -1394,34 +1407,60 @@ def _self_attrs(name):
     }
 
 
-@pytest.mark.parametrize("name", MOVED)
+@pytest.mark.parametrize("name", COORDINATED)
 def test_photo_method_delegates_to_repository(name):
     attrs = _self_attrs(name)
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to PhotoRepository"
     )
-    assert "_photos_repository" in attrs, (
+    assert {"_photos_repository", "photos"} & attrs, (
         f"Database.{name} no longer delegates to PhotoRepository"
     )
 
 
+def test_photos_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.photos``; Database keeps no aliases."""
+    for name in REMOVED_PHOTO_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.photos"
+    accessor = Database.__dict__["photos"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_photos_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_photos_is_a_fresh_repository_per_access(db):
+    """A new repository each time, with the workspace passed uncalled.
+
+    Catalog-wide reads work with no active workspace; scoped ones raise.
+    """
+    from repositories.photos import PhotoRepository
+
+    first, second = db.photos, db.photos
+    assert isinstance(first, PhotoRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first._resolve_workspace_id == db._ws_id
+    db.set_active_workspace(None)
+    assert db.photos.count_all() == 0
+    with pytest.raises(RuntimeError):
+        db.photos.count()
+
+
 def test_composition_stays_on_the_facade():
-    """Cross-domain calls and side effects are made from the wrappers, so
-    monkeypatches of these Database methods keep applying."""
+    """Cross-domain calls and side effects are made from the façade, and the
+    helpers the listing reads consult are bound from it when the repository
+    is built, so monkeypatches of these Database methods keep applying."""
     assert {
-        "resolve_photos_for_delete", "invalidate_new_images_cache_for_folders",
+        "photos", "invalidate_new_images_cache_for_folders",
         "prune_pipeline_cache_for_ids", "_ws_id",
     } <= _self_attrs("delete_photos")
     assert "check_and_resolve_duplicates_for_hash" in _self_attrs("add_photo")
-    assert "_FILTER_SUBJECT_CHUNK" in _self_attrs("filter_out_wildlife_excluded")
     assert "get_effective_config" in _self_attrs("get_browse_summary")
-    for name in ("get_photos", "get_photo_ids", "count_filtered_photos"):
-        assert {
-            "get_folder_subtree_ids", "collections",
-            "_append_location_status_filter",
-        } <= _self_attrs(name), name
-    for name in ("get_calendar_data", "get_browse_summary"):
-        assert "_build_query_from_rules" in _self_attrs(name), name
+    assert {
+        "_FILTER_SUBJECT_CHUNK", "get_folder_subtree_ids", "_build_query_from_rules",
+        "_append_location_status_filter", "_collection_repository", "_ws_id",
+    } <= _self_attrs("_photos_repository")
 
 
 def test_photo_repository_imports_no_db_code():

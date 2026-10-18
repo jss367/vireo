@@ -404,7 +404,7 @@ def adjust_capture_time(
 
     photos = []
     for pid in photo_ids:
-        row = db.get_photo(pid, verify_workspace=True)
+        row = db.photos.get(pid, verify_workspace=True)
         if row:
             photos.append(row)
     if not photos:

@@ -116,7 +116,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
     for offset in range(0, total, 200):
         progress(offset, total, "", "Reading photo metadata")
         batch = photo_ids[offset:offset + 200]
-        photos = db.get_photos_by_ids(batch)
+        photos = db.photos.get_by_ids(batch)
         recipes = db.edits.get_photo_recipes(batch)
         exif = _get_photo_exif_data(db, batch)
         keywords = db.get_keywords_for_photos(batch)

@@ -7,7 +7,7 @@ def _make_photo_folders_accessible(live_server, tmp_path, photo_ids):
     """Point selected fixture photos at real, empty folders for XMP writes."""
     db = live_server["db"]
     folder_ids = {
-        db.get_photo(photo_id)["folder_id"] for photo_id in photo_ids
+        db.photos.get(photo_id)["folder_id"] for photo_id in photo_ids
     }
     for folder_id in folder_ids:
         folder_path = tmp_path / f"sync-photo-folder-{folder_id}"

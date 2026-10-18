@@ -369,7 +369,7 @@ def test_edit_preview_and_export_render_same_real_raw(app_and_db, tmp_path, save
     from export import export_photos, load_export_image
 
     app, db = app_and_db
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     folder = str(tmp_path / 'photos')
     os.makedirs(folder)
     db.conn.execute('UPDATE folders SET path=? WHERE id=?', (folder, photo['folder_id']))
@@ -385,7 +385,7 @@ def test_edit_preview_and_export_render_same_real_raw(app_and_db, tmp_path, save
         db.set_photo_edit_recipe(photo['id'], recipe)
     else:
         recipe = None
-    photo = db.get_photo(photo['id'])
+    photo = db.photos.get(photo['id'])
     vireo_dir = os.path.dirname(app.config['THUMB_CACHE_DIR'])
     export = load_export_image(photo, vireo_dir, {photo['folder_id']: folder}, recipe=recipe, output_ext='tiff')
     assert isinstance(export, FloatImage)

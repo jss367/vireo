@@ -137,7 +137,7 @@ def test_api_job_develop_all_failures_marks_job_failed(app_and_db, tmp_path, mon
     )
 
     # Pick one photo from the fixture.
-    photos = db.get_photos(per_page=1)
+    photos = db.photos.list_page(per_page=1)
     assert photos, "fixture should provide at least one photo"
     pid = photos[0]['id']
 
@@ -193,7 +193,7 @@ def test_api_job_develop_mixed_outcomes_marks_job_failed(app_and_db, tmp_path, m
 
     monkeypatch.setattr(develop_mod, "develop_photo", flaky_develop)
 
-    photos = db.get_photos(per_page=2)
+    photos = db.photos.list_page(per_page=2)
     assert len(photos) >= 2, "fixture should provide at least two photos"
     pids = [photos[0]['id'], photos[1]['id']]
 

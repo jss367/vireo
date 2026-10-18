@@ -1291,7 +1291,7 @@ def test_serve_thumbnail_retries_original_after_working_copy_eviction(
     app, db, pid, thumb_dir = _make_app_with_real_photo(
         tmp_path, monkeypatch, filename="bird.jpg",
     )
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder = db.get_folder(photo["folder_id"])
     original_path = os.path.join(folder["path"], photo["filename"])
     vireo_dir = os.path.dirname(thumb_dir)

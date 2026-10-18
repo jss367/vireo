@@ -89,7 +89,7 @@ def test_day_boundaries_use_camera_local_dates(timestamps, expected):
 
 def test_time_preview_skips_existing_locations_and_gps(app_and_db):
     app, db = app_and_db
-    p1, p2, p3 = db.get_photo_ids()
+    p1, p2, p3 = db.photos.get_ids()
     db.conn.execute("UPDATE photos SET latitude = 0, longitude = 0 WHERE id = ?", (p1,))
     location_id = db.get_or_create_text_location("Already assigned")
     db.set_photo_location(p2, location_id)
@@ -140,7 +140,7 @@ def discrepancy_catalog(app_and_db, tmp_path):
     config = cfg.load()
     config["write_assigned_location_to_xmp"] = True
     cfg.save(config)
-    photo_ids = db.get_photo_ids()
+    photo_ids = db.photos.get_ids()
     folder = tmp_path / 'photos'
     folder.mkdir()
     keyword = db.get_or_create_text_location('Kumeyaay Lake')

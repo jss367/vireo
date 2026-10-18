@@ -216,7 +216,7 @@ def _staged_photo_ids(db, folder_ids):
     """
     if not folder_ids:
         return []
-    return db.get_photo_ids_in_folders(folder_ids)
+    return db.photos.ids_in_folders(folder_ids)
 
 
 def _residual_staged_changes(db, photo_ids, undeliverable):
@@ -999,7 +999,7 @@ class _ImportFullRun:
             # Collection from copied files (existing logic)
             copied_paths = self.copied_paths
             if copied_paths:
-                photo_ids = thread_db.get_photo_ids_at_paths(copied_paths)
+                photo_ids = thread_db.photos.ids_at_paths(copied_paths)
         else:
             # Collection from all photos in the scanned folder. The scanner
             # filed them under the catalog's spelling of the root, which

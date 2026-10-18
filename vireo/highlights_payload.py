@@ -794,7 +794,7 @@ def build_highlights_payload(
     )
 
     candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
-    total_in_scope = db.count_filtered_photos(folder_id=folder_id)
+    total_in_scope = db.photos.count_filtered(folder_id=folder_id)
 
     buckets, unidentified_photos = collect_highlight_buckets(
         candidates, confidence_threshold, confirmation_filter,

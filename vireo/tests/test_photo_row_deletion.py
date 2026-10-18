@@ -152,7 +152,7 @@ def test_photo_row_deletion_rewrites_every_workspace_once_on_exit(db, tmp_path, 
         photo_rows.delete({gone: None})
         photo_rows.delete({merged: survivor})
         # Rows are gone at once; collections wait for the block to end.
-        assert db.get_photo(gone) is None and db.get_photo(merged) is None
+        assert db.photos.get(gone) is None and db.photos.get(merged) is None
         assert calls == []
     db.conn.commit()
 
@@ -160,7 +160,7 @@ def test_photo_row_deletion_rewrites_every_workspace_once_on_exit(db, tmp_path, 
     assert _ids(db, here) == [survivor, kept]
     # The merged row follows its survivor, which the rule already listed once.
     assert _ids(db, there) == [survivor]
-    assert db.get_photo(kept) is not None
+    assert db.photos.get(kept) is not None
 
 
 def test_photo_row_deletion_rewrites_collections_when_the_block_raises(db, tmp_path):
@@ -190,7 +190,7 @@ def test_photo_row_deletion_rollback_restores_rows_and_collections(db, tmp_path)
         except RuntimeError:
             db.conn.rollback()
             raise
-    assert db.get_photo(gone) is not None
+    assert db.photos.get(gone) is not None
     assert _ids(db, coll) == [gone]
 
 
@@ -221,7 +221,7 @@ def test_remove_orphans_prunes_collections(db):
 
     remove_orphans(db, [orphan])
 
-    assert db.get_photo(orphan) is None
+    assert db.photos.get(orphan) is None
     assert _ids(db, coll) == [kept]
     assert _dangling(db) == set()
 
@@ -275,7 +275,7 @@ def test_archive_merge_dropping_an_already_archived_photo_remaps_collections(db,
     counts = db.merge_staged_tree_into_archive(stage_root, arch)
 
     assert counts["already_present"] == 1
-    assert db.get_photo(staged) is None
+    assert db.photos.get(staged) is None
     assert _ids(db, coll) == [archived]
     assert _dangling(db) == set()
 
@@ -288,7 +288,7 @@ def test_archive_merge_replacing_a_phantom_row_remaps_collections(db, tmp_path):
     counts = db.merge_staged_tree_into_archive(stage_root, arch)
 
     assert phantom in counts["dropped_photo_ids"]
-    assert db.get_photo(phantom) is None
+    assert db.photos.get(phantom) is None
     assert _ids(db, coll) == [staged]
     assert _dangling(db) == set()
 

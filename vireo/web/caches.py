@@ -40,7 +40,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         # Detections are global, but exposing them for photos outside the
         # active workspace leaks data the workspace deliberately hides
         # (mirrors serve_thumbnail's workspace gate).
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
@@ -186,7 +186,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         Returns 0 when the photos table is empty (avoids a "recommended
         0 MB" surprise on a fresh install).
         """
-        photo_count = db.count_catalog_photos()
+        photo_count = db.photos.count_all()
         if not photo_count:
             return 0
         avg = db.caches.preview_average_bytes()
@@ -309,7 +309,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         for sg in results["species_groups"]:
             for pg in sg.get("scene_groups", sg.get("pose_groups", [])):
                 for photo in pg["photos"]:
-                    p = db.get_photo(photo["photo_id"])
+                    p = db.photos.get(photo["photo_id"])
                     if p:
                         photo["filename"] = p["filename"]
                         photo["sharpness"] = p["sharpness"]
@@ -374,7 +374,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
             old_flags = {}
             for pid in keepers + rejects + unflag:
                 db._verify_photo_in_workspace(pid)
-                old_flags[pid] = db.get_photo(pid)["flag"] or "none"
+                old_flags[pid] = db.photos.get(pid)["flag"] or "none"
 
             # Clearing an already-clear flag is a no-op.
             cleared = [pid for pid in unflag if old_flags[pid] != "none"]

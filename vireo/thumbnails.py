@@ -355,7 +355,7 @@ def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
         else:
             recipe = db.get_photo_edit_recipe(photo["id"])
             if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") == "camera":
-                detail_photo = db.get_photo(photo["id"]) or photo
+                detail_photo = db.photos.get(photo["id"]) or photo
                 if not cache_matches(thumb_path, detail_photo, recipe):
                     needed.append(photo)
     return needed
@@ -477,7 +477,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
 
     os.makedirs(cache_dir, exist_ok=True)
 
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
     # Filter to only photos needing thumbnails
@@ -505,7 +505,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # have a vireo_dir; fall back to a raw folder+filename join for
         # callers that don't pass it.
         recipe = db.get_photo_edit_recipe(photo["id"])
-        source_photo = db.get_photo(photo["id"]) if recipe else photo
+        source_photo = db.photos.get(photo["id"]) if recipe else photo
         if source_photo is None:
             source_photo = photo
         source_path = _recipe_source_path(

@@ -2041,7 +2041,7 @@ def create_predictions_blueprint(
             all_flag_pids = actionable_picks + actionable_rejects
             old_flags = {}
             for pid in all_flag_pids:
-                old = db.get_photo(pid)
+                old = db.photos.get(pid)
                 if old:
                     old_flags[pid] = old["flag"] or "none"
 

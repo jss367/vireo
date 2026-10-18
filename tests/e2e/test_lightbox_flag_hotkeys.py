@@ -34,7 +34,7 @@ def _wait_for_flag(db, photo_id, expected, timeout=3.0):
     deadline = time.time() + timeout
     flag = None
     while time.time() < deadline:
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         flag = photo["flag"] if photo else None
         if flag == expected:
             return flag
@@ -220,7 +220,7 @@ def test_lightbox_x_reverts_feedback_when_flag_write_fails(live_server, page):
         "document.getElementById('lightboxFlagStatus').textContent.trim() === 'No flag'",
         timeout=3000,
     )
-    assert db.get_photo(pid)["flag"] in (None, "none")
+    assert db.photos.get(pid)["flag"] in (None, "none")
 
 
 def test_lightbox_newer_failed_write_falls_back_to_older_success(live_server, page):
@@ -296,7 +296,7 @@ def test_lightbox_u_unflags_photo(live_server, page):
 
     # Pre-flag the photo so we can verify that `u` clears it.
     db.photo_review.set_flag(pid, "flagged")
-    assert db.get_photo(pid)["flag"] == "flagged"
+    assert db.photos.get(pid)["flag"] == "flagged"
 
     page.keyboard.press("u")
 
@@ -336,7 +336,7 @@ def test_lightbox_honors_modifier_rebind(live_server, page):
     # Bare 'p' should now be a no-op (modifier mismatch).
     page.keyboard.press("p")
     time.sleep(0.3)
-    assert db.get_photo(pid)["flag"] in (None, "none")
+    assert db.photos.get(pid)["flag"] in (None, "none")
 
     # Ctrl+P should flag.
     page.keyboard.press("Control+p")

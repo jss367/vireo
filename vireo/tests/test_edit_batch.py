@@ -53,7 +53,7 @@ def test_partial_preset_keeps_explicit_neutral_settings():
 def test_relative_api_preserves_individual_edits_and_undo_redo(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [photo["id"] for photo in db.get_photos()]
+    ids = [photo["id"] for photo in db.photos.list_page()]
     originals = {}
     for index, pid in enumerate(ids):
         originals[pid] = db.set_photo_edit_recipe(pid, {
@@ -82,7 +82,7 @@ def test_relative_api_preserves_individual_edits_and_undo_redo(app_and_db):
 def test_partial_paste_can_reset_without_overwriting_other_settings(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [photo["id"] for photo in db.get_photos()]
+    ids = [photo["id"] for photo in db.photos.list_page()]
     for pid in ids:
         db.set_photo_edit_recipe(pid, {"rotation": 90, "adjustments": {"exposure": 1, "saturation": 10}})
     response = client.post('/api/photos/edit-recipe/apply', json={
@@ -96,7 +96,7 @@ def test_partial_paste_can_reset_without_overwriting_other_settings(app_and_db):
 def test_invalid_batch_leaves_every_photo_unchanged(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [photo["id"] for photo in db.get_photos()]
+    ids = [photo["id"] for photo in db.photos.list_page()]
     response = client.post('/api/photos/edit-recipe/apply', json={
         "photo_ids": ids, "recipe": {"adjustments": {"sharpen_radius": 99}},
         "fields": ["adjustments.sharpen_radius"], "mode": "merge",
@@ -107,7 +107,7 @@ def test_invalid_batch_leaves_every_photo_unchanged(app_and_db):
 
 def test_summary_reports_mixed_neutral_and_common_values(app_and_db):
     app, db = app_and_db
-    ids = [photo["id"] for photo in db.get_photos()]
+    ids = [photo["id"] for photo in db.photos.list_page()]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
     response = app.test_client().post('/api/photos/edit-recipe/summary', json={"photo_ids": ids})
     assert response.status_code == 200
@@ -119,7 +119,7 @@ def test_summary_reports_mixed_neutral_and_common_values(app_and_db):
 def test_rich_presets_roundtrip_and_compose_without_saving(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     fields = ["rotation", "adjustments.white_balance.temperature"]
     response = client.post('/api/edit-presets', json={
         "name": "Portrait orientation", "recipe": {"rotation": 90}, "fields": fields,
@@ -306,7 +306,7 @@ def test_batch_write_failure_rolls_back_recipes_sync_and_history(app_and_db, mon
     from db import Database
 
     app, db = app_and_db
-    ids = [photo['id'] for photo in db.get_photos()]
+    ids = [photo['id'] for photo in db.photos.list_page()]
     original = Database.set_photo_edit_recipe
     calls = []
 

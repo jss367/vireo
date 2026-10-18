@@ -159,7 +159,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
 def _photo_ids_error(db, photo_ids, json_error):
     """The error response for unknown or out-of-workspace photo_ids, else None."""
     # Validate all photo_ids exist before mutating.
-    found_ids = db.get_existing_photo_ids(photo_ids)
+    found_ids = db.photos.existing_ids(photo_ids)
     missing = [pid for pid in photo_ids if pid not in found_ids]
     if missing:
         return json_error(f"Unknown photo_ids: {missing}")

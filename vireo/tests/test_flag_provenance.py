@@ -15,7 +15,7 @@ from services.photo_review import PhotoReviewService, flag_description, flag_not
 
 
 def _photo(db, name="bird1.jpg"):
-    return next(p for p in db.get_photos() if p["filename"] == name)
+    return next(p for p in db.photos.list_page() if p["filename"] == name)
 
 
 def _history_row(db, edit_id):
@@ -214,7 +214,7 @@ def test_set_flag_rejects_malformed_provenance(app_and_db, body, message):
     resp = client.post(f"/api/photos/{pid}/flag", json=body)
     assert resp.status_code == 400
     assert resp.get_json()["error"] == message
-    assert db.get_photo(pid)["flag"] == "none"
+    assert db.photos.get(pid)["flag"] == "none"
     batch = client.post("/api/batch/flag", json={**body, "photo_ids": [pid]})
     assert batch.status_code == 400
     assert batch.get_json()["error"] == message
@@ -235,7 +235,7 @@ def test_blank_provenance_counts_as_absent(app_and_db):
 def test_batch_flag_with_provenance_is_one_attributed_undoable_edit(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()][:2]
+    ids = [p["id"] for p in db.photos.list_page()][:2]
     resp = client.post(
         "/api/batch/flag",
         json={"photo_ids": ids, "flag": "rejected", "source": "claude-fable-5-1", "reason": "departure frames"},
@@ -251,7 +251,7 @@ def test_batch_flag_with_provenance_is_one_attributed_undoable_edit(app_and_db):
         assert note["source"] == "claude-fable-5-1" and note["reason"] == "departure frames"
     assert client.post("/api/undo").status_code == 200
     for pid in ids:
-        assert db.get_photo(pid)["flag"] == "none"
+        assert db.photos.get(pid)["flag"] == "none"
 
 
 def test_v1_flag_aliases_take_the_token_and_share_the_views(app_and_db):
@@ -260,7 +260,7 @@ def test_v1_flag_aliases_take_the_token_and_share_the_views(app_and_db):
     assert views["v1_set_flag"] is views["photo_review.set_flag"]
     assert views["v1_set_flags"] is views["photo_review.set_flags"]
     client = app.test_client()
-    ids = [p["id"] for p in db.get_photos()][:2]
+    ids = [p["id"] for p in db.photos.list_page()][:2]
     headers = {"X-Vireo-Token": app.config["API_TOKEN"]}
     assert client.post(f"/api/v1/photos/{ids[0]}/flag", json={"flag": "rejected"}).status_code == 401
     resp = client.post(
@@ -268,7 +268,7 @@ def test_v1_flag_aliases_take_the_token_and_share_the_views(app_and_db):
         json={"flag": "rejected", "source": "agent", "reason": "soft"}, headers=headers,
     )
     assert resp.status_code == 200
-    assert db.get_photo(ids[0])["flag"] == "rejected"
+    assert db.photos.get(ids[0])["flag"] == "rejected"
     resp = client.post(
         "/api/v1/batch/flag",
         json={"photo_ids": ids, "flag": "flagged", "source": "agent"}, headers=headers,
@@ -286,7 +286,7 @@ def test_batch_flag_rejects_ids_that_are_not_photo_keys(app_and_db, photo_ids):
     resp = client.post("/api/batch/flag", json={"photo_ids": photo_ids, "flag": "rejected"})
     assert resp.status_code == 400
     assert resp.get_json()["error"] == "photo_ids must be a list of positive signed 64-bit integer IDs"
-    assert all(p["flag"] == "none" for p in db.get_photos())
+    assert all(p["flag"] == "none" for p in db.photos.list_page())
     assert db.edit_history.list_recent() == before
 
 
@@ -311,7 +311,7 @@ def test_batch_flag_matching_no_photos_leaves_undo_and_redo_alone(app_and_db):
     assert client.get("/api/redo/status").get_json()["available"] is True
     assert client.get("/api/undo/status").get_json()["available"] is False
     assert client.post("/api/redo").status_code == 200
-    assert db.get_photo(pid)["flag"] == "rejected"
+    assert db.photos.get(pid)["flag"] == "rejected"
 
 
 @pytest.mark.parametrize("body", ["1", "true", '"bad"', "[1]"])
@@ -325,7 +325,7 @@ def test_v1_flag_aliases_reject_non_object_json_bodies(app_and_db, body):
         resp = client.post(path, data=body, headers=headers)
         assert resp.status_code == 400, (path, resp.get_json())
         assert resp.get_json()["code"] == "json_body_not_object"
-    assert db.get_photo(pid)["flag"] == "none"
+    assert db.photos.get(pid)["flag"] == "none"
 
 
 @pytest.mark.parametrize("path, extra", [
@@ -350,5 +350,5 @@ def test_flag_writes_require_an_explicit_flag(app_and_db, path, extra):
     assert client.post(url, json={**body, "flag": None}).status_code == 400
     assert client.post("/api/v1" + url[4:], json=body, headers=headers).status_code == 400
 
-    assert db.get_photo(pid)["flag"] == "flagged"
+    assert db.photos.get(pid)["flag"] == "flagged"
     assert len(db.edit_history.list_recent()) == before

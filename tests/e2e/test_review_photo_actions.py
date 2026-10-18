@@ -64,20 +64,20 @@ def test_save_failure_is_visible_and_the_same_action_can_retry(live_server, page
             route.continue_()
 
     page.route(f"**/api/batch/{field}", intercept)
-    original = live_server["db"].get_photo(photo_id)[field]
+    original = live_server["db"].photos.get(photo_id)[field]
     action_chip(page, target, field).click()
     error = page.locator('#toastContainer > [data-type="error"]')
     expect(error).to_have_count(1)
     expect(error).to_contain_text(f"Could not save {field}")
     expect(error.locator("img")).to_have_count(0)
     expect(page.locator('#toastContainer > [data-type="success"]')).to_have_count(0)
-    assert live_server["db"].get_photo(photo_id)[field] == original
+    assert live_server["db"].photos.get(photo_id)[field] == original
     if surface == "lightbox" and field == "flag":
         page.wait_for_function("_lbFlagPendingWrites === 0")
         expect(page.locator("#lightboxFlagStatus")).to_contain_text("No flag")
     action_chip(page, target, field).click()
     expect(page.locator('#toastContainer > [data-type="success"]')).to_have_count(1)
-    assert live_server["db"].get_photo(photo_id)[field] == (3 if field == "rating" else "rejected")
+    assert live_server["db"].photos.get(photo_id)[field] == (3 if field == "rating" else "rejected")
     assert requests == [{"photo_ids": [photo_id], field: 3 if field == "rating" else "rejected"}] * 2
 
 
@@ -140,7 +140,7 @@ def test_rapid_choices_are_serialized_and_duplicate_pending_clicks_share_one_wri
     wait_for_held(page, held, 2)
     held[1].continue_()
     assert page.evaluate("async () => await lastSave") is True
-    assert live_server["db"].get_photo(photo_id)[field] == (5 if field == "rating" else "none")
+    assert live_server["db"].photos.get(photo_id)[field] == (5 if field == "rating" else "none")
     assert len(held) == 2
     expect(page.locator('#toastContainer > [data-type="success"]')).to_have_count(2)
 
@@ -189,4 +189,4 @@ def test_lightbox_rapid_flag_failure_restores_the_last_confirmed_flag(live_serve
     page.wait_for_function("_lbFlagPendingWrites === 0")
     expect(page.locator("#lightboxFlagStatus")).to_contain_text("Rejected")
     expect(page.locator('#toastContainer > [data-type="error"]')).to_have_count(1)
-    assert live_server["db"].get_photo(photo_id)["flag"] == "rejected"
+    assert live_server["db"].photos.get(photo_id)["flag"] == "rejected"

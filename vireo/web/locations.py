@@ -310,7 +310,7 @@ def create_locations_blueprint(
         if body.get("scope") == "all":
             if "photo_ids" in body or "collection_id" in body:
                 return json_error("Choose all photos, photo_ids, or collection_id, not multiple sources", 400)
-            photo_ids, error = db.get_photo_ids(), None
+            photo_ids, error = db.photos.get_ids(), None
         else:
             photo_ids, error = bulk_gps_location_source_ids(db, body)
         if error is not None:
@@ -324,7 +324,7 @@ def create_locations_blueprint(
                 "skipped": [],
             })
 
-        photos_map = db.get_photos_by_ids(photo_ids)
+        photos_map = db.photos.get_by_ids(photo_ids)
         if len(photos_map) != len(photo_ids):
             return json_error("One or more photos were not found", 404)
         for photo_id in photo_ids:

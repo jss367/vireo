@@ -288,7 +288,7 @@ class _ThumbPass:
         mutation — the retry paths rewrite ``thumb.photo_path`` and
         validating against that would false-reject a live row.
         """
-        photos = self.thread_db.get_photos_by_ids([photo_id])
+        photos = self.thread_db.photos.get_by_ids([photo_id])
         photo = photos.get(photo_id)
         if photo is None:
             return False
@@ -360,7 +360,7 @@ class _ThumbPass:
         # Unedited RAWs need catalog detail too: a missing, unreadable or
         # undecodable source must still be able to retry its paired JPEG.
         if thumb.recipe or self._is_raw(canonical_path):
-            thumb.detail_photo = self.thread_db.get_photo(thumb.photo_id)
+            thumb.detail_photo = self.thread_db.photos.get(thumb.photo_id)
             if thumb.detail_photo:
                 folder_row = self.thread_db.get_folder(thumb.detail_photo["folder_id"])
                 thumb.folders = (
@@ -448,7 +448,7 @@ class _ThumbPass:
         """
         thumb.recipe = self.thread_db.get_photo_edit_recipe(thumb.photo_id)
         if thumb.recipe:
-            thumb.detail_photo = self.thread_db.get_photo(thumb.photo_id) or photo
+            thumb.detail_photo = self.thread_db.photos.get(thumb.photo_id) or photo
             if not self._resolve_recipe_source(thumb, folders):
                 return False
         result_path = self._generate(thumb)
@@ -699,7 +699,7 @@ def previews_stage(
             run.stages["previews"]["status"] = "completed"
             return
         else:
-            photos = thread_db.get_photos(per_page=999999)
+            photos = thread_db.photos.list_page(per_page=999999)
 
         folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
         total = len(photos)
@@ -778,7 +778,7 @@ def _preview_photo(thread_db, photo, folders, target: _PreviewTarget):
     ``"failed"``, or None when a removed stale file reappeared before it
     could be regenerated (nothing is counted).
     """
-    detail_photo = thread_db.get_photo(photo["id"]) or photo
+    detail_photo = thread_db.photos.get(photo["id"]) or photo
     cache_path = os.path.join(target.preview_dir, f'{photo["id"]}_{target.max_size}.jpg')
     recipe = thread_db.get_photo_edit_recipe(photo["id"])
     if os.path.exists(cache_path) and _keep_existing_preview(

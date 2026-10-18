@@ -74,7 +74,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             )
 
             # Update subject_size via the existing quality method
-            db.update_photo_quality(
+            db.photos.update_quality(
                 pid,
                 subject_size=0.08 + i * 0.02,
             )
