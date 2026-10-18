@@ -3234,7 +3234,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         verify_contents=verify_contents, pre_commit_check=pre_commit_check,
         thumb_cache_dir=thumb_cache_dir,
     )
-    return _run_folder_move(move, destination, src_path, folder_name)
+    return move.run(destination, folder_name)
 
 
 def _folder_move_source(db, folder_id, destination_name):
@@ -3260,44 +3260,6 @@ def _folder_move_source(db, folder_id, destination_name):
     except ValueError as exc:
         return None, None, None, {"moved": 0, "errors": [str(exc)]}
     return src_path, folder_name, landing_name, None
-
-
-def _run_folder_move(move, destination, src_path, folder_name):
-    """Run a ``_FolderMove``'s checks and phases in order; return its result."""
-    error = move.resolve_destination_views(destination)
-    if error is not None:
-        return error
-
-    # Validation (overlap, tracked-folder, and the per-file content-conflict
-    # scan a merge runs) can take a noticeable moment on a large tree, so name
-    # the phase before it starts rather than leaving the bar blank.
-    move.progress(0, 0, "", "Checking destination")
-    for check in (move.refuse_source_overlap,
-                  move.resolve_tracked_destination,
-                  move.probe_destination,
-                  move.refuse_content_conflict):
-        error = check()
-        if error is not None:
-            return error
-
-    log.info("%s folder %s -> %s",
-             "Merging" if move.dest_exists else "Moving", src_path,
-             move.rsync_target)
-
-    for phase in (move.ensure_remote_parent,
-                  move.copy_tree,
-                  move.plan_mtime_corrections,
-                  move.verify_copy):
-        error = phase()
-        if error is not None:
-            return error
-
-    move.update_catalog()
-    move.apply_mtime_corrections()
-    move.relocate_developed_dirs()
-    move.remove_originals()
-    move.progress(move.total_files, move.total_files, folder_name, "Done")
-    return move.result()
 
 
 def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
@@ -3405,7 +3367,7 @@ def _folder_move_rsync_args(remote, dest_exists):
     # expect POSIX-style paths and can misread a native ``C:\...`` source as
     # remote-shell syntax, so retain the prior bare-name behavior there. Keep
     # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
-    # shutil fallback in ``_FolderMove.copy_tree`` when no rsync exists at all).
+    # shutil fallback in ``_FolderTransfer.copy_tree`` when no rsync exists at all).
     rsync_bin = "rsync"
     if sys.platform != "win32":
         rsync_bin = resolve_rsync_bin() or rsync_bin
@@ -3452,47 +3414,178 @@ def _rsync_copy_error(returncode, stderr, timed_out):
 
 
 class _FolderMove:
-    """Run-wide state for one ``move_folder`` call.
+    """Coordinate one ``move_folder`` call.
 
-    Each pre-commit phase returns the result dict to abort with, or None to
-    continue; ``move_folder`` returns the first one it gets. The post-commit
-    phases never abort.
+    The phases live on three collaborators, each owning only the state it
+    writes:
+
+      target   (``_FolderMoveTarget``) — the destination views and the
+        preflight checks that resolve them;
+      transfer (``_FolderTransfer``) — the copy and its verification;
+      catalog  (``_FolderCatalogRewrite``) — the catalog rewrite and the
+        post-commit rebases keyed to it.
+
+    ``run`` calls them in order. Each pre-commit phase returns the result
+    dict to abort with, or None to continue; ``run`` returns the first one
+    it gets. The post-commit phases never abort. Deleting the originals
+    and building the result stay here.
     """
 
     def __init__(self, db, folder_id, src_path, landing_name, *, progress_cb,
                  developed_dir, merge, remote, reject_tracked_ancestor,
                  allow_tracked_merge, verify_contents, pre_commit_check,
                  thumb_cache_dir):
+        self.src_path = src_path
+        self.progress_cb = progress_cb
+        self.target = _FolderMoveTarget(
+            db, folder_id, src_path, landing_name, merge=merge, remote=remote,
+            reject_tracked_ancestor=reject_tracked_ancestor,
+            allow_tracked_merge=allow_tracked_merge,
+        )
+        self.transfer = _FolderTransfer(
+            db, src_path, self.target, remote=remote,
+            verify_contents=verify_contents, progress_cb=progress_cb,
+            progress=self.progress,
+        )
+        self.catalog = _FolderCatalogRewrite(
+            db, folder_id, src_path, landing_name, self.target,
+            progress=self.progress, pre_commit_check=pre_commit_check,
+            thumb_cache_dir=thumb_cache_dir, developed_dir=developed_dir,
+        )
+        self.cleanup_error = None
+
+    def progress(self, current, total, filename, phase):
+        if self.progress_cb:
+            self.progress_cb(current, total, filename, phase)
+
+    def run(self, destination, folder_name):
+        """Run the checks and phases in order; return the move's result."""
+        target, transfer, catalog = self.target, self.transfer, self.catalog
+        error = target.resolve_destination_views(destination)
+        if error is not None:
+            return error
+
+        # Validation (overlap, tracked-folder, and the per-file content-conflict
+        # scan a merge runs) can take a noticeable moment on a large tree, so name
+        # the phase before it starts rather than leaving the bar blank.
+        self.progress(0, 0, "", "Checking destination")
+        for check in (target.refuse_source_overlap,
+                      target.resolve_tracked_destination,
+                      target.probe_destination,
+                      target.refuse_content_conflict):
+            error = check()
+            if error is not None:
+                return error
+
+        log.info("%s folder %s -> %s",
+                 "Merging" if target.dest_exists else "Moving", self.src_path,
+                 target.rsync_target)
+
+        for phase in (transfer.ensure_remote_parent,
+                      transfer.copy_tree,
+                      transfer.plan_mtime_corrections,
+                      transfer.verify_copy):
+            error = phase()
+            if error is not None:
+                return error
+
+        catalog.update_catalog()
+        catalog.apply_mtime_corrections(transfer.mtime_updates)
+        catalog.relocate_developed_dirs()
+        self.remove_originals()
+        self.progress(transfer.total_files, transfer.total_files, folder_name,
+                      "Done")
+        return self.result()
+
+    def remove_originals(self):
+        """Delete originals.
+
+        The catalog already points at the new destination, so anything that
+        goes wrong from here is post-commit: the archive is already published.
+        Record a ``cleanup_error`` so the caller can warn the user about
+        leftover originals without misreporting the move as failed (which
+        would also leave the archive's tracked row in place while telling the
+        user their data is still in staging).
+        """
+        src_path = self.src_path
+        # A single rmtree: no per-item count to show.
+        self.progress(0, 0, "", "Removing originals")
+        log.info("Verification passed, deleting originals: %s", src_path)
+        try:
+            shutil.rmtree(src_path)
+        except OSError as e:
+            log.exception("Post-commit cleanup of %s failed", src_path)
+            self.cleanup_error = str(e)
+
+    def result(self):
+        merge_counts = self.catalog.merge_counts
+        result = {"moved": self.catalog.total_photos, "errors": [],
+                  "mtimes_refreshed": self.catalog.mtimes_refreshed}
+        if self.target.merge_into_tracked is not None:
+            # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
+            # previews, offline copies of the deleted staged photos), not a
+            # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
+            # stays a stable dict of display numbers that gets serialized straight
+            # into the archive-stage summary/API payload.
+            dropped = merge_counts.pop("dropped_photo_ids", None) or []
+            # ``preserved_edit_count`` is likewise a caller-facing signal (the
+            # NAS transfer's residual check adds it to "still need a sync"), not
+            # a user-facing display number, so lift it off ``merge_counts`` too.
+            # ``preserved_off_staging_identities`` is the subset the caller adds
+            # to residual -- see ``merge_staged_tree_into_archive`` for why the
+            # full count would double-report the phantom/intra-staged remaps.
+            # Reported as identities (not a raw rowcount) so the caller can
+            # filter out rows the pre-transfer drain already classified as
+            # undeliverable and rows in sibling workspaces this sync would not
+            # have written anyway.
+            preserved_edits = merge_counts.pop("preserved_edit_count", 0) or 0
+            preserved_off_staging_identities = merge_counts.pop(
+                "preserved_off_staging_identities", None) or []
+            result["merge"] = merge_counts
+            result["merged_into_existing"] = self.target.merge_into_tracked
+            # On the merge path ``total_photos`` counts every staged source photo,
+            # including identical ones that were dropped as ``already_present``.
+            # Report ``moved`` as the photos actually added to the archive.
+            result["moved"] = merge_counts["new_photos"]
+            if dropped:
+                result["dropped_photo_ids"] = dropped
+            if preserved_edits:
+                result["preserved_edit_count"] = preserved_edits
+            if preserved_off_staging_identities:
+                result["preserved_off_staging_identities"] = (
+                    preserved_off_staging_identities)
+        if self.cleanup_error is not None:
+            result["cleanup_error"] = self.cleanup_error
+        return result
+
+
+class _FolderMoveTarget:
+    """Where one ``move_folder`` copy lands, and the preflight that decides it.
+
+    Owns the three destination views (``transfer_dest``, ``rsync_target``,
+    ``catalog_path``), whether the destination already exists, and the
+    tracked-archive merge decision (``merge_into_tracked``,
+    ``merge_reconcile_base``). The later phases only read them. Each check
+    returns the result dict to abort with, or None to continue; none of
+    them copies, deletes or commits anything.
+    """
+
+    def __init__(self, db, folder_id, src_path, landing_name, *, merge, remote,
+                 reject_tracked_ancestor, allow_tracked_merge):
         self.db = db
         self.folder_id = folder_id
         self.src_path = src_path
         self.landing_name = landing_name
-        self.progress_cb = progress_cb
-        self.developed_dir = developed_dir
         self.merge = merge
         self.remote = remote
         self.reject_tracked_ancestor = reject_tracked_ancestor
         self.allow_tracked_merge = allow_tracked_merge
-        self.verify_contents = verify_contents
-        self.pre_commit_check = pre_commit_check
-        self.thumb_cache_dir = thumb_cache_dir
         self.transfer_dest = None
         self.rsync_target = None
         self.catalog_path = None
         self.merge_into_tracked = None
         self.merge_reconcile_base = None
         self.dest_exists = False
-        self.total_files = 0
-        self.rsync_bin = None
-        self.mtime_updates = []
-        self.total_photos = 0
-        self.merge_counts = None
-        self.mtimes_refreshed = 0
-        self.cleanup_error = None
-
-    def progress(self, current, total, filename, phase):
-        if self.progress_cb:
-            self.progress_cb(current, total, filename, phase)
 
     def resolve_destination_views(self, destination):
         """Resolve the three destination views.
@@ -3790,6 +3883,34 @@ class _FolderMove:
                 ]}
         return None
 
+
+class _FolderTransfer:
+    """Copy the source tree to ``target`` and verify the copy.
+
+    Owns the source-file count, the rsync binary and the planned
+    ``file_mtime`` corrections. Reads the destination views and
+    ``dest_exists`` from ``target``. Each phase returns the result dict to
+    abort with, or None to continue. A failed phase removes only a
+    destination this move created, never a pre-existing merge target, and
+    never touches the source.
+    """
+
+    def __init__(self, db, src_path, target, *, remote, verify_contents,
+                 progress_cb, progress):
+        self.db = db
+        self.src_path = src_path
+        self.target = target
+        self.remote = remote
+        self.verify_contents = verify_contents
+        # ``progress_cb`` is the caller's raw callback (may be None), handed
+        # to the copy and timestamp helpers; ``progress`` is the coordinator's
+        # None-safe wrapper around it.
+        self.progress_cb = progress_cb
+        self.progress = progress
+        self.total_files = 0
+        self.rsync_bin = None
+        self.mtime_updates = []
+
     def ensure_remote_parent(self):
         """For a fresh remote move, ensure the destination's PARENT directory
         exists on the NAS.
@@ -3802,8 +3923,8 @@ class _FolderMove:
         base "/", or a transfer_dest with no parent component) since mkdir-p
         there is meaningless.
         """
-        if self.remote and not self.dest_exists:
-            parent_dir = posixpath.dirname(self.transfer_dest)
+        if self.remote and not self.target.dest_exists:
+            parent_dir = posixpath.dirname(self.target.transfer_dest)
             if parent_dir and parent_dir != "/":
                 ok, detail = _remote_mkdir_p(self.remote, parent_dir)
                 if not ok:
@@ -3817,7 +3938,7 @@ class _FolderMove:
     def copy_tree(self):
         src_path = self.src_path
         remote = self.remote
-        dest_exists = self.dest_exists
+        dest_exists = self.target.dest_exists
         progress_cb = self.progress_cb
         # Count source files up front so the copy phase reports against a real
         # denominator from the first file. This count is the progress denominator
@@ -3846,7 +3967,7 @@ class _FolderMove:
             rsync_flags += metadata_excludes
             try:
                 returncode, stderr, timed_out = _run_rsync_streamed(
-                    src_path, self.rsync_target, rsync_flags, total_files,
+                    src_path, self.target.rsync_target, rsync_flags, total_files,
                     progress_cb, rsync_bin=rsync_bin, extra_args=extra_args,
                 )
             except FileNotFoundError:
@@ -3862,7 +3983,7 @@ class _FolderMove:
                 # --ignore-existing for a merge; a fresh move copies everything.
                 try:
                     _copy_tree_with_progress(
-                        src_path, self.catalog_path, dest_exists, total_files,
+                        src_path, self.target.catalog_path, dest_exists, total_files,
                         progress_cb,
                     )
                     returncode, stderr, timed_out = 0, "", False
@@ -3871,7 +3992,7 @@ class _FolderMove:
                     # Only remove a destination we created — never one that
                     # pre-existed (a merge target may hold the user's own files).
                     if not dest_exists:
-                        shutil.rmtree(self.catalog_path, ignore_errors=True)
+                        shutil.rmtree(self.target.catalog_path, ignore_errors=True)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
 
         error = _rsync_copy_error(returncode, stderr, timed_out)
@@ -3908,7 +4029,7 @@ class _FolderMove:
         """
         if not self.remote:
             self.mtime_updates, problem = _plan_moved_file_mtimes(
-                self.db, self.src_path, self.transfer_dest,
+                self.db, self.src_path, self.target.transfer_dest,
                 progress_cb=self.progress_cb,
             )
             if problem is not None:
@@ -3922,8 +4043,8 @@ class _FolderMove:
                 # retry into one that demands a merge. A destination that was
                 # already there is never removed -- it may hold the user's own
                 # files.
-                if not self.dest_exists:
-                    shutil.rmtree(self.transfer_dest, ignore_errors=True)
+                if not self.target.dest_exists:
+                    shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {problem}. Originals preserved."
                 ]}
@@ -3932,8 +4053,8 @@ class _FolderMove:
     def verify_copy(self):
         """Verify before deleting originals."""
         src_path = self.src_path
-        transfer_dest = self.transfer_dest
-        dest_exists = self.dest_exists
+        transfer_dest = self.target.transfer_dest
+        dest_exists = self.target.dest_exists
         if self.remote:
             # One rsync dry-run with no per-file output: no count to show.
             self.progress(0, 0, "", "Verifying copy")
@@ -3954,7 +4075,7 @@ class _FolderMove:
             # merge moves, and is the safety backstop replacing the local
             # content-conflict and file-count checks.
             verify = _remote_verify_complete(self.rsync_bin, src_path,
-                                             self.rsync_target, self.remote,
+                                             self.target.rsync_target, self.remote,
                                              is_merge=dest_exists)
             if verify is not None:
                 name, detail = verify
@@ -3991,6 +4112,32 @@ class _FolderMove:
                 ]}
         return None
 
+
+class _FolderCatalogRewrite:
+    """Repoint the catalog at the verified copy, then rebase what is keyed to it.
+
+    Owns the moved-photo count, the tracked-merge counts and the number of
+    ``file_mtime`` corrections applied. ``update_catalog`` is the commit
+    point; ``apply_mtime_corrections`` and ``relocate_developed_dirs`` run
+    after it and never abort the move. Reads the destination views and the
+    tracked-merge decision from ``target``.
+    """
+
+    def __init__(self, db, folder_id, src_path, landing_name, target, *,
+                 progress, pre_commit_check, thumb_cache_dir, developed_dir):
+        self.db = db
+        self.folder_id = folder_id
+        self.src_path = src_path
+        self.landing_name = landing_name
+        self.target = target
+        self.progress = progress
+        self.pre_commit_check = pre_commit_check
+        self.thumb_cache_dir = thumb_cache_dir
+        self.developed_dir = developed_dir
+        self.total_photos = 0
+        self.merge_counts = None
+        self.mtimes_refreshed = 0
+
     def update_catalog(self):
         """Update DB first: cascade folder paths.
 
@@ -4015,7 +4162,7 @@ class _FolderMove:
         self.progress(0, 0, "", "Updating catalog")
         if self.pre_commit_check:
             self.pre_commit_check()
-        if self.merge_into_tracked is not None:
+        if self.target.merge_into_tracked is not None:
             # Destination is a tracked archive and the caller opted into merging:
             # fold the staged folder/photo rows into the existing archive rows
             # instead of a path cascade (which would collide on folders.path).
@@ -4023,13 +4170,13 @@ class _FolderMove:
             # overlap (so alias/case-fold destinations still match the existing
             # rows) and ``catalog_path`` for the ancestor case; see where it is set.
             self.merge_counts = db.merge_staged_tree_into_archive(
-                self.folder_id, self.merge_reconcile_base)
+                self.folder_id, self.target.merge_reconcile_base)
         else:
-            db.move_folder_path(self.folder_id, self.catalog_path,
+            db.move_folder_path(self.folder_id, self.target.catalog_path,
                                 new_name=self.landing_name)
         db.update_folder_counts()
 
-    def apply_mtime_corrections(self):
+    def apply_mtime_corrections(self, mtime_updates):
         """Only now that the rows live at the destination.
 
         Guarded on the values the plan was built from, so a concurrent scan
@@ -4038,7 +4185,6 @@ class _FolderMove:
         already-present collision simply matches nothing.
         """
         db = self.db
-        mtime_updates = self.mtime_updates
         if not mtime_updates:
             return
         # Carry the mtime-pinned working-copy markers along with the
@@ -4073,12 +4219,12 @@ class _FolderMove:
         log.info(
             "Re-stamped file_mtime for %d photo(s) under %s from the copy "
             "at %s -- the transfer did not carry their timestamps across",
-            self.mtimes_refreshed, self.src_path, self.catalog_path,
+            self.mtimes_refreshed, self.src_path, self.target.catalog_path,
         )
         if self.thumb_cache_dir and mtime_updates:
-            self._align_thumbnail_mtimes()
+            self._align_thumbnail_mtimes(mtime_updates)
 
-    def _align_thumbnail_mtimes(self):
+    def _align_thumbnail_mtimes(self, mtime_updates):
         """Touch each cached thumbnail to its photo's corrected timestamp.
 
         The thumbnail endpoint gates cache freshness on ``cached_mtime >=
@@ -4104,7 +4250,7 @@ class _FolderMove:
         db = self.db
         try:
             fresh_by_id = {photo_id: fresh
-                           for fresh, photo_id, _, _ in self.mtime_updates}
+                           for fresh, photo_id, _, _ in mtime_updates}
             # Chunked: a folder of a few thousand photos would otherwise
             # bind one variable per id and trip SQLite's
             # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) -- and the
@@ -4153,9 +4299,9 @@ class _FolderMove:
         """
         src_path = self.src_path
         developed_dir = self.developed_dir
-        developed_base = (self.merge_reconcile_base
-                          if self.merge_into_tracked is not None
-                          else self.catalog_path)
+        developed_base = (self.target.merge_reconcile_base
+                          if self.target.merge_into_tracked is not None
+                          else self.target.catalog_path)
         if developed_dir:
             from export import relocate_developed_dir
             relocate_developed_dir(developed_dir, src_path, developed_base)
@@ -4174,64 +4320,3 @@ class _FolderMove:
                     continue
                 old_child = src_path + new_child[len(developed_base):]
                 relocate_developed_dir(developed_dir, old_child, new_child)
-
-    def remove_originals(self):
-        """Delete originals.
-
-        The catalog already points at the new destination, so anything that
-        goes wrong from here is post-commit: the archive is already published.
-        Record a ``cleanup_error`` so the caller can warn the user about
-        leftover originals without misreporting the move as failed (which
-        would also leave the archive's tracked row in place while telling the
-        user their data is still in staging).
-        """
-        src_path = self.src_path
-        # A single rmtree: no per-item count to show.
-        self.progress(0, 0, "", "Removing originals")
-        log.info("Verification passed, deleting originals: %s", src_path)
-        try:
-            shutil.rmtree(src_path)
-        except OSError as e:
-            log.exception("Post-commit cleanup of %s failed", src_path)
-            self.cleanup_error = str(e)
-
-    def result(self):
-        merge_counts = self.merge_counts
-        result = {"moved": self.total_photos, "errors": [],
-                  "mtimes_refreshed": self.mtimes_refreshed}
-        if self.merge_into_tracked is not None:
-            # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
-            # previews, offline copies of the deleted staged photos), not a
-            # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
-            # stays a stable dict of display numbers that gets serialized straight
-            # into the archive-stage summary/API payload.
-            dropped = merge_counts.pop("dropped_photo_ids", None) or []
-            # ``preserved_edit_count`` is likewise a caller-facing signal (the
-            # NAS transfer's residual check adds it to "still need a sync"), not
-            # a user-facing display number, so lift it off ``merge_counts`` too.
-            # ``preserved_off_staging_identities`` is the subset the caller adds
-            # to residual -- see ``merge_staged_tree_into_archive`` for why the
-            # full count would double-report the phantom/intra-staged remaps.
-            # Reported as identities (not a raw rowcount) so the caller can
-            # filter out rows the pre-transfer drain already classified as
-            # undeliverable and rows in sibling workspaces this sync would not
-            # have written anyway.
-            preserved_edits = merge_counts.pop("preserved_edit_count", 0) or 0
-            preserved_off_staging_identities = merge_counts.pop(
-                "preserved_off_staging_identities", None) or []
-            result["merge"] = merge_counts
-            result["merged_into_existing"] = self.merge_into_tracked
-            # On the merge path ``total_photos`` counts every staged source photo,
-            # including identical ones that were dropped as ``already_present``.
-            # Report ``moved`` as the photos actually added to the archive.
-            result["moved"] = merge_counts["new_photos"]
-            if dropped:
-                result["dropped_photo_ids"] = dropped
-            if preserved_edits:
-                result["preserved_edit_count"] = preserved_edits
-            if preserved_off_staging_identities:
-                result["preserved_off_staging_identities"] = (
-                    preserved_off_staging_identities)
-        if self.cleanup_error is not None:
-            result["cleanup_error"] = self.cleanup_error
-        return result

@@ -1,5 +1,7 @@
 """Media stages for the streaming photo pipeline."""
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import os
@@ -7,6 +9,7 @@ import queue
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from artifact_flight import ArtifactProducerFailed
 from camera_denoise import cache_matches as _camera_cache_matches
@@ -23,25 +26,41 @@ from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 
+if TYPE_CHECKING:
+    from db import Database
+    from pipeline_stages.stage_types import (
+        EditRecipe,
+        FilterExcluded,
+        PhotoRecord,
+        RecipeRenderSource,
+        ScanQueue,
+        ThumbMinSourceSizeKwargs,
+        ThumbnailRetry,
+        ThumbRawDecodeKwargs,
+    )
+
 log = logging.getLogger(__name__)
+
+# What the previews stage did with one photo (see ``_preview_photo``).
+_PreviewOutcome = Literal["cached", "generated", "skipped", "failed"]
 
 
 def thumbnail_stage(
     run: PipelineRun,
     *,
-    _RAW_EXTENSIONS,
-    _SENTINEL,
-    _filter_excluded,
-    _recipe_render_source,
-    _retry_thumbnail_with_companion,
-    _retry_thumbnail_with_working_copy,
-    _thumb_min_source_size_kwargs,
-    _thumb_raw_decode_kwargs,
-    effective_thumb_cache_dir,
-    effective_vireo_dir,
-    scan_to_thumb,
-    skip_scan,
-):
+    _RAW_EXTENSIONS: tuple[str, ...],
+    _SENTINEL: object,
+    _filter_excluded: FilterExcluded,
+    _recipe_render_source: RecipeRenderSource,
+    _retry_thumbnail_with_companion: ThumbnailRetry,
+    _retry_thumbnail_with_working_copy: ThumbnailRetry,
+    _thumb_min_source_size_kwargs: ThumbMinSourceSizeKwargs,
+    _thumb_raw_decode_kwargs: ThumbRawDecodeKwargs,
+    effective_thumb_cache_dir: str,
+    effective_vireo_dir: str,
+    scan_to_thumb: ScanQueue,
+    skip_scan: bool,
+) -> None:
     run.stages["thumbnails"]["status"] = "running"
     run.runner.update_step(run.job["id"], "thumbnails", status="running")
     run.update_stages(run.runner, run.job["id"], run.stages)
@@ -113,8 +132,8 @@ class _ThumbPhoto:
     photo_id: int
     photo_path: str
     already_exists: bool = False
-    recipe: object = None
-    detail_photo: object = None
+    recipe: EditRecipe | None = None
+    detail_photo: PhotoRecord | None = None
     folders: dict = field(default_factory=dict)
 
 
@@ -123,20 +142,20 @@ class _ThumbPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
-        raw_extensions,
-        sentinel,
-        filter_excluded,
-        recipe_render_source,
-        retry_thumbnail_with_companion,
-        retry_thumbnail_with_working_copy,
-        thumb_min_source_size_kwargs,
-        thumb_raw_decode_kwargs,
-        effective_thumb_cache_dir,
-        effective_vireo_dir,
-        scan_to_thumb,
-    ):
+        raw_extensions: tuple[str, ...],
+        sentinel: object,
+        filter_excluded: FilterExcluded,
+        recipe_render_source: RecipeRenderSource,
+        retry_thumbnail_with_companion: ThumbnailRetry,
+        retry_thumbnail_with_working_copy: ThumbnailRetry,
+        thumb_min_source_size_kwargs: ThumbMinSourceSizeKwargs,
+        thumb_raw_decode_kwargs: ThumbRawDecodeKwargs,
+        effective_thumb_cache_dir: str,
+        effective_vireo_dir: str,
+        scan_to_thumb: ScanQueue,
+    ) -> None:
         self.run = run
         self.raw_extensions = raw_extensions
         self.sentinel = sentinel
@@ -156,7 +175,7 @@ class _ThumbPass:
         self.failed_photos = []
         self.pending_thumb_paths = []
 
-    def setup(self):
+    def setup(self) -> None:
         from thumbnails import (
             _is_working_copy_source,
             _retry_thumbnail_after_working_copy_eviction,
@@ -186,7 +205,7 @@ class _ThumbPass:
 
     # -- bookkeeping -------------------------------------------------
 
-    def _record_failure(self, photo_id, photo_path, reason):
+    def _record_failure(self, photo_id: int, photo_path: str | None, reason: str) -> None:
         if len(self.failed_photos) >= _FAILURE_DETAIL_LIMIT:
             return
         self.failed_photos.append({
@@ -195,13 +214,13 @@ class _ThumbPass:
             "reason": reason,
         })
 
-    def _flush_thumb_paths(self):
+    def _flush_thumb_paths(self) -> None:
         if self.pending_thumb_paths:
             self.thread_db.caches.set_thumbnail_paths(self.pending_thumb_paths)
             self.thread_db.commit_with_retry()
             self.pending_thumb_paths.clear()
 
-    def _report_progress(self, photo_path, total):
+    def _report_progress(self, photo_path: str, total: int) -> None:
         # Include failed in the progress counter so the dashboard
         # reflects all work attempted, not just successes. Mixed
         # success/failure must not hide behind a 0/N progress bar.
@@ -224,7 +243,7 @@ class _ThumbPass:
 
     # -- scan queue --------------------------------------------------
 
-    def drain_scan_queue(self):
+    def drain_scan_queue(self) -> None:
         run = self.run
         while True:
             # Continue draining after cancellation, but park before
@@ -259,7 +278,7 @@ class _ThumbPass:
             scan_total = run.stages["scan"].get("count", 0)
             self._report_progress(thumb.photo_path, scan_total)
 
-    def _still_owns(self, photo_id, canonical_path):
+    def _still_owns(self, photo_id: int, canonical_path: str) -> bool:
         """True if the catalog's current row at ``photo_id`` names
         ``canonical_path`` as either its own file or its companion.
 
@@ -323,7 +342,7 @@ class _ThumbPass:
             )
         return os.path.normpath(canonical_path) in expected
 
-    def _thumbnail_scanned_photo(self, thumb):
+    def _thumbnail_scanned_photo(self, thumb: _ThumbPhoto) -> bool:
         """Thumbnail one photo taken from the scan queue.
 
         Returns False when the queue entry is stale (its photo_id was
@@ -409,7 +428,7 @@ class _ThumbPass:
 
     # -- collection replay -------------------------------------------
 
-    def thumbnail_collection(self):
+    def thumbnail_collection(self) -> None:
         run = self.run
         coll_photos = self.filter_excluded(
             self.thread_db.collections.get_photos(run.collection_id, per_page=999999)
@@ -436,7 +455,9 @@ class _ThumbPass:
                 )
             self._report_progress(thumb.photo_path, total)
 
-    def _thumbnail_collection_photo(self, thumb, photo, folders, folder_path):
+    def _thumbnail_collection_photo(
+        self, thumb: _ThumbPhoto, photo: sqlite3.Row, folders: dict[int, str], folder_path: str,
+    ) -> bool:
         """Thumbnail one photo of the replayed collection.
 
         Returns False when the photo was already counted as failed and
@@ -475,10 +496,10 @@ class _ThumbPass:
 
     # -- per-photo render --------------------------------------------
 
-    def _is_raw(self, path):
+    def _is_raw(self, path: str) -> bool:
         return os.path.splitext(path)[1].lower() in self.raw_extensions
 
-    def _resolve_recipe_source(self, thumb, folders):
+    def _resolve_recipe_source(self, thumb: _ThumbPhoto, folders: dict[int, str]) -> bool:
         """Point an edited photo at its recipe render source.
 
         Returns False, after counting the photo as failed, when that
@@ -499,7 +520,11 @@ class _ThumbPass:
                 self.effective_vireo_dir,
                 trust_existing_working_copy=False,
                 live_source_path=thumb.photo_path,
-                folder_path=folders.get(thumb.detail_photo["folder_id"]),
+                # Both callers load ``detail_photo`` before resolving an
+                # edited photo's render source.
+                folder_path=folders.get(
+                    cast("PhotoRecord", thumb.detail_photo)["folder_id"],
+                ),
             )
         ):
             self.failed += 1
@@ -514,10 +539,10 @@ class _ThumbPass:
             return False
         return True
 
-    def _generate(self, thumb):
+    def _generate(self, thumb: _ThumbPhoto) -> str | None:
         recipe = thumb.recipe
         detail_photo = thumb.detail_photo
-        recipe_kwargs = {"recipe": recipe} if recipe else {}
+        recipe_kwargs: dict[str, Any] = {"recipe": recipe} if recipe else {}
         if recipe:
             recipe_kwargs["camera_metadata"] = detail_photo
             recipe_kwargs["native_size"] = (
@@ -539,7 +564,7 @@ class _ThumbPass:
             **min_size_kwargs,
         )
 
-    def _retry_after_working_copy_eviction(self, thumb, folder_path):
+    def _retry_after_working_copy_eviction(self, thumb: _ThumbPhoto, folder_path: str | None) -> str | None:
         result_path, thumb.photo_path = (
             self.retry_thumbnail_after_working_copy_eviction(
                 thumb.detail_photo,
@@ -554,14 +579,16 @@ class _ThumbPass:
         )
         return result_path
 
-    def _retry_with_companion(self, thumb, fallback_photo, folder_path):
+    def _retry_with_companion(
+        self, thumb: _ThumbPhoto, fallback_photo: PhotoRecord, folder_path: str | None,
+    ) -> str | None:
         return self.retry_thumbnail_with_companion(
             self.thread_db, self.generate_thumbnail, fallback_photo,
             thumb.photo_id, thumb.photo_path, self.cache_dir, self.thumb_size,
             thumb.recipe, folder_path,
         )
 
-    def _retry_with_working_copy(self, thumb, result_path):
+    def _retry_with_working_copy(self, thumb: _ThumbPhoto, result_path: str | None) -> str | None:
         if (
             result_path is None
             and thumb.detail_photo is not None
@@ -574,7 +601,7 @@ class _ThumbPass:
             )
         return result_path
 
-    def _tally(self, thumb, result_path):
+    def _tally(self, thumb: _ThumbPhoto, result_path: str | None) -> None:
         if result_path is None:
             self.failed += 1
             self._record_failure(
@@ -592,7 +619,7 @@ class _ThumbPass:
 
     # -- finish ------------------------------------------------------
 
-    def finish(self):
+    def finish(self) -> None:
         run = self.run
         # Flush any thumb_path updates from the final partial batch.
         self._flush_thumb_paths()
@@ -637,10 +664,10 @@ class _ThumbPass:
 def previews_stage(
     run: PipelineRun,
     *,
-    _filter_excluded,
-    effective_vireo_dir,
-    skip_scan,
-):
+    _filter_excluded: FilterExcluded,
+    effective_vireo_dir: str,
+    skip_scan: bool,
+) -> None:
     """Generate preview images for browsed photos."""
     if run.abort.is_set():
         run.stages["previews"]["status"] = "skipped"
@@ -731,7 +758,10 @@ class _PreviewTarget:
     preview_quality: int
 
 
-def _generate_previews(run: PipelineRun, thread_db, photos, folders, target: _PreviewTarget):
+def _generate_previews(
+    run: PipelineRun, thread_db: Database, photos: list[sqlite3.Row], folders: dict[int, str],
+    target: _PreviewTarget,
+) -> tuple[int, int, int]:
     """Warm each photo's preview; return (generated, skipped, failed)."""
     total = len(photos)
     generated = 0
@@ -766,7 +796,9 @@ def _generate_previews(run: PipelineRun, thread_db, photos, folders, target: _Pr
     return generated, skipped, failed
 
 
-def _preview_photo(thread_db, photo, folders, target: _PreviewTarget):
+def _preview_photo(
+    thread_db: Database, photo: sqlite3.Row, folders: dict[int, str], target: _PreviewTarget,
+) -> _PreviewOutcome | None:
     """Warm one preview.
 
     Returns ``"cached"`` when an existing file is kept (counted as skipped,
@@ -788,7 +820,10 @@ def _preview_photo(thread_db, photo, folders, target: _PreviewTarget):
     return None
 
 
-def _keep_existing_preview(thread_db, photo, detail_photo, cache_path, recipe, max_size):
+def _keep_existing_preview(
+    thread_db: Database, photo: sqlite3.Row, detail_photo: PhotoRecord, cache_path: str,
+    recipe: EditRecipe | None, max_size: int,
+) -> bool:
     """Track a reusable preview file, or remove a stale edited one.
 
     Returns True when the existing file stays (the photo is then skipped);
@@ -833,8 +868,9 @@ def _keep_existing_preview(thread_db, photo, detail_photo, cache_path, recipe, m
 
 
 def _materialize_photo_preview(
-    thread_db, photo, detail_photo, folders, cache_path, recipe, target: _PreviewTarget,
-):
+    thread_db: Database, photo: sqlite3.Row, detail_photo: PhotoRecord, folders: dict[int, str],
+    cache_path: str, recipe: EditRecipe | None, target: _PreviewTarget,
+) -> _PreviewOutcome:
     """Render one missing preview; return its stage outcome."""
     folder_path = folders.get(detail_photo["folder_id"])
     try:
@@ -871,7 +907,7 @@ def _materialize_photo_preview(
     return "skipped"
 
 
-def _record_previews_result(run: PipelineRun, generated, skipped, failed, total):
+def _record_previews_result(run: PipelineRun, generated: int, skipped: int, failed: int, total: int) -> None:
     """Store the previews rollup and mark the step's final status."""
     run.result["stages"]["previews"] = {
         "generated": generated, "skipped": skipped, "failed": failed, "total": total
