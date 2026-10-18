@@ -33,7 +33,7 @@ interface ImportReadiness {error?: string; exiftool?: {available?: boolean; vers
 interface ImportLocationSuggestion { kind: 'keyword' | 'google'; source: 'your_photos' | 'your_place' | 'google_park' | 'google_area'; name: string; keyword_id?: number; place_id?: string; parents?: string[]; summary?: string; photo_count?: number; distance_m?: number; }
 interface ImportLocationGroup { key: string; suggestion: ImportLocationSuggestion | null; cells: string[]; file_count: number; latitude: number; longitude: number; sample_paths: string[]; unresolved_reasons?: Record<string, number>; }
 interface ImportLocationOption { id: number; name: string; label: string; }
-interface ImportLocationSuggestions { groups: ImportLocationGroup[]; file_cells: Record<string, string>; no_gps_paths: string[]; location_options: ImportLocationOption[]; }
+interface ImportLocationSuggestions { work_limit_error?: string; groups: ImportLocationGroup[]; file_cells: Record<string, string>; no_gps_paths: string[]; location_options: ImportLocationOption[]; }
 interface ImportLocationFrame extends Partial<ImportLocationSuggestions> { done?: boolean; error?: string; reading?: number; naming?: number; total?: number; }
 type ImportLocationTarget = { kind: 'skip'; reason: string } | { kind: 'keyword'; keyword_id?: number; name: string } | { kind: 'google'; place_id?: string; name: string } | { kind: 'new'; name: string; latitude: number; longitude: number };
 type ImportLocationChoice = Exclude<ImportLocationTarget, { kind: 'skip' }> & { cells: string[] };

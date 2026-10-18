@@ -133,17 +133,21 @@ async function fetchImportLocations(signature) {
   }
 }
 
-/** @param {ImportLocationGroup} group @param {Set<string>} candidates */
-function importLocationGroupCount(group, candidates) {
+/** @param {Set<string>} candidates @returns {Map<string, number>} */
+function importLocationCellCounts(candidates) {
+  /** @type {Map<string, number>} */ const counts = new Map();
   const data = importLocations.data;
-  if (!data) return 0;
-  const cells = new Set(group.cells);
-  let count = 0;
+  if (!data) return counts;
   candidates.forEach(path => {
     const cell = data.file_cells[path];
-    if (cell !== undefined && cells.has(cell)) count += 1;
+    if (cell !== undefined) counts.set(cell, (counts.get(cell) || 0) + 1);
   });
-  return count;
+  return counts;
+}
+
+/** @param {ImportLocationGroup} group @param {Map<string, number>} counts */
+function importLocationGroupCount(group, counts) {
+  return group.cells.reduce((total, cell) => total + (counts.get(cell) || 0), 0);
 }
 
 // The text a group's input starts with: the suggestion, written as the
@@ -248,6 +252,7 @@ function renderImportLocationStatus() {
     return;
   }
   const candidates = importLocationCandidatePaths();
+  const counts = importLocationCellCounts(candidates);
   const noGps = new Set(data.no_gps_paths);
   let withGps = 0;
   let missing = 0;
@@ -255,7 +260,7 @@ function renderImportLocationStatus() {
     if (data.file_cells[path] !== undefined) withGps += 1;
     else if (noGps.has(path)) missing += 1;
   });
-  const spots = data.groups.filter(g => importLocationGroupCount(g, candidates) > 0).length;
+  const spots = data.groups.filter(g => importLocationGroupCount(g, counts) > 0).length;
   if (!withGps) {
     status.textContent = 'None of the photos to import have GPS, so none will get a location.';
     return;
@@ -349,12 +354,12 @@ function updateImportLocationCounts() {
   renderImportLocationStatus();
   const data = importLocations.data;
   if (!data) return;
-  const candidates = importLocationCandidatePaths();
+  const counts = importLocationCellCounts(importLocationCandidatePaths());
   data.groups.forEach(group => {
     const row = /** @type {HTMLElement | null} */ (document.querySelector(
       '.import-location-group[data-key="' + CSS.escape(group.key) + '"]'));
     if (!row) return;
-    const n = importLocationGroupCount(group, candidates);
+    const n = importLocationGroupCount(group, counts);
     row.style.display = n ? '' : 'none';
     const count = /** @type {HTMLElement} */ (row.querySelector('.import-location-count'));
     count.textContent = n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
@@ -366,10 +371,10 @@ function updateImportLocationCounts() {
 function importLocationChoices() {
   const data = importLocations.data;
   if (!importLocationsEnabled() || !data) return [];
-  const candidates = importLocationCandidatePaths();
+  const counts = importLocationCellCounts(importLocationCandidatePaths());
   /** @type {ImportLocationChoice[]} */ const choices = [];
   data.groups.forEach(group => {
-    if (!importLocationGroupCount(group, candidates)) return;
+    if (!importLocationGroupCount(group, counts)) return;
     const target = importLocationTarget(group);
     if (target.kind === 'skip') return;
     choices.push({ ...target, cells: group.cells.slice() });
@@ -380,9 +385,12 @@ function importLocationChoices() {
 // Keep these admission limits aligned with services/import_locations.py.
 /** @returns {string | null} */
 function importLocationChoicesProblem() {
+  if (importLocationsEnabled() && importLocations.data?.work_limit_error) {
+    return importLocations.data.work_limit_error;
+  }
   const choices = importLocationChoices();
-  if (choices.length > 100000) {
-    return 'Select at most 100,000 location groups. Uncheck groups, turn off GPS location suggestions, or import fewer files.';
+  if (choices.length > 1000) {
+    return 'Select at most 1,000 location groups. Uncheck groups, turn off GPS location suggestions, or import fewer files.';
   }
   const cells = new Set(choices.flatMap(choice => choice.cells));
   if (cells.size > 100000) {

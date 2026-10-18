@@ -85,10 +85,10 @@ test('location admission counts only selected choices and distinct cells at back
   h.ctx.selected = [];
   h.run('importLocationChoices = () => selected;');
   const problem = () => h.run('importLocationChoicesProblem()');
-  h.ctx.selected = Array.from({length: 100000}, (_, i) => ({cells: [String(i)]}));
+  h.ctx.selected = Array.from({length: 1000}, (_, i) => ({cells: [String(i)]}));
   assert.equal(problem(), null);
   h.ctx.selected.push({cells: ['extra']});
-  assert.match(problem(), /100,000.*Uncheck/);
+  assert.match(problem(), /1,000.*Uncheck/);
   h.ctx.selected = [{cells: Array.from({length: 100000}, (_, i) => String(i))}];
   assert.equal(problem(), null);
   h.ctx.selected.push({cells: ['0']});
@@ -99,7 +99,7 @@ test('location admission counts only selected choices and distinct cells at back
   assert.equal(problem(), null);
   const backend = readFileSync('vireo/services/import_locations.py', 'utf8');
   assert.match(backend, /MAX_SUGGESTION_PATHS = 100_000\b/);
-  assert.match(backend, /MAX_CHOICES = MAX_SUGGESTION_PATHS\b/);
+  assert.match(backend, /MAX_CHOICES = 1000\b/);
   assert.match(backend, /MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS\b/);
 });
 
@@ -121,11 +121,64 @@ test('legacy GPS intent survives both copy retry builders without invented choic
 test('form admission blocks excessive location selections in both import modes', () => {
   const ctx = vm.createContext({sources: ['/invented'], newImagesSnapshotId: null,
     importExiftoolRequired: false, document: {getElementById: () => ({checked: false})},
-    importLocationChoicesProblem: () => 'Select at most 100,000 location groups.',
+    importLocationChoicesProblem: () => 'Select at most 1,000 location groups.',
     selectedImportMode: () => { throw new Error('must reject before mode-specific admission'); }});
   vm.runInContext(readFileSync('vireo/static/import/form.js', 'utf8'), ctx);
-  assert.match(vm.runInContext('importFormProblem().message', ctx), /100,000/);
+  assert.match(vm.runInContext('importFormProblem().message', ctx), /1,000/);
   ctx.newImagesSnapshotId = 123;
   ctx.newImagesFileCount = 0;
-  assert.match(vm.runInContext('importFormProblem().message', ctx), /100,000/);
+  assert.match(vm.runInContext('importFormProblem().message', ctx), /1,000/);
+});
+
+test('preview work-limit refusal blocks GPS Start until a new preview or opt-out', () => {
+  const h = harness();
+  h.ctx.data = {groups: [], file_cells: {}, no_gps_paths: [], location_options: [],
+    work_limit_error: 'GPS locations support at most 1,000 groups per import. Preview fewer files, or turn off GPS location suggestions.'};
+  h.run('importLocations.data = data;');
+  assert.match(h.run('importLocationChoicesProblem()'), /1,000.*Preview fewer files/);
+  h.ctx.document.getElementById = () => ({checked: false});
+  assert.equal(h.run('importLocationChoicesProblem()'), null);
+  assert.deepEqual(h.choices(), []);
+  h.ctx.document.getElementById = () => ({checked: true});
+  h.run('delete importLocations.data.work_limit_error;');
+  assert.equal(h.run('importLocationChoicesProblem()'), null);
+});
+
+test('large choices and keystroke validation read candidate cells only linearly', () => {
+  for (const size of [10000, 20000]) {
+    const h = harness();
+    let reads = 0;
+    const paths = Array.from({length: size}, (_, i) => '/invented/' + i);
+    const fileCells = Object.fromEntries(paths.map((path, i) => [path, String(i % 1000)]));
+    h.ctx.large = {groups: Array.from({length: 1000}, (_, i) => ({
+      key: String(i), cells: [String(i)], suggestion: null, sample_paths: [],
+      latitude: 0, longitude: 0,
+    })), file_cells: new Proxy(fileCells, {get(target, key) {
+      if (++reads > size * 8) throw new Error('quadratic candidate-path scan');
+      return target[key];
+    }}), no_gps_paths: [], location_options: []};
+    h.ctx.importPreviewedPaths = paths;
+    h.run(`importLocations.data = large;
+      large.groups.forEach(group => importLocations.choices.set(group.key,
+        {enabled: true, value: 'Invented ' + group.key}));`);
+    assert.equal(h.choices().length, 1000);
+    assert.equal(reads, size, 'one path lookup per candidate, across every group');
+    reads = 0;
+    h.run('updateStartGate = () => importLocationChoicesProblem();');
+    h.edit(0, 'Edited invented location');
+    assert.ok(reads <= size * 4, 'keystroke status and Start validation use constant linear passes');
+    reads = 0;
+    h.ctx.importSelectionEnabled = () => true;
+    h.ctx.importGridCards = () => [];
+    h.ctx.importSelectableCardPaths = () => [paths[0]];
+    h.ctx.importDeselected = new Set();
+    assert.equal(h.choices().length, 1, 'selection replacement takes effect immediately');
+    assert.equal(reads, 1);
+    h.ctx.importDeselected.add(paths[0]);
+    assert.deepEqual(h.choices(), [], 'deselection is never cached');
+    h.ctx.importPreviewedPaths = ['/invented/replacement'];
+    h.ctx.importSelectionEnabled = () => false;
+    h.ctx.large.file_cells = {'/invented/replacement': '1'};
+    assert.deepEqual(h.choices()[0].cells, ['1'], 'new preview mapping replaces old counts');
+  }
 });

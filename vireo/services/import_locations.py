@@ -59,11 +59,10 @@ PLACE_RADIUS_M = 300
 
 # One card's worth and then some; the suggestions map every path to its cell.
 MAX_SUGGESTION_PATHS = 100_000
-# Choices come from a preview of at most MAX_SUGGESTION_PATHS files, which
-# has no more cells than files and no more groups than cells, so admission
-# accepts anything the page can send.
+# Cells bound the in-memory file map; groups separately bound provider detail
+# requests and write transactions when applying the user's choices.
 MAX_CHOICE_CELLS = MAX_SUGGESTION_PATHS
-MAX_CHOICES = MAX_SUGGESTION_PATHS
+MAX_CHOICES = 1000
 MAX_LOCATION_NAME = 200
 
 _SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area")
@@ -415,6 +414,14 @@ class ImportLocationSuggester:
         _add_cell(group, key, cell, suggestion, reason)
 
     def result(self) -> JsonDict:
+        if len(self._groups) > MAX_CHOICES:
+            return {
+                "groups": [], "file_cells": {},
+                "work_limit_error": (
+                    f"GPS locations support at most {MAX_CHOICES:,} groups per import. "
+                    "Preview fewer files, or turn off GPS location suggestions."
+                ),
+            }
         finished = []
         for group in self._groups.values():
             done = _finish_group(self._db, group)
@@ -446,6 +453,8 @@ def suggest_import_locations(
     it. Each group's ``suggestion`` is None or a dict with ``kind``
     (``"keyword"`` with ``keyword_id``, ``name`` and ``parents``, or
     ``"google"`` with ``place_id``, ``name`` and ``summary``) and ``source``.
+    Over-budget previews return empty groups and ``work_limit_error``;
+    callers must require fewer files or explicit GPS opt-out before import.
     """
     suggester = ImportLocationSuggester(
         db, gps_by_path, api_key=api_key, language=language)
@@ -656,6 +665,8 @@ def apply_location_choices(
     ``cancel_check`` stopped it, in which case the choice in progress left
     nothing behind.
     """
+    if len(choices) > MAX_CHOICES:
+        raise LocationChoiceError(f"at most {MAX_CHOICES} location groups may be applied")
     for counter in ("locations_added", "locations_kept", "locations_unchosen",
                     "locations_no_gps", "locations_unresolved"):
         summary.setdefault(counter, 0)

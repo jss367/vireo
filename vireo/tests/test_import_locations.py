@@ -302,14 +302,19 @@ def test_parse_location_choices_keeps_the_request_shape():
     assert parse_location_choices(None) == []
 
 
-def test_admission_accepts_every_choice_set_a_preview_can_produce():
-    """One choice per cell, for a preview at its file cap, is admissible."""
-    cap = import_locations.MAX_SUGGESTION_PATHS
+def test_admission_bounds_group_work_separately_from_preview_cells():
+    """File/cell capacity never authorizes extra provider calls or writes."""
+    cap = import_locations.MAX_CHOICES
     raw = [{"cells": [f"{i // 1000},{i % 1000}"], "kind": "keyword", "keyword_id": 1}
            for i in range(cap)]
     assert len(parse_location_choices(raw)) == cap
     with pytest.raises(LocationChoiceError):
         parse_location_choices(raw + [{"cells": ["-1,-1"], "kind": "keyword", "keyword_id": 1}])
+    cells = [f"{i // 1000},{i % 1000}" for i in range(import_locations.MAX_CHOICE_CELLS)]
+    assert len(parse_location_choices([{"kind": "keyword", "keyword_id": 1, "cells": cells}])[0]["cells"]) == len(cells)
+    with pytest.raises(LocationChoiceError):
+        parse_location_choices([{"kind": "keyword", "keyword_id": 1, "cells": cells + ["-1,-1"]}])
+
 
 
 @pytest.mark.parametrize("raw", [
