@@ -52,16 +52,11 @@ CONN_USE_LIMITS = {
     "label_source_identities.py": 8,
     "location_review.py": 1,
     "misses.py": 4,
-    "pipeline_stages/classification.py": 2,
-    "pipeline_stages/detection.py": 4,
-    "pipeline_stages/features.py": 4,
-    "pipeline_stages/media.py": 2,
-    "pipeline_stages/scanning.py": 1,
     "schema.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,
     "species_identity_repair.py": 3,
-    "volume_reachability.py": 8,
+    "volume_reachability.py": 8
 }
 
 

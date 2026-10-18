@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import path_guard
 from db import Database
@@ -14,7 +14,11 @@ from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import resolve_remote_archive_target
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from jobs import JobRunner
     from services.imports import ImportService
+    from services.service_types import JobDict, JsonDict
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +80,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     )
 
 
-def _admit_import_job(service, db, request):
+def _admit_import_job(service: ImportService, db: Database, request: _ImportPhotosRequest) -> str | ImportFailure:
     """The admission steps after the workspace switch; returns a job id or
     an ``ImportFailure``. ``runner.start`` must stay the last step."""
     runner = service.get_runner()
@@ -123,7 +127,7 @@ def _admit_import_job(service, db, request):
         )
 
 
-def _local_copy_conflict(runner, db, paths):
+def _local_copy_conflict(runner: JobRunner | None, db: Database, paths: Sequence[str]) -> str | None:
     """Return the local-copy conflict for ``paths``; hold ``stage_boundary_lock``."""
     pending_sources = stage_pending_source_paths(
         runner.list_jobs if runner is not None else None,
@@ -136,7 +140,7 @@ def _local_copy_conflict(runner, db, paths):
     )
 
 
-def _competing_retry_failure(runner, job_config):
+def _competing_retry_failure(runner: JobRunner, job_config: JsonDict) -> ImportFailure | None:
     """Server-side retry-exclusivity gate: refuse a retry whose
     root ancestor already has an active retry in flight, even when the
     Jobs-page UI gate was bypassed (two tabs, a stale UI that didn't
@@ -194,7 +198,10 @@ class _ImportPhotosRequest:
     ``ImportFailure`` to refuse the request, or ``None`` to continue.
     """
 
-    def __init__(self, service, db, body, *, is_excluded_scan_path, is_unsafe_path):
+    def __init__(
+        self, service: ImportService, db: Database, body: JsonDict, *,
+        is_excluded_scan_path: Callable[[str], bool], is_unsafe_path: Callable[[str], bool],
+    ) -> None:
         self.service = service
         self.db = db
         self.body = body
@@ -202,7 +209,7 @@ class _ImportPhotosRequest:
         self.is_unsafe_path = is_unsafe_path
         self.rsync_bin = None
 
-    def parse_sources(self):
+    def parse_sources(self) -> ImportFailure | None:
         sources = self.body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
@@ -223,7 +230,7 @@ class _ImportPhotosRequest:
         self.sources = sources
         return None
 
-    def validate_selection(self):
+    def validate_selection(self) -> ImportFailure | None:
         body = self.body
         include_paths = body.get("include_paths")
         previewed_count = body.get("previewed_count")
@@ -254,6 +261,9 @@ class _ImportPhotosRequest:
                     return ImportFailure(
                         f"{name} must be a non-negative integer", 400,
                     )
+            # The loop above returned unless both counts are ints.
+            previewed_count = cast("int", previewed_count)
+            checked_count = cast("int", checked_count)
             include_paths = set(include_paths)
             if len(include_paths) > previewed_count:
                 return ImportFailure(
@@ -290,7 +300,7 @@ class _ImportPhotosRequest:
         self.checked_count = checked_count
         return None
 
-    def resolve_destination(self):
+    def resolve_destination(self) -> ImportFailure | None:
         # Remote (SSH) archive destination — mirrors the pipeline route's
         # remote-target request shape (remote_target_id + subpath). The card
         # is rsynced to remote_path/subpath and cataloged at
@@ -343,6 +353,8 @@ class _ImportPhotosRequest:
             )
             if err is not None:
                 return err
+            # Without an error the resolver returns the archive config.
+            remote_archive_config = cast("JsonDict", remote_archive_config)
             # Catalog at the resolved local mount path.
             destination = remote_archive_config["mount_final"]
 
@@ -359,7 +371,7 @@ class _ImportPhotosRequest:
         self.defer_nas_transfer = defer_nas_transfer
         return None
 
-    def check_destination_outside_sources(self):
+    def check_destination_outside_sources(self) -> ImportFailure | None:
         # Reject destinations that are equal to, or nested under, any source
         # (after realpath so a symlink can't slip past). The importer copies
         # every card file into the destination and marks the card safe to
@@ -390,7 +402,7 @@ class _ImportPhotosRequest:
                 )
         return None
 
-    def preflight_local_copy_conflict(self):
+    def preflight_local_copy_conflict(self) -> ImportFailure | None:
         """Refuse a destination a local copy covers.
 
         The copied files are catalogued under the destination; if a local
@@ -420,7 +432,7 @@ class _ImportPhotosRequest:
         self.conflict_paths = [self.destination]
         return None
 
-    def validate_folder_template(self):
+    def validate_folder_template(self) -> ImportFailure | None:
         folder_template = self.body.get("folder_template", "%Y/%Y-%m-%d")
         if folder_template and self.is_unsafe_path(folder_template):
             return ImportFailure(
@@ -430,7 +442,7 @@ class _ImportPhotosRequest:
         self.folder_template = folder_template
         return None
 
-    def resolve_after_import(self):
+    def resolve_after_import(self) -> ImportFailure | None:
         """Resolve the after-import strategy.
 
         After-import strategy: validated at enqueue (failing the chain
@@ -466,7 +478,7 @@ class _ImportPhotosRequest:
         self.after_import = after_import
         return None
 
-    def validate_parent_import(self):
+    def validate_parent_import(self) -> ImportFailure | None:
         """Bind a recovery retry to the failed import it inherits scope from.
 
         Recovery-retry imports carry forward the photo IDs a previous
@@ -529,11 +541,14 @@ class _ImportPhotosRequest:
                 return parent_err
         return None
 
-    def recheck_parent_takeover(self):
+    def recheck_parent_takeover(self) -> ImportFailure | None:
         """Cheap DB/runner evidence only; caller holds the admission guard."""
-        fresh = {}
+        fresh: JsonDict = {}
+        # Only a retry rechecks, and validate_parent_import required its
+        # parent id to be a non-empty string.
+        parent_id_raw = cast("str", self.parent_id_raw)
         *_, failure = self.service._validate_parent_import_job(
-            self.parent_id_raw.strip(), self.active_ws, self.db,
+            parent_id_raw.strip(), self.active_ws, self.db,
             relocate_landings=False, snapshot_out=fresh,
         )
         if failure is not None:
@@ -550,7 +565,7 @@ class _ImportPhotosRequest:
             )
         return None
 
-    def validate_after_import_process(self):
+    def validate_after_import_process(self) -> ImportFailure | None:
         # Skip the "process still exists" check ONLY when the parent has a
         # frozen snapshot for THIS exact process id — that snapshot will
         # substitute for db.resolve_process() below. A retry that changed
@@ -566,7 +581,7 @@ class _ImportPhotosRequest:
             allow_missing=parent_has_snapshot_for_after_import,
         )
 
-    def read_import_options(self):
+    def read_import_options(self) -> ImportFailure | None:
         body = self.body
         self.file_types = body.get("file_types", "both")
         self.skip_duplicates = bool(body.get("skip_duplicates", True))
@@ -580,7 +595,7 @@ class _ImportPhotosRequest:
         )
         return tag_options_err
 
-    def validate_carry_photo_ids(self):
+    def validate_carry_photo_ids(self) -> ImportFailure | None:
         carry_raw = self.body.get("carry_photo_ids")
         if carry_raw is None:
             self.carry_photo_ids = None
@@ -655,7 +670,7 @@ class _ImportPhotosRequest:
         self.carry_photo_ids = carry_photo_ids
         return None
 
-    def check_retry_source_drift(self):
+    def check_retry_source_drift(self) -> ImportFailure | None:
         """Refuse a recovery retry whose sources changed since the parent ran.
 
         A recovery retry must not silently import files the parent
@@ -722,7 +737,8 @@ class _ImportPhotosRequest:
 
         drifted_sources = []
         for src in sources:
-            parent_snap = parent_source_snapshots.get(src)
+            # Every source is in ``parent_sources``, so its snapshot is a dict.
+            parent_snap = cast("JsonDict", parent_source_snapshots.get(src))
             # Reuse the same discovery + snapshot helpers the parent
             # ran through so a mismatch here reflects a genuine
             # source change, not a difference in enumeration logic.
@@ -755,7 +771,7 @@ class _ImportPhotosRequest:
             )
         return None
 
-    def check_retry_remote_target(self):
+    def check_retry_remote_target(self) -> ImportFailure | None:
         """Refuse a retry whose remote target changed since the parent ran.
 
         A retry that keeps the same remote target must land on the
@@ -804,7 +820,7 @@ class _ImportPhotosRequest:
             )
         return None
 
-    def snapshot_after_import_process(self):
+    def snapshot_after_import_process(self) -> ImportFailure | None:
         """Freeze the after-import process's stage flags.
 
         Snapshot the chosen saved process's stage flags at enqueue time
@@ -848,7 +864,7 @@ class _ImportPhotosRequest:
                     return ImportFailure(str(e), 404)
         return None
 
-    def plan_after_import_transfer(self):
+    def plan_after_import_transfer(self) -> ImportFailure | None:
         """Plan local processing staging or the chained NAS move.
 
         Validate the optional NAS move that chains after processing
@@ -923,7 +939,7 @@ class _ImportPhotosRequest:
                 return move_err
         return None
 
-    def check_retry_move_target(self):
+    def check_retry_move_target(self) -> ImportFailure | None:
         """Refuse a retry whose chained NAS-move target changed.
 
         A retry with a chained NAS move must land on the same
@@ -964,9 +980,12 @@ class _ImportPhotosRequest:
             )
         return None
 
-    def check_pending_archive(self):
+    def check_pending_archive(self) -> ImportFailure | None:
+        # Deferring the transfer requires local processing, whose staging
+        # plan always returns a move target.
         pending_archive_id = (
-            os.path.basename(self.move_target_snapshot["managed_staging_root"]) if self.defer_nas_transfer else None
+            os.path.basename(cast("JsonDict", self.move_target_snapshot)["managed_staging_root"])
+            if self.defer_nas_transfer else None
         )
         self.pending_archive_id = pending_archive_id
         if pending_archive_id:
@@ -975,13 +994,13 @@ class _ImportPhotosRequest:
                 return ImportFailure("These photos have already been sent to NAS. Start a new import instead of retrying.")
         return None
 
-    def prepare_workspace(self):
+    def prepare_workspace(self) -> ImportFailure | None:
         self.active_ws, self.created_workspace, self.previous_active_ws, workspace_err = (
             self.service._prepare_import_workspace(self.db, self.body)
         )
         return workspace_err
 
-    def remote_transport(self):
+    def remote_transport(self) -> JsonDict | None:
         """Snapshot the resolved remote transport at enqueue time so a
         settings edit between click-Start and job-run can't redirect the
         archive to a different host/mount than the panel is showing
@@ -1005,7 +1024,7 @@ class _ImportPhotosRequest:
             }
         return remote_target
 
-    def job_config(self):
+    def job_config(self) -> JsonDict:
         include_paths = self.include_paths
         move_target_snapshot = self.move_target_snapshot
         job_config = {
@@ -1078,7 +1097,7 @@ class _ImportPhotosRequest:
             }
         return job_config
 
-    def _recovery_job_config(self):
+    def _recovery_job_config(self) -> JsonDict:
         """The retry/resume lineage keys of the persisted job config."""
         parent_config = self.parent_config
         parent_resume = self.parent_resume
@@ -1158,7 +1177,10 @@ class _ImportPhotosJob:
     Holds only what the worker reads, never the request's ``Database``.
     """
 
-    def __init__(self, request, runner, remote_target, *, thumb_cache_dir, vireo_dir):
+    def __init__(
+        self, request: _ImportPhotosRequest, runner: JobRunner, remote_target: JsonDict | None, *,
+        thumb_cache_dir: str, vireo_dir: str,
+    ) -> None:
         self.service = request.service
         self.runner = runner
         self.remote_target = remote_target
@@ -1181,14 +1203,16 @@ class _ImportPhotosJob:
         self.after_import = request.after_import
         self.after_import_snapshot = request.after_import_snapshot
         self.move_target_snapshot = request.move_target_snapshot
-        self.import_tags = request.import_tags
-        self.location_from_gps = request.location_from_gps
+        # Admission refused the request unless the tag options parsed.
+        self.import_tags = cast("list[str]", request.import_tags)
+        self.location_from_gps = cast("bool", request.location_from_gps)
         self.carry_photo_ids = request.carry_photo_ids
         self.parent_resume = request.parent_resume
         self.source_snapshots = request.parent_source_snapshots
-        self.active_ws = request.active_ws
+        # Admission refused the request unless a workspace resolved.
+        self.active_ws = cast("int", request.active_ws)
 
-    def work(self, job):
+    def work(self, job: JobDict) -> JsonDict:
         from import_job import ImportParams, run_import_job
 
         service = self.service
@@ -1284,7 +1308,7 @@ class _ImportPhotosJob:
                     "after import-photos job",
                 )
 
-    def _prepare_import_destination(self):
+    def _prepare_import_destination(self) -> str:
         """Return where this run copies to, preparing local staging if used."""
         import_destination = self.destination
         managed_staging = self.managed_staging
@@ -1314,7 +1338,7 @@ class _ImportPhotosJob:
                     )
         return import_destination
 
-    def _apply_tags(self, job, result):
+    def _apply_tags(self, job: JobDict, result: JsonDict) -> bool:
         """Run the tag/GPS pass; return whether it recorded errors.
 
         An interrupted parent never reached its tag/GPS pass, so a
@@ -1357,7 +1381,7 @@ class _ImportPhotosJob:
             result["tags_applied"] = True
         return tag_errors
 
-    def _mark_post_import_step(self, job, step, result=None):
+    def _mark_post_import_step(self, job: JobDict, step: str, result: JsonDict | None = None) -> None:
         """Record a finished post-import step on the history row now.
 
         A restart before the runner writes the final result leaves the row
@@ -1377,7 +1401,7 @@ class _ImportPhotosJob:
         }
         self.runner.flush_partial_result(job)
 
-    def _chain_after_import(self, job, result):
+    def _chain_after_import(self, job: JobDict, result: JsonDict) -> bool:
         """Create the import collection and optionally enqueue processing.
 
         Every skip is written to the result as ``after_import_skipped``
@@ -1439,6 +1463,8 @@ class _ImportPhotosJob:
                 "failed to create import collection"
             )
             return False
+        # ``_record_import_collection`` returns its database with the id.
+        thread_db = cast("Database", thread_db)
         try:
             return self._enqueue_chained_processing(
                 job, result, thread_db, col_id, chain_scope)
@@ -1453,7 +1479,9 @@ class _ImportPhotosJob:
             )
             return False
 
-    def _enqueue_chained_processing(self, job, result, thread_db, col_id, chain_scope):
+    def _enqueue_chained_processing(
+        self, job: JobDict, result: JsonDict, thread_db: Database, col_id: int, chain_scope: list[int],
+    ) -> bool:
         """Queue the after-import processing run (and its planned NAS move).
 
         Returns whether the chain was paid; a blocked process records why
@@ -1461,7 +1489,8 @@ class _ImportPhotosJob:
         """
         service = self.service
         active_ws = self.active_ws
-        after_import = self.after_import
+        # ``_chain_after_import`` returned when there is no process id.
+        after_import = cast("int", self.after_import)
         move_target_snapshot = self.move_target_snapshot
         after_move = None
         if move_target_snapshot is not None and not self.defer_nas_transfer:
@@ -1516,7 +1545,7 @@ class _ImportPhotosJob:
             result["model_warning"] = model_warning
         return process_job_id is not None
 
-    def _plan_after_move(self, thread_db, chain_scope):
+    def _plan_after_move(self, thread_db: Database, chain_scope: Sequence[int]) -> JsonDict:
         """Which imported folders must the chained NAS move relocate?
 
         Computed here — not at request time — because the archive
@@ -1529,7 +1558,8 @@ class _ImportPhotosJob:
         """
         from import_chain import minimal_move_set
 
-        move_target_snapshot = self.move_target_snapshot
+        # Only planned when there is a move target.
+        move_target_snapshot = cast("JsonDict", self.move_target_snapshot)
         folder_rows = []
         for i in range(0, len(chain_scope), 500):
             chunk = chain_scope[i:i + 500]

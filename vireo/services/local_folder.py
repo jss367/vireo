@@ -20,6 +20,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 from services.local_workspace import (
     MANIFEST_VERSION,
@@ -48,11 +49,39 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
+
+    from db import Database
+    from services.local_workspace import (
+        BeginCommit,
+        CancelCheck,
+        CopyProgress,
+        LocalEntry,
+        ManifestKey,
+        RootRecord,
+        StepProgress,
+        WalkEntry,
+    )
+    from services.service_types import JobDict, JsonDict
+
 # Job types of the folder-scoped stage/sync/discard transitions. The folder
 # status endpoint reports them, and folder moves refuse to race one.
 LOCAL_FOLDER_JOB_TYPES = frozenset(
     {"work-locally-folder-stage", "work-locally-folder-sync", "work-locally-folder-discard"}
 )
+
+
+class FolderMapping(TypedDict):
+    """One catalog folder a folder stage rebases, as recorded in its mappings."""
+
+    folder_id: int
+    source_path: str
+    local_path: str
+    status: str
+    is_root: bool
+
 
 _LOCKS: dict[int, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -88,17 +117,17 @@ def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path
 
 
 def local_copy_preflight(
-    db,
-    root_folder_ids: list[int],
+    db: Database,
+    root_folder_ids: Iterable[int],
     vireo_dir: str,
     *,
-    destination_bases: dict[int, str] | None = None,
-    cancel_check=None,
-) -> dict:
+    destination_bases: Mapping[int, str] | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> JsonDict:
     """Measure selected sources and capacity on their destination volumes."""
     destination_bases = destination_bases or {}
-    folders = []
-    volumes_by_device: dict[int, dict] = {}
+    folders: list[JsonDict] = []
+    volumes_by_device: dict[int, JsonDict] = {}
 
     for raw_root_id in root_folder_ids:
         if cancel_check and cancel_check():
@@ -149,7 +178,7 @@ def local_copy_preflight(
             }
         )
 
-    volumes = []
+    volumes: list[JsonDict] = []
     for index, volume in enumerate(volumes_by_device.values(), start=1):
         volume["id"] = index
         volume["required_bytes"] = volume["copy_bytes"] + volume["reserve_bytes"]
@@ -218,28 +247,28 @@ def _remove_folder_dir(
     _remove_tree(base)
 
 
-def folder_state(db, root_folder_id: int) -> dict | None:
+def folder_state(db: Database, root_folder_id: int) -> JsonDict | None:
     row = db.local_folders.get_state(root_folder_id)
     return dict(row) if row else None
 
 
-def _mappings(db, root_folder_id: int) -> list[dict]:
+def _mappings(db: Database, root_folder_id: int) -> list[JsonDict]:
     rows = db.local_folders.mappings(root_folder_id)
     return [dict(row) for row in rows]
 
 
-def _root_mapping(db, root_folder_id: int) -> dict | None:
+def _root_mapping(db: Database, root_folder_id: int) -> JsonDict | None:
     row = db.local_folders.root_mapping(root_folder_id)
     return dict(row) if row else None
 
 
-def local_root_for_folder(db, folder_id: int) -> int | None:
+def local_root_for_folder(db: Database, folder_id: int) -> int | None:
     """Return the local-session root covering ``folder_id``, if any."""
     row = db.local_folders.root_for_folder(folder_id)
     return int(row["root_folder_id"]) if row else None
 
 
-def local_roots_under_folder(db, folder_id: int) -> list[int]:
+def local_roots_under_folder(db: Database, folder_id: int) -> list[int]:
     """Return every local-session root whose source lives inside ``folder_id``.
 
     Staging rebases the child folder row's ``folders.path`` under
@@ -265,7 +294,7 @@ def local_roots_under_folder(db, folder_id: int) -> list[int]:
     return sorted(result)
 
 
-def local_root_under_folder(db, folder_id: int) -> int | None:
+def local_root_under_folder(db: Database, folder_id: int) -> int | None:
     """Return one local-session root whose source lives inside ``folder_id``.
 
     Short-circuit variant of :func:`local_roots_under_folder`; guards that
@@ -285,7 +314,7 @@ def _resolve_physical(path: str) -> str | None:
         return None
 
 
-def _load_staged_source_index(db) -> list[tuple[int, str, str | None]]:
+def _load_staged_source_index(db: Database) -> list[tuple[int, str, str | None]]:
     """Snapshot of ``(root_folder_id, source_path, physical_source_path)``.
 
     Cached per call so a snapshot import that passes every frozen file path
@@ -332,7 +361,7 @@ def _path_overlaps_source(
 
 
 def _staged_root_visible_to_workspace(
-    db, root_folder_id: int, workspace_id: int | None,
+    db: Database, root_folder_id: int, workspace_id: int | None,
 ) -> bool:
     """Whether a staged root's mappings sit under a folder the workspace sees."""
     if workspace_id is None:
@@ -342,7 +371,7 @@ def _staged_root_visible_to_workspace(
 
 
 def local_root_overlapping_path(
-    db, path: str, *, include_descendants: bool = True,
+    db: Database, path: str, *, include_descendants: bool = True,
 ) -> int | None:
     """Return a local-session root whose original source overlaps ``path``.
 
@@ -392,14 +421,16 @@ class PendingStagePath(str):
     workspace_id: int | None
     status: str | None
 
-    def __new__(cls, path: str, *, workspace_id=None, status=None):
+    def __new__(
+        cls, path: str, *, workspace_id: int | None = None, status: str | None = None
+    ) -> PendingStagePath:
         obj = super().__new__(cls, path)
         obj.workspace_id = workspace_id
         obj.status = status
         return obj
 
 
-def _pending_stage_refusal(path: str, pending, active_workspace_id) -> str:
+def _pending_stage_refusal(path: str, pending: str, active_workspace_id: int | None) -> str:
     """Refusal naming whose folder-stage job overlaps ``path`` and its state.
 
     The job can belong to the caller's own workspace as easily as to
@@ -412,10 +443,14 @@ def _pending_stage_refusal(path: str, pending, active_workspace_id) -> str:
         f"a {status} folder-stage job" if status in _PENDING_STAGE_STATUSES
         else "a folder-stage job"
     )
-    try:
-        own = int(job_ws) == int(active_workspace_id)
-    except (TypeError, ValueError):
+    own: bool | None
+    if job_ws is None or active_workspace_id is None:
         own = None  # owner unknown: say nothing about it
+    else:
+        try:
+            own = int(job_ws) == int(active_workspace_id)
+        except (TypeError, ValueError):
+            own = None  # owner unknown: say nothing about it
     if own is None:
         clause = f"{job} overlaps it"
     elif own:
@@ -432,7 +467,9 @@ def _pending_stage_refusal(path: str, pending, active_workspace_id) -> str:
     return f"Cannot scan {path}: {clause}. {advice}"
 
 
-def stage_pending_source_paths(list_jobs, db) -> list[str]:
+def stage_pending_source_paths(
+    list_jobs: Callable[[], Iterable[JobDict]] | Iterable[JobDict] | None, db: Database
+) -> list[str]:
     """Paths reserved by queued/running folder-stage jobs.
 
     A stage route registers a job under
@@ -503,12 +540,12 @@ def stage_pending_source_paths(list_jobs, db) -> list[str]:
 
 
 def local_copy_scan_conflict(
-    db,
-    paths,
+    db: Database,
+    paths: Iterable[str],
     *,
     include_descendants: bool = True,
     active_workspace_id: int | None = None,
-    pending_stage_sources: list[str] | None = None,
+    pending_stage_sources: Iterable[str] | None = None,
 ) -> str | None:
     """User-facing refusal when scanning ``paths`` would re-add staged photos.
 
@@ -569,33 +606,35 @@ def local_copy_scan_conflict(
     return None
 
 
-def folder_has_local_copy(db, folder_id: int) -> bool:
+def folder_has_local_copy(db: Database, folder_id: int) -> bool:
     return local_root_for_folder(db, folder_id) is not None
 
 
-def workspace_local_root_ids(db, workspace_id: int) -> list[int]:
+def workspace_local_root_ids(db: Database, workspace_id: int) -> list[int]:
     rows = db.local_folders.workspace_root_ids(workspace_id)
     return [int(row["root_folder_id"]) for row in rows]
 
 
 def _workspace_local_session_photo_count(
-    db, workspace_id: int, root_folder_id: int
+    db: Database, workspace_id: int, root_folder_id: int
 ) -> int:
     """Count workspace-visible photos covered by one local session."""
     row = db.local_folders.visible_photo_count(workspace_id, root_folder_id)
+    # A bare COUNT(*) with no GROUP BY always yields exactly one row.
+    assert row is not None
     return int(row["photo_count"] or 0)
 
 
-def workspace_has_local_folders(db, workspace_id: int) -> bool:
+def workspace_has_local_folders(db: Database, workspace_id: int) -> bool:
     return bool(workspace_local_root_ids(db, workspace_id))
 
 
-def affected_workspace_ids(db, root_folder_id: int) -> list[int]:
+def affected_workspace_ids(db: Database, root_folder_id: int) -> list[int]:
     rows = db.local_folders.affected_workspace_ids(root_folder_id)
     return [int(row["workspace_id"]) for row in rows]
 
 
-def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
+def workspace_ids_for_folder_tree(db: Database, root_folder_id: int) -> list[int]:
     """Return every workspace whose catalog scope intersects this root.
 
     Unlike :func:`affected_workspace_ids`, this also works before the local
@@ -605,7 +644,7 @@ def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
     root = db.get_folder(root_folder_id)
     if root is None:
         return []
-    workspace_ids = set()
+    workspace_ids: set[int] = set()
     rows = db.workspace_folders.all_linked_paths()
     for row in rows:
         # Intersection is symmetric: a workspace root that contains the local
@@ -619,7 +658,7 @@ def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
 
 
 def _invalidate_new_images_for_source(
-    db, source_path: str | None, workspace_ids=(),
+    db: Database, source_path: str | None, workspace_ids: Iterable[int] = (),
 ) -> None:
     """Drop cached New Images answers that a staged source changes.
 
@@ -642,7 +681,7 @@ def _invalidate_new_images_for_source(
         db.invalidate_new_images_cache_for_workspace(workspace_id)
 
 
-def workspace_summaries_for_ids(db, workspace_ids: list[int]) -> list[dict]:
+def workspace_summaries_for_ids(db: Database, workspace_ids: Sequence[int]) -> list[JsonDict]:
     """Return lightweight workspace details in the same order as the IDs."""
     if not workspace_ids:
         return []
@@ -658,7 +697,7 @@ def workspace_summaries_for_ids(db, workspace_ids: list[int]) -> list[dict]:
     ]
 
 
-def _load_manifest(vireo_dir: str, root_folder_id: int) -> dict | None:
+def _load_manifest(vireo_dir: str, root_folder_id: int) -> JsonDict | None:
     path = manifest_path(vireo_dir, root_folder_id)
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -674,14 +713,14 @@ def _load_manifest(vireo_dir: str, root_folder_id: int) -> dict | None:
     return data
 
 
-def _write_sync_recovery(vireo_dir: str, root_folder_id: int, deleted_keys) -> None:
+def _write_sync_recovery(vireo_dir: str, root_folder_id: int, deleted_keys: Iterable[ManifestKey]) -> None:
     _write_manifest(
         _sync_recovery_path(vireo_dir, root_folder_id),
         {"confirmed_deletions": [[int(index), rel] for index, rel in deleted_keys]},
     )
 
 
-def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
+def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set[ManifestKey] | None:
     path = _sync_recovery_path(vireo_dir, root_folder_id)
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -690,7 +729,7 @@ def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
         return None
     except (OSError, json.JSONDecodeError) as exc:
         raise LocalWorkspaceError(f"Sync recovery marker is unreadable: {exc}") from exc
-    result = set()
+    result: set[ManifestKey] = set()
     for entry in data.get("confirmed_deletions", []):
         if isinstance(entry, list) and len(entry) == 2:
             with suppress(TypeError, ValueError):
@@ -699,7 +738,7 @@ def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
 
 
 def _check_local_destination(
-    db, root_folder_id: int, source_path: str, local_root: Path, vireo_dir: str
+    db: Database, root_folder_id: int, source_path: str, local_root: Path, vireo_dir: str
 ) -> None:
     """Refuse a local destination that overlaps anything Vireo already manages."""
     if _physical_is_within(str(local_root), source_path) or _physical_is_within(
@@ -761,8 +800,8 @@ def _check_local_destination(
 
 
 def _catalog_records(
-    db, root_folder_id: int, local_base: Path, vireo_dir: str
-) -> tuple[list[dict], list[dict]]:
+    db: Database, root_folder_id: int, local_base: Path, vireo_dir: str
+) -> tuple[list[RootRecord], list[FolderMapping]]:
     row = db.get_folder(root_folder_id)
     if row is None:
         raise LocalWorkspaceError("Folder not found")
@@ -795,12 +834,12 @@ def _catalog_records(
     local_root = local_base / _safe_folder_name(source_path, root_folder_id)
     _check_local_destination(db, root_folder_id, source_path, local_root, vireo_dir)
 
-    root = {
+    root: RootRecord = {
         "folder_id": int(row["id"]),
         "source_path": source_path,
         "local_path": str(local_root),
     }
-    folders = []
+    folders: list[FolderMapping] = []
     for folder in db.local_folders.catalog_rows_by_path():
         if not _is_within(folder["path"], source_path):
             continue
@@ -818,12 +857,12 @@ def _catalog_records(
     return [root], folders
 
 
-def _delete_state_rows(db, root_folder_id: int) -> None:
+def _delete_state_rows(db: Database, root_folder_id: int) -> None:
     db.local_folders.delete_mappings(root_folder_id)
     db.local_folders.delete_state(root_folder_id)
 
 
-def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) -> None:
+def _materialize_ancestor_workspaces(db: Database, source_path: str, folders: Sequence[FolderMapping]) -> None:
     """Insert workspace_folders rows for ancestor-linked workspaces.
 
     When workspace A links ``/parent`` and hasn't yet materialized
@@ -861,8 +900,8 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
 
 
 def _claim_staging(
-    db, root_folder_id: int, vireo_dir: str, local_base: str | None
-) -> tuple[list[dict], list[dict]]:
+    db: Database, root_folder_id: int, vireo_dir: str, local_base: str | None
+) -> tuple[list[RootRecord], list[FolderMapping]]:
     """Create the local destination and record the 'staging' claim.
 
     Runs under the stage boundary lock so concurrent stages see the claim
@@ -910,7 +949,14 @@ def _claim_staging(
     return roots, folders
 
 
-def _copy_folder_entries(root: dict, entries: list, manifest: dict, *, progress=None, cancel_check=None) -> None:
+def _copy_folder_entries(
+    root: RootRecord,
+    entries: Sequence[WalkEntry],
+    manifest: JsonDict,
+    *,
+    progress: CopyProgress | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> None:
     """Copy one root's collected source entries locally, recording each in ``manifest["files"]``."""
     total_files = manifest["total_files"]
     total_bytes = manifest["total_bytes"]
@@ -932,15 +978,15 @@ def _copy_folder_entries(root: dict, entries: list, manifest: dict, *, progress=
 
 
 def stage_folder(
-    db,
+    db: Database,
     root_folder_id: int,
     vireo_dir: str,
     *,
     local_base: str | None = None,
-    progress=None,
-    cancel_check=None,
-    begin_commit=None,
-) -> dict:
+    progress: CopyProgress | None = None,
+    cancel_check: CancelCheck | None = None,
+    begin_commit: BeginCommit | None = None,
+) -> JsonDict:
     """Copy one top-level folder locally and atomically rebase the catalog."""
     root_folder_id = int(root_folder_id)
     with _folder_lock(root_folder_id):
@@ -950,7 +996,7 @@ def stage_folder(
             entries_per_root, total_files, total_bytes = _collect_source_entries(
                 roots, Path(roots[0]["local_path"])
             )
-            manifest = {
+            manifest: JsonDict = {
                 "version": MANIFEST_VERSION,
                 "root_folder_id": root_folder_id,
                 "created_at": time.time(),
@@ -1013,7 +1059,7 @@ def stage_folder(
             raise
 
 
-def folder_status(db, root_folder_id: int, vireo_dir: str) -> dict:
+def folder_status(db: Database, root_folder_id: int, vireo_dir: str) -> JsonDict:
     """Return status for a root, resolving a shared covering session."""
     root_folder_id = int(root_folder_id)
     covering = local_root_for_folder(db, root_folder_id)
@@ -1043,7 +1089,7 @@ def folder_status(db, root_folder_id: int, vireo_dir: str) -> dict:
     if state_row is None or root is None:
         raise LocalWorkspaceError("Local folder state is incomplete")
     workspace_ids = affected_workspace_ids(db, root_folder_id)
-    result = {
+    result: JsonDict = {
         "state": state_row["state"],
         "folder_id": root_folder_id,
         "root_folder_id": root_folder_id,
@@ -1081,11 +1127,11 @@ def folder_status(db, root_folder_id: int, vireo_dir: str) -> dict:
     return result
 
 
-def workspace_status(db, workspace_id: int, vireo_dir: str) -> dict:
+def workspace_status(db: Database, workspace_id: int, vireo_dir: str) -> JsonDict:
     """Aggregate the active workspace's root-folder residency."""
     roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
-    items = []
-    seen_sessions = set()
+    items: list[JsonDict] = []
+    seen_sessions: set[int] = set()
     for root in roots:
         status = folder_status(db, int(root["id"]), vireo_dir)
         status["requested_folder_id"] = int(root["id"])
@@ -1159,14 +1205,14 @@ def _derive_folder_name(path: str) -> str:
     return normalized.rsplit("/", 1)[-1] or normalized
 
 
-def _folder_name_for(db, folder_id: int, fallback_path: str) -> str:
+def _folder_name_for(db: Database, folder_id: int, fallback_path: str) -> str:
     row = db.get_folder(int(folder_id))
     if row and row["name"]:
         return row["name"]
     return _derive_folder_name(fallback_path)
 
 
-def _nearest_visible_ancestor(db, folder_id: int, workspace_id: int) -> int | None:
+def _nearest_visible_ancestor(db: Database, folder_id: int, workspace_id: int) -> int | None:
     """Return the nearest ancestor of ``folder_id`` that is linked to
     ``workspace_id`` and would appear in ``get_folder_tree`` (status ok or
     partial). Returns ``None`` if no such ancestor exists.
@@ -1182,7 +1228,7 @@ def _nearest_visible_ancestor(db, folder_id: int, workspace_id: int) -> int | No
     return int(row["id"]) if row else None
 
 
-def _restore_catalog(db, root_folder_id: int) -> None:
+def _restore_catalog(db: Database, root_folder_id: int) -> None:
     mappings = _mappings(db, root_folder_id)
     mapped_ids = {item["folder_id"] for item in mappings}
     root = next((item for item in mappings if item["is_root"]), None)
@@ -1222,7 +1268,7 @@ def _restore_catalog(db, root_folder_id: int) -> None:
         raise
 
 
-def _verify_folder_sync_root(root: dict) -> None:
+def _verify_folder_sync_root(root: JsonDict) -> None:
     """Refuse to sync unless the source and managed local roots are intact."""
     try:
         source_st = os.lstat(root["source_path"])
@@ -1237,12 +1283,12 @@ def _verify_folder_sync_root(root: dict) -> None:
 
 
 def _check_folder_deletion_confirmation(
-    deleted: list,
+    deleted: Sequence[ManifestKey],
     *,
     allow_deletions: bool,
     confirmed_deletions: int | None,
     resuming: bool,
-    recovery_confirmed: set | None,
+    recovery_confirmed: AbstractSet[ManifestKey] | None,
 ) -> bool:
     """Refuse source deletions the user has not confirmed.
 
@@ -1265,18 +1311,18 @@ def _check_folder_deletion_confirmation(
 
 
 def _folder_sync_conflicts(
-    manifest: dict,
-    baseline: dict,
-    local: dict,
-    changed: list,
-    deleted: list,
-    recovery_republish: set,
+    manifest: JsonDict,
+    baseline: Mapping[ManifestKey, JsonDict],
+    local: Mapping[ManifestKey, LocalEntry],
+    changed: Sequence[ManifestKey],
+    deleted: Sequence[ManifestKey],
+    recovery_republish: AbstractSet[ManifestKey],
     *,
-    scan_progress=None,
-    cancel_check=None,
+    scan_progress: StepProgress | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> list[str]:
     """Source paths a sync would clobber, reporting each compared entry."""
-    conflicts = []
+    conflicts: list[str] = []
     at_risk = [key for key in changed if key in baseline] + list(deleted)
     added = [key for key in changed if key not in baseline]
     # Every at-risk source entry is re-read (and usually re-hashed) before
@@ -1285,7 +1331,7 @@ def _folder_sync_conflicts(
     scan_total = len(at_risk) + len(added)
     scanned = 0
 
-    def note_scanning(rel):
+    def note_scanning(rel: str) -> None:
         """Name the entry about to be compared, before it is counted.
 
         The count is what the job's throughput and ETA are derived from,
@@ -1342,7 +1388,13 @@ def _folder_sync_conflicts(
     return conflicts
 
 
-def _publish_folder_changes(manifest: dict, local: dict, changed: list, deleted: list, progress=None) -> None:
+def _publish_folder_changes(
+    manifest: JsonDict,
+    local: Mapping[ManifestKey, LocalEntry],
+    changed: Sequence[ManifestKey],
+    deleted: Sequence[ManifestKey],
+    progress: StepProgress | None = None,
+) -> None:
     """Apply local deletions, then publish created and modified files to source."""
     total = len(changed) + len(deleted)
     done = 0
@@ -1364,17 +1416,17 @@ def _publish_folder_changes(manifest: dict, local: dict, changed: list, deleted:
 
 
 def sync_folder(
-    db,
+    db: Database,
     root_folder_id: int,
     vireo_dir: str,
     *,
     allow_deletions: bool = False,
     confirmed_deletions: int | None = None,
-    progress=None,
-    scan_progress=None,
-    cancel_check=None,
-    begin_commit=None,
-) -> dict:
+    progress: StepProgress | None = None,
+    scan_progress: StepProgress | None = None,
+    cancel_check: CancelCheck | None = None,
+    begin_commit: BeginCommit | None = None,
+) -> JsonDict:
     """Publish one shared local folder and restore its catalog paths.
 
     ``scan_progress(current, total, rel)`` reports the conflict scan that runs
@@ -1390,7 +1442,7 @@ def sync_folder(
         if not state_row or state_row["state"] not in {"active", "syncing"}:
             raise LocalWorkspaceError("This folder is not working locally")
         resuming = state_row["state"] == "syncing"
-        recovery_confirmed = None
+        recovery_confirmed: set[ManifestKey] | None = None
         if resuming:
             allow_deletions = True
             recovery_confirmed = _load_sync_recovery(vireo_dir, root_folder_id)
@@ -1446,7 +1498,9 @@ def sync_folder(
         }
 
 
-def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_published=False) -> dict:
+def discard_folder(
+    db: Database, root_folder_id: int, vireo_dir: str, *, acknowledge_published: bool = False
+) -> JsonDict:
     """Remove one local session without changing source files."""
     root_folder_id = int(local_root_for_folder(db, root_folder_id) or root_folder_id)
     with _folder_lock(root_folder_id):
