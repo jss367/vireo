@@ -132,7 +132,7 @@ def test_restricted_generator_survives_discovery_for_empty_leaf_status(leaves):
     folders["update_folder_status"](state, "ok", True)
     assert registered == ["/invented/root"] + [x for x in leaves if "blocked" not in x]
     assert state.scoped_paths == {"/invented/root", *leaves}
-    assert state._restrict_root_paths == {x for x in leaves if "blocked" not in x}
+    assert state._restrict_root_paths == {os.path.normpath(x) for x in leaves if "blocked" not in x}
     assert not any("blocked" in x for x in stats)
     assert stamps  # Zero indexed files still retain the explicit scope for status.
 
