@@ -639,7 +639,9 @@ function toggleReviewScopeRegroup() {
 }
 
 function registerPipelineReviewScopeHook() {
-    window.getPhotoExternalEditDisabledHint = function() {
+  Vireo.registerPageHooks({
+    getPhotoExternalEditDisabledHint: function() {
       return isScopedReviewView() ? scopedViewEditHint() : null;
-    };
+    },
+  });
 }

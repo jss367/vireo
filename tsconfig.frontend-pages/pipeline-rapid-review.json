@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/pipeline-rapid-review.d.ts",
+    "../types/page-hooks.d.ts",
     "../tests/frontend/rapid-review-type-contracts.ts",
     "../vireo/static/pipeline-rapid-review/apply-diff.js",
     "../vireo/static/pipeline-rapid-review/apply.js",

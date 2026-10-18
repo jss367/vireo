@@ -25,6 +25,7 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
+from services.import_locations import MAX_SUGGESTION_PATHS, stream_location_suggestions
 from services.imports import ImportFailure, ImportService
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -1275,7 +1276,6 @@ def create_imports_blueprint(
     invalidate_missing_originals,
     enqueue_process_job,
     chain_after_move,
-    bulk_gps_location_payload,
     guard_move_folder,
     sync_job_lock,
 ):
@@ -1294,7 +1294,6 @@ def create_imports_blueprint(
         invalidate_missing_originals=invalidate_missing_originals,
         enqueue_process_job=enqueue_process_job,
         chain_after_move=chain_after_move,
-        bulk_gps_location_payload=bulk_gps_location_payload,
     )
 
     def import_response(result):
@@ -1786,6 +1785,37 @@ def create_imports_blueprint(
         )
         return Response(
             stream.generate(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @blueprint.route("/api/import/location-suggestions", methods=["POST"])
+    def api_import_location_suggestions():
+        """Stream suggested locations for the files an import would bring in.
+
+        Accepts ``{"paths": [...]}`` (the preview's source files) and streams
+        GPS-reading progress, then the files grouped by GPS cell with one
+        suggested place per group; see
+        ``services.import_locations.stream_location_suggestions``. Nothing is
+        written except the shared reverse-geocode cache.
+        """
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths")
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or any(not isinstance(path, str) or not path for path in paths)
+        ):
+            return json_error("paths must be a non-empty list of file paths", 400)
+        if len(paths) > MAX_SUGGESTION_PATHS:
+            return json_error(
+                f"at most {MAX_SUGGESTION_PATHS:,} files can be checked for locations",
+                400,
+            )
+        import config as cfg
+
+        return Response(
+            stream_location_suggestions(db_path, paths, cfg.load()),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

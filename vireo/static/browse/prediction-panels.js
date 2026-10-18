@@ -574,7 +574,7 @@ function refreshBrowseSidebarPanels() {
   }
 }
 
-window.afterHistoryChange = async function() {
+async function afterHistoryChange() {
   // History can change membership and ordering, including photos outside the
   // loaded page. Re-run the current query for both toolbar and keyboard actions.
   var previousSelection = new Set(selectedPhotos);
@@ -631,7 +631,7 @@ window.afterHistoryChange = async function() {
   refreshBrowseSidebarPanels();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
-};
+}
 
 // Accepting writes a keyword, so every surface that counts keywords has to be
 // told — the same fan-out applySelectionKeyword performs. refreshPendingSyncBanner

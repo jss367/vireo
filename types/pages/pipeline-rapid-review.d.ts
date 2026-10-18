@@ -19,7 +19,7 @@ interface RapidApplyDiff {flagNew:number;rejectNew:number;clearNew:number;tagNew
 interface RapidState {results:RapidResults|null;photoMap:Record<number,RapidPhoto>;allSessions:RapidSession[];sessions:RapidSession[];sessionIndex:number;items:RapidPhoto[];picks:Set<number>;rejects:Set<number>;reviewed:Set<number>;touched:Set<number>;initialFlags:Record<number,string>;initialSpeciesKeywords:Record<number,Record<string,boolean>>;keywordStateSpecies:string;initialSpecies:string;history:RapidHistory[];currentIndex:number;seeded:boolean;applying:boolean;loadError:boolean;historyRefreshFailed:boolean;zoomed:boolean;zoomPhotoId:number|null;zoomAnchor:{x:number;y:number}|null;zoomDrag:{pointerId:number;startX:number;startY:number;scrollLeft:number;scrollTop:number;moved:boolean}|null;suppressZoomClick:boolean;openToken:number;queue:RapidQueue;queuePromptResolve:((choice:string|null)=>void)|null;}
 interface RapidShortcutConfig {keyboard_shortcuts?:Record<string,Record<string,string>>;}
 interface RapidKeymap {setScope(scope:string):void;matchesShortcut?(event:KeyboardEvent,shortcut:string):boolean;register?(scope:string,item:{key:string;name:string;description:string;category:string;action:()=>boolean}):void;}
-interface Window {Keymap:RapidKeymap;_vireoShortcuts?:Record<string,Record<string,string>>;beforeHistoryChange:()=>boolean;afterHistoryChange:()=>Promise<void>;vireoThumbnailUrl?:(photo:RapidPhoto|number)=>string;}
+interface Window {Keymap:RapidKeymap;_vireoShortcuts?:Record<string,Record<string,string>>;vireoThumbnailUrl?:(photo:RapidPhoto|number)=>string;}
 declare var Keymap:RapidKeymap;
 declare function matchesShortcut(event:KeyboardEvent,shortcut:string):boolean;
 declare function showToast(message:string,kind?:string):void;
@@ -32,3 +32,5 @@ declare function safeFetch(url:'/api/encounters/species',init?:RequestInit,optio
 declare function safeFetch(url:'/api/pipeline/save-cache',init?:RequestInit,options?:{toast?:boolean}):Promise<unknown>;
 // WebIDL coerces assigned numeric counts to text; the implementation relies on that setter.
 interface RapidTextOutput {textContent:string|number|null;}
+// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;

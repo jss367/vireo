@@ -47,3 +47,5 @@ declare function splitPipelineMessages(errors?: string[], notes?: string[]): {er
 
 interface PipelineCardAggregate {running: boolean; failed: boolean; warning: boolean; completed: number; skipped: number; present: number;}
 declare function safeFetch(url: '/api/pipeline/slots', init?: RequestInit, options?: {toast?: boolean}): Promise<PipelineSlotInfo>;
+// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;

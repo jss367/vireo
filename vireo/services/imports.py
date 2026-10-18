@@ -17,14 +17,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
+import places
 from db import Database
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from services.import_locations import (
+    LocationChoiceError,
+    apply_location_choices,
+    parse_location_choices,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from jobs import JobRunner
-    from services.service_types import ErrorResponse, JobDict, JsonDict
+    from services.service_types import JobDict, JsonDict
 
     # A tag-scope entry: ``("photo", photo_id, identity)`` or ``("file", hash_or_path)``.
     _ScopeToken = tuple[str, int, str] | tuple[str, str]
@@ -85,15 +91,6 @@ class _EnqueueProcessJob(Protocol):
         collection_id: int, process_id: int, chained_from: str | None = None,
         expanded: JsonDict | None = None, after_move: JsonDict | None = None,
     ) -> tuple[str | None, str | None, str | None]: ...
-
-
-class _BulkGpsLocationPayload(Protocol):
-    """``BulkGpsLocations.payload``: ``(payload, error_response)``."""
-
-    def __call__(
-        self, db: Database, body: JsonDict,
-        cancel_check: Callable[[], bool] | None = None,
-    ) -> tuple[JsonDict | None, ErrorResponse | None]: ...
 
 
 class _CancelRequested(Protocol):
@@ -685,7 +682,6 @@ class ImportService:
         invalidate_missing_originals: _InvalidateMissingOriginals,
         enqueue_process_job: _EnqueueProcessJob,
         chain_after_move: Callable[[JobDict, JsonDict, JsonDict, int], object],
-        bulk_gps_location_payload: _BulkGpsLocationPayload,
     ) -> None:
         # Any: ``config`` is the Flask app config, whose values are of mixed types.
         self.get_runner = get_runner
@@ -694,7 +690,6 @@ class ImportService:
         self.invalidate_missing_originals = invalidate_missing_originals
         self.enqueue_process_job = enqueue_process_job
         self.chain_after_move = chain_after_move
-        self.bulk_gps_location_payload = bulk_gps_location_payload
         # Serialize workers importing the same frozen snapshot so replays
         # observe prior catalog admissions instead of claiming them again.
         self.snapshot_import_locks: dict[tuple[int, int], threading.Lock] = {}
@@ -754,15 +749,16 @@ class ImportService:
                                    and isinstance(result.get("photo_ids"), list) and not competing),
         }
 
-    def _gps_location_chunks(self, values: Iterable[int], size: int = 800) -> Iterator[list[int]]:
-        values = list(values)
-        for idx in range(0, len(values), size):
-            yield values[idx:idx + size]
 
     def _validate_import_tag_options(
         self, body: JsonDict,
-    ) -> tuple[list[str] | None, bool | None, ImportFailure | None]:
-        """Normalize optional tags attached to a photo import request."""
+    ) -> tuple[list[str] | None, list[JsonDict] | None, ImportFailure | None]:
+        """Normalize the optional tags and location choices of an import request."""
+        if body.get("location_from_gps"):
+            return None, None, ImportFailure(
+                "This import used legacy automatic GPS locations. Open Import, "
+                "preview the source again, and select location groups before starting."
+            )
         raw_tags = body.get("tags", [])
         if not isinstance(raw_tags, list):
             return None, None, ImportFailure("tags must be a list of names")
@@ -788,12 +784,11 @@ class ImportService:
                 seen.add(match_key)
                 tags.append(name)
 
-        location_from_gps = body.get("location_from_gps", False)
-        if not isinstance(location_from_gps, bool):
-            return None, None, ImportFailure(
-                "location_from_gps must be a boolean"
-            )
-        return tags, location_from_gps, None
+        try:
+            location_choices = parse_location_choices(body.get("location_choices"))
+        except LocationChoiceError as error:
+            return None, None, ImportFailure(str(error))
+        return tags, location_choices, None
 
     def _queue_import_keyword_add(
         self,     db: Database, photo_id: int, keyword_name: str, workspace_id: int, *, commit: bool = False,
@@ -849,26 +844,29 @@ class ImportService:
         return cancel_requested
 
     def _apply_import_tags(
-        self,     workspace_id: int, photo_ids: Sequence[int], tags: Sequence[str], location_from_gps: bool,
+        self,     workspace_id: int, photo_ids: Sequence[int], tags: Sequence[str],
+        location_choices: Sequence[JsonDict],
         result: JsonDict, *, job: JobDict | None = None, runner: JobRunner | None = None,
     ) -> None:
-        """Apply requested common tags and per-photo GPS locations.
+        """Apply requested common tags and the locations chosen on the import page.
 
         Tagging is deliberately post-import: ``photo_ids`` is the importer's
         authoritative set of successfully cataloged photos, so skipped
         archive duplicates never gain tags. Failures here do not change the
         copy/verification result; they are reported separately in the job.
         """
-        if not tags and not location_from_gps:
+        if not tags and not location_choices:
             return
 
         summary = {
             "requested_tags": list(tags),
             "tagged_photos": 0,
-            "location_requested": bool(location_from_gps),
+            "location_requested": bool(location_choices),
             "locations_added": 0,
+            "locations_kept": 0,
+            "locations_unchosen": 0,
+            "locations_no_gps": 0,
             "locations_unresolved": 0,
-            "locations_skipped": 0,
             "errors": [],
         }
         result["tagging"] = summary
@@ -883,10 +881,10 @@ class ImportService:
 
         if job is not None and runner is not None:
             phase = (
-                "Adding tags and GPS locations"
-                if tags and location_from_gps
-                else "Adding GPS locations"
-                if location_from_gps
+                "Adding tags and locations"
+                if tags and location_choices
+                else "Adding locations"
+                if location_choices
                 else "Adding tags"
             )
             runner.push_event(job["id"], "progress", {
@@ -902,10 +900,10 @@ class ImportService:
             thread_db, workspace_id, photo_ids, tags, summary, cancel_requested)
         tagging_cancelled = cancel_requested()
 
-        if location_from_gps and not tagging_cancelled:
-            self._add_import_gps_locations(
-                thread_db, photo_ids, summary, cancel_requested)
-        elif location_from_gps:
+        if location_choices and not tagging_cancelled:
+            self._add_import_locations(
+                thread_db, photo_ids, location_choices, summary, cancel_requested)
+        elif location_choices:
             summary["skipped"] = "import cancelled"
         thread_db.close()
 
@@ -968,95 +966,28 @@ class ImportService:
                 )
         summary["tagged_photos"] = len(tagged_photo_ids)
 
-    def _add_import_gps_locations(
-        self, thread_db: Database, photo_ids: Sequence[int], summary: JsonDict,
+    def _add_import_locations(
+        self, thread_db: Database, photo_ids: Sequence[int],
+        location_choices: Sequence[JsonDict], summary: JsonDict,
         cancel_requested: _CancelRequested,
     ) -> None:
-        """Assign each imported photo the location its EXIF GPS resolves to."""
-        unresolved = 0
-        skipped = 0
-        added = 0
-        cancelled_during_gps = False
-        # Resolve imports in bounded chunks to limit each payload's memory
-        # use and give cancellation a chance between large batches while
-        # sharing the persistent ~110 m geocode cache.
-        for photo_chunk in self._gps_location_chunks(photo_ids, size=10000):
-            if cancel_requested():
-                cancelled_during_gps = True
-                break
-            try:
-                payload, error = self.bulk_gps_location_payload(
-                    thread_db, {"photo_ids": photo_chunk},
-                    cancel_check=cancel_requested,
-                )
-                # ``payload`` is None exactly when ``error`` is set.
-                if error is not None or payload is None:
-                    raise RuntimeError("location resolution was rejected")
-                if payload.pop("cancelled", False) or cancel_requested():
-                    cancelled_during_gps = True
-                    break
-                details_by_place_id = payload.pop(
-                    "_details_by_place_id", {}
-                )
-                unresolved += len(payload["unresolved"])
-                skipped += len(payload["skipped"])
-                for group in payload["groups"]:
-                    if cancel_requested(pause_safe=False):
-                        cancelled_during_gps = True
-                        break
-                    details = details_by_place_id.get(group["place_id"])
-                    if not details:
-                        unresolved += len(group["photo_ids"])
-                        continue
-                    try:
-                        leaf_id = thread_db.upsert_place_chain(details)
-                    except Exception as exc:
-                        log.exception(
-                            "Failed to create GPS import location %s",
-                            group["place_id"],
-                        )
-                        summary["errors"].append(
-                            f"Could not create location "
-                            f"{group.get('summary') or group['place_id']}: "
-                            f"{exc}"
-                        )
-                        unresolved += len(group["photo_ids"])
-                        continue
-                    from services.edit_history import change_photo_location
-                    with thread_db._commits_held():
-                        location_items = []
-                        for photo_id in group["photo_ids"]:
-                            if cancel_requested(pause_safe=False):
-                                cancelled_during_gps = True
-                                break
-                            item = change_photo_location(thread_db, photo_id, leaf_id)
-                            if item is not None:
-                                location_items.append(item)
-                        added += len(location_items)
-                        if location_items:
-                            thread_db.record_edit(
-                                "photo_location",
-                                f"Added GPS location during import to "
-                                f"{len(location_items)} photos",
-                                "from_exif", location_items,
-                                is_batch=True, _commit=False,
-                            )
-                thread_db.commit()
-                if cancel_requested():
-                    cancelled_during_gps = True
-                if cancelled_during_gps:
-                    break
-            except Exception as exc:
-                thread_db.rollback()
-                log.exception("Failed to add GPS locations during import")
-                summary["errors"].append(
-                    f"Could not add GPS locations: {exc}"
-                )
-                unresolved += len(photo_chunk)
-        summary["locations_added"] = added
-        summary["locations_unresolved"] = unresolved
-        summary["locations_skipped"] = skipped
-        if cancelled_during_gps:
+        """Give each imported photo the location chosen for its GPS cell."""
+        import config as cfg
+
+        maps_config = cfg.load()
+        try:
+            apply_location_choices(
+                thread_db, photo_ids, location_choices,
+                api_key=(maps_config.get("google_maps_api_key", "") or "").strip(),
+                language=places.result_language(maps_config),
+                summary=summary,
+                cancel_check=cancel_requested,
+            )
+        except Exception as exc:  # broad: catalog failures leave photos untagged and are reported, never fail the copy
+            thread_db.rollback()
+            log.exception("Failed to add chosen locations during import")
+            summary["errors"].append(f"Could not add locations: {exc}")
+        if summary.pop("cancelled", False):
             summary["skipped"] = "import cancelled"
 
     def _prepare_import_workspace(

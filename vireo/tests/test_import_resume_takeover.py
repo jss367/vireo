@@ -623,7 +623,7 @@ def test_terminal_runner_descendant_overrides_unpersisted_history(tmp_path, stat
         service = ImportService(
             lambda: runner, str(tmp_path / "catalog.db"), {},
             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-            chain_after_move=Mock(), bulk_gps_location_payload=Mock(),
+            chain_after_move=Mock(),
         )
         rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
         assert import_resume_takeover(PARENT_ID, _parent()["result"], rows)["by"] == "resume"
@@ -690,7 +690,7 @@ def test_takeover_reads_never_started_descendant_pipeline_history(tmp_path):
         db.conn.commit()
         service = ImportService(lambda: runner, db._db_path, {},
                                 invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                                chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                                chain_after_move=Mock())
         rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
         assert {row["id"] for row in rows} == {"d", "process-d"}
         takeover = import_resume_takeover(PARENT_ID, _parent()["result"], rows)
@@ -725,7 +725,7 @@ def test_takeover_fetches_transitive_legacy_descendants(tmp_path, unpersisted_ch
         db.conn.commit()
         service = ImportService(lambda: runner, db._db_path, {},
                                 invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                                chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                                chain_after_move=Mock())
         rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
         assert {row["id"] for row in rows} == {"legacy-child", "grandchild"}
         assert import_resume_takeover(PARENT_ID, _parent()["result"], rows)["by"] == "grandchild"
@@ -748,7 +748,7 @@ def test_moved_descendant_recovers_only_matching_bytes(current, path_style, monk
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                            chain_after_move=Mock())
     child = _row("d", "2026-09-01T11:00:00", {
         "ok": True, "tags_applied": True, "chained": False,
         "photo_ids": [3], "photo_fingerprints": {"3": "/local/child.jpg|s=12|h=original"},
@@ -842,7 +842,7 @@ def test_rebase_moved_parent_fingerprint_when_descendant_move_relocated_carry():
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                            chain_after_move=Mock())
     takeover = {
         "descendant_photo_fingerprints": {},
         "descendant_landed_files": {},
@@ -866,7 +866,7 @@ def test_rebase_moved_parent_fingerprint_rejects_replaced_bytes():
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                            chain_after_move=Mock())
     takeover = {
         "descendant_photo_fingerprints": {},
         "descendant_landed_files": {},
@@ -900,7 +900,7 @@ def test_rebase_covers_both_descendant_and_parent_carry_in_one_pass(path_style, 
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
-                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+                            chain_after_move=Mock())
     takeover = {
         "descendant_photo_fingerprints": {
             "3": "/local/child.jpg|s=12|h=hash-child",

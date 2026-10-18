@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/life-list.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/life-list/boot.js",
     "../vireo/static/life-list/cards.js",
     "../vireo/static/life-list/explorer-cards.js",

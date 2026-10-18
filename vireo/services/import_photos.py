@@ -590,7 +590,7 @@ class _ImportPhotosRequest:
             body.get("trust_likely_duplicates", False)
         ) and not self.verify_by_hash
         self.recursive = bool(body.get("recursive", True))
-        self.import_tags, self.location_from_gps, tag_options_err = (
+        self.import_tags, self.location_choices, tag_options_err = (
             self.service._validate_import_tag_options(body)
         )
         return tag_options_err
@@ -1049,7 +1049,7 @@ class _ImportPhotosRequest:
             # and the corresponding remote-target snapshot handling.
             "after_import_snapshot": self.after_import_snapshot,
             "tags": self.import_tags,
-            "location_from_gps": self.location_from_gps,
+            "location_choices": self.location_choices,
             "allow_missing_exiftool": bool(
                 self.body.get("allow_missing_exiftool", False)
             ),
@@ -1205,7 +1205,7 @@ class _ImportPhotosJob:
         self.move_target_snapshot = request.move_target_snapshot
         # Admission refused the request unless the tag options parsed.
         self.import_tags = cast("list[str]", request.import_tags)
-        self.location_from_gps = cast("bool", request.location_from_gps)
+        self.location_choices = cast("list[JsonDict]", request.location_choices)
         self.carry_photo_ids = request.carry_photo_ids
         self.parent_resume = request.parent_resume
         self.source_snapshots = request.parent_source_snapshots
@@ -1371,7 +1371,7 @@ class _ImportPhotosJob:
                 tag_photo_ids.append(pid)
         self.service._apply_import_tags(
             self.active_ws, tag_photo_ids, self.import_tags,
-            self.location_from_gps, result, job=job, runner=self.runner,
+            self.location_choices, result, job=job, runner=self.runner,
         )
         tag_errors = bool((result.get("tagging") or {}).get("errors"))
         # A pass Stop cut short, or one with failed tags or locations,

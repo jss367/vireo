@@ -4,9 +4,11 @@ import globals from 'globals';
 
 // Pages whose scripts are ES modules (see CLAUDE.md and
 // vireo/tests/test_module_pages.py). Their files share nothing through
-// globals: every name is imported, declared, or a browser global, and the
-// only window writes allowed are the page hooks and shared-script latches
-// the list names, made from the page's shared.js.
+// globals: every name is imported, declared, or a browser global. The page
+// hands the navbar and lightbox its hooks through Vireo.registerPageHooks
+// (vireo-page-hooks.js), not window, so the only window writes allowed are
+// the shared-script latches the list names (`sharedWrites`), made from the
+// page's shared.js.
 const modulePages = JSON.parse(readFileSync(new URL('./frontend-module-pages.json', import.meta.url), 'utf8'));
 const GLOBAL_OBJECTS = '/^(window|globalThis|self)$/';
 const inlineHandlerRestrictions = [
@@ -46,7 +48,9 @@ const inlineHandlerRestrictions = [
 
 /** @param {string} page @param {{pageHooks: string[], sharedWrites: string[]}} contract */
 function modulePageConfig(page, contract) {
-  const allowed = [...contract.pageHooks, ...contract.sharedWrites].join('|');
+  const allowed = contract.sharedWrites.join('|');
+  const sharedWriteSelector = `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`
+    + (allowed ? `:not([computed=false][property.name=/^(${allowed})$/])` : '');
   const pageFiles = `vireo/static/${page}/**/*.js`;
   const shim = `vireo/static/${page}/shared.js`;
   const rules = {
@@ -61,8 +65,8 @@ function modulePageConfig(page, contract) {
         ...rules,
         'no-restricted-syntax': ['error', ...inlineHandlerRestrictions, {
           selector: `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`,
-          message: 'Module pages own no globals: export the value, or expose a page hook from shared.js '
-            + '(listed in frontend-module-pages.json).',
+          message: 'Module pages own no globals: export the value, or register a page hook from shared.js '
+            + 'with Vireo.registerPageHooks (listed in frontend-module-pages.json).',
         }],
       },
     },
@@ -70,10 +74,9 @@ function modulePageConfig(page, contract) {
       files: [shim],
       rules: {
         'no-restricted-syntax': ['error', ...inlineHandlerRestrictions, {
-          selector: `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`
-            + `:not([computed=false][property.name=/^(${allowed})$/])`,
-          message: `${shim} may only write the page hooks and shared latches listed for "${page}" `
-            + 'in frontend-module-pages.json.',
+          selector: sharedWriteSelector,
+          message: `${shim} may only write the shared latches listed for "${page}" (sharedWrites) `
+            + 'in frontend-module-pages.json; register page hooks with Vireo.registerPageHooks.',
         }],
       },
     },

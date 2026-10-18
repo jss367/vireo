@@ -23,7 +23,7 @@ def _prepare_missing_originals_delete(page):
             window.__missingRemoveToasts.push({message, kind});
           };
           window.checkMissingPhotos = () => {};
-          window.loadMisses = async () => {};
+          Vireo.registerPageHooks({loadMisses: async () => {}});
           window.__missingRefreshCount = 0;
           window.refreshMissingPhotosNow = async () => {
             window.__missingRefreshCount += 1;

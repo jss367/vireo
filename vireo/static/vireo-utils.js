@@ -1,6 +1,6 @@
 /* Vireo shared utilities — loaded by _navbar.html on every page. */
 
-window.Vireo = window.Vireo || {};
+window.Vireo = window.Vireo || /** @type {VireoNamespace} */ ({});
 window.Vireo.dom = window.Vireo.dom || {
   /** @param {Element | null | undefined} element @param {string} state @param {string} [message] */
   setStatus: function(element, state, message) {

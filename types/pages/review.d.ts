@@ -10,7 +10,7 @@ interface ReviewRule {field?:string;rules?:ReviewRule[]}
 interface ReviewFilterController {getRules():ReviewRule[]|{rules?:ReviewRule[]};getVisual():unknown;setResultTotal(count:number):void;setVisualInfo(info:unknown):void;hasFilters():boolean;init(options:{page:string;root:HTMLElement|null;scopeLabel:string;onChange:()=>unknown;getScope:()=>{folder_id:null;collection_id:number|null}}):Promise<void>}
 declare const VireoFilter:ReviewFilterController;
 declare const VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
-declare const Vireo:{predictions:{decidedPredictionIds(value:unknown):number[];groupedDecisionTracker():{alreadyDecided(id:number):boolean;record(value:unknown):number[]}}};
+declare const Vireo:VireoPageHookRegistry&{predictions:{decidedPredictionIds(value:unknown):number[];groupedDecisionTracker():{alreadyDecided(id:number):boolean;record(value:unknown):number[]}}};
 declare function safeFetch<T>(url:string,options?:RequestInit,feedback?:{toast?:boolean}):Promise<T>;
 declare function showToast(message:string,kind?:string):void;
 declare function showRevealFeedback(response:unknown):void;

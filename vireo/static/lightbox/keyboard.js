@@ -104,8 +104,8 @@ document.addEventListener('keydown', function(e) {
   // need '-' / '0' as literal input in lat/lon fields.
   var editable = _lbKeyTargetEditable(e.target);
   // Flag / Reject / Unflag — operate on the photo currently displayed in the
-  // lightbox. The lightbox is shared across pages; setFlagFor (browse) and
-  // setReviewFlag (review) update their page's local model, so prefer them
+  // lightbox. The lightbox is shared across pages; the setFlagFor (browse) and
+  // setReviewFlag (review) page hooks update their page's local model, so prefer them
   // when available so badges/grids stay in sync without a refetch. The bare
   // POST fallback covers pages that open the lightbox without a flag helper
   // (misses, pipeline-review). Lives outside the no-modifier guard below so
@@ -121,10 +121,8 @@ document.addEventListener('keydown', function(e) {
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
     if (lbFlag !== null && vireoLightboxSession.requestedPhotoId() != null) {
       var pid = vireoLightboxSession.requestedPhotoId(); if (pid == null) return;
-      if (
-        typeof window.handleMissesLightboxFlagShortcut === 'function' &&
-        window.handleMissesLightboxFlagShortcut(pid, lbFlag) === true
-      ) {
+      var missesFlagShortcut = Vireo.pageHook('handleMissesLightboxFlagShortcut');
+      if (missesFlagShortcut && missesFlagShortcut(pid, lbFlag) === true) {
         e.preventDefault();
         e.stopImmediatePropagation();
         return;

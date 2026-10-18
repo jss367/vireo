@@ -1911,7 +1911,7 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
 
     # Filtering keeps the saved review editable.
     with page.expect_request("**/api/photos/*/flag"):
-        page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[3])
+        page.evaluate("(photoId) => Vireo.pageHook('setFlagFor')(photoId, 'flagged')", all_ids[3])
 
     scope.select_option("collection")
     page.locator("[data-testid='pipeline-review-collection']").select_option(
@@ -1930,7 +1930,7 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
     assert regroup_payloads[-1]["collection_id"] == collection_id
     assert regroup_payloads[-1]["save_cache"] is False
     flags_before = len(flag_payloads)
-    page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[0])
+    page.evaluate("(photoId) => Vireo.pageHook('setFlagFor')(photoId, 'flagged')", all_ids[0])
     page.wait_for_timeout(100)
     assert len(flag_payloads) == flags_before
 
@@ -2022,11 +2022,11 @@ def test_pipeline_review_scope_guard_blocks_writes_to_hidden_photos(live_server,
           out.inspectorOpen = document.getElementById('inspectOverlay')
             .classList.contains('open');
           // The shared lightbox and native menu call these page writers.
-          out.flag = await window.setFlagFor(hidden, 'rejected');
+          out.flag = await Vireo.pageHook('setFlagFor')(hidden, 'rejected');
           out.rating = await setRatingFor(hidden, 2);
-          out.wildlife = await window.setWildlifeExcludedFor(hidden, true);
+          out.wildlife = await Vireo.pageHook('setWildlifeExcludedFor')(hidden, true);
           out.lightbox = openPipelineLightbox(hidden);
-          out.lightboxReadOnly = window.getLightboxOpenOptions(hidden).readOnly;
+          out.lightboxReadOnly = Vireo.pageHook('getLightboxOpenOptions')(hidden).readOnly;
           return out;
         }""",
         hidden,
@@ -2050,7 +2050,7 @@ def test_pipeline_review_scope_guard_blocks_writes_to_hidden_photos(live_server,
 
     # The in-scope photo is still writable, and its write is the only one.
     with page.expect_request(f"**/api/photos/{visible}/flag"):
-        page.evaluate("(pid) => window.setFlagFor(pid, 'flagged')", visible)
+        page.evaluate("(pid) => Vireo.pageHook('setFlagFor')(pid, 'flagged')", visible)
     assert hidden_writes() == []
 
 
@@ -2099,7 +2099,7 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     expect(page.locator(".photo-card.review")).to_have_count(0)
 
     page.evaluate(
-        "(photoId) => window.setFlagFor(photoId, 'flagged')",
+        "(photoId) => Vireo.pageHook('setFlagFor')(photoId, 'flagged')",
         photo_ids[0],
     )
     expect(page.locator(".photo-label")).to_have_count(1)

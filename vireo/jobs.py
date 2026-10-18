@@ -1,20 +1,30 @@
 """Background job runner with SSE progress streaming and log broadcasting."""
 
-import json
 import logging
 import queue
-import sqlite3
-import sys
 import threading
 import time
-import traceback
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime
 
 import power
 from job_contract import failure_event
-from job_summaries import describe_result, error_text
+from job_runner.checkpoints import JobCheckpointer
+from job_runner.control import JobControl
+from job_runner.events import EventStreams
+from job_runner.history import INTERRUPTED_BY_RESTART as INTERRUPTED_BY_RESTART
+from job_runner.history import JobHistory
+from job_runner.pipeline_queue import SLOT_CAP as SLOT_CAP
+from job_runner.pipeline_queue import PipelineQueue
+from job_runner.reservations import WorkspaceBusyError as WorkspaceBusyError
+from job_runner.reservations import WorkspaceReservations
+from job_runner.reservations import describe_job as describe_job
+from job_runner.reservations import describe_jobs as describe_jobs
+from job_runner.reservations import format_duration as format_duration
+from job_runner.steps import StepTree
+from job_runner.views import new_job_dict, snapshot_job, synthesize_queued_view
+from job_runner.workers import WorkerThreads
 from resource_ledger import (
     bind_resource_cancel_check,
     bind_resource_owner,
@@ -91,92 +101,6 @@ def job_type_blocks_local_transitions(job_type):
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
-_PROMOTION_RETRY_DELAY_SECS = 0.1
-# How often live jobs checkpoint their step tree and progress into
-# job_history. A crash or kill (the desktop app quits Flask without a
-# graceful shutdown) never reaches _persist_job, so without checkpoints
-# the startup sweep can only say "interrupted" — not what got done.
-CHECKPOINT_INTERVAL_SECS = 2.0
-INTERRUPTED_BY_RESTART = "Interrupted by Vireo restart"
-_LIVE_STATUSES = ("running", "pausing", "paused")
-
-
-def _load_json(blob):
-    """Decode a job_history JSON column, tolerating NULL and junk."""
-    if not blob or not isinstance(blob, str):
-        return None
-    try:
-        return json.loads(blob)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-class _TrackedJobThread(threading.Thread):
-    """A normal job thread that reports when its target has fully returned."""
-
-    def __init__(self, *args, on_finish, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._on_finish = on_finish
-
-    def run(self):
-        try:
-            super().run()
-        finally:
-            self._on_finish(self)
-
-
-# Maximum number of pipeline jobs allowed to run concurrently. Bumped
-# to 2 in Step 6 of the concurrency rollout (Steps 1-3 added the
-# ModelCache + GPU/regroup locks that make this safe; Steps 4-5 added
-# the queue + UI). The cap is intentionally low: the gains from
-# overlapping two pipelines come from one's GPU phase running while
-# another's I/O / CPU phases progress. A third pipeline would mostly
-# queue at the GPU lock without adding throughput.
-# See docs/plans/2026-05-26-pipeline-concurrency-design.md.
-SLOT_CAP = 2
-
-
-class WorkspaceBusyError(RuntimeError):
-    """A transfer and another job cannot share the workspace's originals."""
-
-
-# A synchronous request that has held its workspace reservation this long is
-# hung, not slow: a busy rejection says so and logs the holder's stack.
-STALE_WORKSPACE_MUTATION_SECS = 60
-
-
-def format_duration(seconds):
-    """Short human duration for status text: "12 s", "4 min", "3 h 2 min"."""
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds} s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} min"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
-
-
-def describe_job(job):
-    """Name a job for a busy message, e.g. "the export job (running for 4 min)"."""
-    kind = str(job.get("type") or "unknown").replace("-", " ").replace("_", " ")
-    status = job.get("status") or "running"
-    started = job.get("_start_time")
-    if status == "running" and isinstance(started, (int, float)):
-        status = f"running for {format_duration(time.time() - started)}"
-    return f"the {kind} job ({status})"
-
-
-def _join_blockers(items):
-    if len(items) <= 1:
-        return "".join(items)
-    return ", ".join(items[:-1]) + " and " + items[-1]
-
-
-def describe_jobs(jobs):
-    """``describe_job`` for each job, joined into one phrase."""
-    return _join_blockers([describe_job(job) for job in jobs])
-
 
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
@@ -187,24 +111,8 @@ class JobRunner:
 
     def __init__(self, db=None):
         self._jobs = {}
-        self._events = {}  # job_id -> deque of events
-        self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.RLock()
         self._pause_condition = threading.Condition(self._lock)
-        self._cancelled = set()  # job ids that have been cancelled
-        # Cooperative pause requests. Pausable work reaches these through
-        # is_cancelled(), which doubles as its existing safe-point callback.
-        # Keeping the wait in the runner means scan/import call sites do not
-        # need a second callback threaded through every layer.
-        self._pause_requested = set()
-        # job ids past an uninterruptible commit point (e.g. the
-        # local-processing archive move). Once a job is in here, any
-        # late ``cancel_job`` call is a no-op so the terminal status can
-        # no longer be flipped to "cancelled" by a Stop press that
-        # landed after the commit finished but before _run_job recorded
-        # the result. Cleared by _prune_finished_jobs alongside
-        # _cancelled.
-        self._uncancellable = set()
         # Held while any sleep-blocking job runs; see issue #1397. Resolved
         # through the module rather than bound at import so tests (and any
         # future platform override) can substitute the inhibitor.
@@ -213,87 +121,39 @@ class JobRunner:
                 reason
             ),
         )
-        self._db_path = None
-        # Pending pipeline work, keyed by job_id. Populated by
-        # ``enqueue_pipeline`` and consumed by ``_try_promote_queued``
-        # when a slot opens. The work_fn closure can't be persisted
-        # cross-process, so a process restart will see queued rows in
-        # job_history without a matching entry here; the startup sweep
-        # promotes such rows to 'failed'.
-        self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
-        self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
-        # workspace -> holders of synchronous reservations (API requests).
-        # Each holder records what it is, when it began and which thread holds
-        # it, so a rejected transfer can name it instead of "something".
-        self._workspace_mutations = {}
-        self._exclusive_workspace_mutations = {}  # workspace -> holder
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
-        self._promotion_retry_scheduled = False
-        # Periodic checkpointing of live jobs into job_history. Started
-        # lazily by the first persisted job and exits on its own once no
-        # persisted job is live, so idle runners (and the thousands the
-        # test suite creates) own no thread.
-        self._checkpoint_thread = None
-        self._checkpoint_wakeup = threading.Event()
-        # Serializes the whole snapshot+write path so a late-finishing
-        # older snapshot (the 2s timer's) cannot overwrite the row with
-        # a scope that a fresher snapshot (a worker's synchronous flush
-        # right after a batch commit) already persisted. Without this
-        # the two callers can each snapshot under ``_lock`` and then
-        # race in ``_write_checkpoints``, leaving the interrupted row
-        # holding stale ``photo_ids`` if Vireo crashes in that window.
-        # Held around the whole checkpoint sequence, above ``_lock`` in
-        # lock order: nothing else acquires it.
-        self._checkpoint_write_lock = threading.Lock()
-        # Worker ownership is explicit.  Daemon threads alone are not a
-        # lifecycle: short-lived create_app() callers (especially tests) must
-        # be able to cancel and join their work before tearing down databases
-        # and process-wide monkeypatches.
-        self._worker_threads = set()
-        self._shutting_down = False
+        self._workers = WorkerThreads(self._lock, lambda: self._run_job)
+        self._streams = EventStreams(self._lock, self._jobs)
+        self._steps = StepTree(self._lock, self._jobs)
+        self._control = JobControl(
+            self._lock, self._pause_condition, self._jobs, self._streams,
+        )
+        self._queue = PipelineQueue(
+            self._lock, self._jobs, self._workers,
+            promote=lambda: self._try_promote_queued(),
+        )
+        self._reservations = WorkspaceReservations(
+            self._lock, self._pause_condition, self._jobs, self._queue,
+            self._control, self._workers,
+        )
+        self._history = JobHistory(db.job_history.catalog_file() if db else None)
+        self._checkpoints = JobCheckpointer(
+            self._lock, self._jobs, self._history, self._workers,
+            checkpoint=lambda: self.checkpoint_live_jobs(),
+        )
         if db:
-            self._db_path = db.job_history.catalog_file()
             # job_history is part of the canonical schema (canonical_schema.
             # FORMERLY_LAZY_OBJECTS); the runner only reconciles its rows.
-            self._startup_sweep(db)
-
-    def _start_worker_thread(self, job, work_fn):
-        """Start and retain a worker until its complete cleanup finishes.
-
-        Returns False when shutdown won the race with a caller that had
-        already registered a job but had not started its thread yet.
-        """
-        def forget_thread(thread):
-            with self._lock:
-                self._worker_threads.discard(thread)
-
-        thread = _TrackedJobThread(
-            target=self._run_job,
-            args=(job, work_fn),
-            on_finish=forget_thread,
-            daemon=True,
-            name=f"vireo-job-{job['id']}",
-        )
-        with self._lock:
-            if self._shutting_down:
-                return False
-            self._worker_threads.add(thread)
-            # Start while still holding the ownership lock. shutdown() can
-            # therefore never take a snapshot between registration and start.
-            thread.start()
-        return True
+            self._history.startup_sweep(db)
 
     def _discard_unstarted_job(self, job_id):
         """Remove a job whose worker lost the race with shutdown()."""
         with self._lock:
             self._jobs.pop(job_id, None)
-            self._events.pop(job_id, None)
-            self._subscribers.pop(job_id, None)
-            self._cancelled.discard(job_id)
-            self._pause_requested.discard(job_id)
-            self._uncancellable.discard(job_id)
+            self._streams.drop_locked(job_id)
+            self._control.forget_locked(job_id)
 
     def shutdown(self, timeout=10.0):
         """Stop accepting work, request cancellation, and join workers.
@@ -311,23 +171,13 @@ class JobRunner:
         # waits and worker joins share the caller's shutdown budget.
         deadline = time.monotonic() + timeout
         with self._pause_condition:
-            self._shutting_down = True
-            queued_ids = list(self._queued_pipelines)
-            for job_id, job in self._jobs.items():
-                if (
-                    job.get("status") in ("running", "pausing", "paused")
-                    and job_id not in self._uncancellable
-                ):
-                    self._cancelled.add(job_id)
-                    self._pause_requested.discard(job_id)
+            self._workers.begin_shutdown_locked()
+            queued_ids = list(self._queue.queued)
+            self._control.cancel_live_locked()
             # A paused worker must wake before it can observe cancellation.
             self._pause_condition.notify_all()
-            checkpoint_thread = self._checkpoint_thread
-        # The checkpoint thread exits on its next wake once it sees
-        # _shutting_down; wake it now so it doesn't hold the deadline.
-        self._checkpoint_wakeup.set()
-        if checkpoint_thread is not None and checkpoint_thread.is_alive():
-            checkpoint_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            checkpoint_thread = self._checkpoints.thread
+        self._checkpoints.stop(checkpoint_thread, deadline)
 
         # Queued jobs have persisted state to transition as well as in-memory
         # contexts to remove. Do that outside the runner lock, bounding each
@@ -355,336 +205,26 @@ class JobRunner:
                     "Failed to cancel queued job %s during shutdown", job_id,
                 )
 
-        current = threading.current_thread()
-        while True:
-            with self._lock:
-                threads = [
-                    thread for thread in self._worker_threads
-                    if thread is not current and thread.is_alive()
-                ]
-            if not threads:
-                return queued_cancelled
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                log.warning(
-                    "JobRunner shutdown timed out with %d worker(s) alive: %s",
-                    len(threads), ", ".join(thread.name for thread in threads),
-                )
-                return False
-            threads[0].join(timeout=remaining)
-
-    def _startup_sweep(self, db):
-        """Reconcile job_history with the fact that we just started.
-
-        On a clean shutdown a job thread either finishes or is cancelled
-        and the row is updated accordingly. On a crash or kill, threads
-        die without persisting — so rows with ``status='running'`` from
-        a prior process are orphans. Mark them ``'failed'``. Queued rows
-        from a prior process likewise lose their in-process work closure;
-        mark them ``'failed'`` too so they don't linger forever waiting
-        for a slot.
-
-        Running rows carry whatever the checkpoint thread last wrote
-        (step tree, progress, partial result). Keep all of it: the user
-        wants to know what the job got done before the restart, not just
-        that it was interrupted. Steps still marked running are flipped
-        to failed with the interruption as their error; completed steps
-        keep their summaries; the checkpoint time becomes ``finished_at``
-        (the last moment the job was known to be alive) and is exposed as
-        ``result.last_progress_at`` so the UI can say when progress was
-        last recorded — or that none was.
-
-        Future PR: rebuild work closures from the ``config`` blob on
-        startup so queued runs survive restart.
-        """
-        now = datetime.now().isoformat()
-        msg = INTERRUPTED_BY_RESTART
-        rows = db.job_history.unfinished()
-        for row in rows:
-            was_queued = row["status"] == "queued"
-            result = _load_json(row["result"])
-            if not isinstance(result, dict):
-                result = {}
-            tree = _load_json(row["tree"])
-            if not isinstance(tree, list):
-                tree = []
-            progress = _load_json(row["progress"])
-            if not isinstance(progress, dict):
-                progress = {}
-            last_progress_at = progress.pop("checkpoint_at", None)
-            for step in tree:
-                if isinstance(step, dict) and step.get("status") == "running":
-                    step["status"] = "failed"
-                    step["error"] = step.get("error") or msg
-                    step["error_count"] = max(
-                        int(step.get("error_count") or 0), 1,
-                    )
-            result.update({
-                "error": msg,
-                "interrupted": True,
-                "last_progress_at": last_progress_at,
-            })
-            if was_queued:
-                # Durable marker so callers can distinguish a queued row
-                # the sweep failed from one that actually started (e.g.
-                # a chained pipeline swept before any slot promoted it,
-                # which _chained_job_exists must not treat as proof the
-                # import handed its photos to processing).
-                result["never_started"] = True
-            db.job_history.mark_interrupted(
-                row["id"],
-                last_progress_at or now,
-                json.dumps(result, default=str),
-                int(row["error_count"] or 0) + 1,
-                json.dumps(tree) if tree else row["tree"],
-                self._interrupted_summary(msg, was_queued, tree, progress),
-                json.dumps(progress, default=str) if progress else None,
-            )
-        db.commit()
-
-    @staticmethod
-    def _interrupted_summary(msg, was_queued, tree, progress):
-        """One-line history summary for a job the restart cut short."""
-        if was_queued:
-            return f"{msg} before it started"
-        if tree:
-            done = sum(
-                1 for s in tree
-                if isinstance(s, dict) and s.get("status") == "completed"
-            )
-            noun = "step" if len(tree) == 1 else "steps"
-            return f"{msg} after {done} of {len(tree)} {noun}"
-        current = progress.get("current") or 0
-        total = progress.get("total") or 0
-        if isinstance(current, (int, float)) and isinstance(total, (int, float)):
-            if total:
-                return f"{msg} at {int(current):,} of {int(total):,}"
-            if current:
-                return f"{msg} at {int(current):,}"
-        return msg
-
-    # ------------------------------------------------------------------
-    # Live checkpoints
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _insert_running_row(conn, job):
-        """Insert the job's history row as running, if it has none yet.
-
-        ``OR IGNORE`` so a pipeline promoted from ``queued`` (whose row
-        already exists) and a job whose final row already landed are
-        both left alone.
-        """
-        conn.execute(
-            "INSERT OR IGNORE INTO job_history "
-            "(id, type, status, started_at, config, workspace_id, error_count) "
-            "VALUES (?, ?, 'running', ?, ?, ?, 0)",
-            (
-                job["id"],
-                job["type"],
-                job["started_at"],
-                json.dumps(job.get("config") or {}, default=str),
-                job.get("workspace_id"),
-            ),
-        )
-
-    def _record_job_started(self, job):
-        """Write the running row before any work happens.
-
-        Bookkeeping must never break the job: lock contention is logged
-        and skipped (the checkpoint thread retries the insert on its next
-        tick).
-        """
-
-        conn = None
-        try:
-            conn = sqlite3.connect(self._db_path, timeout=5)
-            self._insert_running_row(conn, job)
-            conn.commit()
-        except sqlite3.Error as exc:
-            log.warning(
-                "Could not record start of job %s in history: %s",
-                job["id"], exc,
-            )
-        finally:
-            if conn is not None:
-                conn.close()
-
-    def _live_persisted_jobs_locked(self):
-        """Jobs worth checkpointing. Must be called with self._lock held."""
-        return [
-            j for j in self._jobs.values()
-            if j["status"] in _LIVE_STATUSES
-            and not j.get("ephemeral")
-            and not j.get("_persisted")
-        ]
-
-    def _ensure_checkpoint_thread(self):
-        """Start the checkpoint thread unless one is already running."""
-        if not self._db_path:
-            return
-        with self._lock:
-            if self._shutting_down:
-                return
-            thread = self._checkpoint_thread
-            if thread is not None and thread.is_alive():
-                return
-            self._checkpoint_wakeup.clear()
-            thread = threading.Thread(
-                target=self._checkpoint_loop,
-                daemon=True,
-                name="vireo-job-checkpoints",
-            )
-            self._checkpoint_thread = thread
-            thread.start()
-
-    def _checkpoint_loop(self):
-        while True:
-            self._checkpoint_wakeup.wait(CHECKPOINT_INTERVAL_SECS)
-            with self._lock:
-                if self._shutting_down or not self._live_persisted_jobs_locked():
-                    # Nothing left to checkpoint; the next persisted job
-                    # start spawns a fresh thread.
-                    self._checkpoint_thread = None
-                    return
-            try:
-                self.checkpoint_live_jobs()
-            except Exception:
-                log.exception("Job checkpoint failed")
+        if not self._workers.join(deadline):
+            return False
+        return queued_cancelled
 
     def checkpoint_live_jobs(self):
-        """Persist a snapshot of every live, non-ephemeral job.
+        """Persist a snapshot of every live, non-ephemeral job now.
 
-        Writes the step tree, progress, partial result and elapsed time
-        onto the job's ``running`` history row so a crash leaves a record
-        of what the job got done. Until the job has a real ``result``, a
-        worker's ``job["partial_result"]`` stands in for it, so the
-        startup sweep keeps it on the interrupted row. Returns the number
-        of rows updated. Public so tests (and callers that just did something worth
-        recording) can checkpoint deterministically instead of waiting
-        for the timer.
-
-        The whole snapshot+write path runs under
-        ``_checkpoint_write_lock``: without it, a worker's synchronous
-        flush after a batch commit (scope N+1) can race the 2s timer
-        that started earlier with scope N — both snapshot under
-        ``_lock``, both release it, and whichever ``_write_checkpoints``
-        finishes last wins. A late-finishing N would overwrite N+1 on
-        disk and, on a crash inside that window, leave the interrupted
-        row missing the latest cataloged photo ids.
+        See ``JobCheckpointer.checkpoint_live_jobs``. Returns the number of
+        rows updated.
         """
-        if not self._db_path:
-            return 0
-        with self._checkpoint_write_lock:
-            with self._lock:
-                snapshots = []
-                for j in self._live_persisted_jobs_locked():
-                    snap = self._snapshot_job(j)
-                    # A worker publishes ``partial_result`` (a fresh dict
-                    # per update) for what a crash must not lose. Write
-                    # it only when it changed: it can be large, and the
-                    # row keeps the last written copy between writes.
-                    partial = j.get("partial_result")
-                    if (
-                        snap.get("result") is None
-                        and partial is not None
-                        and partial is not j.get("_checkpointed_partial")
-                    ):
-                        snap["result"] = partial
-                        snap["_partial_result"] = partial
-                    snapshots.append(snap)
-            if not snapshots:
-                return 0
-            written = self._write_checkpoints(snapshots)
-            if written:
-                with self._lock:
-                    for snap in snapshots:
-                        live = self._jobs.get(snap["id"])
-                        if live is not None and "_partial_result" in snap:
-                            live["_checkpointed_partial"] = snap["_partial_result"]
-            return written
+        return self._checkpoints.checkpoint_live_jobs()
 
     def flush_partial_result(self, job, attempts=10, cancel_check=None):
         """Write ``job["partial_result"]`` to its history row now.
 
-        For a worker that must not proceed until the row holds its latest
-        partial result. A checkpoint skips a write it can't get the lock
-        for, so retry with a short backoff. Returns True once the row holds
-        it, or at once when this runner keeps no history for the job.
-
-        ``cancel_check``, when passed, is polled before each attempt so a
-        Stop pressed while SQLite stays write-locked can end the wait
-        without sitting through the full retry window (each internal
-        checkpoint call blocks up to the 5s SQLite busy timeout).
+        See ``JobCheckpointer.flush_partial_result``.
         """
-        if not self._db_path or job.get("ephemeral"):
-            return True
-        for attempt in range(attempts):
-            if cancel_check is not None and cancel_check():
-                return False
-            self.checkpoint_live_jobs()
-            if job.get("_checkpointed_partial") is job.get("partial_result"):
-                return True
-            time.sleep(0.2 * (attempt + 1))
-        return False
-
-    def _write_checkpoints(self, snapshots):
-        """Write checkpoint snapshots in one transaction.
-
-        The UPDATE is guarded by ``status='running'`` so a checkpoint that
-        races the final ``_persist_job`` write can never revert a terminal
-        row back to running. Lock contention (a worker mid-transaction on
-        its own connection) is skipped, not waited out: the next tick
-        tries again.
-        """
-
-        now_iso = datetime.now().isoformat()
-        now = time.time()
-        conn = None
-        try:
-            conn = sqlite3.connect(self._db_path, timeout=5)
-            written = 0
-            for job in snapshots:
-                progress = dict(job.get("progress") or {})
-                progress["checkpoint_at"] = now_iso
-                elapsed = now - (job.get("_start_time") or now)
-                result = job.get("result")
-                self._insert_running_row(conn, job)
-                cur = conn.execute(
-                    "UPDATE job_history "
-                    "SET duration=?, result=COALESCE(?, result), "
-                    "    error_count=?, tree=?, "
-                    "    summary=?, progress=?, resource_wait_seconds=?, "
-                    "    resource_wait_count=? "
-                    "WHERE id = ? AND status = 'running'",
-                    (
-                        round(elapsed, 1),
-                        json.dumps(result, default=str)
-                        if result is not None else None,
-                        # Mirror ``_persist_job``: a bounded-sample ``errors``
-                        # list publishes the real count as ``errors_total``,
-                        # so the checkpointed ``error_count`` must read that
-                        # too — otherwise an interrupted job's startup-sweep
-                        # ``+1`` lands on the capped sample size, not the
-                        # true total.
-                        JobRunner._error_total(job),
-                        json.dumps(job.get("steps") or [], default=str),
-                        self._build_summary(job),
-                        json.dumps(progress, default=str),
-                        job.get("resource_wait_seconds", 0.0),
-                        job.get("resource_wait_count", 0),
-                        job["id"],
-                    ),
-                )
-                written += cur.rowcount
-            conn.commit()
-            return written
-        except sqlite3.OperationalError as exc:
-            log.debug("Skipped job checkpoint: %s", exc)
-            return 0
-        finally:
-            if conn is not None:
-                conn.close()
+        return self._checkpoints.flush_partial_result(
+            job, attempts=attempts, cancel_check=cancel_check,
+        )
 
     def enqueue_pipeline(self, work_fn, config=None, workspace_id=None,
                          runtime_warning=None):
@@ -692,15 +232,12 @@ class JobRunner:
         # Cover the persistence window before the queued context is published.
         # A transfer must not slip between checking admission and publishing it.
         with self._lock:
-            self._check_workspace_admission_locked(workspace_id)
-            self._pipeline_admissions[workspace_id] = self._pipeline_admissions.get(workspace_id, 0) + 1
+            self._reservations.check_admission_locked(workspace_id)
+            self._queue.admit_locked(workspace_id)
         try:
             return self._enqueue_pipeline_admitted(work_fn, config, workspace_id, runtime_warning)
         finally:
-            with self._lock:
-                self._pipeline_admissions[workspace_id] -= 1
-                if not self._pipeline_admissions[workspace_id]:
-                    del self._pipeline_admissions[workspace_id]
+            self._queue.release_admission(workspace_id)
 
     def _enqueue_pipeline_admitted(self, work_fn, config=None, workspace_id=None,
                                    runtime_warning=None):
@@ -718,7 +255,7 @@ class JobRunner:
         Returns the job id.
         """
         with self._lock:
-            if self._shutting_down:
+            if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
             self._enqueue_counter += 1
             seq = self._enqueue_counter
@@ -726,32 +263,18 @@ class JobRunner:
         now_iso = datetime.now().isoformat()
         config_blob = config or {}
 
-        # Persist the queued row using a thread-local connection so we
-        # don't share the caller's DB handle across thread boundaries.
-        if self._db_path:
-            import sqlite3
-            conn = sqlite3.connect(self._db_path, timeout=30)
-            try:
-                conn.execute(
-                    "INSERT INTO job_history "
-                    "(id, type, status, started_at, config, workspace_id, "
-                    " error_count) "
-                    "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0)",
-                    (job_id, now_iso, json.dumps(config_blob), workspace_id),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        if self._history.db_path:
+            self._history.insert_queued_row(job_id, now_iso, config_blob, workspace_id)
 
         with self._lock:
-            self._queued_pipelines[job_id] = {
+            self._queue.add_locked(job_id, {
                 "work_fn": work_fn,
                 "config": config_blob,
                 "workspace_id": workspace_id,
                 "runtime_warning": runtime_warning,
                 "started_at": now_iso,
-            }
-            shutdown_raced = self._shutting_down
+            })
+            shutdown_raced = self._workers.shutting_down
 
         # The database insert happens outside the runner lock. shutdown() may
         # begin in that window after the initial admission check; publish a
@@ -774,7 +297,7 @@ class JobRunner:
         lands first, rowcount==0 and promotion quietly gives up.
         """
         with self._lock:
-            claimed = self._claim_queued_promotion_locked()
+            claimed = self._queue.claim_locked()
             if claimed is None:
                 return
             job_id, ctx = claimed
@@ -783,26 +306,24 @@ class JobRunner:
         try:
             # Atomic queued->running flip. If a concurrent cancel beat us
             # to it, rowcount is 0 and the row stays in its final state.
-            if self._db_path:
-                promoted = self._flip_queued_row_to_running(job_id)
+            if self._history.db_path:
+                promoted = self._history.flip_queued_row_to_running(job_id)
         except Exception:
             with self._lock:
-                if self._queued_pipelines.get(job_id) is ctx:
-                    ctx.pop("_promoting", None)
-                    self._schedule_promotion_retry_locked()
+                if self._queue.unclaim_locked(job_id, ctx):
+                    self._queue.schedule_retry_locked()
             log.exception("Failed to promote queued pipeline %s", job_id)
             return
 
         retry_promotion = False
         record_terminal = False
         with self._lock:
-            if self._queued_pipelines.get(job_id) is not ctx:
+            if not self._queue.unclaim_locked(job_id, ctx):
                 retry_promotion = True
             else:
-                ctx.pop("_promoting", None)
                 if not promoted:
                     # The row was modified elsewhere (cancelled).
-                    self._queued_pipelines.pop(job_id, None)
+                    self._queue.discard_locked(job_id)
                     record_terminal = True
                     retry_promotion = True
                 else:
@@ -827,63 +348,8 @@ class JobRunner:
             return
 
         log.info("Job %s started type=pipeline", job["id"])
-        if not self._start_worker_thread(job, work_fn):
+        if not self._workers.start(job, work_fn):
             self._cancel_unstarted_promoted_pipeline(job)
-
-    def _claim_queued_promotion_locked(self):
-        """Mark the oldest queued pipeline as promoting if a slot is open.
-
-        Returns ``(job_id, ctx)``, or None when shutting down, no slot is
-        free, or nothing is waiting. Must be called with self._lock held.
-        """
-        if self._shutting_down:
-            return None
-        active = sum(
-            1 for j in self._jobs.values()
-            if (
-                j["type"] == "pipeline"
-                and j["status"] in ("running", "pausing", "paused")
-            )
-        )
-        if active >= SLOT_CAP:
-            return None
-        promoting = sum(
-            1 for ctx in self._queued_pipelines.values()
-            if ctx.get("_promoting")
-        )
-        if active + promoting >= SLOT_CAP:
-            return None
-        candidates = sorted(
-            (
-                item for item in self._queued_pipelines.items()
-                if not item[1].get("_promoting")
-            ),
-            key=lambda kv: kv[1]["started_at"],
-        )
-        if not candidates:
-            return None
-        job_id, ctx = candidates[0]
-        ctx["_promoting"] = True
-        return job_id, ctx
-
-    def _flip_queued_row_to_running(self, job_id):
-        """Flip the job's history row from queued to running.
-
-        Returns False when the row was no longer queued.
-        """
-        import sqlite3
-        conn = sqlite3.connect(self._db_path, timeout=30)
-        try:
-            cur = conn.execute(
-                "UPDATE job_history SET status='running' "
-                "WHERE id = ? AND status = 'queued'",
-                (job_id,),
-            )
-            promoted = cur.rowcount == 1
-            conn.commit()
-        finally:
-            conn.close()
-        return promoted
 
     def _install_promoted_pipeline_locked(self, job_id, ctx):
         """Move a promoted pipeline from its queue context into the live jobs.
@@ -891,7 +357,7 @@ class JobRunner:
         Returns ``(job, work_fn)``. Must be called with self._lock held.
         """
         # Move from queue context into the live jobs dict.
-        del self._queued_pipelines[job_id]
+        self._queue.remove_locked(job_id)
         job = {
             "id": job_id,
             "type": "pipeline",
@@ -916,14 +382,9 @@ class JobRunner:
         }
         self._prune_finished_jobs()
         self._jobs[job_id] = job
-        self._events[job_id] = deque(maxlen=1000)
-        # setdefault, NOT assignment: clients can subscribe to the
-        # SSE stream while the pipeline is still queued. Replacing
-        # the list at promotion time would silently drop those
-        # waiters' queues.
-        self._subscribers.setdefault(job_id, [])
+        self._streams.open_promoted_locked(job_id)
         work_fn = ctx["work_fn"]
-        if job_id in self._cancelled:
+        if job_id in self._control.cancelled:
             def work_fn(job):
                 return {"cancelled": True, "never_started": True}
         return job, work_fn
@@ -942,7 +403,7 @@ class JobRunner:
             job["result"] = {"cancelled": True, "never_started": True}
             job["finished_at"] = now
             job["_ended_at"] = time.time()
-            self._cancelled.discard(job["id"])
+            self._control.consume_cancel_locked(job["id"])
         self.push_event(job["id"], "complete", {
             "job_id": job["id"],
             "job_type": job["type"],
@@ -951,39 +412,9 @@ class JobRunner:
             "duration": 0.0,
             "errors": [],
         })
-        if self._db_path:
-            self._persist_job(job, 0.0)
+        if self._history.db_path:
+            self._history.persist_job(job, 0.0)
         job["_persisted"] = True
-
-    def _schedule_promotion_retry_locked(self):
-        """Retry queue promotion after a transient DB failure.
-
-        Must be called with self._lock held.
-        """
-        if self._promotion_retry_scheduled or self._shutting_down:
-            return
-        self._promotion_retry_scheduled = True
-
-        def retry():
-            time.sleep(_PROMOTION_RETRY_DELAY_SECS)
-            with self._lock:
-                self._promotion_retry_scheduled = False
-                if self._shutting_down:
-                    return
-            self._try_promote_queued()
-
-        def forget_thread(thread):
-            with self._lock:
-                self._worker_threads.discard(thread)
-
-        thread = _TrackedJobThread(
-            target=retry,
-            on_finish=forget_thread,
-            daemon=True,
-            name="vireo-promotion-retry",
-        )
-        self._worker_threads.add(thread)
-        thread.start()
 
     def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
         """Keep a terminal queued pipeline in the normal in-memory lifecycle."""
@@ -1010,8 +441,7 @@ class JobRunner:
         with self._lock:
             self._prune_finished_jobs()
             self._jobs[job_id] = job
-            self._events.setdefault(job_id, deque(maxlen=1000))
-            self._subscribers.setdefault(job_id, [])
+            self._streams.ensure_locked(job_id)
 
     @contextmanager
     def admission_guard(self):
@@ -1070,47 +500,10 @@ class JobRunner:
             workspace_transfer_batch=workspace_transfer_batch,
         )
         log.info("Job %s started type=%s", job["id"], job_type)
-        if not self._start_worker_thread(job, work_fn):
+        if not self._workers.start(job, work_fn):
             self._discard_unstarted_job(job["id"])
             raise RuntimeError("JobRunner is shut down")
         return job["id"]
-
-    def _make_job_dict(self, job_id, job_type, *, config, workspace_id,
-                       ephemeral, counts_for_badge, pausable,
-                       blocks_local_transitions, runtime_warning,
-                       singleton_key=None, now=None):
-        return {
-            "id": job_id,
-            "type": job_type,
-            "status": "running",
-            "started_at": now or datetime.now().isoformat(),
-            "finished_at": None,
-            "progress": {"current": 0, "total": 0, "current_file": ""},
-            "result": None,
-            "errors": [],
-            "config": config or {},
-            "workspace_id": workspace_id,
-            "steps": [],
-            "ephemeral": ephemeral,
-            "counts_for_badge": counts_for_badge,
-            "pausable": bool(pausable),
-            "blocks_local_transitions": bool(blocks_local_transitions),
-            "exclusive_workspace": False,
-            "workspace_transfer_batch": None,
-            "runtime_warning": runtime_warning,
-            "singleton_key": singleton_key,
-            "resource_wait_seconds": 0.0,
-            "resource_wait_count": 0,
-            # Pre-seeded so later writes from worker threads update an
-            # existing key instead of inserting a new one: key insertion
-            # while a request handler iterates the same dict (jsonify of
-            # /api/jobs) raises "dictionary changed size during iteration";
-            # same-key updates don't resize the dict.
-            "_start_time": time.time(),
-            "_ended_at": None,
-            "_persisted": False,
-            "_fatal_error": None,
-        }
 
     def _register_and_prepare(self, job_type, work_fn, *, config, workspace_id,
                               ephemeral, runtime_warning, counts_for_badge,
@@ -1130,13 +523,13 @@ class JobRunner:
             job_type, blocks_local_transitions,
         )
         with self._lock:
-            if self._shutting_down:
+            if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
-            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions)
+            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions)
             self._enqueue_counter += 1
             seq = self._enqueue_counter
             job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
-            job = self._make_job_dict(
+            job = new_job_dict(
                 job_id, job_type,
                 config=config, workspace_id=workspace_id,
                 ephemeral=ephemeral, counts_for_badge=counts_for_badge,
@@ -1148,152 +541,24 @@ class JobRunner:
             self._prune_finished_jobs()
             job["workspace_transfer_batch"] = workspace_transfer_batch
             self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            self._subscribers[job_id] = []
+            self._streams.open_locked(job_id)
         return job, work_fn
 
-    @contextmanager
     def workspace_mutation(self, workspace_id, *, exclusive=False, label=None):
         """Reserve synchronous mutations against transfers for their full duration.
 
-        ``label`` names the holder in the message a blocked job gets back.
+        A context manager; see ``WorkspaceReservations.workspace_mutation``.
         """
-        holder = {
-            "label": label or "a change in this workspace",
-            "started": time.monotonic(),
-            "thread": threading.get_ident(),
-        }
-        with self._lock:
-            self._check_workspace_admission_locked(workspace_id, exclusive=exclusive)
-            self._workspace_mutations.setdefault(workspace_id, []).append(holder)
-            if exclusive:
-                self._exclusive_workspace_mutations[workspace_id] = holder
-        try:
-            yield
-        finally:
-            with self._lock:
-                holders = [h for h in self._workspace_mutations[workspace_id] if h is not holder]
-                if holders:
-                    self._workspace_mutations[workspace_id] = holders
-                else:
-                    del self._workspace_mutations[workspace_id]
-                if self._exclusive_workspace_mutations.get(workspace_id) is holder:
-                    del self._exclusive_workspace_mutations[workspace_id]
-            held = time.monotonic() - holder["started"]
-            if held >= STALE_WORKSPACE_MUTATION_SECS:
-                log.warning("Workspace %s reservation for %s was held for %s",
-                            workspace_id, holder["label"], format_duration(held))
+        return self._reservations.workspace_mutation(
+            workspace_id, exclusive=exclusive, label=label,
+        )
 
     def wait_for_workspace_transfer(self, job_id):
         """Reserve an automatic transfer batch after its producing jobs finish.
 
-        All batch members register while their parent is still live. The first
-        move claims every live sibling, so the reservation survives between
-        serialized moves. Other waiting batches do not deadlock each other;
-        registration order chooses the next batch once existing work drains.
+        See ``WorkspaceReservations.wait_for_workspace_transfer``.
         """
-        with self._pause_condition:
-            while True:
-                job = self._jobs[job_id]
-                if job_id in self._cancelled or self._shutting_down:
-                    return False
-                workspace_id = job["workspace_id"]
-                batch = job.get("workspace_transfer_batch")
-                if not batch:
-                    raise ValueError("Automatic transfer batch is required")
-                live = [j for j in self._jobs.values()
-                        if j.get("workspace_id") == workspace_id
-                        and j.get("status") in ("running", "queued", "pausing", "paused")
-                        and j.get("blocks_local_transitions", True)]
-                first_batch = next((j.get("workspace_transfer_batch") for j in live
-                                    if j.get("workspace_transfer_batch") and j.get("exclusive_workspace")), None)
-                if first_batch is None:
-                    first_batch = next((j.get("workspace_transfer_batch") for j in live
-                                        if j.get("workspace_transfer_batch")), None)
-                busy = any(j.get("workspace_transfer_batch") != batch
-                           and (not j.get("workspace_transfer_batch") or j.get("exclusive_workspace"))
-                           for j in live)
-                if (not busy and first_batch == batch
-                        and not self._pipeline_admissions.get(workspace_id)
-                        and not self._workspace_mutations.get(workspace_id)
-                        and not any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
-                    for sibling in live:
-                        if sibling.get("workspace_transfer_batch") == batch:
-                            sibling["exclusive_workspace"] = True
-                    return True
-                self._pause_condition.wait(timeout=0.1)
-
-    def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
-        """Check both sides of a transfer reservation under the registration lock.
-
-        A rejection names what holds the workspace: the user cannot see a
-        synchronous reservation anywhere else, so "wait for running jobs"
-        with no job running leaves them nothing to wait for.
-        """
-        if not blocking:
-            return
-        exclusive_holder = self._exclusive_workspace_mutations.get(workspace_id)
-        if exclusive_holder is not None:
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "Wait for {blockers} to finish before starting another job or change in this workspace.",
-                [], [exclusive_holder],
-            )
-        active = [j for j in self._jobs.values()
-                  if j.get("workspace_id") == workspace_id
-                  and j.get("status") in ("running", "queued", "pausing", "paused")
-                  and j.get("blocks_local_transitions", True)]
-        transfers = [j for j in active if j.get("exclusive_workspace")]
-        if transfers:
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "Wait for the NAS transfer ({blockers}) to finish before starting another job in this workspace.",
-                transfers, [],
-            )
-        if not exclusive:
-            return
-        queued = sum(1 for c in self._queued_pipelines.values() if c.get("workspace_id") == workspace_id)
-        admitting = self._pipeline_admissions.get(workspace_id, 0)
-        holders = self._workspace_mutations.get(workspace_id, [])
-        if active or queued or admitting or holders:
-            extra = []
-            if queued:
-                extra.append("a queued pipeline" if queued == 1 else f"{queued} queued pipelines")
-            if admitting:
-                extra.append("a pipeline being added to the queue")
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "This workspace is busy with {blockers}. Wait for {it} to finish, then try again.",
-                active, holders, extra,
-            )
-
-    def _raise_workspace_busy_locked(self, workspace_id, template, jobs, holders, extra=()):
-        """Raise ``WorkspaceBusyError`` naming every blocker in ``template``.
-
-        A request that has held its reservation past
-        ``STALE_WORKSPACE_MUTATION_SECS`` is called out as long-running, and
-        its thread's stack goes to the log so the hang can be diagnosed
-        without attaching a debugger to the running app.
-        """
-        now = time.monotonic()
-        stale = [h for h in holders if now - h["started"] >= STALE_WORKSPACE_MUTATION_SECS]
-        parts = [describe_job(j) for j in jobs]
-        parts += [f"{h['label']} (running for {format_duration(now - h['started'])})" for h in holders]
-        parts += list(extra)
-        message = template.format(blockers=_join_blockers(parts), it="it" if len(parts) == 1 else "them")
-        if stale:
-            message += " A request is taking longer than usual; it may still be working."
-        (log.warning if stale else log.info)("Workspace %s busy: %s", workspace_id, message)
-        frames = sys._current_frames() if stale else {}
-        for holder in stale:
-            frame = frames.get(holder["thread"])
-            if frame is None:
-                log.warning("Holder of %s (thread %s) has exited without releasing its reservation",
-                            holder["label"], holder["thread"])
-            else:
-                log.warning("Holder of %s (thread %s) is at:\n%s", holder["label"], holder["thread"],
-                            "".join(traceback.format_stack(frame)))
-        raise WorkspaceBusyError(message)
+        return self._reservations.wait_for_workspace_transfer(job_id)
 
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).
@@ -1313,7 +578,7 @@ class JobRunner:
                 j.get("type") == job_type
                 and j.get("singleton_key") == singleton_key
                 and j.get("status") in ("running", "queued", "pausing", "paused")
-                and jid not in self._cancelled
+                and jid not in self._control.cancelled
             ):
                 return jid, j
         return None, None
@@ -1342,24 +607,24 @@ class JobRunner:
         # Compute the joined snapshot / register a new job under one lock
         # acquisition so the check-and-start is genuinely atomic.
         with self._lock:
-            if self._shutting_down:
+            if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
             existing_id, existing = self._find_singleton_locked(
                 job_type, singleton_key,
             )
             if existing_id is not None:
-                return existing_id, True, self._snapshot_job(existing)
+                return existing_id, True, snapshot_job(existing)
             blocks_local_transitions = _resolve_blocking(
                 job_type, blocks_local_transitions,
             )
-            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
+            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
             # No active singleton — register inline while still holding the
             # lock so a second caller arriving between our check and our
             # registration cannot slip in and register its own.
             self._enqueue_counter += 1
             seq = self._enqueue_counter
             job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
-            job = self._make_job_dict(
+            job = new_job_dict(
                 job_id, job_type,
                 config=config, workspace_id=workspace_id,
                 ephemeral=ephemeral, counts_for_badge=counts_for_badge,
@@ -1371,14 +636,13 @@ class JobRunner:
             job["exclusive_workspace"] = bool(exclusive_workspace)
             self._prune_finished_jobs()
             self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            self._subscribers[job_id] = []
+            self._streams.open_locked(job_id)
 
         log.info(
             "Job %s started type=%s singleton_key=%s",
             job_id, job_type, singleton_key,
         )
-        if not self._start_worker_thread(job, work_fn):
+        if not self._workers.start(job, work_fn):
             self._discard_unstarted_job(job_id)
             raise RuntimeError("JobRunner is shut down")
         return job_id, False, None
@@ -1399,11 +663,8 @@ class JobRunner:
                 to_remove.append(jid)
         for jid in to_remove:
             del self._jobs[jid]
-            self._events.pop(jid, None)
-            self._subscribers.pop(jid, None)
-            self._cancelled.discard(jid)
-            self._pause_requested.discard(jid)
-            self._uncancellable.discard(jid)
+            self._streams.drop_locked(jid)
+            self._control.forget_locked(jid)
 
     def _blocks_sleep(self, job):
         """Whether this job should keep the machine awake while it runs."""
@@ -1413,11 +674,11 @@ class JobRunner:
 
     def _run_job(self, job, work_fn):
         start_time = time.time()
-        if self._db_path and not job.get("ephemeral"):
+        if self._history.db_path and not job.get("ephemeral"):
             # Row exists from the first moment so a kill at any point
             # leaves a history entry; checkpoints then keep it current.
-            self._record_job_started(job)
-            self._ensure_checkpoint_thread()
+            self._history.record_job_started(job)
+            self._checkpoints.ensure_thread()
         holds_sleep_assertion = self._blocks_sleep(job)
         if holds_sleep_assertion:
             # Acquired before the work starts and released in the outer
@@ -1439,28 +700,7 @@ class JobRunner:
                 _job_cancel_probe,
             ):
                 result = work_fn(job)
-            # The worker has returned and released its resources. Honor a
-            # pause accepted during its final unit before publishing completion.
-            # Waiting and finalizing share the pause/cancel lock, so neither
-            # request can be accepted and then silently overtaken by completion.
-            with self._pause_condition:
-                job_id = job["id"]
-                while (
-                    job.get("pausable")
-                    and job_id in self._pause_requested
-                    and job_id not in self._cancelled
-                    and job_id not in self._uncancellable
-                ):
-                    if job.get("status") != "paused":
-                        self._publish_status_locked(job, "paused")
-                    self._pause_condition.wait()
-                self._pause_requested.discard(job_id)
-                if job_id in self._cancelled:
-                    job["status"] = "cancelled"
-                    self._cancelled.discard(job_id)
-                else:
-                    self._apply_result_verdict(job, result)
-                job["result"] = result
+            self._control.settle_returned(job, result)
             if job["status"] == "failed":
                 log.warning(
                     "Job %s reported failure via result: %s",
@@ -1472,7 +712,7 @@ class JobRunner:
             # during shutdown), honor the cancel rather than recording a
             # misleading "failed" status.
             with self._lock:
-                self._settle_raised_job_locked(job, e)
+                self._control.settle_raised_locked(job, e)
             if job["status"] == "failed":
                 log.exception("Job %s failed", job["id"])
         finally:
@@ -1483,69 +723,6 @@ class JobRunner:
             if holds_sleep_assertion:
                 self.sleep_blocker.release()
             self._publish_job_completion(job, start_time)
-
-    @staticmethod
-    def _apply_result_verdict(job, result):
-        """Settle the status of a job whose work function returned normally.
-
-        Must be called with self._pause_condition held.
-        """
-        job["status"] = "completed"
-        # A work function can return normally yet still have
-        # failed (e.g. move-folder returns {"moved": 0, "errors":
-        # [...]} when rsync times out). When the result opts into
-        # the convention by carrying an "ok" key, honor it: fold
-        # its errors into the job's tally so error_count is
-        # accurate, and demote a falsy "ok" to "failed" so the
-        # history doesn't read "completed, 0 errors" for a run
-        # that accomplished nothing. Only a boolean is a verdict:
-        # verify-models uses "ok" for the list of models that
-        # passed.
-        has_verdict = isinstance(result, dict) and isinstance(result.get("ok"), bool)
-        if has_verdict:
-            for err in (result.get("errors") or []):
-                # Structured errors ({"photo_id", "error"})
-                # read as "<file>: <reason>", not a dict repr.
-                err_str = error_text(err)
-                if err_str not in job["errors"]:
-                    job["errors"].append(err_str)
-            if result["ok"] is False:
-                job["status"] = "failed"
-        # Rollup rule: a run that recorded any error failed,
-        # even though its loop finished. The result keeps the
-        # per-item counts, so "412 imported, 3 failed" is
-        # still shown; only the status stops reading as a
-        # clean success. An explicit "ok" is the job's own
-        # verdict and wins: an import lists card-safety
-        # notices ("1 file you deselected was not copied") in
-        # its errors without anything having failed.
-        if job["errors"] and job["status"] == "completed" and not has_verdict:
-            job["status"] = "failed"
-        # It ran to the end, so its summary leads with what it
-        # did; only a crash leads with the error.
-        if job["status"] == "failed":
-            job["_partial_failure"] = True
-
-    def _settle_raised_job_locked(self, job, e):
-        """Settle the status of a job whose work function raised ``e``.
-
-        Must be called with self._lock held.
-        """
-        job_id = job["id"]
-        self._pause_requested.discard(job_id)
-        if job_id in self._cancelled:
-            job["status"] = "cancelled"
-            self._cancelled.discard(job_id)
-        else:
-            job["status"] = "failed"
-            # Avoid duplicating an error the work function already
-            # recorded. Pipelines capture stage errors directly into
-            # job["errors"] and then re-raise with the same message,
-            # so a naive append here would double-count them and
-            # inflate error_count in the persisted history.
-            err_str = str(e)
-            if err_str not in job["errors"]:
-                job["errors"].append(err_str)
 
     def _publish_job_completion(self, job, start_time):
         """Stamp a finished job, publish its completion, and persist it."""
@@ -1585,8 +762,8 @@ class JobRunner:
             "Job %s finished type=%s status=%s duration=%.1fs phase=%s",
             job["id"], job["type"], job["status"], elapsed, phase or "-",
         )
-        if self._db_path and not job.get("ephemeral"):
-            self._persist_job(job, elapsed)
+        if self._history.db_path and not job.get("ephemeral"):
+            self._history.persist_job(job, elapsed)
         # Mark the in-memory job dict as fully persisted so test code
         # can synchronize with `job_history` reads. Ephemeral jobs are
         # also flagged so callers waiting on this don't hang.
@@ -1598,307 +775,17 @@ class JobRunner:
         if job["type"] == "pipeline":
             self._try_promote_queued()
 
-    @staticmethod
-    def _error_total(job):
-        """How many errors a finished job recorded.
-
-        A result dict may report ``errors_total`` when its ``errors`` list
-        is capped (e.g. the importer caps its per-file failures at 50). The
-        capped list is what the runner folded into ``job["errors"]``, so
-        ``len(job["errors"])`` under-reports the real failure count; prefer
-        ``errors_total`` when it is larger so the persisted ``error_count``
-        and the Jobs-page badge reflect the true total.
-        """
-        errors = job.get("errors") or []
-        result = job.get("result")
-        if job.get("type") == "pipeline" and isinstance(result, dict):
-            notes = result.get("notes") or []
-            errors = [error for error in errors if error not in notes]
-        count = len(errors)
-        if isinstance(job.get("result"), dict):
-            try:
-                total = int(job["result"].get("errors_total") or 0)
-            except (TypeError, ValueError):
-                total = 0
-            count = max(count, total)
-        return count
-
-    def _persist_job(self, job, duration):
-        """Persist job to history table using a thread-local connection."""
-        if not self._db_path:
-            return
-
-
-        result_data = job["result"]
-        if job["status"] == "failed" and job["errors"]:
-            # Preserve a structured result (e.g. the pipeline's stages dict)
-            # when the work function stashed one before raising. Otherwise
-            # fall back to a minimal {"error": ...} payload so the history
-            # row still carries something useful.
-            # Use the pre-selected fatal error when available (pipeline jobs
-            # set _fatal_error to a "[stage] Fatal: …" message, which is the
-            # true failure cause). Fall back to errors[0] for non-pipeline
-            # jobs or edge cases where _fatal_error wasn't set.
-            primary_error = job.get("_fatal_error") or job["errors"][0]
-            if isinstance(result_data, dict):
-                result_data = {**result_data, "error": primary_error}
-                if job.get("_partial_failure"):
-                    result_data["partial_failure"] = self._error_total(job)
-            else:
-                result_data = {"error": primary_error}
-
-        tree_json = json.dumps(job.get("steps", []))
-        summary = self._build_summary(job, result_data)
-
-        persisted_error_count = self._error_total(job)
-
-        params = (
-            job["id"],
-            job["type"],
-            job["status"],
-            job["started_at"],
-            job["finished_at"],
-            round(duration, 1),
-            json.dumps(result_data),
-            persisted_error_count,
-            json.dumps(job["config"]),
-            job.get("workspace_id"),
-            tree_json,
-            summary,
-            job.get("resource_wait_seconds", 0.0),
-            job.get("resource_wait_count", 0),
-        )
-
-        for attempt in range(3):
-            conn = None
-            try:
-                conn = sqlite3.connect(self._db_path, timeout=30)
-                conn.execute(
-                    """INSERT OR REPLACE INTO job_history
-                       (id, type, status, started_at, finished_at, duration,
-                        result, error_count, config, workspace_id, tree, summary,
-                        resource_wait_seconds, resource_wait_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    params,
-                )
-                ws_id = job.get("workspace_id")
-                # Keep separate 100-row terminal histories for discovery
-                # probes and other jobs, so periodic checks cannot evict
-                # the user's pipeline/import history. Non-terminal rows
-                # stay outside both quotas. Excluding these rows is
-                # load-bearing: a queued pipeline waiting behind a
-                # busy slot can sit in the table for a long time;
-                # if its row got pruned by an unrelated job
-                # completing, the next promotion attempt would see
-                # rowcount==0 on its conditional UPDATE and treat
-                # that as a cancel, silently dropping the run.
-                for discovery in (False, True):
-                    conn.execute(
-                        """DELETE FROM job_history
-                       WHERE workspace_id IS ?
-                         AND status IN ('completed', 'failed', 'cancelled')
-                         AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                         AND id NOT IN (
-                           SELECT id FROM job_history
-                           WHERE workspace_id IS ?
-                             AND status IN ('completed', 'failed', 'cancelled')
-                             AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                           ORDER BY started_at DESC LIMIT 100
-                       )""",
-                        (ws_id, discovery, ws_id, discovery),
-                    )
-                conn.commit()
-                return
-            except sqlite3.OperationalError:
-                if attempt < 2:
-                    time.sleep(2)
-                else:
-                    log.warning(
-                        "Failed to persist job history for %s after 3 attempts",
-                        job["id"],
-                    )
-            finally:
-                # Close on every path — a failed execute/commit previously
-                # leaked the connection (one per retry).
-                if conn is not None:
-                    conn.close()
-
-    def _build_summary(self, job, result=None):
-        """Build a one-line summary from job steps or result.
-
-        ``result`` is the payload being persisted (which for a failed job
-        already carries the fatal ``error``); it defaults to the job's own
-        result so failed runs summarize with their error instead of a bare
-        "<Type> failed".
-        """
-        steps = job.get("steps", [])
-        if steps:
-            parts = []
-            for s in steps:
-                if s.get("summary"):
-                    parts.append(s["summary"])
-            if parts:
-                return ", ".join(parts)
-
-        if result is None:
-            result = job.get("result")
-        if result and isinstance(result, dict):
-            described = describe_result(job["type"], result, job.get("config"))
-            if described["summary"]:
-                return described["summary"]
-
-        # Final fallback: title-case the job type (e.g. "duplicate-scan" →
-        # "Duplicate Scan") so the summary line is presentable to the user.
-        pretty_type = " ".join(
-            w.capitalize() for w in job["type"].replace("_", " ").replace("-", " ").split()
-        )
-        return f"{pretty_type} {job['status']}"
-
-    def _synthesize_queued_view(self, job_id, ctx):
-        """Render a queued pipeline's in-memory context as a job-shaped dict.
-
-        Queued pipelines aren't in ``self._jobs`` yet — they live in
-        ``self._queued_pipelines`` until the scheduler promotes them.
-        ``get()`` and ``list_jobs()`` both need to surface them in the
-        same shape as a live job so callers (UI, SSE, the navbar's
-        active-jobs polling) can render and cancel them uniformly.
-        """
-        return {
-            "id": job_id,
-            "type": "pipeline",
-            "status": "queued",
-            "started_at": ctx["started_at"],
-            "finished_at": None,
-            "progress": {"current": 0, "total": 0, "current_file": ""},
-            "result": None,
-            "errors": [],
-            "config": dict(ctx["config"]),
-            "workspace_id": ctx["workspace_id"],
-            "steps": [],
-            "ephemeral": False,
-            "counts_for_badge": True,
-            "pausable": False,
-            "runtime_warning": ctx.get("runtime_warning"),
-            "resource_wait_seconds": 0.0,
-            "resource_wait_count": 0,
-        }
-
-    @staticmethod
-    def _snapshot_job(job):
-        """Copy a job dict for callers outside the lock.
-
-        The top-level copy alone isn't enough: handlers jsonify the nested
-        progress/steps containers while worker threads mutate them, and a
-        key insertion during that iteration raises RuntimeError. Snapshot
-        the nested mutable containers under the lock too.
-        """
-        snap = dict(job)
-        # Checkpoint-only state: can be large, and callers read ``result``.
-        snap.pop("partial_result", None)
-        snap.pop("_checkpointed_partial", None)
-        snap["progress"] = dict(job.get("progress") or {})
-        snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
-        snap["errors"] = list(job.get("errors") or [])
-        # Freeze the top-level ``result`` mapping too. Some workers mutate
-        # ``job["result"]`` in place (e.g. the release-local-originals loop
-        # bumps ``failed`` / ``errors_total`` without holding ``_lock``), so
-        # a checkpoint that leaves ``snap["result"]`` as the live dict can
-        # dump the result at one state in ``_write_checkpoints`` and then
-        # read ``_error_total`` at a later state — the row's ``error_count``
-        # column then disagrees with the ``errors_total`` the serialized
-        # result reports, and the startup-sweep +1 compounds the mismatch.
-        # Also freeze the nested per-photo sample lists (``errors`` and
-        # ``kept_reasons``): workers that append to them during the first 50
-        # failures would otherwise let ``json.dumps(snap["result"])``
-        # iterate a live, mid-append list, and the serialized sample size
-        # could race ahead of the top-level ``snap["errors"]`` copy taken a
-        # few lines up — the two counts the checkpoint row cross-references
-        # must come from one immutable snapshot.
-        if isinstance(snap.get("result"), dict):
-            snap["result"] = dict(snap["result"])
-            for key in ("errors", "kept_reasons"):
-                value = snap["result"].get(key)
-                if isinstance(value, list):
-                    snap["result"][key] = list(value)
-        if job.get("status") in ("running", "pausing", "paused"):
-            timing = get_resource_ledger().owner_timing(job["id"])
-            snap["resource_wait_seconds"] = timing["wait_seconds"]
-            snap["resource_wait_count"] = timing["wait_count"]
-        elif job.get("status") in ("completed", "failed", "cancelled"):
-            JobRunner._attach_result_text(snap)
-        return snap
-
-    @staticmethod
-    def _attach_result_text(job):
-        """Add ``summary`` / ``result_details`` prose derived from ``result``.
-
-        The Jobs page shows these instead of the raw result dict, so a
-        finished job reads as "28 photos removed from Vireo, 28 files
-        moved to Trash" rather than ``{"deleted": 28, "trashed": 28, ...}``.
-
-        A stored ``summary`` is kept only when it came from step summaries
-        or from the job itself (``result["summary"]``). Anything else was
-        generated from the result dict, and history rows written before
-        the prose describer exist still carry the old ``ok: True,
-        deleted: 28`` form, so those are recomputed from the result here
-        instead of requiring a backfill.
-        """
-        result = job.get("result")
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                result = None
-        # A worker that stored a partial result and then raised leaves the
-        # in-memory job with the fatal error in _fatal_error/errors, not in
-        # result (only the persisted history row gets it merged in). Fold
-        # it in here so live snapshots of failed jobs describe the failure
-        # too, not just the partial counts.
-        if job.get("status") == "failed" and not (
-            isinstance(result, dict) and result.get("error")
-        ):
-            fatal = job.get("_fatal_error") or (job.get("errors") or [None])[0]
-            if fatal:
-                if isinstance(result, dict):
-                    result = {**result, "error": fatal}
-                    if job.get("_partial_failure"):
-                        result["partial_failure"] = JobRunner._error_total(job)
-                else:
-                    result = {"error": fatal}
-        described = describe_result(job.get("type") or "", result, job.get("config"))
-        steps = job.get("steps") or job.get("tree") or []
-        if isinstance(steps, str):
-            try:
-                steps = json.loads(steps)
-            except (json.JSONDecodeError, TypeError):
-                steps = []
-        from_steps = any(
-            isinstance(s, dict) and s.get("summary") for s in steps
-        )
-        # Interrupted rows get a summary from the startup sweep that says
-        # how far the job got; that beats the plain error text the
-        # describer would produce, so treat it as authored too.
-        authored = isinstance(result, dict) and bool(
-            result.get("summary") or result.get("interrupted")
-        )
-        if described["summary"] and not (from_steps or authored) or not job.get("summary"):
-            job["summary"] = described["summary"]
-        job["result_details"] = described["details"]
-        if described["error"] and not job.get("error"):
-            job["error"] = described["error"]
-        return job
-
     def get(self, job_id):
         """Get a job by id. Returns a copy so callers don't mutate (or race
         with) shared state."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
-                return self._snapshot_job(job)
-            ctx = self._queued_pipelines.get(job_id)
+                return snapshot_job(job)
+            ctx = self._queue.queued.get(job_id)
             if ctx is None:
                 return None
-            return self._synthesize_queued_view(job_id, ctx)
+            return synthesize_queued_view(job_id, ctx)
 
     def list_jobs(self):
         """List all tracked jobs (active, queued, and recently completed).
@@ -1906,232 +793,54 @@ class JobRunner:
         Includes synthetic queued-pipeline entries so the navbar and
         /jobs page can render and cancel them; otherwise a queued run
         disappears from the UI between enqueue and promotion. Returns
-        snapshots, not live dicts — see _snapshot_job.
+        snapshots, not live dicts — see job_runner.views.snapshot_job.
         """
         with self._lock:
-            jobs = [self._snapshot_job(j) for j in self._jobs.values()]
-            for job_id, ctx in self._queued_pipelines.items():
-                jobs.append(self._synthesize_queued_view(job_id, ctx))
+            jobs = [snapshot_job(j) for j in self._jobs.values()]
+            for job_id, ctx in self._queue.queued.items():
+                jobs.append(synthesize_queued_view(job_id, ctx))
             return jobs
 
     def get_history(self, db, limit=10):
-        """Get recent job history from the database.
-
-        Only TERMINAL rows (completed/failed/cancelled) are returned —
-        ``queued`` and ``running`` rows represent live state and surface
-        through ``list_jobs()`` / ``get()`` so the UI can render and
-        cancel them. Including them in history would make queued runs
-        show up under "last run" / Jobs-page history with no cancel
-        affordance, which is exactly the wrong UX.
+        """Recent terminal job history rows; see ``JobHistory.get_history``.
 
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
         """
-        try:
-            ws_id = db.active_workspace_id
-            terminal = ("completed", "failed", "cancelled")
-            rows = db.job_history.terminal(ws_id, terminal, limit)
-            result = []
-            for r in rows:
-                d = dict(r)
-                for field in ("tree", "result", "config", "progress"):
-                    if d.get(field) and isinstance(d[field], str):
-                        try:
-                            d[field] = json.loads(d[field])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                self._attach_result_text(d)
-                result.append(d)
-            return result
-        except Exception:
-            log.warning("Could not read job history", exc_info=True)
-            return []
+        return self._history.get_history(db, limit)
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
-        is_critical = event_type in ("complete", "error")
-        with self._lock:
-            if event_type == "progress":
-                job = self._jobs.get(job_id)
-                if job is not None:
-                    # Mirror latest progress fields onto job["progress"] so
-                    # clients polling /api/jobs or /api/jobs/history see the
-                    # current phase/current_file without needing SSE.
-                    prog = job.setdefault(
-                        "progress",
-                        {"current": 0, "total": 0, "current_file": ""},
-                    )
-                    for key, value in data.items():
-                        if key == "steps":
-                            continue
-                        prog[key] = value
-                if job and job.get("steps"):
-                    data = dict(data)
-                    data["steps"] = [dict(s) for s in job["steps"]]
-            event = {"type": event_type, "data": data, "time": time.time()}
-            if job_id in self._events:
-                self._events[job_id].append(event)
-            # Snapshot subscriber list so we can deliver outside the lock
-            subscribers = list(self._subscribers.get(job_id, []))
-
-        # Deliver to subscribers outside the lock to avoid blocking
-        for q in subscribers:
-            if is_critical:
-                # Critical events must not be dropped
-                try:
-                    q.put(event, timeout=5)
-                except queue.Full:
-                    log.warning(
-                        "Failed to deliver critical '%s' event for job %s "
-                        "after 5s — subscriber queue full",
-                        event_type, job_id,
-                    )
-            else:
-                try:
-                    q.put_nowait(event)
-                except queue.Full:
-                    log.debug(
-                        "Dropped '%s' event for job %s — subscriber queue full",
-                        event_type, job_id,
-                    )
-
-    def _publish_status_locked(self, job, status):
-        """Change *job* status and publish its event as one locked action.
-
-        The caller must hold ``self._lock`` (directly or through
-        ``self._pause_condition``). Keeping the state change, buffered event,
-        and non-blocking subscriber delivery under that same lock prevents
-        competing pause, resume, and completion paths from publishing stale
-        status events out of order.
-        """
-        job_id = job["id"]
-        job["status"] = status
-        event = {
-            "type": "status",
-            "data": {"job_id": job_id, "status": status},
-            "time": time.time(),
-        }
-        if job_id in self._events:
-            self._events[job_id].append(event)
-        for subscriber in self._subscribers.get(job_id, []):
-            try:
-                subscriber.put_nowait(event)
-            except queue.Full:
-                log.debug(
-                    "Dropped 'status' event for job %s — subscriber queue full",
-                    job_id,
-                )
+        self._streams.push(job_id, event_type, data)
 
     def get_events(self, job_id):
         """Get all buffered events for a job."""
-        with self._lock:
-            return list(self._events.get(job_id, []))
+        return self._streams.get_events(job_id)
 
     def subscribe(self, job_id):
         """Subscribe to a job's event stream. Returns a queue."""
-        q = queue.Queue(maxsize=200)
-        with self._lock:
-            if job_id not in self._subscribers:
-                self._subscribers[job_id] = []
-            self._subscribers[job_id].append(q)
-        return q
+        return self._streams.subscribe(job_id)
 
     def unsubscribe(self, job_id, q):
         """Unsubscribe from a job's event stream."""
-        with self._lock:
-            subs = self._subscribers.get(job_id, [])
-            if q in subs:
-                subs.remove(q)
+        self._streams.unsubscribe(job_id, q)
 
     def set_steps(self, job_id, steps):
-        """Define the execution plan for a job.
-
-        Args:
-            job_id: job identifier
-            steps: list of dicts with at least 'id' and 'label' keys
-        """
-        full_steps = []
-        for s in steps:
-            full_steps.append({
-                "id": s["id"],
-                "label": s["label"],
-                "status": "pending",
-                "progress": {"current": 0, "total": 0},
-                "started_at": None,
-                "finished_at": None,
-                "duration": None,
-                "summary": None,
-                "error": None,
-                "error_count": 0,
-            })
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
-                job["steps"] = full_steps
+        """Define the execution plan for a job; see ``StepTree.set_steps``."""
+        self._steps.set_steps(job_id, steps)
 
     def append_step(self, job_id, step_id, label, *, status="completed",
                     summary=None, error=None, error_count=0):
-        """Append an already-terminal step to a job's plan after the fact.
-
-        For completion hooks that learn of extra work — or its failure —
-        only when the job ends (the after-process NAS-move handoff). A
-        stepped job's panel view renders ONLY the step tree: per-step
-        summary/error/error_count are its sole error surface (global
-        ``job.errors`` shows only for failed jobs), so a hook outcome that
-        lives just in ``job.result`` would be invisible to the user.
-
-        Appends under the runner lock — worker-thread mutation of
-        ``job["steps"]`` outside it races ``_snapshot_job``'s copy.
-        """
-        now = datetime.now().isoformat()
-        step = {
-            "id": step_id,
-            "label": label,
-            "status": status,
-            "progress": {"current": 0, "total": 0},
-            "started_at": now,
-            "finished_at": now,
-            "duration": 0.0,
-            "summary": summary,
-            "error": error,
-            "error_count": error_count,
-        }
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is not None:
-                job.setdefault("steps", []).append(step)
+        """Append an already-terminal step; see ``StepTree.append_step``."""
+        self._steps.append_step(
+            job_id, step_id, label, status=status,
+            summary=summary, error=error, error_count=error_count,
+        )
 
     def update_step(self, job_id, step_id, **kwargs):
-        """Update a step's fields (status, progress, summary, error).
-
-        Automatically sets started_at/finished_at/duration timestamps.
-        """
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if not job or "steps" not in job:
-                return
-            for step in job["steps"]:
-                if step["id"] == step_id:
-                    new_status = kwargs.get("status")
-                    if new_status == "running" and step["status"] == "pending":
-                        step["started_at"] = datetime.now().isoformat()
-                    # "cancelled" is terminal too — classify/pipeline steps
-                    # report it on user cancel; without it here those steps
-                    # persist with no finished_at/duration.
-                    if new_status in ("completed", "failed", "cancelled") and step["started_at"]:
-                        step["finished_at"] = datetime.now().isoformat()
-                        start = datetime.fromisoformat(step["started_at"])
-                        end = datetime.fromisoformat(step["finished_at"])
-                        step["duration"] = round((end - start).total_seconds(), 1)
-                    for key in (
-                        "status", "summary", "error", "error_count",
-                        "progress", "current_file", "source_index",
-                        "label_source",
-                    ):
-                        if key in kwargs:
-                            step[key] = kwargs[key]
-                    break
+        """Update a step's fields; see ``StepTree.update_step``."""
+        self._steps.update_step(job_id, step_id, **kwargs)
 
     def cancel_job(
         self,
@@ -2175,21 +884,21 @@ class JobRunner:
             ):
                 if expected_status and expected_status != job["status"]:
                     return False
-                return self._request_running_cancel_locked(job_id)
+                return self._control.request_running_cancel_locked(job_id)
             if job is not None:
                 return False
-            # Queued case: still in _queued_pipelines, not _jobs yet.
-            if job_id in self._queued_pipelines:
+            # Queued case: still in the pipeline queue, not _jobs yet.
+            if job_id in self._queue.queued:
                 if expected_status and expected_status != "queued":
                     return False
                 cancelled_at = datetime.now().isoformat()
-                queued_cancel = self._queued_pipelines[job_id]
+                queued_cancel = self._queue.queued[job_id]
             else:
                 return False
 
         cancelled = True
-        if self._db_path:
-            cancelled = self._cancel_queued_history_row(
+        if self._history.db_path:
+            cancelled = self._history.cancel_queued_history_row(
                 job_id, cancelled_at, db_timeout,
             )
 
@@ -2200,8 +909,8 @@ class JobRunner:
                 return self._cancel_after_lost_queue_race_locked(
                     job_id, expected_status, queued_cancel,
                 )
-            if self._queued_pipelines.get(job_id) is queued_cancel:
-                self._queued_pipelines.pop(job_id, None)
+            if self._queue.is_current_locked(job_id, queued_cancel):
+                self._queue.discard_locked(job_id)
                 retry_promotion = True
             emit_complete = True
         if emit_complete:
@@ -2228,47 +937,6 @@ class JobRunner:
             self._try_promote_queued()
         return True
 
-    def _request_running_cancel_locked(self, job_id):
-        """Flag a running job for cancellation; False if it can't be stopped.
-
-        Must be called with self._lock held.
-        """
-        # Stop is a no-op once the job has entered an
-        # uninterruptible commit step (e.g. the local-processing
-        # archive move). Without this guard a Stop landing after
-        # clear_cancellation() but before _run_job's terminal
-        # check would re-add the job to _cancelled and record
-        # the run as "cancelled" even though the archive
-        # already committed to disk.
-        if job_id in self._uncancellable:
-            return False
-        self._cancelled.add(job_id)
-        self._pause_requested.discard(job_id)
-        # A paused worker is sleeping on this condition. Wake it so
-        # its checkpoint can observe cancellation and return.
-        self._pause_condition.notify_all()
-        return True
-
-    def _cancel_queued_history_row(self, job_id, cancelled_at, db_timeout):
-        """Flip a queued job's history row to cancelled.
-
-        Returns False when the row was no longer queued.
-        """
-        import sqlite3
-        conn = sqlite3.connect(self._db_path, timeout=max(0.0, db_timeout))
-        try:
-            cur = conn.execute(
-                "UPDATE job_history "
-                "SET status='cancelled', finished_at=?, result=? "
-                "WHERE id = ? AND status = 'queued'",
-                (cancelled_at, json.dumps({"cancelled": True, "never_started": True}), job_id),
-            )
-            conn.commit()
-            cancelled = cur.rowcount == 1
-        finally:
-            conn.close()
-        return cancelled
-
     def _cancel_after_lost_queue_race_locked(
         self, job_id, expected_status, queued_cancel,
     ):
@@ -2289,9 +957,9 @@ class JobRunner:
             # branch; the post-commit Stop race exists on
             # this path too when promotion beat the queued
             # cancel.
-            return self._request_running_cancel_locked(job_id)
-        if self._queued_pipelines.get(job_id) is queued_cancel:
-            self._cancelled.add(job_id)
+            return self._control.request_running_cancel_locked(job_id)
+        if self._queue.is_current_locked(job_id, queued_cancel):
+            self._control.flag_cancelled_locked(job_id)
             return True
         return False
 
@@ -2300,7 +968,7 @@ class JobRunner:
         with self._lock:
             job_ids = [
                 job_id
-                for job_id, ctx in self._queued_pipelines.items()
+                for job_id, ctx in self._queue.queued.items()
                 if workspace_id is None or ctx.get("workspace_id") == workspace_id
             ]
         cancelled = []
@@ -2315,98 +983,24 @@ class JobRunner:
         return cancelled
 
     def pause_job(self, job_id):
-        """Request a cooperative pause at the job's next safe checkpoint.
-
-        The public state moves to ``pausing`` immediately. The worker changes
-        it to ``paused`` only at a cooperative checkpoint or after the worker
-        returns, so the UI never claims an in-flight ExifTool/copy batch has
-        already stopped.
-        """
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or job.get("status") != "running"
-                or not job.get("pausable")
-                or job_id in self._uncancellable
-                or job_id in self._cancelled
-            ):
-                return False
-            self._pause_requested.add(job_id)
-            self._publish_status_locked(job, "pausing")
-        return True
+        """Request a cooperative pause; see ``JobControl.pause_job``."""
+        return self._control.pause_job(job_id)
 
     def pause_requested(self, job_id):
-        """Return whether *job_id* currently has a pending pause request.
-
-        Pipeline jobs use this non-blocking probe to coordinate several worker
-        threads.  A single worker reaching a checkpoint is not enough to call
-        the whole pipeline paused; the pipeline publishes ``paused`` only once
-        every active participant has reached a safe boundary.
-        """
-        with self._lock:
-            return (
-                job_id in self._pause_requested
-                and job_id not in self._cancelled
-            )
+        """Whether *job_id* has a pending pause; see ``JobControl.is_pause_requested``."""
+        return self._control.is_pause_requested(job_id)
 
     def mark_paused(self, job_id):
-        """Publish ``paused`` if a live pause request still applies.
-
-        This is separate from :meth:`wait_if_paused` so multi-worker jobs can
-        wait for all of their workers before claiming that work has stopped.
-        """
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or not job.get("pausable")
-                or job_id not in self._pause_requested
-                or job_id in self._cancelled
-                or job.get("status") not in ("pausing", "paused")
-            ):
-                return False
-            if job.get("status") != "paused":
-                self._publish_status_locked(job, "paused")
-            return True
+        """Publish ``paused`` if a pause still applies; see ``JobControl.mark_paused``."""
+        return self._control.mark_paused(job_id)
 
     def wait_if_paused(self, job_id, *, publish_paused=False):
-        """Wait for a pause request to clear, then report cancellation.
-
-        ``publish_paused`` is appropriate for ordinary single-worker jobs.
-        Coordinated jobs pass ``False`` and call :meth:`mark_paused` only after
-        all active workers are parked.
-        """
-        while True:
-            with self._pause_condition:
-                if job_id in self._cancelled:
-                    return True
-                job = self._jobs.get(job_id)
-                if (
-                    job is None
-                    or not job.get("pausable")
-                    or job_id not in self._pause_requested
-                ):
-                    return False
-                if publish_paused and job.get("status") != "paused":
-                    self._publish_status_locked(job, "paused")
-                self._pause_condition.wait()
+        """Wait out a pause, then report cancellation; see ``JobControl.wait_if_paused``."""
+        return self._control.wait_if_paused(job_id, publish_paused=publish_paused)
 
     def resume_job(self, job_id):
         """Resume a pausing or paused job."""
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or job.get("status") not in ("pausing", "paused")
-                or job_id not in self._pause_requested
-                or job_id in self._cancelled
-            ):
-                return False
-            self._pause_requested.discard(job_id)
-            self._publish_status_locked(job, "running")
-            self._pause_condition.notify_all()
-        return True
+        return self._control.resume_job(job_id)
 
     def is_cancelled(self, job_id):
         """Wait through a cooperative pause, then report cancellation.
@@ -2419,56 +1013,22 @@ class JobRunner:
         return self.wait_if_paused(job_id, publish_paused=True)
 
     def cancellation_requested(self, job_id):
-        """Report cancellation without waiting on a pause request.
-
-        Transactional loops use this only after their pause-safe boundary.
-        They can still roll back promptly on Cancel without sleeping while a
-        database write transaction is open.
-        """
-        with self._lock:
-            return job_id in self._cancelled
+        """Report cancellation without waiting; see ``JobControl.cancellation_requested``."""
+        return self._control.cancellation_requested(job_id)
 
     def begin_uncancellable(self, job_id):
-        """Honor a pending pause, then atomically enter an uninterruptible phase.
+        """Honor a pending pause, then enter an uninterruptible phase.
 
-        Returns False when a cancellation is already pending, leaving that flag
-        intact so ``_run_job`` can record the job as cancelled. Once this
-        returns True, later pause and cancellation requests are ignored until
-        the job reaches a terminal state. Pausable callers must invoke this at
-        a safe checkpoint before acquiring resources for the commit.
+        See ``JobControl.begin_uncancellable``.
         """
-        with self._pause_condition:
-            while job_id in self._pause_requested and job_id not in self._cancelled:
-                job = self._jobs.get(job_id)
-                if job is None:
-                    return False
-                if job.get("status") != "paused":
-                    self._publish_status_locked(job, "paused")
-                self._pause_condition.wait()
-            if job_id in self._cancelled:
-                return False
-            self._uncancellable.add(job_id)
-            return True
+        return self._control.begin_uncancellable(job_id)
 
     def clear_cancellation(self, job_id):
-        """Consume any pending cancellation flag for ``job_id`` and
-        mark the job uncancellable.
+        """Consume a pending cancel and mark the job uncancellable.
 
-        Used by stages that have entered an uninterruptible commit step
-        (e.g. the local-processing archive move) where a Stop press
-        cannot be honored without leaving a partial published artifact.
-        Without consuming the flag, ``_run_job``'s atomic terminal check
-        would record the job as "cancelled" even though the commit
-        succeeded — confusing the user about whether the archive landed.
-
-        The flag is consumed AND the job is added to ``_uncancellable``
-        so a Stop press that lands after this call but before
-        ``_run_job`` flips to a terminal status can't re-add the
-        cancellation flag and override the committed result.
+        See ``JobControl.clear_cancellation``.
         """
-        with self._lock:
-            self._cancelled.discard(job_id)
-            self._uncancellable.add(job_id)
+        self._control.clear_cancellation(job_id)
 
 
 class LogBroadcaster(logging.Handler):

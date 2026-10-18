@@ -143,10 +143,9 @@ function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} 
   _lbSetPendingFlagStatus(normalized);
   var write;
 
-  if (typeof window.setFlagFor === 'function') {
-    write = window.setFlagFor(photoId, normalized);
-  } else if (typeof window.setReviewFlag === 'function') {
-    write = window.setReviewFlag(photoId, normalized);
+  var setFlagFor = Vireo.pageHook('setFlagFor') || Vireo.pageHook('setReviewFlag');
+  if (setFlagFor) {
+    write = /** @type {Promise<boolean | void | {provisional: boolean}>} */ (setFlagFor(photoId, normalized));
   } else if (typeof window.safeFetch === 'function') {
     write = window.safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},

@@ -116,14 +116,14 @@ class CompanionPairingRepository:
             (photo_id,),
         ).fetchall()
 
-    def move_detection(self, detection_id: str, photo_id: int) -> None:
+    def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(
             "UPDATE detections SET photo_id = ? WHERE id = ?",
             (photo_id, detection_id),
         )
 
     def insert_rekeyed_detection(
-        self, new_id: str, photo_id: int, det: sqlite3.Row,
+        self, new_id: int, photo_id: int, det: sqlite3.Row,
     ) -> None:
         """Insert ``det`` under ``new_id`` for ``photo_id``; a no-op if that id exists."""
         self.conn.execute(
@@ -137,13 +137,13 @@ class CompanionPairingRepository:
              det["detector_confidence"], det["category"]),
         )
 
-    def redirect_predictions(self, old_id: str, new_id: str) -> None:
+    def redirect_predictions(self, old_id: int, new_id: int) -> None:
         self.conn.execute(
             "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
             (new_id, old_id),
         )
 
-    def carry_prediction_reviews_to_survivors(self, old_id: str, new_id: str) -> None:
+    def carry_prediction_reviews_to_survivors(self, old_id: int, new_id: int) -> None:
         """Move review state off ``old_id``'s predictions onto ``new_id``'s twins."""
         self.conn.execute(
             """INSERT INTO prediction_review
@@ -185,13 +185,13 @@ class CompanionPairingRepository:
             (new_id, old_id),
         )
 
-    def redirect_classifier_runs(self, old_id: str, new_id: str) -> None:
+    def redirect_classifier_runs(self, old_id: int, new_id: int) -> None:
         self.conn.execute(
             "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
             (new_id, old_id),
         )
 
-    def delete_detection(self, detection_id: str) -> None:
+    def delete_detection(self, detection_id: int) -> None:
         self.conn.execute(
             "DELETE FROM detections WHERE id = ?",
             (detection_id,),
