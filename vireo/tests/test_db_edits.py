@@ -538,3 +538,11 @@ def test_edits_repository_builds_without_an_active_workspace(db):
     repo = db.edits
     assert repo.conn is db.conn
     assert repo.preset_name_max == Database.EDIT_PRESET_NAME_MAX
+
+
+def test_edited_photo_ids_lists_every_recipe_catalog_wide(db, photos):
+    inside, outside = photos
+    assert db.edits.edited_photo_ids() == []
+    _raw_recipe(db, inside, "{}")
+    _raw_recipe(db, outside, "{}")
+    assert sorted(db.edits.edited_photo_ids()) == sorted([inside, outside])
