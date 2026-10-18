@@ -2,6 +2,7 @@
   "extends": "./tsconfig.frontend.base.json",
   "files": [
     "types/frontend.d.ts",
+    "types/page-hooks.d.ts",
     "types/dialogs.d.ts",
     "types/panel-loaders.d.ts",
     "types/navbar.d.ts",

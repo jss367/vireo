@@ -225,8 +225,7 @@ export async function bulkUnflagSelection() {
   render();
 }
 
-// The shared lightbox's flag-key hook; boot.js exposes it as
-// window.handleMissesLightboxFlagShortcut.
+// The shared lightbox's flag-key page hook, which boot.js registers.
 /** @param {number} photoId @param {string} flag */
 export function handleMissesLightboxFlagShortcut(photoId, flag) {
   if (flag !== 'none') return false;

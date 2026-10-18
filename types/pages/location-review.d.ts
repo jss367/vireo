@@ -22,7 +22,7 @@ declare function escapeAttr(value:unknown):string;
 declare function openLightbox(id:number,filename:string,photos:LocationPhoto[]):void;
 declare function closeLightbox():void;
 declare function checkPendingSync():void;
-interface Window {google?:typeof google;L?:typeof L;_vireoLocationReviewMapsReady():void;_vireoLeafletPromise?:Promise<typeof L | undefined>;beforeHistoryChange():boolean;afterHistoryChange():Promise<void>}
+interface Window {google?:typeof google;L?:typeof L;_vireoLocationReviewMapsReady():void;_vireoLeafletPromise?:Promise<typeof L | undefined>;}
 interface DocumentEventMap {'lightbox:photodeleted':CustomEvent<{photoId?:number}>}
 declare namespace google.maps {
  class LatLng {constructor(lat:number,lng:number);lat():number;lng():number}
@@ -48,3 +48,5 @@ declare namespace L {
  function map(id:string,options:{layers:TileLayer[]}):Map;
  const control:{layers(layers:Record<string,TileLayer>):{addTo(map:Map):void}};
 }
+// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;

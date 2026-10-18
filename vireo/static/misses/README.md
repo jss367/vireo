@@ -17,7 +17,7 @@ they are.
 | File | Responsibility |
 | --- | --- |
 | `state.js` | Page state: the `state` object (`missesData`, the tuning config and preview state, focus, `selection`, lightbox tracking, `appliedMissFilters`, the fail-closed scope error) and the constants `CATEGORY_ORDER`, `CATEGORY_LABELS`, `MISS_TUNING_CONTROL_IDS` |
-| `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar and `vireo-utils.js` global the page uses, and `exposePageHooks()` |
+| `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar and `vireo-utils.js` global the page uses, and `registerPageHooks()` |
 | `helpers.js` | `photoThumbnailUrl`, `parseDetectionBox`, `sortPhotos`, and `getSinceParam` |
 | `filters.js` | Reading, cloning and comparing the filter-bar payload, adding it to request bodies, and `applyMissFilters()` |
 | `scope.js` | Legacy `?collection_id=` / `?folder_id=` deep links, `noteLegacyScopeError`, and the scope banner |
@@ -32,7 +32,7 @@ they are.
 | `delete.js` | Deleting the selected photos through the shared delete dialog |
 | `keyboard.js` | `setFocused`, `moveFocus`, the keydown handler, and Shift+J/K selection extension |
 | `badges.js` | Keeping Representative badges and the applied flag filter current after `lifelist:changed` and `lightbox:flagchanged` |
-| `boot.js` | The entry module: exposing the page hooks, binding every listener, the slider handlers, `VireoFilter.init()`, the legacy scope resolution, the config load, and the first load |
+| `boot.js` | The entry module: registering the page hooks, binding every listener, the slider handlers, `VireoFilter.init()`, the legacy scope resolution, the config load, and the first load |
 
 ## State
 
@@ -57,8 +57,9 @@ helpers, which `_navbar.html` loads first and nobody replaces, and
 When a shared script becomes a module, change its import in `shared.js`.
 
 The other direction: the shared navbar and lightbox call a few page
-functions by name. `boot.js` hands them to `exposePageHooks()` in `shared.js`,
-which is the only code that writes `window`:
+functions. `boot.js` hands them to `registerPageHooks()` in `shared.js`, which
+registers them with `Vireo.registerPageHooks` (`vireo-page-hooks.js`); shared
+code asks for them with `Vireo.pageHook(name)` instead of looking for a global:
 
 - `afterHistoryChange` — the navbar's undo/redo reload
 - `loadMisses` — the Missing Originals delete refresh in `navbar-folder-banners.js`
@@ -66,11 +67,12 @@ which is the only code that writes `window`:
 - `openBrowseShortcutPhoto` — the native menu's Open in Lightbox
 - `handleMissesLightboxFlagShortcut` — the lightbox's unflag key
 
-plus `_lightboxZoomHandled`, the lightbox's click-to-zoom latch, which
-`openLightbox()` resets. These names are listed for the page in
-`frontend-module-pages.json`; ESLint rejects any other `window` write in the
-page's files, and `vireo/tests/test_module_pages.py` checks the list against
-`shared.js`.
+These names are the page's `pageHooks` in `frontend-module-pages.json`, which
+`vireo/tests/test_module_pages.py` checks against the registration. The page
+writes no `window` globals at all: `sharedWrites` is empty, and ESLint rejects
+any `window` write in the page's files. (The lightbox's click-to-zoom latch,
+which this page used to reset before opening, is now reset by the lightbox
+itself when it closes.)
 
 ## Load order
 
@@ -82,7 +84,7 @@ only declare functions and initialize passive state, and import cycles between
 them (render ↔ selection ↔ keyboard, ...) are safe because no module calls an
 import while it is being evaluated. Boot then:
 
-1. exposes the page hooks (the classic page had them as globals from parse
+1. registers the page hooks (the classic page had them as globals from parse
    time, so this goes first),
 2. binds the controls that used to carry `onclick=` attributes (the selection
    bar's four buttons, Recompute and Reset preview) and the delegated card

@@ -4,7 +4,10 @@
 docstring before calling any of its step helpers.
 """
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING
 
 from import_job.state import (
     _counts,
@@ -13,9 +16,20 @@ from import_job.state import (
     _reclassify_landed_failed,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
-def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
-                     missing_root_check):
+    from db import Database
+    from import_job.destination import _DestContext
+    from import_job.import_types import Emit
+    from import_job.state import _ImportBatchState, _ImportRunState
+
+
+def _batch_preflight(
+    state: _ImportRunState, emit: Emit, db: Database, *, rel: str, batch: list[Path], queued: int,
+    ctx: _DestContext, missing_root_check: Callable[[], str | None],
+) -> str | None:
     """Run the per-batch guard chain; return ``dest_folder`` or ``None``.
 
     ``None`` means the whole batch was refused — every file booked
@@ -114,8 +128,10 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     )
 
 
-def _refuse_unmounted_archive(state, emit, *, rel, batch, queued, ctx,
-                              missing_root_check):
+def _refuse_unmounted_archive(
+    state: _ImportRunState, emit: Emit, *, rel: str, batch: list[Path], queued: int,
+    ctx: _DestContext, missing_root_check: Callable[[], str | None],
+) -> bool:
     """``_batch_preflight``'s mount checks: missing mount root, then stale
     mount. Returns True when the batch was refused (every file booked
     failed and the refusal phase emitted). Called only from
@@ -195,7 +211,10 @@ def _refuse_unmounted_archive(state, emit, *, rel, batch, queued, ctx,
     return False
 
 
-def _create_dest_folder(state, emit, db, *, rel, batch, queued, dest_folder):
+def _create_dest_folder(
+    state: _ImportRunState, emit: Emit, db: Database, *, rel: str, batch: list[Path], queued: int,
+    dest_folder: str,
+) -> str | None:
     """``_batch_preflight``'s last steps: create ``dest_folder`` and promote
     its folder row out of ``'missing'``. Returns ``dest_folder``, or
     ``None`` when the folder could not be created (the batch is booked
@@ -243,8 +262,11 @@ def _create_dest_folder(state, emit, db, *, rel, batch, queued, dest_folder):
     return dest_folder
 
 
-def _rollback_on_mount_loss(state, batch_st, attests_bytes,
-                            extra_rollback=None, *, db=None, workspace_id=None):
+def _rollback_on_mount_loss(
+    state: _ImportRunState, batch_st: _ImportBatchState, attests_bytes: bool,
+    extra_rollback: Callable[[], None] | None = None, *, db: Database | None = None,
+    workspace_id: int | None = None,
+) -> None:
     """Undo this batch's bookings after a mount-loss detection.
 
     The caller keeps the final post-loop probe at its own call site and
@@ -339,7 +361,7 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
     state.mount_ever_lost = batch_st.mount_lost
 
 
-def _drop_queued_transfers(state, batch_st, rel):
+def _drop_queued_transfers(state: _ImportRunState, batch_st: _ImportBatchState, rel: str) -> None:
     # Queued-but-untransferred files: nothing landed, so no
     # counter rollback — book the failure and drop the queue
     # so the rsync below has nothing to send.

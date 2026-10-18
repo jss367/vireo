@@ -28,7 +28,7 @@
 (function(global) {
   'use strict';
 
-  var Vireo = global.Vireo = global.Vireo || {};
+  var Vireo = global.Vireo = global.Vireo || /** @type {VireoNamespace} */ ({});
 
   /** @param {unknown} id @returns {id is number} */
   function isPredictionId(id) {

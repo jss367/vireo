@@ -87,12 +87,16 @@ interface VireoNamespace {
   predictions?: GroupedPredictions;
 }
 
+// The page-hook registry (vireo-page-hooks.js; types/page-hooks.d.ts), which
+// _navbar.html loads before any page script.
+interface VireoNamespace extends VireoPageHookRegistry {}
+
 interface Window {
   Vireo?: VireoNamespace;
 }
 
 // The DOM-free prediction tracker also runs under Node's globalThis in tests.
-declare var Vireo: VireoNamespace | undefined;
+declare var Vireo: VireoNamespace;
 
 declare function openBatchDevelopmentEditor(): Promise<void>;
 declare function pasteEditSettingsToSelection(): Promise<void>;

@@ -90,7 +90,8 @@ function grmHasPendingUserEdits() {
 }
 
 function registerPipelineReviewLightboxBrowseHook() {
-    window.getLightboxBrowseDisabledHint = function(photoId, willNavigateInPlace) {
+  Vireo.registerPageHooks({
+    getLightboxBrowseDisabledHint: function(photoId, willNavigateInPlace) {
       var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
       var groupOpen = overlay && overlay.classList.contains('open');
       var sameWindowNavigation = !!willNavigateInPlace ||
@@ -99,5 +100,6 @@ function registerPipelineReviewLightboxBrowseHook() {
         return 'Apply or close Group Review before leaving this page';
       }
       return null;
-    };
+    },
+  });
 }

@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/browse.d.ts",
     "../types/frontend.d.ts",
+    "../types/page-hooks.d.ts",
     "../types/panel-loaders.d.ts",
     "../types/shared-controllers.d.ts",
     "../vireo/static/browse/anchors.js",

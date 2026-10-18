@@ -5,12 +5,15 @@ order, on a process pool or inline, under a CPU lease it drops whenever the
 caller pauses.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import multiprocessing
 import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
+from typing import TYPE_CHECKING
 
 from image_loader import ScanCancelled
 from scanner.hashing import (
@@ -20,21 +23,36 @@ from scanner.hashing import (
     _ScanPauseRequested,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterator
+    from concurrent.futures import Future
+    from pathlib import Path
+
+    from scanner.hashing import FileFeatures
+    from scanner.run_state import _ScanSignals
+    from scanner.scan_types import CheckCallback
+
+    # A hashed work-queue file: its path and ``(phash, file_hash)``.
+    _HashedFile = tuple[Path, FileFeatures]
+
 log = logging.getLogger(__name__)
 
 
 class _FeatureHasher:
     """Hashes the work queue; owns the pause and lease handling around it."""
 
-    def __init__(self, *, signals, pause_check, cancel_only_check):
+    def __init__(
+        self, *, signals: _ScanSignals, pause_check: CheckCallback | None,
+        cancel_only_check: CheckCallback | None,
+    ) -> None:
         self.signals = signals
         self.pause_check = pause_check
         self.cancel_only_check = cancel_only_check
 
-    def _pause_pending(self):
+    def _pause_pending(self) -> bool:
         return self.pause_check is not None and self.pause_check()
 
-    def _check_cancelled_no_park(self):
+    def _check_cancelled_no_park(self) -> None:
         """Cancel probe safe to call INSIDE ``_claim_worker_count``.
 
         Never parks. When ``cancel_only_check`` was supplied the
@@ -59,7 +77,7 @@ class _FeatureHasher:
             return
         self.signals.check_cancelled()
 
-    def iter_features(self, files_to_process, paths_to_extract):
+    def iter_features(self, files_to_process: list[Path], paths_to_extract: list[str]) -> Iterator[_HashedFile]:
         """Yield ``(image_path, (phash, file_hash))`` in queue order.
 
         Computes phash + file_hash in parallel across all files that need
@@ -123,11 +141,12 @@ class _FeatureHasher:
         # pool and its CPU permits.
         self.signals.check_cancelled()
 
-    def _pool_features(self, workers, remaining):
+    def _pool_features(self, workers: int, remaining: deque[tuple[Path, str]]) -> Generator[_HashedFile, None, bool]:
         """Hash on a process pool; returns ``True`` when a pause stopped it."""
         mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
         paused = False
+        pending: deque[tuple[Path, str, Future[FileFeatures]]] = deque()
         try:
             # Bounded in-flight window instead of pool.map(): on Python
             # 3.11 Executor.map eagerly submits every input, so on a
@@ -143,7 +162,6 @@ class _FeatureHasher:
             # running lets the enclosing frame drain workers and
             # release CPU permits before we park.
             max_in_flight = workers * 4
-            pending = deque()
             while remaining:
                 self._check_cancelled_no_park()
                 image_path, path_str = remaining[0]
@@ -204,7 +222,7 @@ class _FeatureHasher:
             pool.shutdown(wait=True)
         return paused
 
-    def _feature_result(self, fut):
+    def _feature_result(self, fut: Future[FileFeatures]) -> FileFeatures:
         while True:
             # ``_check_cancelled_no_park`` raises
             # ``_ScanPauseRequested`` on pending pause
@@ -221,7 +239,7 @@ class _FeatureHasher:
             except TimeoutError:
                 continue
 
-    def _inline_features(self, remaining):
+    def _inline_features(self, remaining: deque[tuple[Path, str]]) -> Generator[_HashedFile, None, bool]:
         """Hash in this process; returns ``True`` when a pause stopped it."""
         paused = False
         while remaining:

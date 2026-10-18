@@ -1,11 +1,14 @@
 """Content hashing and the CPU lease the scanner's hashing pool runs under."""
 
+from __future__ import annotations
+
 import contextlib
 import hashlib
 import logging
 import multiprocessing
 import os
 import sys
+from typing import TYPE_CHECKING
 
 import imagehash
 from PIL import Image
@@ -16,10 +19,19 @@ from resource_ledger import (
     get_resource_ledger,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sized
+
+    from scanner.scan_types import StrPath
+
 log = logging.getLogger(__name__)
 
 
 EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
+
+# ``(phash, file_hash)`` for one file; either is None when it could not be
+# computed.
+FileFeatures = tuple[str | None, str | None]
 
 
 class _ScanPauseRequested(RuntimeError):
@@ -60,7 +72,7 @@ _SCAN_MP_METHOD = (
 _WINDOWS_MAX_WORKERS = 61
 
 
-def compute_file_hash(file_path, chunk_size=65536):
+def compute_file_hash(file_path: StrPath, chunk_size: int = 65536) -> str:
     """Compute SHA-256 hash of a file. Returns hex digest string."""
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
@@ -72,7 +84,7 @@ def compute_file_hash(file_path, chunk_size=65536):
     return h.hexdigest()
 
 
-def compute_fd_hash(fd, chunk_size=65536):
+def compute_fd_hash(fd: int, chunk_size: int = 65536) -> str:
     """Compute SHA-256 hash of the object referred to by ``fd``.
 
     Reading from the descriptor rather than re-opening the pathname keeps
@@ -91,7 +103,7 @@ def compute_fd_hash(fd, chunk_size=65536):
     return h.hexdigest()
 
 
-def _compute_file_features(path_str):
+def _compute_file_features(path_str: str) -> FileFeatures:
     """Compute (phash, file_hash) for one image.
 
     Module-level so ProcessPoolExecutor can pickle it. Mirrors the
@@ -113,7 +125,7 @@ def _compute_file_features(path_str):
     return phash, file_hash
 
 
-def _resolve_worker_count(files_to_process):
+def _resolve_worker_count(files_to_process: Sized) -> int:
     """Decide how many workers to use for feature computation.
 
     Returns 1 (sequential) when the batch is tiny or config disables
@@ -142,7 +154,7 @@ def _resolve_worker_count(files_to_process):
 
 
 @contextlib.contextmanager
-def _claim_worker_count(files_to_process, cancel_check=None):
+def _claim_worker_count(files_to_process: Sized, cancel_check: Callable[[], object] | None = None) -> Iterator[int]:
     """Yield the scanner worker grant from the process-wide CPU budget."""
     desired = _resolve_worker_count(files_to_process)
     ledger = get_resource_ledger()

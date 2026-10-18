@@ -553,9 +553,7 @@ function openLightbox(/** @type {number} */ photoId, /** @type {string | null | 
     editPhotoBtn.onclick = function(e) {
       if (e) e.stopPropagation();
       if (_lbGuardReadOnly()) return false;
-      var editHint = typeof window.getLightboxBrowseDisabledHint === 'function'
-        ? window.getLightboxBrowseDisabledHint(photoId, true)
-        : null;
+      var editHint = _lbPageBrowseDisabledHint(photoId);
       if (editHint) {
         if (typeof showToast === 'function') showToast(editHint, 'warning');
         return false;
@@ -622,8 +620,9 @@ function lightboxNav(/** @type {number} */ delta) {
   // from an in-scope result to an out-of-scope one (or stuck read-only in the
   // other direction). Group Review's open-burst exception is preserved by
   // isPhotoActionableInReviewScope().
-  if (typeof window.getLightboxOpenOptions === 'function') {
-    var opened = window.getLightboxOpenOptions(next.id);
+  var getLightboxOpenOptions = Vireo.pageHook('getLightboxOpenOptions');
+  if (getLightboxOpenOptions) {
+    var opened = getLightboxOpenOptions(next.id);
     if (opened && Object.prototype.hasOwnProperty.call(opened, 'readOnly')) {
       navOptions.readOnly = opened.readOnly;
       navOptions.readOnlyMessage = opened.readOnlyMessage;

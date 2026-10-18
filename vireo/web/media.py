@@ -1341,7 +1341,7 @@ class _ThumbnailRequest:
         self._retry_with_working_copy = _retry_thumbnail_with_working_copy
         self.vireo_dir = os.path.dirname(self.thumb_dir)
         # Look up the photo's folder path directly rather than via
-        # ``folders.tree()``: the tree filter excludes folders whose
+        # ``get_folder_tree()``: the tree filter excludes folders whose
         # status is ``'missing'``, which would leave the canonical-path
         # helper with an empty mapping and silently fall back to
         # ``os.path.join('', photo['filename'])`` — a CWD-relative path
@@ -2127,6 +2127,700 @@ def _tinted_mask_png(weight):
     return buf.getvalue()
 
 
+def _requested_pair_source(get_db, config, photo, folder_path):
+    """Resolve an explicit RAW/JPEG display choice for a paired photo.
+
+    Paired files remain one catalog record, but browser image requests can
+    select which physical source supplies the pixels with
+    ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
+    fall back to the established canonical rendering path so old clients
+    and ordinary photos are unchanged. Live files are preferred, with the
+    offline-original cache as the fallback; a known pair missing both
+    returns the source name with no path so routes can fail explicitly
+    instead of showing RAW pixels under a JPEG label.
+    """
+    requested = (request.args.get("source") or "").strip().lower()
+    if requested not in {"jpeg", "raw"}:
+        return None, None
+
+    from image_loader import RAW_EXTENSIONS
+
+    primary_ext = os.path.splitext(photo["filename"])[1].lower()
+    if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
+        return None, None
+
+    def _offline_path(column):
+        try:
+            row = get_db().caches.offline_original_get(photo["id"])
+        except sqlite3.Error:
+            log.warning("Could not read offline original for photo %s", photo["id"], exc_info=True)
+            return None
+        if not row or not row[column]:
+            return None
+        cached = row[column]
+        if not os.path.isabs(cached):
+            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+            cached = os.path.join(vireo_dir, cached)
+        return cached if os.path.isfile(cached) else None
+
+    if requested == "raw":
+        primary = os.path.join(folder_path, photo["filename"])
+        if os.path.isfile(primary):
+            return "raw", primary
+        return "raw", _offline_path("original_path")
+
+    companion = os.path.join(folder_path, photo["companion_path"])
+    companion_ext = os.path.splitext(companion)[1].lower()
+    if companion_ext not in {".jpg", ".jpeg"}:
+        return "jpeg", None
+    if os.path.isfile(companion):
+        return "jpeg", companion
+    return "jpeg", _offline_path("companion_path")
+
+
+def _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename):
+    """Serve or self-heal the thumbnail of a photo the caller may show."""
+    thumb_dir = config["THUMB_CACHE_DIR"]
+    folder_row = db.folders.get(photo["folder_id"])
+    if not folder_row:
+        return "", 404
+    pair_source, pair_source_path = _requested_pair_source(
+        get_db, config, photo, folder_row["path"],
+    )
+    if pair_source and not pair_source_path:
+        return "", 404
+
+    thumb = _ThumbnailRequest(
+        db,
+        photo_id,
+        photo,
+        folder_row,
+        filename,
+        thumb_dir,
+        pair_source,
+        pair_source_path,
+    )
+    thumb.select_cache_target()
+    response = thumb.serve_fresh_cache()
+    if response is not None:
+        return response
+
+    # Self-heal path: regenerate on miss (or stale) when the photo
+    # still exists.
+    thumb.prepare_self_heal()
+    try:
+        thumb.resolve_render_source()
+        if thumb.would_retry_failed_raw_decode():
+            log.info(
+                "Skipping thumbnail self-heal for photo %s; selected source "
+                "would retry a RAW decode that already failed for current "
+                "source mtime",
+                photo_id,
+            )
+            return "", 404
+        result = thumb.generate()
+    except Exception:  # broad: self-heal runs any decoder; a failure is logged and answers 404
+        log.exception(
+            "Thumbnail self-heal failed for photo %s (source=%s)",
+            photo_id, photo["filename"],
+        )
+        return "", 404
+
+    if not result:
+        # generate_thumbnail logged the reason (unreadable source,
+        # unsupported format, etc.). Nothing else to do here.
+        _record_working_copy_failure(db, photo, thumb.source)
+        return "", 404
+
+    thumb.peg_mtime_to_source(result)
+    thumb.persist_thumb_path()
+    return _send_cached_thumbnail(thumb_dir, thumb.cache_filename)
+
+
+def _mask_file_is_db_backed(get_db, filename, mask_path):
+    """Whether a mask file on disk is actually this photo's.
+
+    ``masks/<id>.png`` and ``masks/<id>.<variant>.png`` are keyed by
+    bare photo id, and ``photos.id`` recycles freed rowids, so file
+    existence alone does not mean the file belongs to the photo now
+    holding that id. ``photo_masks`` rows cascade away with the photo,
+    so requiring one is what distinguishes "this photo's mask" from
+    "a mask the previous owner of this rowid left behind" — and unlike
+    a timestamp check it can't be fooled by a stale file that happens
+    to be newer than the new photo's source.
+
+    Callers only reach this with an id-keyed filename; ``serve_mask``
+    refuses the rest because it cannot scope them to a workspace.
+    """
+    m = re.match(r"^(\d+)[._]", filename)
+    if not m:
+        return True
+    pid = int(m.group(1))
+    db = get_db()
+    real = os.path.realpath(mask_path)
+    for mask in db.masks_features.list_masks_for_photo(pid):
+        if mask["path"] and os.path.realpath(mask["path"]) == real:
+            return True
+    mask_path = db.masks_features.photo_mask_path(pid)
+    return bool(mask_path and os.path.realpath(mask_path) == real)
+
+
+def _read_mask_bytes(mask_path):
+    """Read an immutable mask generation, or lose a cleanup race.
+
+    POSIX keeps an already-open unlinked file readable, while Windows
+    refuses to unlink an open handle. The only race to recover from is
+    cleanup winning before ``open``; callers then re-resolve the current
+    database path and retry without waiting for a long-running writer.
+    """
+    try:
+        with open(mask_path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _load_crop_source(config, db, photo):
+    """Decode the crop source: the working copy first, then the original.
+
+    Returns ``_CROP_FOLDER_MISSING`` when there is no working copy and
+    the photo's folder row is gone, and ``None`` when nothing decoded.
+    """
+    from image_loader import load_image
+
+    # Try working copy first, fall back to original
+    vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+    image_path = None
+    using_working_copy = False
+    if photo["working_copy_path"]:
+        wc = os.path.join(vireo_dir, photo["working_copy_path"])
+        if os.path.exists(wc):
+            image_path = wc
+            using_working_copy = True
+    if image_path is None:
+        folder = db.folders.get(photo["folder_id"])
+        if not folder:
+            return _CROP_FOLDER_MISSING
+        image_path = os.path.join(folder["path"], photo["filename"])
+
+    if using_working_copy:
+        # Stamp access recency — same pattern as
+        # ``/photos/<id>/original`` and ``/photos/<id>/edit-preview``.
+        # Without this, repeated interactive crop previews leave the
+        # working copy's atime unchanged and it stays first in the
+        # quota eviction queue even while the user is actively
+        # working on the photo.
+        #
+        # Only the touch runs under the guard, and deliberately so.
+        # ``working_copy_publication_guard`` is a process-wide lock
+        # that the quota pass holds across a full scandir of the
+        # cache; holding it across a decode as well would serialize
+        # every interactive image read in the app against every
+        # other one and against eviction, which is exactly the
+        # stall this PR set out to remove. A `utime` under the lock
+        # costs microseconds. If eviction unlinks the file between
+        # the touch and the open, the decode returns None and the
+        # original-source fallback below handles it — that path
+        # already exists for precisely this race.
+        with working_copy_publication_guard():
+            touch_working_copy_access(image_path)
+    preview_size = 1024 if request.args.get("detection_id") is not None else None
+    img = load_image(image_path, max_size=preview_size)
+    if img is None and using_working_copy:
+        # Quota enforcement can unlink the working copy after the
+        # existence check above but before Pillow opens it. Re-resolve
+        # the primary source once so an otherwise healthy crop request
+        # does not become a transient 500 during eviction.
+        folder = db.folders.get(photo["folder_id"])
+        original_path = (
+            os.path.join(folder["path"], photo["filename"])
+            if folder else None
+        )
+        if original_path and os.path.isfile(original_path):
+            img = load_image(original_path, max_size=preview_size)
+    return img
+
+
+def _crop_to_detection(img, dets, requested_detection):
+    """Crop to the primary (or requested) subject box with its padding."""
+    import config as cfg
+
+    det_box = None
+    if dets:
+        det_row = dets[0]
+        det_box = {
+            "x": det_row["box_x"], "y": det_row["box_y"],
+            "w": det_row["box_w"], "h": det_row["box_h"],
+        }
+    if requested_detection is not None:
+        from subjects import suggested_crop
+        det_box = suggested_crop(det_row)
+    if det_box:
+        iw, ih = img.size
+        padding = 0 if requested_detection is not None else cfg.load().get("detection_padding", 0.2)
+        pad_w = det_box["w"] * padding
+        pad_h = det_box["h"] * padding
+        x1 = max(0, int((det_box["x"] - pad_w) * iw))
+        y1 = max(0, int((det_box["y"] - pad_h) * ih))
+        x2 = min(iw, int((det_box["x"] + det_box["w"] + pad_w) * iw))
+        y2 = min(ih, int((det_box["y"] + det_box["h"] + pad_h) * ih))
+        crop = img.crop((x1, y1, x2, y2))
+        if requested_detection is not None or (crop.size[0] >= 50 and crop.size[1] >= 50):
+            img = crop
+    return img
+
+
+def _focus_mask_bytes(db_path, db, photo_id):
+    """Only read the recorded mask inside this catalog's mask directory."""
+    mask_path = db.masks_features.photo_mask_path(photo_id)
+    if not mask_path:
+        return None
+    masks_dir = os.path.realpath(os.path.join(os.path.dirname(db_path), "masks"))
+    abs_mask = os.path.realpath(mask_path)
+    inside = abs_mask == masks_dir or abs_mask.startswith(masks_dir + os.sep)
+    return _read_mask_bytes(abs_mask) if inside else None
+
+
+def _focus_source_image(config, photo, folder, source_choice):
+    """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
+
+    ``working`` requires the working copy, with no original fallback.
+    ``auto`` permits original fallback. A working copy is capped at
+    ``working_copy_max_size``, so on a large sensor its pixels are not
+    the original's: when the reviewer asked for ``original``, or left it
+    to ``auto`` and the copy is downsized against the catalog
+    dimensions, the original is decoded instead (JPEG-first, the
+    embedded full-size JPEG of a RAW) and used when it is larger.
+    """
+    from focus_crop import prefer_original
+    from image_loader import load_image, load_working_image
+
+    folders = {photo["folder_id"]: folder["path"]} if folder else {}
+    original_path = os.path.join(folder["path"], photo["filename"]) if folder else None
+    img, source = None, None
+    if source_choice != "original":
+        img, source = load_working_image(
+            dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
+            folders=None if source_choice == "working" else folders,
+            record_access=True, return_source=True,
+        )
+    wants_original = source_choice == "original" or (
+        source_choice == "auto" and img is not None and source == "working_copy"
+        and prefer_original(img.size, photo)
+    )
+    if wants_original and original_path and os.path.isfile(original_path):
+        original = load_image(original_path, max_size=None)
+        if original is not None and (img is None or max(original.size) > max(img.size)):
+            img, source = original, "original"
+    return img, source
+
+
+def _paired_cache_path_for_request(
+    preview_dir, photo, photo_id, size, pair_source, pair_source_path,
+    render_recipe, bypass_cache,
+):
+    """The source-keyed shadow cache path, or ``None`` for ordinary previews."""
+    # Paired renders coordinate through a distinct source-aware artifact
+    # so a browser warmup (prefetch=1) and the visible request that
+    # follows can share one decode instead of racing two — the paired
+    # URLs necessarily differ (prefetch vs no prefetch) so the browser
+    # cannot coalesce them and the server must.
+    # Key the paired shadow cache by render/source state so a changed
+    # edit recipe or a swapped paired source produces a distinct
+    # filename. Otherwise repeatedly accessed entries would keep
+    # returning bytes rendered from the previous state indefinitely —
+    # regular preview-cache invalidation does not remove these source-keyed
+    # files. Old states remain accounted for until LRU eviction.
+    return (
+        _paired_preview_path(
+            preview_dir,
+            photo_id,
+            size,
+            pair_source,
+            _paired_render_state_hash(
+                photo, size, pair_source, pair_source_path, render_recipe,
+            ),
+        )
+        if bypass_cache
+        else None
+    )
+
+
+def _serve_cached_preview(
+    db, photo_id, size, cache_path, paired_cache_path, vireo_dir, *,
+    bypass_cache, stale_after_failed_invalidation,
+    skip_untracked_preview_adoption,
+):
+    """Serve a tracked, adoptable or paired cache hit; ``None`` on a miss."""
+    from flask import send_file
+
+    # Cache hit (tracked): touch and serve. The touch is best-effort
+    # bookkeeping — under concurrent traffic SQLite can raise
+    # OperationalError: database is locked, but that shouldn't turn a
+    # valid cache hit into a 500 when the JPEG is right there on disk.
+    if (
+        not bypass_cache
+        and not stale_after_failed_invalidation
+        and db.caches.preview_get(photo_id, size)
+        and os.path.exists(cache_path)
+    ):
+        with contextlib.suppress(sqlite3.Error):
+            db.caches.preview_touch(photo_id, size)
+        return send_file(cache_path, mimetype="image/jpeg")
+
+    # Cache hit (on-disk but untracked): lazy adoption.
+    # caches.preview_insert uses time.time() for last_access_at, so the
+    # adopted entry is ranked as freshly-accessed in the LRU in a single
+    # commit (instead of insert-with-mtime-then-touch-to-now).
+    # Read bytes into memory before evicting: eviction may delete the
+    # file we just adopted (e.g. preview_cache_max_mb=0), but we can
+    # still serve the response from memory — mirrors the miss path.
+    if (
+        not bypass_cache
+        and not stale_after_failed_invalidation
+        and not skip_untracked_preview_adoption
+        and os.path.exists(cache_path)
+    ):
+        with open(cache_path, "rb") as f:
+            data = f.read()
+        try:
+            db.caches.preview_insert(photo_id, size, len(data))
+            evict_preview_cache_if_over_quota(db, vireo_dir)
+        except Exception:
+            # broad: the bytes are already in memory; bookkeeping must not
+            # turn a cache hit into a 500.
+            log.warning("Could not adopt untracked preview for photo %s", photo_id, exc_info=True)
+        return Response(data, mimetype="image/jpeg")
+
+    # Paired-render cache hit: an earlier equal-key producer already
+    # decoded and atomically published these bytes to the paired shadow
+    # cache, so waiters skip repeating that work.
+    if (
+        paired_cache_path
+        and paired_preview_ready(db, paired_cache_path)
+    ):
+        with contextlib.suppress(sqlite3.Error):
+            db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
+        return send_file(paired_cache_path, mimetype="image/jpeg")
+    return None
+
+
+def _materialize_requested_preview(
+    db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
+    render_recipe, bypass_cache, pair_source, pair_source_path,
+    _prepare_source,
+):
+    """Render the preview; ``None`` when the source could not be decoded."""
+    import config as cfg
+
+    preview_quality = cfg.load().get("preview_quality", 90)
+    try:
+        return materialize_preview(
+            db,
+            photo,
+            folder_row["path"],
+            size=size,
+            vireo_dir=vireo_dir,
+            preview_quality=preview_quality,
+            recipe=render_recipe,
+            cache_path=None if bypass_cache else cache_path,
+            pair_source=pair_source,
+            pair_source_path=pair_source_path,
+            coordinate=False,
+            publish_best_effort=True,
+            publication_guard=lambda: _preparation_publication(
+                db, photo_id, _prepare_source,
+                captured_recipe=render_recipe,
+            ),
+        )
+    except PreviewMaterializationError:
+        return None
+
+
+class _PreviewServer:
+    """The ``/photos/<id>/preview`` and ``/full`` cache path behind ``_serve_preview``.
+
+    Built once per blueprint around the per-app state its steps share: the
+    request database getter, the app config (``THUMB_CACHE_DIR`` is read when
+    a request runs), and the app's ``RenderCache`` preview-invalidation set
+    and clearer. ``_serve_preview`` re-enters itself through the equal-key
+    artifact flight.
+    """
+
+    def __init__(
+        self, get_db, config, *, invalid_preview_cache_paths,
+        clear_preview_cache_invalid,
+    ):
+        self._get_db = get_db
+        self._config = config
+        self._invalid_preview_cache_paths = invalid_preview_cache_paths
+        self._clear_preview_cache_invalid = clear_preview_cache_invalid
+
+
+    def allowed_preview_sizes(self):
+        """Allowlist for /photos/<id>/preview?size=N.
+
+        Includes the fixed tier plus the user-configured preview_max_size
+        so /full can delegate here. Reads workspace-effective config so
+        a per-workspace preview_max_size override is honored.
+        """
+        import config as cfg
+        effective = self._get_db().get_effective_config(cfg.load())
+        fixed = set(PREVIEW_TIER_SIZES)
+        pm = effective.get("preview_max_size") or 1920
+        if pm == 0:
+            return fixed  # 0 = "full" — handled by /original path
+        return fixed | {int(pm)}
+
+    def _reconcile_preview_cache_file(
+        self, db, photo, photo_id, size, cache_path, recipe, render_recipe, bypass_cache,
+    ):
+        """Drop corrupt, invalidated and stale untracked preview files.
+
+        Returns ``(stale_after_failed_invalidation,
+        skip_untracked_preview_adoption)``: whether the cached file is still
+        known stale (it could not be removed) and whether an on-disk file
+        that failed removal must not be adopted as a cache hit.
+        """
+        # Reject corrupt zero-byte cache files (prior write interrupted).
+        # Treat them as a miss so the regeneration path below produces a
+        # real preview.
+        if (
+            not bypass_cache
+            and os.path.exists(cache_path)
+            and os.path.getsize(cache_path) == 0
+        ):
+            with contextlib.suppress(OSError):
+                os.remove(cache_path)
+            db.caches.preview_delete(photo_id, size)  # no-op if no row
+
+        skip_untracked_preview_adoption = False
+        stale_after_failed_invalidation = (
+            cache_path in self._invalid_preview_cache_paths
+            or _is_preview_cache_invalid(db, photo_id, size)
+            or (os.path.exists(cache_path) and not _camera_cache_matches(cache_path, photo, render_recipe))
+        )
+        if (
+            not bypass_cache
+            and stale_after_failed_invalidation
+            and os.path.exists(cache_path)
+        ):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove previously invalidated preview cache %s",
+                    cache_path, exc_info=True,
+                )
+            else:
+                self._invalid_preview_cache_paths.discard(cache_path)
+                self._clear_preview_cache_invalid(db, photo_id, size)
+                db.caches.preview_delete(photo_id, size)
+                stale_after_failed_invalidation = False
+        elif not bypass_cache and stale_after_failed_invalidation:
+            self._invalid_preview_cache_paths.discard(cache_path)
+            self._clear_preview_cache_invalid(db, photo_id, size)
+            db.caches.preview_delete(photo_id, size)
+            stale_after_failed_invalidation = False
+        if (
+            not bypass_cache
+            and recipe
+            and os.path.exists(cache_path)
+            and not db.caches.preview_get(photo_id, size)
+        ):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                skip_untracked_preview_adoption = True
+                log.warning(
+                    "Failed to remove stale untracked preview cache %s",
+                    cache_path, exc_info=True,
+                )
+        return stale_after_failed_invalidation, skip_untracked_preview_adoption
+
+    def _coordinate_preview_flight(
+        self, photo_id, size, cache_path, paired_cache_path, bypass_cache,
+        _prepare_source,
+    ):
+        """Run the cache-miss render under the equal-key artifact flight."""
+        artifact_key = os.path.abspath(
+            paired_cache_path if bypass_cache else cache_path,
+        )
+        speculative = request.args.get("prefetch") == "1"
+        speculative_slot = False
+        if speculative:
+            speculative_slot = preview_prefetch_slots.acquire(blocking=False)
+            if not speculative_slot:
+                return _shed_prefetch_response()
+
+        def coordinated_request(*, guarded):
+            response = make_response(
+                self._serve_preview(
+                    photo_id, size, _artifact_flight_guarded=guarded,
+                    _prepare_source=_prepare_source,
+                )
+            )
+            if response.status_code >= 400:
+                raise _ArtifactResponseError(response)
+            return response
+
+        try:
+            result = preview_artifact_flights.run(
+                artifact_key,
+                lambda: coordinated_request(guarded=True),
+                lambda: coordinated_request(guarded=False),
+                join=not speculative,
+            )
+            if result.skipped:
+                return _shed_prefetch_response()
+            return result.value
+        except _ArtifactResponseError as exc:
+            return exc.to_response()
+        except ArtifactProducerFailed as exc:
+            if isinstance(exc.__cause__, _ArtifactResponseError):
+                return exc.__cause__.to_response()
+            if isinstance(exc.__cause__, PreviewMaterializationError):
+                return "Could not load image", 500
+            raise
+        finally:
+            if speculative_slot:
+                preview_prefetch_slots.release()
+
+    def _record_rendered_preview(
+        self, db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
+        bypass_cache, rendered,
+    ):
+        """Bookkeeping after a render: clear invalidation, evict, publish paired bytes."""
+        if not bypass_cache and rendered.published:
+            self._invalid_preview_cache_paths.discard(cache_path)
+            self._clear_preview_cache_invalid(db, photo_id, size)
+            try:
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception:  # broad: eviction is maintenance; the render is already in memory
+                log.warning("Preview cache eviction failed after render", exc_info=True)
+        # Publish the paired-render bytes so an equal-key follower still
+        # inside preview_artifact_flights.run() finds a ready artifact when
+        # it re-enters _serve_preview instead of decoding the same source.
+        # Best-effort: a full or read-only disk must never turn a successful
+        # producer render into a 500.
+        if bypass_cache and paired_cache_path and rendered.data is not None:
+            try:
+                # Publication and registration share the source-identity
+                # guard: a deletion/reimport during decoding must not attach
+                # the old pixels to the new photo's durable cache entry.
+                with _preparation_publication(db, photo_id, photo):
+                    atomic_write_bytes(rendered.data, paired_cache_path)
+                    db.caches.paired_preview_insert(
+                        photo_id, os.path.basename(paired_cache_path), len(rendered.data),
+                    )
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception:  # broad: paired-cache publication is best-effort; the render is served from memory
+                log.warning(
+                    "Failed to publish paired preview cache %s",
+                    paired_cache_path, exc_info=True,
+                )
+
+    def _serve_preview(
+        self, photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
+    ):
+        """Serve a preview at the given size, using the preview_cache LRU.
+
+        This is the single code path behind both /photos/<id>/preview and
+        /photos/<id>/full. Callers have already validated size.
+
+        ``_prepare_source`` is the photo row full-resolution preparation
+        selected: the render publishes only while the catalog still holds
+        that source (see ``_preparation_publication``).
+        """
+        from flask import send_file
+
+        # Confirm the photo still exists before any cache return so that a
+        # deleted photo can't be served from a stale per-size cache (and so
+        # SQLite id reuse can't surface the wrong image). verify_workspace
+        # keeps cross-workspace photos from being served here at all
+        # (mirrors serve_thumbnail).
+        db = self._get_db()
+        photo = db.photos.get(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        if _prepare_source is not None:
+            from offline_cache import photo_source_matches
+
+            if not photo_source_matches(_prepare_source, photo):
+                return "Photo source changed", 404
+
+        vireo_dir = os.path.dirname(self._config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
+        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        recipe = db.get_photo_edit_recipe(photo_id)
+        folder_row = db.folders.get(photo["folder_id"])
+        if not folder_row:
+            return "Not found", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            self._get_db, self._config, photo, folder_row["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
+        # Recipes and local masks use primary-RAW coordinates. The selected
+        # developed JPEG may have different geometry and should be displayed
+        # as-authored rather than receiving the RAW edit a second time.
+        render_recipe = None if pair_source == "jpeg" else recipe
+        # The established preview cache is keyed only by (photo_id, size).
+        # Explicit paired-source views bypass it so RAW and JPEG pixels can
+        # never contaminate one another. Both indexes share the preview disk LRU.
+        bypass_cache = pair_source is not None
+        paired_cache_path = _paired_cache_path_for_request(
+            preview_dir, photo, photo_id, size, pair_source, pair_source_path,
+            render_recipe, bypass_cache,
+        )
+
+        stale_after_failed_invalidation, skip_untracked_preview_adoption = (
+            self._reconcile_preview_cache_file(
+                db, photo, photo_id, size, cache_path, recipe, render_recipe,
+                bypass_cache,
+            )
+        )
+        cached = _serve_cached_preview(
+            db, photo_id, size, cache_path, paired_cache_path, vireo_dir,
+            bypass_cache=bypass_cache,
+            stale_after_failed_invalidation=stale_after_failed_invalidation,
+            skip_untracked_preview_adoption=skip_untracked_preview_adoption,
+        )
+        if cached is not None:
+            return cached
+
+        # Cache miss: coordinate every durable preview producer in this
+        # process before decoding.  The recursive producer re-runs all cache
+        # and invalidation checks under the flight; equal-key waiters then
+        # re-enter once more and serve the atomically published JPEG through
+        # their own Flask request context.  Paired renders are coordinated
+        # too, keyed by the source-aware paired path so RAW and JPEG variants
+        # of the same photo never share a flight — the shared artifact for
+        # waiters live at that paired path, isolated from ordinary previews.
+        if not _artifact_flight_guarded:
+            return self._coordinate_preview_flight(
+                photo_id, size, cache_path, paired_cache_path, bypass_cache,
+                _prepare_source,
+            )
+
+        rendered = _materialize_requested_preview(
+            db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
+            render_recipe, bypass_cache, pair_source, pair_source_path,
+            _prepare_source,
+        )
+        if rendered is None:
+            return "Could not load image", 500
+
+        self._record_rendered_preview(
+            db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
+            bypass_cache, rendered,
+        )
+        if rendered.data is not None:
+            return Response(rendered.data, mimetype="image/jpeg")
+        return send_file(cache_path, mimetype="image/jpeg")
+
+
 def create_media_blueprint(
     get_db,
     json_error,
@@ -2154,56 +2848,11 @@ def create_media_blueprint(
     so the prepare-full-resolution job renders through this canonical path.
     """
     blueprint = Blueprint("media", __name__)
-
-    def _requested_pair_source(photo, folder_path):
-        """Resolve an explicit RAW/JPEG display choice for a paired photo.
-
-        Paired files remain one catalog record, but browser image requests can
-        select which physical source supplies the pixels with
-        ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
-        fall back to the established canonical rendering path so old clients
-        and ordinary photos are unchanged. Live files are preferred, with the
-        offline-original cache as the fallback; a known pair missing both
-        returns the source name with no path so routes can fail explicitly
-        instead of showing RAW pixels under a JPEG label.
-        """
-        requested = (request.args.get("source") or "").strip().lower()
-        if requested not in {"jpeg", "raw"}:
-            return None, None
-
-        from image_loader import RAW_EXTENSIONS
-
-        primary_ext = os.path.splitext(photo["filename"])[1].lower()
-        if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
-            return None, None
-
-        def _offline_path(column):
-            try:
-                row = get_db().caches.offline_original_get(photo["id"])
-            except sqlite3.Error:
-                log.warning("Could not read offline original for photo %s", photo["id"], exc_info=True)
-                return None
-            if not row or not row[column]:
-                return None
-            cached = row[column]
-            if not os.path.isabs(cached):
-                vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-                cached = os.path.join(vireo_dir, cached)
-            return cached if os.path.isfile(cached) else None
-
-        if requested == "raw":
-            primary = os.path.join(folder_path, photo["filename"])
-            if os.path.isfile(primary):
-                return "raw", primary
-            return "raw", _offline_path("original_path")
-
-        companion = os.path.join(folder_path, photo["companion_path"])
-        companion_ext = os.path.splitext(companion)[1].lower()
-        if companion_ext not in {".jpg", ".jpeg"}:
-            return "jpeg", None
-        if os.path.isfile(companion):
-            return "jpeg", companion
-        return "jpeg", _offline_path("companion_path")
+    previews = _PreviewServer(
+        get_db, config,
+        invalid_preview_cache_paths=invalid_preview_cache_paths,
+        clear_preview_cache_invalid=clear_preview_cache_invalid,
+    )
 
     @blueprint.route("/thumbnails/<filename>")
     def serve_thumbnail(filename):
@@ -2266,7 +2915,7 @@ def create_media_blueprint(
             # do NOT touch the cached file here — another workspace may
             # legitimately own it.
             return "", 404
-        return _serve_photo_thumbnail(db, photo_id, photo, filename)
+        return _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename)
 
     @blueprint.route("/thumbnails/duplicate/<filename>")
     def serve_duplicate_thumbnail(filename):
@@ -2293,106 +2942,7 @@ def create_media_blueprint(
         photo = db.photos.get(photo_id)
         if not photo:
             return "", 404
-        return _serve_photo_thumbnail(db, photo_id, photo, filename)
-
-    def _serve_photo_thumbnail(db, photo_id, photo, filename):
-        """Serve or self-heal the thumbnail of a photo the caller may show."""
-        thumb_dir = config["THUMB_CACHE_DIR"]
-        folder_row = db.folders.get(photo["folder_id"])
-        if not folder_row:
-            return "", 404
-        pair_source, pair_source_path = _requested_pair_source(
-            photo, folder_row["path"],
-        )
-        if pair_source and not pair_source_path:
-            return "", 404
-
-        thumb = _ThumbnailRequest(
-            db,
-            photo_id,
-            photo,
-            folder_row,
-            filename,
-            thumb_dir,
-            pair_source,
-            pair_source_path,
-        )
-        thumb.select_cache_target()
-        response = thumb.serve_fresh_cache()
-        if response is not None:
-            return response
-
-        # Self-heal path: regenerate on miss (or stale) when the photo
-        # still exists.
-        thumb.prepare_self_heal()
-        try:
-            thumb.resolve_render_source()
-            if thumb.would_retry_failed_raw_decode():
-                log.info(
-                    "Skipping thumbnail self-heal for photo %s; selected source "
-                    "would retry a RAW decode that already failed for current "
-                    "source mtime",
-                    photo_id,
-                )
-                return "", 404
-            result = thumb.generate()
-        except Exception:  # broad: self-heal runs any decoder; a failure is logged and answers 404
-            log.exception(
-                "Thumbnail self-heal failed for photo %s (source=%s)",
-                photo_id, photo["filename"],
-            )
-            return "", 404
-
-        if not result:
-            # generate_thumbnail logged the reason (unreadable source,
-            # unsupported format, etc.). Nothing else to do here.
-            _record_working_copy_failure(db, photo, thumb.source)
-            return "", 404
-
-        thumb.peg_mtime_to_source(result)
-        thumb.persist_thumb_path()
-        return _send_cached_thumbnail(thumb_dir, thumb.cache_filename)
-
-    def _mask_file_is_db_backed(filename, mask_path):
-        """Whether a mask file on disk is actually this photo's.
-
-        ``masks/<id>.png`` and ``masks/<id>.<variant>.png`` are keyed by
-        bare photo id, and ``photos.id`` recycles freed rowids, so file
-        existence alone does not mean the file belongs to the photo now
-        holding that id. ``photo_masks`` rows cascade away with the photo,
-        so requiring one is what distinguishes "this photo's mask" from
-        "a mask the previous owner of this rowid left behind" — and unlike
-        a timestamp check it can't be fooled by a stale file that happens
-        to be newer than the new photo's source.
-
-        Callers only reach this with an id-keyed filename; ``serve_mask``
-        refuses the rest because it cannot scope them to a workspace.
-        """
-        m = re.match(r"^(\d+)[._]", filename)
-        if not m:
-            return True
-        pid = int(m.group(1))
-        db = get_db()
-        real = os.path.realpath(mask_path)
-        for mask in db.masks_features.list_masks_for_photo(pid):
-            if mask["path"] and os.path.realpath(mask["path"]) == real:
-                return True
-        mask_path = db.masks_features.photo_mask_path(pid)
-        return bool(mask_path and os.path.realpath(mask_path) == real)
-
-    def _read_mask_bytes(mask_path):
-        """Read an immutable mask generation, or lose a cleanup race.
-
-        POSIX keeps an already-open unlinked file readable, while Windows
-        refuses to unlink an open handle. The only race to recover from is
-        cleanup winning before ``open``; callers then re-resolve the current
-        database path and retry without waiting for a long-running writer.
-        """
-        try:
-            with open(mask_path, "rb") as handle:
-                return handle.read()
-        except OSError:
-            return None
+        return _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename)
 
     @blueprint.route("/masks/<filename>")
     def serve_mask(filename):
@@ -2420,7 +2970,7 @@ def create_media_blueprint(
         if get_db().photos.get(pid, verify_workspace=True) is None:
             return "", 404
         if os.path.exists(mask_path) and _mask_file_is_db_backed(
-            filename, mask_path,
+            get_db, filename, mask_path,
         ):
             mask_bytes = _read_mask_bytes(mask_path)
             if mask_bytes is not None:
@@ -2518,94 +3068,6 @@ def create_media_blueprint(
             ],
         })
 
-    def _load_crop_source(db, photo):
-        """Decode the crop source: the working copy first, then the original.
-
-        Returns ``_CROP_FOLDER_MISSING`` when there is no working copy and
-        the photo's folder row is gone, and ``None`` when nothing decoded.
-        """
-        from image_loader import load_image
-
-        # Try working copy first, fall back to original
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        image_path = None
-        using_working_copy = False
-        if photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                image_path = wc
-                using_working_copy = True
-        if image_path is None:
-            folder = db.folders.get(photo["folder_id"])
-            if not folder:
-                return _CROP_FOLDER_MISSING
-            image_path = os.path.join(folder["path"], photo["filename"])
-
-        if using_working_copy:
-            # Stamp access recency — same pattern as
-            # ``/photos/<id>/original`` and ``/photos/<id>/edit-preview``.
-            # Without this, repeated interactive crop previews leave the
-            # working copy's atime unchanged and it stays first in the
-            # quota eviction queue even while the user is actively
-            # working on the photo.
-            #
-            # Only the touch runs under the guard, and deliberately so.
-            # ``working_copy_publication_guard`` is a process-wide lock
-            # that the quota pass holds across a full scandir of the
-            # cache; holding it across a decode as well would serialize
-            # every interactive image read in the app against every
-            # other one and against eviction, which is exactly the
-            # stall this PR set out to remove. A `utime` under the lock
-            # costs microseconds. If eviction unlinks the file between
-            # the touch and the open, the decode returns None and the
-            # original-source fallback below handles it — that path
-            # already exists for precisely this race.
-            with working_copy_publication_guard():
-                touch_working_copy_access(image_path)
-        preview_size = 1024 if request.args.get("detection_id") is not None else None
-        img = load_image(image_path, max_size=preview_size)
-        if img is None and using_working_copy:
-            # Quota enforcement can unlink the working copy after the
-            # existence check above but before Pillow opens it. Re-resolve
-            # the primary source once so an otherwise healthy crop request
-            # does not become a transient 500 during eviction.
-            folder = db.folders.get(photo["folder_id"])
-            original_path = (
-                os.path.join(folder["path"], photo["filename"])
-                if folder else None
-            )
-            if original_path and os.path.isfile(original_path):
-                img = load_image(original_path, max_size=preview_size)
-        return img
-
-    def _crop_to_detection(img, dets, requested_detection):
-        """Crop to the primary (or requested) subject box with its padding."""
-        import config as cfg
-
-        det_box = None
-        if dets:
-            det_row = dets[0]
-            det_box = {
-                "x": det_row["box_x"], "y": det_row["box_y"],
-                "w": det_row["box_w"], "h": det_row["box_h"],
-            }
-        if requested_detection is not None:
-            from subjects import suggested_crop
-            det_box = suggested_crop(det_row)
-        if det_box:
-            iw, ih = img.size
-            padding = 0 if requested_detection is not None else cfg.load().get("detection_padding", 0.2)
-            pad_w = det_box["w"] * padding
-            pad_h = det_box["h"] * padding
-            x1 = max(0, int((det_box["x"] - pad_w) * iw))
-            y1 = max(0, int((det_box["y"] - pad_h) * ih))
-            x2 = min(iw, int((det_box["x"] + det_box["w"] + pad_w) * iw))
-            y2 = min(ih, int((det_box["y"] + det_box["h"] + pad_h) * ih))
-            crop = img.crop((x1, y1, x2, y2))
-            if requested_detection is not None or (crop.size[0] >= 50 and crop.size[1] >= 50):
-                img = crop
-        return img
-
     @blueprint.route("/photos/<int:photo_id>/crop")
     def serve_crop_preview(photo_id):
         """Serve the cropped region that would be sent to BioCLIP."""
@@ -2633,7 +3095,7 @@ def create_media_blueprint(
             if not dets:
                 return json_error("Subject not found", 404)
 
-        img = _load_crop_source(db, photo)
+        img = _load_crop_source(config, db, photo)
         if img is _CROP_FOLDER_MISSING:
             return "Not found", 404
         if img is None:
@@ -2662,49 +3124,6 @@ def create_media_blueprint(
             response.add_etag()
             response.make_conditional(request)
         return response
-
-    def _focus_mask_bytes(db, photo_id):
-        """Only read the recorded mask inside this catalog's mask directory."""
-        mask_path = db.masks_features.photo_mask_path(photo_id)
-        if not mask_path:
-            return None
-        masks_dir = os.path.realpath(os.path.join(os.path.dirname(db_path), "masks"))
-        abs_mask = os.path.realpath(mask_path)
-        inside = abs_mask == masks_dir or abs_mask.startswith(masks_dir + os.sep)
-        return _read_mask_bytes(abs_mask) if inside else None
-
-    def _focus_source_image(photo, folder, source_choice):
-        """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
-
-        ``working`` requires the working copy, with no original fallback.
-        ``auto`` permits original fallback. A working copy is capped at
-        ``working_copy_max_size``, so on a large sensor its pixels are not
-        the original's: when the reviewer asked for ``original``, or left it
-        to ``auto`` and the copy is downsized against the catalog
-        dimensions, the original is decoded instead (JPEG-first, the
-        embedded full-size JPEG of a RAW) and used when it is larger.
-        """
-        from focus_crop import prefer_original
-        from image_loader import load_image, load_working_image
-
-        folders = {photo["folder_id"]: folder["path"]} if folder else {}
-        original_path = os.path.join(folder["path"], photo["filename"]) if folder else None
-        img, source = None, None
-        if source_choice != "original":
-            img, source = load_working_image(
-                dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
-                folders=None if source_choice == "working" else folders,
-                record_access=True, return_source=True,
-            )
-        wants_original = source_choice == "original" or (
-            source_choice == "auto" and img is not None and source == "working_copy"
-            and prefer_original(img.size, photo)
-        )
-        if wants_original and original_path and os.path.isfile(original_path):
-            original = load_image(original_path, max_size=None)
-            if original is not None and (img is None or max(original.size) > max(img.size)):
-                img, source = original, "original"
-        return img, source
 
     @blueprint.route("/photos/<int:photo_id>/focus-crop")
     def serve_focus_crop(photo_id):
@@ -2772,14 +3191,14 @@ def create_media_blueprint(
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
         except ValueError as exc:
             return json_error(str(exc), 404)
-        img, source = _focus_source_image(photo, db.folders.get(photo["folder_id"]), source_choice)
+        img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
         if img is None:
             if source_choice in {"working", "original"}:
                 return json_error(f"The {source_choice} image is not available", 404)
             return "Could not load image", 500
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
-        mask_bytes = _focus_mask_bytes(db, photo_id) if request.args.get("mask") == "1" else None
+        mask_bytes = _focus_mask_bytes(db_path, db, photo_id) if request.args.get("mask") == "1" else None
         if mask_bytes is not None:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
         buf = io.BytesIO()
@@ -2792,389 +3211,6 @@ def create_media_blueprint(
         response.cache_control.private = True
         response.cache_control.max_age = 0
         return response
-
-    def allowed_preview_sizes():
-        """Allowlist for /photos/<id>/preview?size=N.
-
-        Includes the fixed tier plus the user-configured preview_max_size
-        so /full can delegate here. Reads workspace-effective config so
-        a per-workspace preview_max_size override is honored.
-        """
-        import config as cfg
-        effective = get_db().get_effective_config(cfg.load())
-        fixed = set(PREVIEW_TIER_SIZES)
-        pm = effective.get("preview_max_size") or 1920
-        if pm == 0:
-            return fixed  # 0 = "full" — handled by /original path
-        return fixed | {int(pm)}
-
-
-    def _paired_cache_path_for_request(
-        preview_dir, photo, photo_id, size, pair_source, pair_source_path,
-        render_recipe, bypass_cache,
-    ):
-        """The source-keyed shadow cache path, or ``None`` for ordinary previews."""
-        # Paired renders coordinate through a distinct source-aware artifact
-        # so a browser warmup (prefetch=1) and the visible request that
-        # follows can share one decode instead of racing two — the paired
-        # URLs necessarily differ (prefetch vs no prefetch) so the browser
-        # cannot coalesce them and the server must.
-        # Key the paired shadow cache by render/source state so a changed
-        # edit recipe or a swapped paired source produces a distinct
-        # filename. Otherwise repeatedly accessed entries would keep
-        # returning bytes rendered from the previous state indefinitely —
-        # regular preview-cache invalidation does not remove these source-keyed
-        # files. Old states remain accounted for until LRU eviction.
-        return (
-            _paired_preview_path(
-                preview_dir,
-                photo_id,
-                size,
-                pair_source,
-                _paired_render_state_hash(
-                    photo, size, pair_source, pair_source_path, render_recipe,
-                ),
-            )
-            if bypass_cache
-            else None
-        )
-
-    def _reconcile_preview_cache_file(
-        db, photo, photo_id, size, cache_path, recipe, render_recipe, bypass_cache,
-    ):
-        """Drop corrupt, invalidated and stale untracked preview files.
-
-        Returns ``(stale_after_failed_invalidation,
-        skip_untracked_preview_adoption)``: whether the cached file is still
-        known stale (it could not be removed) and whether an on-disk file
-        that failed removal must not be adopted as a cache hit.
-        """
-        # Reject corrupt zero-byte cache files (prior write interrupted).
-        # Treat them as a miss so the regeneration path below produces a
-        # real preview.
-        if (
-            not bypass_cache
-            and os.path.exists(cache_path)
-            and os.path.getsize(cache_path) == 0
-        ):
-            with contextlib.suppress(OSError):
-                os.remove(cache_path)
-            db.caches.preview_delete(photo_id, size)  # no-op if no row
-
-        skip_untracked_preview_adoption = False
-        stale_after_failed_invalidation = (
-            cache_path in invalid_preview_cache_paths
-            or _is_preview_cache_invalid(db, photo_id, size)
-            or (os.path.exists(cache_path) and not _camera_cache_matches(cache_path, photo, render_recipe))
-        )
-        if (
-            not bypass_cache
-            and stale_after_failed_invalidation
-            and os.path.exists(cache_path)
-        ):
-            try:
-                os.remove(cache_path)
-            except OSError:
-                skip_untracked_preview_adoption = True
-                log.warning(
-                    "Failed to remove previously invalidated preview cache %s",
-                    cache_path, exc_info=True,
-                )
-            else:
-                invalid_preview_cache_paths.discard(cache_path)
-                clear_preview_cache_invalid(db, photo_id, size)
-                db.caches.preview_delete(photo_id, size)
-                stale_after_failed_invalidation = False
-        elif not bypass_cache and stale_after_failed_invalidation:
-            invalid_preview_cache_paths.discard(cache_path)
-            clear_preview_cache_invalid(db, photo_id, size)
-            db.caches.preview_delete(photo_id, size)
-            stale_after_failed_invalidation = False
-        if (
-            not bypass_cache
-            and recipe
-            and os.path.exists(cache_path)
-            and not db.caches.preview_get(photo_id, size)
-        ):
-            try:
-                os.remove(cache_path)
-            except OSError:
-                skip_untracked_preview_adoption = True
-                log.warning(
-                    "Failed to remove stale untracked preview cache %s",
-                    cache_path, exc_info=True,
-                )
-        return stale_after_failed_invalidation, skip_untracked_preview_adoption
-
-    def _serve_cached_preview(
-        db, photo_id, size, cache_path, paired_cache_path, vireo_dir, *,
-        bypass_cache, stale_after_failed_invalidation,
-        skip_untracked_preview_adoption,
-    ):
-        """Serve a tracked, adoptable or paired cache hit; ``None`` on a miss."""
-        from flask import send_file
-
-        # Cache hit (tracked): touch and serve. The touch is best-effort
-        # bookkeeping — under concurrent traffic SQLite can raise
-        # OperationalError: database is locked, but that shouldn't turn a
-        # valid cache hit into a 500 when the JPEG is right there on disk.
-        if (
-            not bypass_cache
-            and not stale_after_failed_invalidation
-            and db.caches.preview_get(photo_id, size)
-            and os.path.exists(cache_path)
-        ):
-            with contextlib.suppress(sqlite3.Error):
-                db.caches.preview_touch(photo_id, size)
-            return send_file(cache_path, mimetype="image/jpeg")
-
-        # Cache hit (on-disk but untracked): lazy adoption.
-        # caches.preview_insert uses time.time() for last_access_at, so the
-        # adopted entry is ranked as freshly-accessed in the LRU in a single
-        # commit (instead of insert-with-mtime-then-touch-to-now).
-        # Read bytes into memory before evicting: eviction may delete the
-        # file we just adopted (e.g. preview_cache_max_mb=0), but we can
-        # still serve the response from memory — mirrors the miss path.
-        if (
-            not bypass_cache
-            and not stale_after_failed_invalidation
-            and not skip_untracked_preview_adoption
-            and os.path.exists(cache_path)
-        ):
-            with open(cache_path, "rb") as f:
-                data = f.read()
-            try:
-                db.caches.preview_insert(photo_id, size, len(data))
-                evict_preview_cache_if_over_quota(db, vireo_dir)
-            except Exception:
-                # broad: the bytes are already in memory; bookkeeping must not
-                # turn a cache hit into a 500.
-                log.warning("Could not adopt untracked preview for photo %s", photo_id, exc_info=True)
-            return Response(data, mimetype="image/jpeg")
-
-        # Paired-render cache hit: an earlier equal-key producer already
-        # decoded and atomically published these bytes to the paired shadow
-        # cache, so waiters skip repeating that work.
-        if (
-            paired_cache_path
-            and paired_preview_ready(db, paired_cache_path)
-        ):
-            with contextlib.suppress(sqlite3.Error):
-                db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
-            return send_file(paired_cache_path, mimetype="image/jpeg")
-        return None
-
-    def _coordinate_preview_flight(
-        photo_id, size, cache_path, paired_cache_path, bypass_cache,
-        _prepare_source,
-    ):
-        """Run the cache-miss render under the equal-key artifact flight."""
-        artifact_key = os.path.abspath(
-            paired_cache_path if bypass_cache else cache_path,
-        )
-        speculative = request.args.get("prefetch") == "1"
-        speculative_slot = False
-        if speculative:
-            speculative_slot = preview_prefetch_slots.acquire(blocking=False)
-            if not speculative_slot:
-                return _shed_prefetch_response()
-
-        def coordinated_request(*, guarded):
-            response = make_response(
-                _serve_preview(
-                    photo_id, size, _artifact_flight_guarded=guarded,
-                    _prepare_source=_prepare_source,
-                )
-            )
-            if response.status_code >= 400:
-                raise _ArtifactResponseError(response)
-            return response
-
-        try:
-            result = preview_artifact_flights.run(
-                artifact_key,
-                lambda: coordinated_request(guarded=True),
-                lambda: coordinated_request(guarded=False),
-                join=not speculative,
-            )
-            if result.skipped:
-                return _shed_prefetch_response()
-            return result.value
-        except _ArtifactResponseError as exc:
-            return exc.to_response()
-        except ArtifactProducerFailed as exc:
-            if isinstance(exc.__cause__, _ArtifactResponseError):
-                return exc.__cause__.to_response()
-            if isinstance(exc.__cause__, PreviewMaterializationError):
-                return "Could not load image", 500
-            raise
-        finally:
-            if speculative_slot:
-                preview_prefetch_slots.release()
-
-    def _materialize_requested_preview(
-        db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
-        render_recipe, bypass_cache, pair_source, pair_source_path,
-        _prepare_source,
-    ):
-        """Render the preview; ``None`` when the source could not be decoded."""
-        import config as cfg
-
-        preview_quality = cfg.load().get("preview_quality", 90)
-        try:
-            return materialize_preview(
-                db,
-                photo,
-                folder_row["path"],
-                size=size,
-                vireo_dir=vireo_dir,
-                preview_quality=preview_quality,
-                recipe=render_recipe,
-                cache_path=None if bypass_cache else cache_path,
-                pair_source=pair_source,
-                pair_source_path=pair_source_path,
-                coordinate=False,
-                publish_best_effort=True,
-                publication_guard=lambda: _preparation_publication(
-                    db, photo_id, _prepare_source,
-                    captured_recipe=render_recipe,
-                ),
-            )
-        except PreviewMaterializationError:
-            return None
-
-    def _record_rendered_preview(
-        db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
-        bypass_cache, rendered,
-    ):
-        """Bookkeeping after a render: clear invalidation, evict, publish paired bytes."""
-        if not bypass_cache and rendered.published:
-            invalid_preview_cache_paths.discard(cache_path)
-            clear_preview_cache_invalid(db, photo_id, size)
-            try:
-                evict_preview_cache_if_over_quota(db, vireo_dir)
-            except Exception:  # broad: eviction is maintenance; the render is already in memory
-                log.warning("Preview cache eviction failed after render", exc_info=True)
-        # Publish the paired-render bytes so an equal-key follower still
-        # inside preview_artifact_flights.run() finds a ready artifact when
-        # it re-enters _serve_preview instead of decoding the same source.
-        # Best-effort: a full or read-only disk must never turn a successful
-        # producer render into a 500.
-        if bypass_cache and paired_cache_path and rendered.data is not None:
-            try:
-                # Publication and registration share the source-identity
-                # guard: a deletion/reimport during decoding must not attach
-                # the old pixels to the new photo's durable cache entry.
-                with _preparation_publication(db, photo_id, photo):
-                    atomic_write_bytes(rendered.data, paired_cache_path)
-                    db.caches.paired_preview_insert(
-                        photo_id, os.path.basename(paired_cache_path), len(rendered.data),
-                    )
-                evict_preview_cache_if_over_quota(db, vireo_dir)
-            except Exception:  # broad: paired-cache publication is best-effort; the render is served from memory
-                log.warning(
-                    "Failed to publish paired preview cache %s",
-                    paired_cache_path, exc_info=True,
-                )
-
-    def _serve_preview(
-        photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
-    ):
-        """Serve a preview at the given size, using the preview_cache LRU.
-
-        This is the single code path behind both /photos/<id>/preview and
-        /photos/<id>/full. Callers have already validated size.
-
-        ``_prepare_source`` is the photo row full-resolution preparation
-        selected: the render publishes only while the catalog still holds
-        that source (see ``_preparation_publication``).
-        """
-        from flask import send_file
-
-        # Confirm the photo still exists before any cache return so that a
-        # deleted photo can't be served from a stale per-size cache (and so
-        # SQLite id reuse can't surface the wrong image). verify_workspace
-        # keeps cross-workspace photos from being served here at all
-        # (mirrors serve_thumbnail).
-        db = get_db()
-        photo = db.photos.get(photo_id, verify_workspace=True)
-        if not photo:
-            return "Not found", 404
-        if _prepare_source is not None:
-            from offline_cache import photo_source_matches
-
-            if not photo_source_matches(_prepare_source, photo):
-                return "Photo source changed", 404
-
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        preview_dir = os.path.join(vireo_dir, "previews")
-        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
-        recipe = db.get_photo_edit_recipe(photo_id)
-        folder_row = db.folders.get(photo["folder_id"])
-        if not folder_row:
-            return "Not found", 404
-        pair_source, pair_source_path = _requested_pair_source(
-            photo, folder_row["path"],
-        )
-        if pair_source and not pair_source_path:
-            return "Not found", 404
-        # Recipes and local masks use primary-RAW coordinates. The selected
-        # developed JPEG may have different geometry and should be displayed
-        # as-authored rather than receiving the RAW edit a second time.
-        render_recipe = None if pair_source == "jpeg" else recipe
-        # The established preview cache is keyed only by (photo_id, size).
-        # Explicit paired-source views bypass it so RAW and JPEG pixels can
-        # never contaminate one another. Both indexes share the preview disk LRU.
-        bypass_cache = pair_source is not None
-        paired_cache_path = _paired_cache_path_for_request(
-            preview_dir, photo, photo_id, size, pair_source, pair_source_path,
-            render_recipe, bypass_cache,
-        )
-
-        stale_after_failed_invalidation, skip_untracked_preview_adoption = (
-            _reconcile_preview_cache_file(
-                db, photo, photo_id, size, cache_path, recipe, render_recipe,
-                bypass_cache,
-            )
-        )
-        cached = _serve_cached_preview(
-            db, photo_id, size, cache_path, paired_cache_path, vireo_dir,
-            bypass_cache=bypass_cache,
-            stale_after_failed_invalidation=stale_after_failed_invalidation,
-            skip_untracked_preview_adoption=skip_untracked_preview_adoption,
-        )
-        if cached is not None:
-            return cached
-
-        # Cache miss: coordinate every durable preview producer in this
-        # process before decoding.  The recursive producer re-runs all cache
-        # and invalidation checks under the flight; equal-key waiters then
-        # re-enter once more and serve the atomically published JPEG through
-        # their own Flask request context.  Paired renders are coordinated
-        # too, keyed by the source-aware paired path so RAW and JPEG variants
-        # of the same photo never share a flight — the shared artifact for
-        # waiters live at that paired path, isolated from ordinary previews.
-        if not _artifact_flight_guarded:
-            return _coordinate_preview_flight(
-                photo_id, size, cache_path, paired_cache_path, bypass_cache,
-                _prepare_source,
-            )
-
-        rendered = _materialize_requested_preview(
-            db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
-            render_recipe, bypass_cache, pair_source, pair_source_path,
-            _prepare_source,
-        )
-        if rendered is None:
-            return "Could not load image", 500
-
-        _record_rendered_preview(
-            db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
-            bypass_cache, rendered,
-        )
-        if rendered.data is not None:
-            return Response(rendered.data, mimetype="image/jpeg")
-        return send_file(cache_path, mimetype="image/jpeg")
 
     @blueprint.route("/photos/<int:photo_id>/full")
     def serve_full_photo(photo_id):
@@ -3204,7 +3240,7 @@ def create_media_blueprint(
                 params.append("prefetch=1")
             suffix = f"?{'&'.join(params)}" if params else ""
             return redirect(f"/photos/{photo_id}/original{suffix}")
-        return _serve_preview(photo_id, int(pm or 1920))
+        return previews._serve_preview(photo_id, int(pm or 1920))
 
     @blueprint.route("/photos/<int:photo_id>/preview")
     def serve_photo_preview(photo_id, *, _prepare_source=None):
@@ -3223,9 +3259,9 @@ def create_media_blueprint(
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
-        if size not in allowed_preview_sizes():
+        if size not in previews.allowed_preview_sizes():
             return "Unsupported size", 400
-        return _serve_preview(photo_id, size, _prepare_source=_prepare_source)
+        return previews._serve_preview(photo_id, size, _prepare_source=_prepare_source)
 
     @blueprint.route("/photos/<int:photo_id>/edit-mask-preview")
     def serve_edit_mask_preview(photo_id):
@@ -3549,7 +3585,7 @@ def create_media_blueprint(
         )
 
         pair_source, pair_source_path = _requested_pair_source(
-            photo, folder["path"],
+            get_db, config, photo, folder["path"],
         )
         if pair_source and not pair_source_path:
             return "Not found", 404

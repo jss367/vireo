@@ -22129,7 +22129,7 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     # listener's own comments explain why each refresh is there, and a
     # character budget silently turns into "the comment got longer" failures.
     handler = _browse_js_function_body(
-        html, "window.afterHistoryChange = async function("
+        html, "async function afterHistoryChange("
     )
     assert "refreshBrowseSidebarPanels(" in handler, (
         "undo/redo must repaint the whole sidebar, not one panel"
@@ -22175,7 +22175,7 @@ def test_browse_undo_bails_when_selection_moves_during_hydration(app_and_db):
     client = app.test_client()
     html = _page_with_scripts(client, "/browse")
     handler = _browse_js_function_body(
-        html, "window.afterHistoryChange = async function("
+        html, "async function afterHistoryChange("
     )
     reset_at = handler.find("await resetAndLoad(")
     assert reset_at != -1, "the handler must reload the query"

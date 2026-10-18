@@ -84,15 +84,17 @@ function hasEditorHistory() {
 
 // The shared history buttons and shortcuts use the working history first.
 // Saving starts a fresh session; the existing persisted undo then applies.
-window.localHistoryStatus = function(operation) {
+/** @param {VireoHistoryOperation} operation */
+function localHistoryStatus(operation) {
   if (!editorHistoryBlocked() && !hasEditorHistory()) return null;
   return {
     available: !editorHistoryBlocked() && editorHistory[operation].length > 0,
     description: 'Photo adjustment',
   };
-};
+}
 
-window.changeLocalHistory = function(operation) {
+/** @param {VireoHistoryOperation} operation */
+function changeLocalHistory(operation) {
   if (editorHistoryBlocked()) return false;
   finishEditorHistoryGesture();
   if (!hasEditorHistory()) return null;
@@ -119,7 +121,7 @@ window.changeLocalHistory = function(operation) {
   updatePreview();
   if (window.renderHistoryControls) window.renderHistoryControls();
   return true;
-};
+}
 
 /** @param {{target:EventTarget|null}} event */ function editorHistoryOwnsEvent(event) {
   var target = event.target instanceof HTMLElement ? event.target : null;
@@ -165,3 +167,10 @@ document.addEventListener('pointerdown', function(event) {
   });
 });
 window.addEventListener('blur', finishEditorHistoryGesture);
+
+// The navbar's undo/redo transport asks the editor's working history first
+// (vireo-page-hooks.js).
+Vireo.registerPageHooks({
+  localHistoryStatus: localHistoryStatus,
+  changeLocalHistory: changeLocalHistory,
+});

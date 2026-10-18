@@ -34,3 +34,30 @@ ownership checks similarly prevent stale completions from changing newer state.
 navbar. Page-specific integrations, such as `browse/lightbox.js`, load after the
 navbar. Existing pure-helper, state-regression, and browser tests exercise the
 scripts through these entry points.
+
+## Page hooks
+
+The lightbox is on every page, but some of its actions belong to the page
+that opened it: a rating or flag goes through the page's own model so its
+grid stays current, Delete removes the photo from the page's grid, and a page
+may open photos read-only. The lightbox asks for those functions with
+`Vireo.pageHook(name)` (`vireo/static/vireo-page-hooks.js`) and falls back to
+the shared API when the page registered none. It never looks for a page
+global by name. The hooks it uses:
+
+| Hook | Used by |
+| --- | --- |
+| `setRatingFor` / `setReviewRating` | The context menu's rating chips |
+| `setFlagFor` / `setReviewFlag` | `_lbApplyFlag` (flag buttons, keys, context menu); without one it POSTs the shared flag endpoint |
+| `handleMissesLightboxFlagShortcut` | The flag keys and buttons on Misses, which keep unflag-as-miss local |
+| `setColorLabelFor`, `openPhotoExportModal`, `copyPhotoPaths`, `revealPhoto` / `revealReviewPhoto` | Context-menu items, shown only when registered (reveal falls back to the API) |
+| `setWildlifeExcludedFor` | The context menu's wildlife toggle |
+| `removeDeletedLightboxPhoto` | Delete: drops the photo from the page's grid before the lightbox moves on |
+| `getLightboxOpenOptions` | The read-only state for the next photo after navigation or Delete |
+| `getLightboxBrowseDisabledHint` | Edit Photo and Open in Browse, disabled while the page has unsaved work |
+| `getDetailPhotoId` | Refreshing the page's detail-panel image after an edit |
+| `loadHighlights` / `updateHighlightsLightboxControls` | Reloading Highlights after a curation change |
+
+`types/page-hooks.d.ts` gives each hook's signature, and
+`tests/e2e/test_page_hooks.py` lists which page registers which.
+

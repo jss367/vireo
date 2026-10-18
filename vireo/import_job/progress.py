@@ -1,8 +1,19 @@
 """Import progress: the ETA estimator and the progress emitter."""
 
+from __future__ import annotations
+
 import time
+from typing import TYPE_CHECKING, Any
 
 from job_contract import progress_event
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from import_job.import_types import Emit
+    from import_job.state import _ImportRunState
+    from jobs import JobRunner
+    from services.service_types import JobDict
 
 _IMPORT_ETA_PROGRESS_KEYS = (
     "eta_state", "eta_settled", "eta_seconds", "eta_rate_per_min",
@@ -38,7 +49,7 @@ class _ImportEtaEstimator:
     individual file.
     """
 
-    def __init__(self, clock=None, expected_new=None):
+    def __init__(self, clock: Callable[[], float] | None = None, expected_new: int | None = None) -> None:
         self._clock = clock or time.monotonic
         self._expected_new = expected_new
         self._batch_started_at = None
@@ -50,19 +61,19 @@ class _ImportEtaEstimator:
         self._duplicate_seconds_per_file = None
 
     @staticmethod
-    def _smooth(previous, measured):
+    def _smooth(previous: float | None, measured: float) -> float:
         if previous is None:
             return measured
         return 0.4 * previous + 0.6 * measured
 
-    def note_importing(self, copied):
+    def note_importing(self, copied: int) -> None:
         """Start timing the current batch on its first per-file event."""
         if self._batch_started_at is None:
             self._batch_started_at = self._clock()
             self._batch_start_settled = self._settled
             self._batch_start_copied = copied
 
-    def note_batch_complete(self, current, copied):
+    def note_batch_complete(self, current: int, copied: int) -> None:
         """Settle a batch and, when it landed files, learn its duration."""
         current = max(self._settled, int(current or 0))
         completed = current - self._batch_start_settled
@@ -106,7 +117,7 @@ class _ImportEtaEstimator:
         self._batch_start_settled = current
         self._batch_start_copied = copied
 
-    def fields(self, total):
+    def fields(self, total: int) -> dict[str, Any]:
         """Return JSON-safe telemetry for the progress event and step."""
         result = {
             "eta_state": (
@@ -150,7 +161,7 @@ class _ImportEtaEstimator:
         return result
 
 
-def _make_emitter(job, runner, state, eta):
+def _make_emitter(job: JobDict, runner: JobRunner, state: _ImportRunState, eta: _ImportEtaEstimator) -> Emit:
     """Build the per-run progress emitter shared by both import paths.
 
     ``state.folder_counts``: live per-folder counters, mutated by the
@@ -158,7 +169,7 @@ def _make_emitter(job, runner, state, eta):
     so the Import page can render truthful per-folder progress mid-run
     (not just from the terminal result).
     """
-    def _emit(phase, current, total, current_file="", *, is_importing=False):
+    def _emit(phase: str, current: int, total: int, current_file: str = "", *, is_importing: bool = False) -> None:
         eta_fields = {}
         if total > 0:
             if is_importing:

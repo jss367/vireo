@@ -65,7 +65,7 @@ function pipelineCollectionAcceptsManualPhotos(collection) {
   } catch(e) { return false; }
 }
 
-/** @param {number[]} photoIds */
+/** @param {number[]} [photoIds] */
 async function addToCollection(photoIds) {
   if (pipelineReviewCollectionSubmitPromise) return false;
   if (isScopedReviewView()) {
@@ -226,7 +226,7 @@ function confirmPipelineCollection() {
   return pipelineReviewCollectionSubmitPromise;
 }
 
-/** @param {number[]} photoIds */
+/** @param {number[]} [photoIds] */
 function batchAddKeyword(photoIds) {
   if (pipelineReviewKeywordSubmitPromise) return false;
   if (isScopedReviewView()) {

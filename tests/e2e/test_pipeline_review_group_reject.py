@@ -449,7 +449,7 @@ def test_single_photo_flag_blocked_while_bulk_reject_pending(live_server, page):
     assert "route" in held, "expected the encounter group-state read to be held"
 
     landed = page.evaluate(
-        "([photoId]) => window.setFlagFor(photoId, 'flagged')",
+        "([photoId]) => Vireo.pageHook('setFlagFor')(photoId, 'flagged')",
         [photo_ids[0]],
     )
 
@@ -570,7 +570,7 @@ def test_single_photo_flag_blocked_while_bulk_undo_pending(live_server, page):
     assert "route" in held, "expected the undo request to be held"
 
     page.evaluate(
-        "([photoId]) => window.setFlagFor(photoId, 'flagged')",
+        "([photoId]) => Vireo.pageHook('setFlagFor')(photoId, 'flagged')",
         [photo_ids[0]],
     )
 
@@ -1490,7 +1490,7 @@ def test_lightbox_flag_over_group_review_updates_pending_zones(live_server, page
     # must land in the burst's pending zones — not the database — so a later
     # Apply from Group Review reflects it instead of clobbering it.
     landed = page.evaluate(
-        "pid => window.setFlagFor(pid, 'rejected')",
+        "pid => Vireo.pageHook('setFlagFor')(pid, 'rejected')",
         burst_ids[0],
     )
     assert landed is not False
@@ -1574,10 +1574,10 @@ def test_older_persisted_flag_does_not_clear_newer_group_provisional_flag(
     photo_id = photo_ids[0]
     page.evaluate(
         """pid => {
-          window.__originalSetFlagFor = window.setFlagFor;
-          window.setFlagFor = function() {
+          window.__originalSetFlagFor = Vireo.pageHook('setFlagFor');
+          Vireo.registerPageHooks({setFlagFor: function() {
             return new Promise(resolve => { window.__resolvePersistedFlag = resolve; });
-          };
+          }});
           openPipelineLightbox(pid);
           _lbApplyFlag(pid, 'flagged');
           closeLightbox();
@@ -1608,7 +1608,9 @@ def test_older_persisted_flag_does_not_clear_newer_group_provisional_flag(
         page.evaluate("pid => openPipelineLightbox(pid)", photo_id)
         expect(page.locator("#lightboxFlagStatus")).to_have_text("Rejected")
     finally:
-        page.evaluate("window.setFlagFor = window.__originalSetFlagFor")
+        page.evaluate(
+            "Vireo.registerPageHooks({setFlagFor: window.__originalSetFlagFor})"
+        )
 
 
 def test_group_apply_waits_for_earlier_direct_flag_write(live_server, page):

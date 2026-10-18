@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/settings.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/settings/all-settings.js",
     "../vireo/static/settings/autosave.js",
     "../vireo/static/settings/boot.js",

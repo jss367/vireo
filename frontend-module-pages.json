@@ -9,8 +9,6 @@
       "loadMisses",
       "openBrowseShortcutPhoto"
     ],
-    "sharedWrites": [
-      "_lightboxZoomHandled"
-    ]
+    "sharedWrites": []
   }
 }

@@ -11,6 +11,9 @@ function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   if (vireoLightboxSession.requestedPhotoId() != null) vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
   var wasOpen = !!window._lbEscToken;
   if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
+  // The wrap's click-to-zoom latch (set by a mouseup that zoomed out) must not
+  // carry into the next session, or it would swallow its first click-to-zoom.
+  window._lightboxZoomHandled = false;
   vireoLightboxViewport.close();
   _lbVisualTransitionPending = false;
   _lbSetPhotoTransitionPending(false);
@@ -49,19 +52,17 @@ function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
 
 /* ---------- Lightbox right-click context menu ----------
  * The lightbox is shared across pages (browse, review, etc.), so the menu
- * sits in _navbar.html alongside the overlay. Rating / color / flag / reveal
- * helpers (`setRatingFor`, `setColorLabelFor`, `setFlagFor`, `findSimilar`,
- * `openInEditor`, `openPhotoExportModal`, `revealPhoto`, `copyPhotoPaths`) are
- * defined on pages that carry a photo grid (browse.html). On /review, there
- * is no selection model
- * but per-photo `setReviewRating` / `setReviewFlag` helpers exist and the
- * rating/flag chips fall through to them. Pages without a page-local flag
- * helper use the shared photo flag endpoint. Color labels are not part of the
- * review workflow, so the color row is omitted when `setColorLabelFor` is
- * absent.
+ * sits in _navbar.html alongside the overlay. Pages that carry a photo grid
+ * (Browse) register rating / color / export / reveal / copy-path page hooks
+ * (`setRatingFor`, `setColorLabelFor`, `openPhotoExportModal`, `revealPhoto`,
+ * `copyPhotoPaths`; see vireo-page-hooks.js). On /review, there is no
+ * selection model but per-photo `setReviewRating` / `setReviewFlag` hooks
+ * exist and the rating/flag chips fall through to them. Pages without a
+ * flag hook use the shared photo flag endpoint. Color labels are not part of
+ * the review workflow, so the color row is omitted when `setColorLabelFor` is
+ * not registered.
  */
 function buildLightboxContextMenu(/** @type {number} */ pid) {
-  var has = function(/** @type {keyof Window} */ name) { return typeof window[name] === 'function'; };
   var readOnlyHint = _lbReadOnly ? _lbReadOnlyMessage : null;
 
   var rateChip = function(/** @type {number} */ n) {
@@ -71,8 +72,8 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
       disabled: !!readOnlyHint,
       disabledHint: readOnlyHint || undefined,
       onClick: function() {
-        if (has('setRatingFor')) window.setRatingFor(pid, n);
-        else if (has('setReviewRating')) window.setReviewRating(pid, n);
+        const setRating = Vireo.pageHook('setRatingFor') || Vireo.pageHook('setReviewRating');
+        if (setRating) setRating(pid, n);
       },
     };
   };
@@ -86,7 +87,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
       colorBaseTitle: title,
       disabled: !!readOnlyHint,
       disabledHint: readOnlyHint || undefined,
-      onClick: function() { if (has('setColorLabelFor')) window.setColorLabelFor(pid, c); },
+      onClick: function() { const hook = Vireo.pageHook('setColorLabelFor'); if (hook) hook(pid, c); },
     };
   };
   var flagChip = function(/** @type {LightboxFlag} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
@@ -111,7 +112,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
   /** @type {LightboxMenuItem[]} */ var items = [
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
   ];
-  if (has('setColorLabelFor')) {
+  if (Vireo.pageHook('setColorLabelFor')) {
     items.push({ chips: [
       colorChip(null, '\u25CB', 'No color'),
       colorChip('red', '\u25CF', 'Red'),
@@ -142,9 +143,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
       disabledHint: editButton.disabled ? editButton.title : undefined,
       onClick: function() { editButton.click(); } });
   }
-  var browseDisabledHint = typeof window.getLightboxBrowseDisabledHint === 'function'
-    ? window.getLightboxBrowseDisabledHint(pid)
-    : null;
+  var browseDisabledHint = Vireo.pageHook('getLightboxBrowseDisabledHint')?.(pid) ?? null;
   items.push({ label: 'Open in Browse', disabled: !!browseDisabledHint,
     disabledHint: browseDisabledHint || undefined,
     onClick: function() {
@@ -162,14 +161,14 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
     }));
   }
 
-  if (has('findSimilar')) {
+  if (typeof window.findSimilar === 'function') {
     items.push({ label: 'Find Similar',
       onClick: function() { window.findSimilar(pid); } });
   }
-  if (has('openInEditor')) {
+  if (typeof window.openInEditor === 'function') {
     items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
-  if (has('openPhotoExportModal')) {
+  if (Vireo.pageHook('openPhotoExportModal')) {
     items.push({ label: 'Export\u2026',
       onClick: function() {
         // The lightbox can navigate while its context menu remains open.
@@ -178,14 +177,15 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
         var exportPid = vireoLightboxSession.displayedPhotoId() != null
           ? vireoLightboxSession.displayedPhotoId()
           : vireoLightboxSession.requestedPhotoId();
-        if (exportPid != null) window.openPhotoExportModal([exportPid]);
+        const hook = Vireo.pageHook('openPhotoExportModal');
+        if (exportPid != null && hook) hook([exportPid]);
       } });
   }
   items.push({ label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealLightboxPhoto(pid); } });
-  if (has('copyPhotoPaths')) {
+  if (Vireo.pageHook('copyPhotoPaths')) {
     items.push({ label: 'Copy Path',
-      onClick: function() { window.copyPhotoPaths([pid]); } });
+      onClick: function() { const hook = Vireo.pageHook('copyPhotoPaths'); if (hook) hook([pid]); } });
   }
 
   items.push({ separator: true });
@@ -196,15 +196,12 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
 }
 
 function revealLightboxPhoto(/** @type {number} */ pid) {
-  // Browse and Review each expose their own reveal helpers. Other pages can
+  // Browse and Review each register their own reveal hooks. Other pages can
   // also open the shared lightbox, so keep a direct API fallback here rather
   // than hiding the action based on which page happened to launch it.
-  if (typeof window.revealPhoto === 'function') {
-    window.revealPhoto(pid);
-    return;
-  }
-  if (typeof window.revealReviewPhoto === 'function') {
-    window.revealReviewPhoto(pid);
+  var revealPhoto = Vireo.pageHook('revealPhoto') || Vireo.pageHook('revealReviewPhoto');
+  if (revealPhoto) {
+    revealPhoto(pid);
     return;
   }
   safeFetch('/api/files/reveal', {

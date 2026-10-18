@@ -221,11 +221,11 @@ async function setSpeciesHighlightFromMenu(/** @type {string} */ species, /** @t
   document.dispatchEvent(new CustomEvent('highlights:changed', {
     detail: { species: species, photoId: photoId },
   }));
-  if (typeof window.loadHighlights === 'function') {
-    await window.loadHighlights();
-    if (typeof window.updateHighlightsLightboxControls === 'function') {
-      window.updateHighlightsLightboxControls(photoId);
-    }
+  var loadHighlights = Vireo.pageHook('loadHighlights');
+  if (loadHighlights) {
+    await loadHighlights();
+    var updateHighlightsLightboxControls = Vireo.pageHook('updateHighlightsLightboxControls');
+    if (updateHighlightsLightboxControls) updateHighlightsLightboxControls(photoId);
   }
   if (typeof showToast === 'function') {
     showToast('Added to Highlights', 'success');
