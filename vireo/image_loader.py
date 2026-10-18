@@ -659,7 +659,7 @@ def load_image(
 
 @overload
 def load_image(
-    file_path: str | os.PathLike[str], max_size: int | None = ..., *, raw_decode: str,
+    file_path: str | os.PathLike[str], max_size: int | None = ..., raw_decode: str = ...,
 ) -> Image.Image | FloatImage | None: ...
 
 
