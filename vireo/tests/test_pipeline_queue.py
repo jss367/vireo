@@ -532,7 +532,7 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
     # Inject an in-memory context for this id so _try_promote_queued
     # finds something to look at.
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: pytest_fail("should not have run"),
             "config": {},
             "workspace_id": 1,
@@ -549,7 +549,7 @@ def test_promotion_loses_race_to_cancel_leaves_row_cancelled(tmp_path):
         "conditional UPDATE must not overwrite a cancelled row"
     )
     # And the in-memory context is cleaned up.
-    assert job_id not in runner._queued_pipelines
+    assert job_id not in runner._queue.queued
     view = runner.get(job_id)
     assert view is not None
     assert view["status"] == "cancelled"
@@ -570,7 +570,7 @@ def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: pytest_fail("should not have run"),
             "config": {"x": 1},
             "workspace_id": 1,
@@ -607,7 +607,7 @@ def test_cancel_promoting_queued_pipeline_retries_next_candidate(tmp_path):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[cancelled_id] = {
+        runner._queue.queued[cancelled_id] = {
             "work_fn": lambda job: pytest_fail("cancelled job must not run"),
             "config": {},
             "workspace_id": 1,
@@ -615,7 +615,7 @@ def test_cancel_promoting_queued_pipeline_retries_next_candidate(tmp_path):
             "started_at": "2026-05-26T00:00:00",
             "_promoting": True,
         }
-        runner._queued_pipelines[next_id] = {
+        runner._queue.queued[next_id] = {
             "work_fn": lambda job: next_started.set(),
             "config": {},
             "workspace_id": 2,
@@ -656,7 +656,7 @@ def test_cancel_queued_jobs_defers_promotion_until_snapshot_cancelled(tmp_path):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[first_id] = {
+        runner._queue.queued[first_id] = {
             "work_fn": lambda job: pytest_fail("first job must not run"),
             "config": {},
             "workspace_id": 1,
@@ -664,7 +664,7 @@ def test_cancel_queued_jobs_defers_promotion_until_snapshot_cancelled(tmp_path):
             "started_at": "2026-05-26T00:00:00",
             "_promoting": True,
         }
-        runner._queued_pipelines[second_id] = {
+        runner._queue.queued[second_id] = {
             "work_fn": lambda job: second_started.set(),
             "config": {},
             "workspace_id": 1,
@@ -698,7 +698,7 @@ def test_cancel_queued_jobs_preserves_snapshot_cancel_after_promotion(
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: pytest_fail("job must not run"),
             "config": {},
             "workspace_id": 1,
@@ -712,7 +712,7 @@ def test_cancel_queued_jobs_preserves_snapshot_cancel_after_promotion(
     def promote_before_cancel(cancel_id, *args, **kwargs):
         if cancel_id == job_id:
             with runner._lock:
-                ctx = runner._queued_pipelines.pop(job_id)
+                ctx = runner._queue.queued.pop(job_id)
                 ctx.pop("_promoting", None)
                 runner._jobs[job_id] = {
                     "id": job_id,
@@ -753,7 +753,7 @@ def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: pytest_fail("should not have run"),
             "config": {"x": 1},
             "workspace_id": 1,
@@ -765,8 +765,8 @@ def test_cancel_promoting_pipeline_after_db_running_preserves_request(tmp_path):
     assert runner.cancel_job(job_id, expected_status="queued") is True
     assert runner.is_cancelled(job_id)
     with runner._lock:
-        assert job_id in runner._queued_pipelines
-        assert runner._queued_pipelines[job_id]["_promoting"] is True
+        assert job_id in runner._queue.queued
+        assert runner._queue.queued[job_id]["_promoting"] is True
 
 
 def test_cancel_queued_pipeline_after_promotion_finishes_marks_running(tmp_path, monkeypatch):
@@ -782,7 +782,7 @@ def test_cancel_queued_pipeline_after_promotion_finishes_marks_running(tmp_path,
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: pytest_fail("should not have run"),
             "config": {"x": 1},
             "workspace_id": 1,
@@ -797,7 +797,7 @@ def test_cancel_queued_pipeline_after_promotion_finishes_marks_running(tmp_path,
     class FakeConnection:
         def execute(self, *args, **kwargs):
             with runner._lock:
-                ctx = runner._queued_pipelines.pop(job_id)
+                ctx = runner._queue.queued.pop(job_id)
                 ctx.pop("_promoting", None)
                 runner._jobs[job_id] = {
                     "id": job_id,
@@ -851,14 +851,14 @@ def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: work_called.set(),
             "config": {"x": 1},
             "workspace_id": 1,
             "runtime_warning": None,
             "started_at": "2026-05-26T00:00:00",
         }
-        runner._cancelled.add(job_id)
+        runner._control.cancelled.add(job_id)
 
     runner._try_promote_queued()
     final = wait_for_job_via_runner(runner, job_id)
@@ -890,7 +890,7 @@ def test_shutdown_after_promotion_before_worker_start_records_never_started(tmp_
     assert row["status"] == "cancelled"
     assert json.loads(row["result"]) == marker
     assert row["duration"] == 0.0
-    complete = [event for event in runner._events[job_id] if event["type"] == "complete"]
+    complete = [event for event in runner._streams.events[job_id] if event["type"] == "complete"]
     assert complete[-1]["data"]["result"] == marker
 
 
@@ -908,7 +908,7 @@ def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):
     )
     db.conn.commit()
     with runner._lock:
-        runner._queued_pipelines[job_id] = {
+        runner._queue.queued[job_id] = {
             "work_fn": lambda job: work_started.set(),
             "config": {"x": 1},
             "workspace_id": 1,
@@ -952,9 +952,9 @@ def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, 
     """
     import sqlite3
 
-    import jobs as jobs_module
+    import job_runner.pipeline_queue as pipeline_queue_module
 
-    monkeypatch.setattr(jobs_module, "SLOT_CAP", 2)
+    monkeypatch.setattr(pipeline_queue_module, "SLOT_CAP", 2)
     runner, db = _make_runner_with_db(tmp_path)
     first_id = "pipeline-1700000000001"
     second_id = "pipeline-1700000000002"
@@ -971,7 +971,7 @@ def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, 
     conn.close()
 
     with runner._lock:
-        runner._queued_pipelines[first_id] = {
+        runner._queue.queued[first_id] = {
             "work_fn": lambda job: None,
             "config": {},
             "workspace_id": 1,
@@ -979,7 +979,7 @@ def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, 
             "started_at": "2026-05-26T00:00:00",
             "_promoting": True,
         }
-        runner._queued_pipelines[second_id] = {
+        runner._queue.queued[second_id] = {
             "work_fn": lambda job: None,
             "config": {},
             "workspace_id": 1,
@@ -996,7 +996,7 @@ def test_in_flight_promotion_counts_against_slot_cap_not_global_guard(tmp_path, 
     ).fetchone()
     assert row["status"] == "completed"
     with runner._lock:
-        assert runner._queued_pipelines[first_id]["_promoting"] is True
+        assert runner._queue.queued[first_id]["_promoting"] is True
 
 
 def test_cancelled_promotion_candidate_retries_next_queued_pipeline(tmp_path):
@@ -1019,14 +1019,14 @@ def test_cancelled_promotion_candidate_retries_next_queued_pipeline(tmp_path):
     conn.close()
 
     with runner._lock:
-        runner._queued_pipelines[cancelled_id] = {
+        runner._queue.queued[cancelled_id] = {
             "work_fn": lambda job: pytest_fail("cancelled job must not run"),
             "config": {},
             "workspace_id": 1,
             "runtime_warning": None,
             "started_at": "2026-05-26T00:00:00",
         }
-        runner._queued_pipelines[next_id] = {
+        runner._queue.queued[next_id] = {
             "work_fn": lambda job: None,
             "config": {},
             "workspace_id": 1,
@@ -1039,7 +1039,7 @@ def test_cancelled_promotion_candidate_retries_next_queued_pipeline(tmp_path):
 
     assert promoted["status"] == "completed"
     with runner._lock:
-        assert cancelled_id not in runner._queued_pipelines
+        assert cancelled_id not in runner._queue.queued
     row = db.conn.execute(
         "SELECT status FROM job_history WHERE id = ?", (next_id,),
     ).fetchone()

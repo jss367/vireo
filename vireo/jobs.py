@@ -2,10 +2,8 @@
 
 import logging
 import queue
-import sys
 import threading
 import time
-import traceback
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime
@@ -13,9 +11,18 @@ from datetime import datetime
 import power
 from job_contract import failure_event
 from job_runner.checkpoints import JobCheckpointer
+from job_runner.control import JobControl
+from job_runner.events import EventStreams
 from job_runner.history import INTERRUPTED_BY_RESTART as INTERRUPTED_BY_RESTART
 from job_runner.history import JobHistory
-from job_runner.outcome import apply_result_verdict
+from job_runner.pipeline_queue import SLOT_CAP as SLOT_CAP
+from job_runner.pipeline_queue import PipelineQueue
+from job_runner.reservations import WorkspaceBusyError as WorkspaceBusyError
+from job_runner.reservations import WorkspaceReservations
+from job_runner.reservations import describe_job as describe_job
+from job_runner.reservations import describe_jobs as describe_jobs
+from job_runner.reservations import format_duration as format_duration
+from job_runner.steps import StepTree
 from job_runner.views import new_job_dict, snapshot_job, synthesize_queued_view
 from job_runner.workers import WorkerThreads
 from resource_ledger import (
@@ -94,61 +101,6 @@ def job_type_blocks_local_transitions(job_type):
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
-_PROMOTION_RETRY_DELAY_SECS = 0.1
-
-
-# Maximum number of pipeline jobs allowed to run concurrently. Bumped
-# to 2 in Step 6 of the concurrency rollout (Steps 1-3 added the
-# ModelCache + GPU/regroup locks that make this safe; Steps 4-5 added
-# the queue + UI). The cap is intentionally low: the gains from
-# overlapping two pipelines come from one's GPU phase running while
-# another's I/O / CPU phases progress. A third pipeline would mostly
-# queue at the GPU lock without adding throughput.
-# See docs/plans/2026-05-26-pipeline-concurrency-design.md.
-SLOT_CAP = 2
-
-
-class WorkspaceBusyError(RuntimeError):
-    """A transfer and another job cannot share the workspace's originals."""
-
-
-# A synchronous request that has held its workspace reservation this long is
-# hung, not slow: a busy rejection says so and logs the holder's stack.
-STALE_WORKSPACE_MUTATION_SECS = 60
-
-
-def format_duration(seconds):
-    """Short human duration for status text: "12 s", "4 min", "3 h 2 min"."""
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds} s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} min"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
-
-
-def describe_job(job):
-    """Name a job for a busy message, e.g. "the export job (running for 4 min)"."""
-    kind = str(job.get("type") or "unknown").replace("-", " ").replace("_", " ")
-    status = job.get("status") or "running"
-    started = job.get("_start_time")
-    if status == "running" and isinstance(started, (int, float)):
-        status = f"running for {format_duration(time.time() - started)}"
-    return f"the {kind} job ({status})"
-
-
-def _join_blockers(items):
-    if len(items) <= 1:
-        return "".join(items)
-    return ", ".join(items[:-1]) + " and " + items[-1]
-
-
-def describe_jobs(jobs):
-    """``describe_job`` for each job, joined into one phrase."""
-    return _join_blockers([describe_job(job) for job in jobs])
-
 
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
@@ -159,24 +111,8 @@ class JobRunner:
 
     def __init__(self, db=None):
         self._jobs = {}
-        self._events = {}  # job_id -> deque of events
-        self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.RLock()
         self._pause_condition = threading.Condition(self._lock)
-        self._cancelled = set()  # job ids that have been cancelled
-        # Cooperative pause requests. Pausable work reaches these through
-        # is_cancelled(), which doubles as its existing safe-point callback.
-        # Keeping the wait in the runner means scan/import call sites do not
-        # need a second callback threaded through every layer.
-        self._pause_requested = set()
-        # job ids past an uninterruptible commit point (e.g. the
-        # local-processing archive move). Once a job is in here, any
-        # late ``cancel_job`` call is a no-op so the terminal status can
-        # no longer be flipped to "cancelled" by a Stop press that
-        # landed after the commit finished but before _run_job recorded
-        # the result. Cleared by _prune_finished_jobs alongside
-        # _cancelled.
-        self._uncancellable = set()
         # Held while any sleep-blocking job runs; see issue #1397. Resolved
         # through the module rather than bound at import so tests (and any
         # future platform override) can substitute the inhibitor.
@@ -185,24 +121,23 @@ class JobRunner:
                 reason
             ),
         )
-        # Pending pipeline work, keyed by job_id. Populated by
-        # ``enqueue_pipeline`` and consumed by ``_try_promote_queued``
-        # when a slot opens. The work_fn closure can't be persisted
-        # cross-process, so a process restart will see queued rows in
-        # job_history without a matching entry here; the startup sweep
-        # promotes such rows to 'failed'.
-        self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
-        self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
-        # workspace -> holders of synchronous reservations (API requests).
-        # Each holder records what it is, when it began and which thread holds
-        # it, so a rejected transfer can name it instead of "something".
-        self._workspace_mutations = {}
-        self._exclusive_workspace_mutations = {}  # workspace -> holder
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
-        self._promotion_retry_scheduled = False
         self._workers = WorkerThreads(self._lock, lambda: self._run_job)
+        self._streams = EventStreams(self._lock, self._jobs)
+        self._steps = StepTree(self._lock, self._jobs)
+        self._control = JobControl(
+            self._lock, self._pause_condition, self._jobs, self._streams,
+        )
+        self._queue = PipelineQueue(
+            self._lock, self._jobs, self._workers,
+            promote=lambda: self._try_promote_queued(),
+        )
+        self._reservations = WorkspaceReservations(
+            self._lock, self._pause_condition, self._jobs, self._queue,
+            self._control, self._workers,
+        )
         self._history = JobHistory(db.job_history.catalog_file() if db else None)
         self._checkpoints = JobCheckpointer(
             self._lock, self._jobs, self._history, self._workers,
@@ -217,11 +152,8 @@ class JobRunner:
         """Remove a job whose worker lost the race with shutdown()."""
         with self._lock:
             self._jobs.pop(job_id, None)
-            self._events.pop(job_id, None)
-            self._subscribers.pop(job_id, None)
-            self._cancelled.discard(job_id)
-            self._pause_requested.discard(job_id)
-            self._uncancellable.discard(job_id)
+            self._streams.drop_locked(job_id)
+            self._control.forget_locked(job_id)
 
     def shutdown(self, timeout=10.0):
         """Stop accepting work, request cancellation, and join workers.
@@ -240,14 +172,8 @@ class JobRunner:
         deadline = time.monotonic() + timeout
         with self._pause_condition:
             self._workers.begin_shutdown_locked()
-            queued_ids = list(self._queued_pipelines)
-            for job_id, job in self._jobs.items():
-                if (
-                    job.get("status") in ("running", "pausing", "paused")
-                    and job_id not in self._uncancellable
-                ):
-                    self._cancelled.add(job_id)
-                    self._pause_requested.discard(job_id)
+            queued_ids = list(self._queue.queued)
+            self._control.cancel_live_locked()
             # A paused worker must wake before it can observe cancellation.
             self._pause_condition.notify_all()
             checkpoint_thread = self._checkpoints.thread
@@ -306,15 +232,12 @@ class JobRunner:
         # Cover the persistence window before the queued context is published.
         # A transfer must not slip between checking admission and publishing it.
         with self._lock:
-            self._check_workspace_admission_locked(workspace_id)
-            self._pipeline_admissions[workspace_id] = self._pipeline_admissions.get(workspace_id, 0) + 1
+            self._reservations.check_admission_locked(workspace_id)
+            self._queue.admit_locked(workspace_id)
         try:
             return self._enqueue_pipeline_admitted(work_fn, config, workspace_id, runtime_warning)
         finally:
-            with self._lock:
-                self._pipeline_admissions[workspace_id] -= 1
-                if not self._pipeline_admissions[workspace_id]:
-                    del self._pipeline_admissions[workspace_id]
+            self._queue.release_admission(workspace_id)
 
     def _enqueue_pipeline_admitted(self, work_fn, config=None, workspace_id=None,
                                    runtime_warning=None):
@@ -344,13 +267,13 @@ class JobRunner:
             self._history.insert_queued_row(job_id, now_iso, config_blob, workspace_id)
 
         with self._lock:
-            self._queued_pipelines[job_id] = {
+            self._queue.add_locked(job_id, {
                 "work_fn": work_fn,
                 "config": config_blob,
                 "workspace_id": workspace_id,
                 "runtime_warning": runtime_warning,
                 "started_at": now_iso,
-            }
+            })
             shutdown_raced = self._workers.shutting_down
 
         # The database insert happens outside the runner lock. shutdown() may
@@ -374,7 +297,7 @@ class JobRunner:
         lands first, rowcount==0 and promotion quietly gives up.
         """
         with self._lock:
-            claimed = self._claim_queued_promotion_locked()
+            claimed = self._queue.claim_locked()
             if claimed is None:
                 return
             job_id, ctx = claimed
@@ -387,22 +310,20 @@ class JobRunner:
                 promoted = self._history.flip_queued_row_to_running(job_id)
         except Exception:
             with self._lock:
-                if self._queued_pipelines.get(job_id) is ctx:
-                    ctx.pop("_promoting", None)
-                    self._schedule_promotion_retry_locked()
+                if self._queue.unclaim_locked(job_id, ctx):
+                    self._queue.schedule_retry_locked()
             log.exception("Failed to promote queued pipeline %s", job_id)
             return
 
         retry_promotion = False
         record_terminal = False
         with self._lock:
-            if self._queued_pipelines.get(job_id) is not ctx:
+            if not self._queue.unclaim_locked(job_id, ctx):
                 retry_promotion = True
             else:
-                ctx.pop("_promoting", None)
                 if not promoted:
                     # The row was modified elsewhere (cancelled).
-                    self._queued_pipelines.pop(job_id, None)
+                    self._queue.discard_locked(job_id)
                     record_terminal = True
                     retry_promotion = True
                 else:
@@ -430,49 +351,13 @@ class JobRunner:
         if not self._workers.start(job, work_fn):
             self._cancel_unstarted_promoted_pipeline(job)
 
-    def _claim_queued_promotion_locked(self):
-        """Mark the oldest queued pipeline as promoting if a slot is open.
-
-        Returns ``(job_id, ctx)``, or None when shutting down, no slot is
-        free, or nothing is waiting. Must be called with self._lock held.
-        """
-        if self._workers.shutting_down:
-            return None
-        active = sum(
-            1 for j in self._jobs.values()
-            if (
-                j["type"] == "pipeline"
-                and j["status"] in ("running", "pausing", "paused")
-            )
-        )
-        if active >= SLOT_CAP:
-            return None
-        promoting = sum(
-            1 for ctx in self._queued_pipelines.values()
-            if ctx.get("_promoting")
-        )
-        if active + promoting >= SLOT_CAP:
-            return None
-        candidates = sorted(
-            (
-                item for item in self._queued_pipelines.items()
-                if not item[1].get("_promoting")
-            ),
-            key=lambda kv: kv[1]["started_at"],
-        )
-        if not candidates:
-            return None
-        job_id, ctx = candidates[0]
-        ctx["_promoting"] = True
-        return job_id, ctx
-
     def _install_promoted_pipeline_locked(self, job_id, ctx):
         """Move a promoted pipeline from its queue context into the live jobs.
 
         Returns ``(job, work_fn)``. Must be called with self._lock held.
         """
         # Move from queue context into the live jobs dict.
-        del self._queued_pipelines[job_id]
+        self._queue.remove_locked(job_id)
         job = {
             "id": job_id,
             "type": "pipeline",
@@ -497,14 +382,9 @@ class JobRunner:
         }
         self._prune_finished_jobs()
         self._jobs[job_id] = job
-        self._events[job_id] = deque(maxlen=1000)
-        # setdefault, NOT assignment: clients can subscribe to the
-        # SSE stream while the pipeline is still queued. Replacing
-        # the list at promotion time would silently drop those
-        # waiters' queues.
-        self._subscribers.setdefault(job_id, [])
+        self._streams.open_promoted_locked(job_id)
         work_fn = ctx["work_fn"]
-        if job_id in self._cancelled:
+        if job_id in self._control.cancelled:
             def work_fn(job):
                 return {"cancelled": True, "never_started": True}
         return job, work_fn
@@ -523,7 +403,7 @@ class JobRunner:
             job["result"] = {"cancelled": True, "never_started": True}
             job["finished_at"] = now
             job["_ended_at"] = time.time()
-            self._cancelled.discard(job["id"])
+            self._control.consume_cancel_locked(job["id"])
         self.push_event(job["id"], "complete", {
             "job_id": job["id"],
             "job_type": job["type"],
@@ -535,25 +415,6 @@ class JobRunner:
         if self._history.db_path:
             self._history.persist_job(job, 0.0)
         job["_persisted"] = True
-
-    def _schedule_promotion_retry_locked(self):
-        """Retry queue promotion after a transient DB failure.
-
-        Must be called with self._lock held.
-        """
-        if self._promotion_retry_scheduled or self._workers.shutting_down:
-            return
-        self._promotion_retry_scheduled = True
-
-        def retry():
-            time.sleep(_PROMOTION_RETRY_DELAY_SECS)
-            with self._lock:
-                self._promotion_retry_scheduled = False
-                if self._workers.shutting_down:
-                    return
-            self._try_promote_queued()
-
-        self._workers.start_promotion_retry_locked(retry)
 
     def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
         """Keep a terminal queued pipeline in the normal in-memory lifecycle."""
@@ -580,8 +441,7 @@ class JobRunner:
         with self._lock:
             self._prune_finished_jobs()
             self._jobs[job_id] = job
-            self._events.setdefault(job_id, deque(maxlen=1000))
-            self._subscribers.setdefault(job_id, [])
+            self._streams.ensure_locked(job_id)
 
     @contextmanager
     def admission_guard(self):
@@ -665,7 +525,7 @@ class JobRunner:
         with self._lock:
             if self._workers.shutting_down:
                 raise RuntimeError("JobRunner is shut down")
-            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions)
+            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions)
             self._enqueue_counter += 1
             seq = self._enqueue_counter
             job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
@@ -681,152 +541,24 @@ class JobRunner:
             self._prune_finished_jobs()
             job["workspace_transfer_batch"] = workspace_transfer_batch
             self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            self._subscribers[job_id] = []
+            self._streams.open_locked(job_id)
         return job, work_fn
 
-    @contextmanager
     def workspace_mutation(self, workspace_id, *, exclusive=False, label=None):
         """Reserve synchronous mutations against transfers for their full duration.
 
-        ``label`` names the holder in the message a blocked job gets back.
+        A context manager; see ``WorkspaceReservations.workspace_mutation``.
         """
-        holder = {
-            "label": label or "a change in this workspace",
-            "started": time.monotonic(),
-            "thread": threading.get_ident(),
-        }
-        with self._lock:
-            self._check_workspace_admission_locked(workspace_id, exclusive=exclusive)
-            self._workspace_mutations.setdefault(workspace_id, []).append(holder)
-            if exclusive:
-                self._exclusive_workspace_mutations[workspace_id] = holder
-        try:
-            yield
-        finally:
-            with self._lock:
-                holders = [h for h in self._workspace_mutations[workspace_id] if h is not holder]
-                if holders:
-                    self._workspace_mutations[workspace_id] = holders
-                else:
-                    del self._workspace_mutations[workspace_id]
-                if self._exclusive_workspace_mutations.get(workspace_id) is holder:
-                    del self._exclusive_workspace_mutations[workspace_id]
-            held = time.monotonic() - holder["started"]
-            if held >= STALE_WORKSPACE_MUTATION_SECS:
-                log.warning("Workspace %s reservation for %s was held for %s",
-                            workspace_id, holder["label"], format_duration(held))
+        return self._reservations.workspace_mutation(
+            workspace_id, exclusive=exclusive, label=label,
+        )
 
     def wait_for_workspace_transfer(self, job_id):
         """Reserve an automatic transfer batch after its producing jobs finish.
 
-        All batch members register while their parent is still live. The first
-        move claims every live sibling, so the reservation survives between
-        serialized moves. Other waiting batches do not deadlock each other;
-        registration order chooses the next batch once existing work drains.
+        See ``WorkspaceReservations.wait_for_workspace_transfer``.
         """
-        with self._pause_condition:
-            while True:
-                job = self._jobs[job_id]
-                if job_id in self._cancelled or self._workers.shutting_down:
-                    return False
-                workspace_id = job["workspace_id"]
-                batch = job.get("workspace_transfer_batch")
-                if not batch:
-                    raise ValueError("Automatic transfer batch is required")
-                live = [j for j in self._jobs.values()
-                        if j.get("workspace_id") == workspace_id
-                        and j.get("status") in ("running", "queued", "pausing", "paused")
-                        and j.get("blocks_local_transitions", True)]
-                first_batch = next((j.get("workspace_transfer_batch") for j in live
-                                    if j.get("workspace_transfer_batch") and j.get("exclusive_workspace")), None)
-                if first_batch is None:
-                    first_batch = next((j.get("workspace_transfer_batch") for j in live
-                                        if j.get("workspace_transfer_batch")), None)
-                busy = any(j.get("workspace_transfer_batch") != batch
-                           and (not j.get("workspace_transfer_batch") or j.get("exclusive_workspace"))
-                           for j in live)
-                if (not busy and first_batch == batch
-                        and not self._pipeline_admissions.get(workspace_id)
-                        and not self._workspace_mutations.get(workspace_id)
-                        and not any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
-                    for sibling in live:
-                        if sibling.get("workspace_transfer_batch") == batch:
-                            sibling["exclusive_workspace"] = True
-                    return True
-                self._pause_condition.wait(timeout=0.1)
-
-    def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
-        """Check both sides of a transfer reservation under the registration lock.
-
-        A rejection names what holds the workspace: the user cannot see a
-        synchronous reservation anywhere else, so "wait for running jobs"
-        with no job running leaves them nothing to wait for.
-        """
-        if not blocking:
-            return
-        exclusive_holder = self._exclusive_workspace_mutations.get(workspace_id)
-        if exclusive_holder is not None:
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "Wait for {blockers} to finish before starting another job or change in this workspace.",
-                [], [exclusive_holder],
-            )
-        active = [j for j in self._jobs.values()
-                  if j.get("workspace_id") == workspace_id
-                  and j.get("status") in ("running", "queued", "pausing", "paused")
-                  and j.get("blocks_local_transitions", True)]
-        transfers = [j for j in active if j.get("exclusive_workspace")]
-        if transfers:
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "Wait for the NAS transfer ({blockers}) to finish before starting another job in this workspace.",
-                transfers, [],
-            )
-        if not exclusive:
-            return
-        queued = sum(1 for c in self._queued_pipelines.values() if c.get("workspace_id") == workspace_id)
-        admitting = self._pipeline_admissions.get(workspace_id, 0)
-        holders = self._workspace_mutations.get(workspace_id, [])
-        if active or queued or admitting or holders:
-            extra = []
-            if queued:
-                extra.append("a queued pipeline" if queued == 1 else f"{queued} queued pipelines")
-            if admitting:
-                extra.append("a pipeline being added to the queue")
-            self._raise_workspace_busy_locked(
-                workspace_id,
-                "This workspace is busy with {blockers}. Wait for {it} to finish, then try again.",
-                active, holders, extra,
-            )
-
-    def _raise_workspace_busy_locked(self, workspace_id, template, jobs, holders, extra=()):
-        """Raise ``WorkspaceBusyError`` naming every blocker in ``template``.
-
-        A request that has held its reservation past
-        ``STALE_WORKSPACE_MUTATION_SECS`` is called out as long-running, and
-        its thread's stack goes to the log so the hang can be diagnosed
-        without attaching a debugger to the running app.
-        """
-        now = time.monotonic()
-        stale = [h for h in holders if now - h["started"] >= STALE_WORKSPACE_MUTATION_SECS]
-        parts = [describe_job(j) for j in jobs]
-        parts += [f"{h['label']} (running for {format_duration(now - h['started'])})" for h in holders]
-        parts += list(extra)
-        message = template.format(blockers=_join_blockers(parts), it="it" if len(parts) == 1 else "them")
-        if stale:
-            message += " A request is taking longer than usual; it may still be working."
-        (log.warning if stale else log.info)("Workspace %s busy: %s", workspace_id, message)
-        frames = sys._current_frames() if stale else {}
-        for holder in stale:
-            frame = frames.get(holder["thread"])
-            if frame is None:
-                log.warning("Holder of %s (thread %s) has exited without releasing its reservation",
-                            holder["label"], holder["thread"])
-            else:
-                log.warning("Holder of %s (thread %s) is at:\n%s", holder["label"], holder["thread"],
-                            "".join(traceback.format_stack(frame)))
-        raise WorkspaceBusyError(message)
+        return self._reservations.wait_for_workspace_transfer(job_id)
 
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).
@@ -846,7 +578,7 @@ class JobRunner:
                 j.get("type") == job_type
                 and j.get("singleton_key") == singleton_key
                 and j.get("status") in ("running", "queued", "pausing", "paused")
-                and jid not in self._cancelled
+                and jid not in self._control.cancelled
             ):
                 return jid, j
         return None, None
@@ -885,7 +617,7 @@ class JobRunner:
             blocks_local_transitions = _resolve_blocking(
                 job_type, blocks_local_transitions,
             )
-            self._check_workspace_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
+            self._reservations.check_admission_locked(workspace_id, blocks_local_transitions, exclusive_workspace)
             # No active singleton — register inline while still holding the
             # lock so a second caller arriving between our check and our
             # registration cannot slip in and register its own.
@@ -904,8 +636,7 @@ class JobRunner:
             job["exclusive_workspace"] = bool(exclusive_workspace)
             self._prune_finished_jobs()
             self._jobs[job_id] = job
-            self._events[job_id] = deque(maxlen=1000)
-            self._subscribers[job_id] = []
+            self._streams.open_locked(job_id)
 
         log.info(
             "Job %s started type=%s singleton_key=%s",
@@ -932,11 +663,8 @@ class JobRunner:
                 to_remove.append(jid)
         for jid in to_remove:
             del self._jobs[jid]
-            self._events.pop(jid, None)
-            self._subscribers.pop(jid, None)
-            self._cancelled.discard(jid)
-            self._pause_requested.discard(jid)
-            self._uncancellable.discard(jid)
+            self._streams.drop_locked(jid)
+            self._control.forget_locked(jid)
 
     def _blocks_sleep(self, job):
         """Whether this job should keep the machine awake while it runs."""
@@ -972,28 +700,7 @@ class JobRunner:
                 _job_cancel_probe,
             ):
                 result = work_fn(job)
-            # The worker has returned and released its resources. Honor a
-            # pause accepted during its final unit before publishing completion.
-            # Waiting and finalizing share the pause/cancel lock, so neither
-            # request can be accepted and then silently overtaken by completion.
-            with self._pause_condition:
-                job_id = job["id"]
-                while (
-                    job.get("pausable")
-                    and job_id in self._pause_requested
-                    and job_id not in self._cancelled
-                    and job_id not in self._uncancellable
-                ):
-                    if job.get("status") != "paused":
-                        self._publish_status_locked(job, "paused")
-                    self._pause_condition.wait()
-                self._pause_requested.discard(job_id)
-                if job_id in self._cancelled:
-                    job["status"] = "cancelled"
-                    self._cancelled.discard(job_id)
-                else:
-                    apply_result_verdict(job, result)
-                job["result"] = result
+            self._control.settle_returned(job, result)
             if job["status"] == "failed":
                 log.warning(
                     "Job %s reported failure via result: %s",
@@ -1005,7 +712,7 @@ class JobRunner:
             # during shutdown), honor the cancel rather than recording a
             # misleading "failed" status.
             with self._lock:
-                self._settle_raised_job_locked(job, e)
+                self._control.settle_raised_locked(job, e)
             if job["status"] == "failed":
                 log.exception("Job %s failed", job["id"])
         finally:
@@ -1016,27 +723,6 @@ class JobRunner:
             if holds_sleep_assertion:
                 self.sleep_blocker.release()
             self._publish_job_completion(job, start_time)
-
-    def _settle_raised_job_locked(self, job, e):
-        """Settle the status of a job whose work function raised ``e``.
-
-        Must be called with self._lock held.
-        """
-        job_id = job["id"]
-        self._pause_requested.discard(job_id)
-        if job_id in self._cancelled:
-            job["status"] = "cancelled"
-            self._cancelled.discard(job_id)
-        else:
-            job["status"] = "failed"
-            # Avoid duplicating an error the work function already
-            # recorded. Pipelines capture stage errors directly into
-            # job["errors"] and then re-raise with the same message,
-            # so a naive append here would double-count them and
-            # inflate error_count in the persisted history.
-            err_str = str(e)
-            if err_str not in job["errors"]:
-                job["errors"].append(err_str)
 
     def _publish_job_completion(self, job, start_time):
         """Stamp a finished job, publish its completion, and persist it."""
@@ -1096,7 +782,7 @@ class JobRunner:
             job = self._jobs.get(job_id)
             if job is not None:
                 return snapshot_job(job)
-            ctx = self._queued_pipelines.get(job_id)
+            ctx = self._queue.queued.get(job_id)
             if ctx is None:
                 return None
             return synthesize_queued_view(job_id, ctx)
@@ -1111,7 +797,7 @@ class JobRunner:
         """
         with self._lock:
             jobs = [snapshot_job(j) for j in self._jobs.values()]
-            for job_id, ctx in self._queued_pipelines.items():
+            for job_id, ctx in self._queue.queued.items():
                 jobs.append(synthesize_queued_view(job_id, ctx))
             return jobs
 
@@ -1126,188 +812,35 @@ class JobRunner:
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
-        is_critical = event_type in ("complete", "error")
-        with self._lock:
-            if event_type == "progress":
-                job = self._jobs.get(job_id)
-                if job is not None:
-                    # Mirror latest progress fields onto job["progress"] so
-                    # clients polling /api/jobs or /api/jobs/history see the
-                    # current phase/current_file without needing SSE.
-                    prog = job.setdefault(
-                        "progress",
-                        {"current": 0, "total": 0, "current_file": ""},
-                    )
-                    for key, value in data.items():
-                        if key == "steps":
-                            continue
-                        prog[key] = value
-                if job and job.get("steps"):
-                    data = dict(data)
-                    data["steps"] = [dict(s) for s in job["steps"]]
-            event = {"type": event_type, "data": data, "time": time.time()}
-            if job_id in self._events:
-                self._events[job_id].append(event)
-            # Snapshot subscriber list so we can deliver outside the lock
-            subscribers = list(self._subscribers.get(job_id, []))
-
-        # Deliver to subscribers outside the lock to avoid blocking
-        for q in subscribers:
-            if is_critical:
-                # Critical events must not be dropped
-                try:
-                    q.put(event, timeout=5)
-                except queue.Full:
-                    log.warning(
-                        "Failed to deliver critical '%s' event for job %s "
-                        "after 5s — subscriber queue full",
-                        event_type, job_id,
-                    )
-            else:
-                try:
-                    q.put_nowait(event)
-                except queue.Full:
-                    log.debug(
-                        "Dropped '%s' event for job %s — subscriber queue full",
-                        event_type, job_id,
-                    )
-
-    def _publish_status_locked(self, job, status):
-        """Change *job* status and publish its event as one locked action.
-
-        The caller must hold ``self._lock`` (directly or through
-        ``self._pause_condition``). Keeping the state change, buffered event,
-        and non-blocking subscriber delivery under that same lock prevents
-        competing pause, resume, and completion paths from publishing stale
-        status events out of order.
-        """
-        job_id = job["id"]
-        job["status"] = status
-        event = {
-            "type": "status",
-            "data": {"job_id": job_id, "status": status},
-            "time": time.time(),
-        }
-        if job_id in self._events:
-            self._events[job_id].append(event)
-        for subscriber in self._subscribers.get(job_id, []):
-            try:
-                subscriber.put_nowait(event)
-            except queue.Full:
-                log.debug(
-                    "Dropped 'status' event for job %s — subscriber queue full",
-                    job_id,
-                )
+        self._streams.push(job_id, event_type, data)
 
     def get_events(self, job_id):
         """Get all buffered events for a job."""
-        with self._lock:
-            return list(self._events.get(job_id, []))
+        return self._streams.get_events(job_id)
 
     def subscribe(self, job_id):
         """Subscribe to a job's event stream. Returns a queue."""
-        q = queue.Queue(maxsize=200)
-        with self._lock:
-            if job_id not in self._subscribers:
-                self._subscribers[job_id] = []
-            self._subscribers[job_id].append(q)
-        return q
+        return self._streams.subscribe(job_id)
 
     def unsubscribe(self, job_id, q):
         """Unsubscribe from a job's event stream."""
-        with self._lock:
-            subs = self._subscribers.get(job_id, [])
-            if q in subs:
-                subs.remove(q)
+        self._streams.unsubscribe(job_id, q)
 
     def set_steps(self, job_id, steps):
-        """Define the execution plan for a job.
-
-        Args:
-            job_id: job identifier
-            steps: list of dicts with at least 'id' and 'label' keys
-        """
-        full_steps = []
-        for s in steps:
-            full_steps.append({
-                "id": s["id"],
-                "label": s["label"],
-                "status": "pending",
-                "progress": {"current": 0, "total": 0},
-                "started_at": None,
-                "finished_at": None,
-                "duration": None,
-                "summary": None,
-                "error": None,
-                "error_count": 0,
-            })
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
-                job["steps"] = full_steps
+        """Define the execution plan for a job; see ``StepTree.set_steps``."""
+        self._steps.set_steps(job_id, steps)
 
     def append_step(self, job_id, step_id, label, *, status="completed",
                     summary=None, error=None, error_count=0):
-        """Append an already-terminal step to a job's plan after the fact.
-
-        For completion hooks that learn of extra work — or its failure —
-        only when the job ends (the after-process NAS-move handoff). A
-        stepped job's panel view renders ONLY the step tree: per-step
-        summary/error/error_count are its sole error surface (global
-        ``job.errors`` shows only for failed jobs), so a hook outcome that
-        lives just in ``job.result`` would be invisible to the user.
-
-        Appends under the runner lock — worker-thread mutation of
-        ``job["steps"]`` outside it races ``snapshot_job``'s copy.
-        """
-        now = datetime.now().isoformat()
-        step = {
-            "id": step_id,
-            "label": label,
-            "status": status,
-            "progress": {"current": 0, "total": 0},
-            "started_at": now,
-            "finished_at": now,
-            "duration": 0.0,
-            "summary": summary,
-            "error": error,
-            "error_count": error_count,
-        }
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is not None:
-                job.setdefault("steps", []).append(step)
+        """Append an already-terminal step; see ``StepTree.append_step``."""
+        self._steps.append_step(
+            job_id, step_id, label, status=status,
+            summary=summary, error=error, error_count=error_count,
+        )
 
     def update_step(self, job_id, step_id, **kwargs):
-        """Update a step's fields (status, progress, summary, error).
-
-        Automatically sets started_at/finished_at/duration timestamps.
-        """
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if not job or "steps" not in job:
-                return
-            for step in job["steps"]:
-                if step["id"] == step_id:
-                    new_status = kwargs.get("status")
-                    if new_status == "running" and step["status"] == "pending":
-                        step["started_at"] = datetime.now().isoformat()
-                    # "cancelled" is terminal too — classify/pipeline steps
-                    # report it on user cancel; without it here those steps
-                    # persist with no finished_at/duration.
-                    if new_status in ("completed", "failed", "cancelled") and step["started_at"]:
-                        step["finished_at"] = datetime.now().isoformat()
-                        start = datetime.fromisoformat(step["started_at"])
-                        end = datetime.fromisoformat(step["finished_at"])
-                        step["duration"] = round((end - start).total_seconds(), 1)
-                    for key in (
-                        "status", "summary", "error", "error_count",
-                        "progress", "current_file", "source_index",
-                        "label_source",
-                    ):
-                        if key in kwargs:
-                            step[key] = kwargs[key]
-                    break
+        """Update a step's fields; see ``StepTree.update_step``."""
+        self._steps.update_step(job_id, step_id, **kwargs)
 
     def cancel_job(
         self,
@@ -1351,15 +884,15 @@ class JobRunner:
             ):
                 if expected_status and expected_status != job["status"]:
                     return False
-                return self._request_running_cancel_locked(job_id)
+                return self._control.request_running_cancel_locked(job_id)
             if job is not None:
                 return False
-            # Queued case: still in _queued_pipelines, not _jobs yet.
-            if job_id in self._queued_pipelines:
+            # Queued case: still in the pipeline queue, not _jobs yet.
+            if job_id in self._queue.queued:
                 if expected_status and expected_status != "queued":
                     return False
                 cancelled_at = datetime.now().isoformat()
-                queued_cancel = self._queued_pipelines[job_id]
+                queued_cancel = self._queue.queued[job_id]
             else:
                 return False
 
@@ -1376,8 +909,8 @@ class JobRunner:
                 return self._cancel_after_lost_queue_race_locked(
                     job_id, expected_status, queued_cancel,
                 )
-            if self._queued_pipelines.get(job_id) is queued_cancel:
-                self._queued_pipelines.pop(job_id, None)
+            if self._queue.is_current_locked(job_id, queued_cancel):
+                self._queue.discard_locked(job_id)
                 retry_promotion = True
             emit_complete = True
         if emit_complete:
@@ -1404,27 +937,6 @@ class JobRunner:
             self._try_promote_queued()
         return True
 
-    def _request_running_cancel_locked(self, job_id):
-        """Flag a running job for cancellation; False if it can't be stopped.
-
-        Must be called with self._lock held.
-        """
-        # Stop is a no-op once the job has entered an
-        # uninterruptible commit step (e.g. the local-processing
-        # archive move). Without this guard a Stop landing after
-        # clear_cancellation() but before _run_job's terminal
-        # check would re-add the job to _cancelled and record
-        # the run as "cancelled" even though the archive
-        # already committed to disk.
-        if job_id in self._uncancellable:
-            return False
-        self._cancelled.add(job_id)
-        self._pause_requested.discard(job_id)
-        # A paused worker is sleeping on this condition. Wake it so
-        # its checkpoint can observe cancellation and return.
-        self._pause_condition.notify_all()
-        return True
-
     def _cancel_after_lost_queue_race_locked(
         self, job_id, expected_status, queued_cancel,
     ):
@@ -1445,9 +957,9 @@ class JobRunner:
             # branch; the post-commit Stop race exists on
             # this path too when promotion beat the queued
             # cancel.
-            return self._request_running_cancel_locked(job_id)
-        if self._queued_pipelines.get(job_id) is queued_cancel:
-            self._cancelled.add(job_id)
+            return self._control.request_running_cancel_locked(job_id)
+        if self._queue.is_current_locked(job_id, queued_cancel):
+            self._control.flag_cancelled_locked(job_id)
             return True
         return False
 
@@ -1456,7 +968,7 @@ class JobRunner:
         with self._lock:
             job_ids = [
                 job_id
-                for job_id, ctx in self._queued_pipelines.items()
+                for job_id, ctx in self._queue.queued.items()
                 if workspace_id is None or ctx.get("workspace_id") == workspace_id
             ]
         cancelled = []
@@ -1471,98 +983,24 @@ class JobRunner:
         return cancelled
 
     def pause_job(self, job_id):
-        """Request a cooperative pause at the job's next safe checkpoint.
-
-        The public state moves to ``pausing`` immediately. The worker changes
-        it to ``paused`` only at a cooperative checkpoint or after the worker
-        returns, so the UI never claims an in-flight ExifTool/copy batch has
-        already stopped.
-        """
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or job.get("status") != "running"
-                or not job.get("pausable")
-                or job_id in self._uncancellable
-                or job_id in self._cancelled
-            ):
-                return False
-            self._pause_requested.add(job_id)
-            self._publish_status_locked(job, "pausing")
-        return True
+        """Request a cooperative pause; see ``JobControl.pause_job``."""
+        return self._control.pause_job(job_id)
 
     def pause_requested(self, job_id):
-        """Return whether *job_id* currently has a pending pause request.
-
-        Pipeline jobs use this non-blocking probe to coordinate several worker
-        threads.  A single worker reaching a checkpoint is not enough to call
-        the whole pipeline paused; the pipeline publishes ``paused`` only once
-        every active participant has reached a safe boundary.
-        """
-        with self._lock:
-            return (
-                job_id in self._pause_requested
-                and job_id not in self._cancelled
-            )
+        """Whether *job_id* has a pending pause; see ``JobControl.is_pause_requested``."""
+        return self._control.is_pause_requested(job_id)
 
     def mark_paused(self, job_id):
-        """Publish ``paused`` if a live pause request still applies.
-
-        This is separate from :meth:`wait_if_paused` so multi-worker jobs can
-        wait for all of their workers before claiming that work has stopped.
-        """
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or not job.get("pausable")
-                or job_id not in self._pause_requested
-                or job_id in self._cancelled
-                or job.get("status") not in ("pausing", "paused")
-            ):
-                return False
-            if job.get("status") != "paused":
-                self._publish_status_locked(job, "paused")
-            return True
+        """Publish ``paused`` if a pause still applies; see ``JobControl.mark_paused``."""
+        return self._control.mark_paused(job_id)
 
     def wait_if_paused(self, job_id, *, publish_paused=False):
-        """Wait for a pause request to clear, then report cancellation.
-
-        ``publish_paused`` is appropriate for ordinary single-worker jobs.
-        Coordinated jobs pass ``False`` and call :meth:`mark_paused` only after
-        all active workers are parked.
-        """
-        while True:
-            with self._pause_condition:
-                if job_id in self._cancelled:
-                    return True
-                job = self._jobs.get(job_id)
-                if (
-                    job is None
-                    or not job.get("pausable")
-                    or job_id not in self._pause_requested
-                ):
-                    return False
-                if publish_paused and job.get("status") != "paused":
-                    self._publish_status_locked(job, "paused")
-                self._pause_condition.wait()
+        """Wait out a pause, then report cancellation; see ``JobControl.wait_if_paused``."""
+        return self._control.wait_if_paused(job_id, publish_paused=publish_paused)
 
     def resume_job(self, job_id):
         """Resume a pausing or paused job."""
-        with self._pause_condition:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or job.get("status") not in ("pausing", "paused")
-                or job_id not in self._pause_requested
-                or job_id in self._cancelled
-            ):
-                return False
-            self._pause_requested.discard(job_id)
-            self._publish_status_locked(job, "running")
-            self._pause_condition.notify_all()
-        return True
+        return self._control.resume_job(job_id)
 
     def is_cancelled(self, job_id):
         """Wait through a cooperative pause, then report cancellation.
@@ -1575,56 +1013,22 @@ class JobRunner:
         return self.wait_if_paused(job_id, publish_paused=True)
 
     def cancellation_requested(self, job_id):
-        """Report cancellation without waiting on a pause request.
-
-        Transactional loops use this only after their pause-safe boundary.
-        They can still roll back promptly on Cancel without sleeping while a
-        database write transaction is open.
-        """
-        with self._lock:
-            return job_id in self._cancelled
+        """Report cancellation without waiting; see ``JobControl.cancellation_requested``."""
+        return self._control.cancellation_requested(job_id)
 
     def begin_uncancellable(self, job_id):
-        """Honor a pending pause, then atomically enter an uninterruptible phase.
+        """Honor a pending pause, then enter an uninterruptible phase.
 
-        Returns False when a cancellation is already pending, leaving that flag
-        intact so ``_run_job`` can record the job as cancelled. Once this
-        returns True, later pause and cancellation requests are ignored until
-        the job reaches a terminal state. Pausable callers must invoke this at
-        a safe checkpoint before acquiring resources for the commit.
+        See ``JobControl.begin_uncancellable``.
         """
-        with self._pause_condition:
-            while job_id in self._pause_requested and job_id not in self._cancelled:
-                job = self._jobs.get(job_id)
-                if job is None:
-                    return False
-                if job.get("status") != "paused":
-                    self._publish_status_locked(job, "paused")
-                self._pause_condition.wait()
-            if job_id in self._cancelled:
-                return False
-            self._uncancellable.add(job_id)
-            return True
+        return self._control.begin_uncancellable(job_id)
 
     def clear_cancellation(self, job_id):
-        """Consume any pending cancellation flag for ``job_id`` and
-        mark the job uncancellable.
+        """Consume a pending cancel and mark the job uncancellable.
 
-        Used by stages that have entered an uninterruptible commit step
-        (e.g. the local-processing archive move) where a Stop press
-        cannot be honored without leaving a partial published artifact.
-        Without consuming the flag, ``_run_job``'s atomic terminal check
-        would record the job as "cancelled" even though the commit
-        succeeded — confusing the user about whether the archive landed.
-
-        The flag is consumed AND the job is added to ``_uncancellable``
-        so a Stop press that lands after this call but before
-        ``_run_job`` flips to a terminal status can't re-add the
-        cancellation flag and override the committed result.
+        See ``JobControl.clear_cancellation``.
         """
-        with self._lock:
-            self._cancelled.discard(job_id)
-            self._uncancellable.add(job_id)
+        self._control.clear_cancellation(job_id)
 
 
 class LogBroadcaster(logging.Handler):

@@ -352,7 +352,7 @@ def test_pipeline_slots_counts_queued(app_and_db):
     # would — by registering an entry in ``_queued_pipelines``. We do
     # this directly so the test doesn't need the full pipeline plumbing.
     with runner._lock:
-        runner._queued_pipelines["pipe-queued-1"] = {
+        runner._queue.queued["pipe-queued-1"] = {
             "started_at": "2026-05-27T10:10:00",
             "config": {"sources": []},
             "workspace_id": None,
@@ -1142,22 +1142,19 @@ def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
 
 def test_update_step_current_file(app_and_db):
     """update_step supports current_file field on steps."""
-    from jobs import JobRunner
-    runner = JobRunner.__new__(JobRunner)
-    runner._jobs = {}
-    runner._subscribers = {}
-    runner._lock = __import__('threading').Lock()
-    runner._history_db_path = None
+    from job_runner.steps import StepTree
+    jobs = {}
+    steps = StepTree(__import__('threading').Lock(), jobs)
 
     job_id = "test-cf"
-    runner._jobs[job_id] = {
+    jobs[job_id] = {
         "id": job_id,
         "steps": [
             {"id": "scan", "label": "Scan", "status": "running"},
         ],
     }
-    runner.update_step(job_id, "scan", current_file="DSC_0001.NEF")
-    assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
+    steps.update_step(job_id, "scan", current_file="DSC_0001.NEF")
+    assert jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
 
 
 def test_start_job_ids_unique_within_same_millisecond(app_and_db, monkeypatch):
@@ -1181,25 +1178,22 @@ def test_start_job_ids_unique_within_same_millisecond(app_and_db, monkeypatch):
 def test_update_step_cancelled_is_terminal(app_and_db):
     """status='cancelled' finalizes a step (finished_at + duration), same as
     completed/failed — classify/pipeline steps report it on user cancel."""
-    from jobs import JobRunner
-    runner = JobRunner.__new__(JobRunner)
-    runner._jobs = {}
-    runner._subscribers = {}
-    runner._lock = __import__('threading').Lock()
-    runner._history_db_path = None
+    from job_runner.steps import StepTree
+    jobs = {}
+    steps = StepTree(__import__('threading').Lock(), jobs)
 
     job_id = "test-cancel-step"
-    runner._jobs[job_id] = {
+    jobs[job_id] = {
         "id": job_id,
         "steps": [
             {"id": "classify", "label": "Classify", "status": "pending",
              "started_at": None, "finished_at": None, "duration": None},
         ],
     }
-    runner.update_step(job_id, "classify", status="running")
-    runner.update_step(job_id, "classify", status="cancelled",
-                       summary="Cancelled (3 of 10 processed)")
-    step = runner._jobs[job_id]["steps"][0]
+    steps.update_step(job_id, "classify", status="running")
+    steps.update_step(job_id, "classify", status="cancelled",
+                      summary="Cancelled (3 of 10 processed)")
+    step = jobs[job_id]["steps"][0]
     assert step["status"] == "cancelled"
     assert step["finished_at"] is not None
     assert step["duration"] is not None
@@ -6612,7 +6606,7 @@ def test_pending_archive_waits_for_synchronous_delete(app_and_db, tmp_path, monk
         release.set()
         thread.join(timeout=synchronization_timeout(10))
     assert responses[0].status_code == 200, responses[0].get_json()
-    assert not app._job_runner._workspace_mutations
+    assert not app._job_runner._reservations.mutations
 
 
 def test_pending_archive_waits_for_running_work(app_and_db, tmp_path, monkeypatch):
