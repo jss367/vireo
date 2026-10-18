@@ -133,6 +133,51 @@ def test_set_result_commit_is_held_with_other_commits(history_db):
     assert _committed_result(db, "job-e") == '{"x": 1}'
 
 
+def test_catalog_file_is_the_main_database_path(db, tmp_path):
+    import os
+
+    assert os.path.realpath(db.job_history.catalog_file()) == os.path.realpath(db._db_path)
+
+
+def test_unfinished_and_mark_interrupted_leave_the_commit_to_the_sweep(history_db):
+    db = history_db
+    _insert(db, "run", status="running", result='{"a": 1}')
+    _insert(db, "queue", status="queued")
+    _insert(db, "done", status="completed")
+    rows = db.job_history.unfinished()
+    assert sorted(r["id"] for r in rows) == ["queue", "run"]
+    assert rows[0].keys() == ["id", "status", "result", "tree", "progress", "error_count"]
+
+    db.job_history.mark_interrupted("run", "2026-01-02T00:00:00", '{"e": 1}', 3, "[]", "cut", None)
+    assert db.in_transaction
+    assert _committed_result(db, "run") == '{"a": 1}'
+    db.commit()
+    row = db.job_history.get("run")
+    assert (row["status"], row["finished_at"], row["result"], row["error_count"],
+            row["tree"], row["summary"], row["progress"]) == (
+        "failed", "2026-01-02T00:00:00", '{"e": 1}', 3, "[]", "cut", None,
+    )
+    assert db.job_history.get("queue")["status"] == "queued"
+
+
+def test_terminal_is_newest_first_and_scoped_only_when_asked(history_db):
+    db = history_db
+    ws = db.require_workspace_id()
+    for job_id, status, started, workspace in (
+        ("a", "completed", "2026-01-01", ws),
+        ("b", "failed", "2026-01-03", ws),
+        ("c", "running", "2026-01-04", ws),
+        ("d", "cancelled", "2026-01-02", None),
+    ):
+        _insert(db, job_id, status=status, workspace_id=workspace)
+        db.conn.execute("UPDATE job_history SET started_at = ? WHERE id = ?", (started, job_id))
+    db.commit()
+    terminal = ("completed", "failed", "cancelled")
+    assert [r["id"] for r in db.job_history.terminal(ws, terminal, 10)] == ["b", "a"]
+    assert [r["id"] for r in db.job_history.terminal(None, terminal, 10)] == ["b", "d", "a"]
+    assert [r["id"] for r in db.job_history.terminal(None, terminal, 1)] == ["b"]
+
+
 # -- structure ------------------------------------------------------------------
 
 
