@@ -255,6 +255,31 @@ def test_location_options_tell_same_named_places_apart(db):
     assert len(labels) == len(set(labels))
 
 
+def test_location_options_stay_unique_when_ancestry_reads_alike(db):
+    """Same names three parents deep, a name that reads like another place's
+    breadcrumb, and case-only differences all get distinct labels."""
+    ids = []
+    for _ in range(2):
+        top = _kw(db, "USA")
+        state = _kw(db, "California", parent_id=top)
+        county = _kw(db, "San Diego County", parent_id=state)
+        ids.append(_kw(db, "Laguna Lake", parent_id=county))
+    beach = _kw(db, "Ocean Beach")
+    dog = _kw(db, "Dog Beach", parent_id=beach)
+    _kw(db, "Dog Beach")  # a second one forces the first to "Dog Beach · Ocean Beach"
+    breadcrumb = _kw(db, "Dog Beach · Ocean Beach")
+    _kw(db, "famosa slough")
+    _kw(db, "Famosa Slough")
+
+    options = location_options(db)
+    labels = {o["id"]: o["label"] for o in options}
+
+    assert len({label.casefold() for label in labels.values()}) == len(labels)
+    assert labels[ids[0]] == f"Laguna Lake · San Diego County · California · USA (#{ids[0]})"
+    assert labels[dog] == f"Dog Beach · Ocean Beach (#{dog})"
+    assert labels[breadcrumb] == "Dog Beach · Ocean Beach"
+
+
 # -- choices ------------------------------------------------------------------------
 
 

@@ -241,8 +241,9 @@ def _location_path(db: Database, keyword_id: int) -> tuple[str, list[str]] | Non
 def location_options(db: Database) -> list[JsonDict]:
     """Every location keyword as ``{"id", "name", "label"}`` for a picker.
 
-    ``label`` is the name with its nearest parent ("Laguna Lake · San Luis
-    Obispo"), and is unique: two same-named places are told apart by it.
+    ``label`` is the name, qualified by as many parents as it takes to tell
+    same-named places apart ("Laguna Lake · San Luis Obispo"), and is unique
+    ignoring case; places that still read alike get their keyword id.
     """
     rows = {row["id"]: row for row in db.locations.location_keyword_rows()}
 
@@ -261,11 +262,20 @@ def location_options(db: Database) -> list[JsonDict]:
         parents = parents_of(keyword_id)
         options.append({"id": keyword_id, "name": row["name"], "parents": parents})
     # Qualify by more parents only as far as it takes to tell names apart.
-    for depth in range(0, 4):
-        labels = Counter(_option_label(o, depth) for o in options)
+    # The page matches typed text case-insensitively, so uniqueness does too.
+    for depth in range(0, 11):
+        labels = Counter(_option_label(o, depth).casefold() for o in options)
         for option in options:
-            if "label" not in option and (labels[_option_label(option, depth)] == 1 or depth == 3):
-                option["label"] = _option_label(option, depth)
+            label = _option_label(option, depth)
+            if "label" not in option and labels[label.casefold()] == 1:
+                option["label"] = label
+    # Identical ancestry, or a name containing " · " that reads like another
+    # place's breadcrumb, can still collide; the keyword id settles it.
+    taken = Counter(o["label"].casefold() for o in options if "label" in o)
+    for option in options:
+        if "label" not in option or taken[option["label"].casefold()] > 1:
+            full = _option_label(option, len(option["parents"]))
+            option["label"] = f"{full} (#{option['id']})"
     for option in options:
         del option["parents"]
     options.sort(key=lambda o: o["label"].casefold())

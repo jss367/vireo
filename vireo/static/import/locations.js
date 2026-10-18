@@ -174,11 +174,16 @@ function importLocationTarget(group) {
     }
     return { kind: 'google', place_id: suggestion.place_id, name: suggestion.name };
   }
-  const option = (importLocations.data?.location_options || [])
-    .find(o => o.label.toLocaleLowerCase() === folded)
-    || (importLocations.data?.location_options || [])
-      .find(o => o.name.toLocaleLowerCase() === folded);
+  const options = importLocations.data?.location_options || [];
+  // Labels are unique; a bare name may be shared by several saved places.
+  const byLabel = options.find(o => o.label.toLocaleLowerCase() === folded);
+  const byName = options.filter(o => o.name.toLocaleLowerCase() === folded);
+  const option = byLabel || (byName.length === 1 ? byName[0] : null);
   if (option) return { kind: 'keyword', keyword_id: option.id, name: option.name };
+  if (byName.length > 1) {
+    return { kind: 'skip', reason: byName.length + ' saved locations are named “' + value
+      + '”; pick one from the list to tag these photos.' };
+  }
   if (value.includes('|')) {
     return { kind: 'skip', reason: 'Location names can’t contain “|”; these photos will be skipped.' };
   }
