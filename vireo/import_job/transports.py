@@ -1,8 +1,11 @@
 """The local-copy and rsync (SSH) transports that move a batch's bytes."""
 
+from __future__ import annotations
+
 import functools
 import os
 import posixpath
+from typing import TYPE_CHECKING, Any, cast
 
 from import_dedup import compute_file_hash
 from import_job.adoption import _WALK_CANCELLED, _WALK_HANDLED, _CardFile, _resolve_dest_collision
@@ -11,6 +14,20 @@ from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
 from import_job.state import _counts, _fail, _LandedFile, _record_checker
 from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from import_dedup import DuplicateChecker
+    from import_job.destination import _DestContext
+    from import_job.import_types import StopCheck
+    from import_job.state import ImportParams, _ImportBatchState, _ImportRunState
+    from jobs import JobRunner
+    from services.service_types import JobDict
+    # A file the batch rsync landed: ``(source_file, dest_basename, src_hash,
+    # src_size, src_mtime_ns, nas_full_path)``.
+    _TransferredFile = tuple[Path, str, str | None, int, int, str]
 
 # Verdicts returned by the transports' ``enqueue``. The CALLER maps them
 # onto the per-file loop's control flow, and the mapping is load-bearing:
@@ -31,7 +48,7 @@ _ENQ_QUEUED = "queued"
 _ENQ_CANCELLED = "cancelled"
 
 
-def _book_copied(state, rel, attests_bytes):
+def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
     """Book one landed copy into the run counters.
 
     The two pre-merge sites incremented in different statement orders
@@ -48,8 +65,8 @@ def _book_copied(state, rel, attests_bytes):
         state.verified += 1
 
 
-def _landed_copied(source_file, *, dest_path, verified_hash, src_size,
-                   src_mtime_ns):
+def _landed_copied(source_file: Path, *, dest_path: str, verified_hash: str, src_size: int,
+                   src_mtime_ns: int) -> _LandedFile:
     """The ``origin="copied"`` ledger entry, shared by both transports.
 
     ``verified_hash`` arrives ledger-normalized (``EMPTY_FILE_SHA256``
@@ -66,7 +83,7 @@ def _landed_copied(source_file, *, dest_path, verified_hash, src_size,
     )
 
 
-def _lazy_source_hash(checker, source_file):
+def _lazy_source_hash(checker: DuplicateChecker | None, source_file: Path) -> Callable[[], str | None]:
     """Zero-arg callable returning ``source_file``'s hash, read at most once.
 
     The checker's ``content_hash`` when duplicate skipping is on (``None``
@@ -76,7 +93,7 @@ def _lazy_source_hash(checker, source_file):
     """
     _sh_cache = [False, None]
 
-    def _src_hash_cached():
+    def _src_hash_cached() -> str | None:
         if not _sh_cache[0]:
             _sh_cache[0] = True
             _sh_cache[1] = (
@@ -102,12 +119,14 @@ class _LocalTransport:
     dest_noun = "archive"
     log_label = "Import"
 
-    def __init__(self, params, ctx):
+    def __init__(self, params: ImportParams, ctx: _DestContext) -> None:
         self._params = params
         self._ctx = ctx
 
-    def enqueue(self, state, batch_st, *, source_file, rel, checker,
-                stop_requested):
+    def enqueue(
+        self, state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
+        checker: DuplicateChecker | None, stop_requested: StopCheck,
+    ) -> str:
         # Local-rebinding shim: the body below is the local path's
         # per-file middle (moved verbatim in PR 7; its collision walk is
         # shared with the rsync transport since PR 7b).
@@ -157,7 +176,8 @@ class _LocalTransport:
                 # must still be probed and cataloged.
                 state.cancelled = True
                 return _ENQ_CANCELLED
-            dest_file = os.path.join(dest_folder, dest_basename)
+            # A placed verdict carries the destination basename.
+            dest_file = os.path.join(dest_folder, cast("str", dest_basename))
 
             src_hash = (
                 checker.content_hash(source_file)
@@ -188,14 +208,18 @@ class _LocalTransport:
         batch_st.landed.append(_landed_copied(
             source_file, dest_path=dest_file,
             # ``copy_and_hash_verify`` returns the destination-read hash
-            # (EMPTY_FILE_SHA256 for zero-byte) — already ledger-normalized.
-            verified_hash=file_hash,
+            # (EMPTY_FILE_SHA256 for zero-byte) — already ledger-normalized,
+            # and never None alongside ``ok``.
+            verified_hash=cast("str", file_hash),
             src_size=src_size, src_mtime_ns=src_mtime_ns,
         ))
         _record_checker(state, checker, source_file, dest_folder, file_hash)
         return _ENQ_HANDLED
 
-    def flush_batch(self, state, batch_st, *, rel, checker):
+    def flush_batch(
+        self, state: _ImportRunState, batch_st: _ImportBatchState, *, rel: str,
+        checker: DuplicateChecker | None,
+    ) -> None:
         # Copies land (and are verified) inside ``enqueue``; nothing is
         # deferred, so there is never anything to flush —
         # ``batch_st.to_transfer`` is always empty on this transport. The
@@ -203,8 +227,10 @@ class _LocalTransport:
         return
 
 
-def _skip_queued_identical(state, batch_st, *, source_file, rel, checker,
-                           src_hash):
+def _skip_queued_identical(
+    state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
+    checker: DuplicateChecker | None, src_hash: str | None,
+) -> bool:
     """Book an rsync-transport duplicate skip against a byte-identical
     file this batch already queued; returns True when booked.
     """
@@ -279,14 +305,15 @@ class _RsyncTransport:
     dest_noun = "mount"
     log_label = "Remote import"
 
-    def __init__(self, job, runner, params, ctx):
+    def __init__(self, job: JobDict, runner: JobRunner, params: ImportParams, ctx: _DestContext) -> None:
         self._job = job
         self._runner = runner
         self._params = params
         self._ctx = ctx
         # Preamble moved verbatim from the pre-merge remote import
         # function (PR 7 transport merge).
-        rt = params.remote_target
+        # ``_make_transport`` builds this transport only for a remote target.
+        rt = cast("dict[str, Any]", params.remote_target)
         remote = rt["remote"]                 # build_remote_move_spec dict
         rsync_bin = rt.get("rsync_bin") or remote.get("rsync_bin")
         ssh_base = rt["ssh_base"]             # remote_path/subpath (NAS side)
@@ -299,14 +326,14 @@ class _RsyncTransport:
         self._move_mod = move_mod
 
     @property
-    def attests_bytes(self):
+    def attests_bytes(self) -> bool:
         # A landed file carries a destination-attested hash only when
         # ``params.verify_by_hash`` made the independent card->NAS check
         # (rsync alone attests nothing).
         return self._params.verify_by_hash
 
-    def _emit_transfer(self, state, rel, transfer_current, transfer_total,
-                       current_file):
+    def _emit_transfer(self, state: _ImportRunState, rel: str, transfer_current: int, transfer_total: int,
+                       current_file: str) -> None:
         """Report one actually-transferred file of the current batch rsync.
 
         Leaves ``current``/``total`` (and the ETA fields derived from them)
@@ -360,8 +387,10 @@ class _RsyncTransport:
             ),
         )
 
-    def enqueue(self, state, batch_st, *, source_file, rel, checker,
-                stop_requested):
+    def enqueue(
+        self, state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
+        checker: DuplicateChecker | None, stop_requested: StopCheck,
+    ) -> str:
         # Local-rebinding shim: the body below is the remote path's
         # per-file middle, moved verbatim; these bindings keep its lines
         # byte-identical to the pre-move text.
@@ -437,6 +466,8 @@ class _RsyncTransport:
             # probed and cataloged.
             state.cancelled = True
             return _ENQ_CANCELLED
+        # A placed verdict carries the destination basename.
+        dest_basename = cast("str", dest_basename)
         batch_st.claimed_basenames[_fold_basename(dest_basename)] = src_hash
         # Only track queued source hashes when duplicate skipping is
         # enabled — the intra-batch dedup that consults this map is
@@ -449,7 +480,10 @@ class _RsyncTransport:
              src_size, src_mtime_ns))
         return _ENQ_QUEUED
 
-    def flush_batch(self, state, batch_st, *, rel, checker):
+    def flush_batch(
+        self, state: _ImportRunState, batch_st: _ImportBatchState, *, rel: str,
+        checker: DuplicateChecker | None,
+    ) -> None:
         # The remote path's transfer phase, moved verbatim in PR 7
         # (including its ``to_transfer``/``cancelled`` guard) and since
         # split into the ``_transfer_queued`` / ``_book_transferred``
@@ -489,7 +523,7 @@ class _RsyncTransport:
                     transferred=transferred, rsync_target=rsync_target,
                 )
 
-    def _rsync_extra_args(self):
+    def _rsync_extra_args(self) -> list[str]:
         """The rsync flags every transfer of this run passes."""
         remote = self._remote
         # ``--ignore-existing`` protects against basename-race overwrites:
@@ -533,8 +567,8 @@ class _RsyncTransport:
             extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
         return extra_args
 
-    def _do_rsync(self, src_specs, target, dest_is_dir, extra_args,
-                  progress_cb=None):
+    def _do_rsync(self, src_specs: list[str], target: str, dest_is_dir: bool, extra_args: list[str],
+                  progress_cb: Callable[..., object] | None = None) -> tuple[int, str, bool]:
         """One streamed rsync; returns ``(rc, stderr, timed_out)``."""
         try:
             rc, stderr, timed_out = self._move_mod._run_rsync_streamed(
@@ -559,7 +593,7 @@ class _RsyncTransport:
         except OSError as exc:
             return 1, str(exc), False
 
-    def _rsync_cancelled(self, rc):
+    def _rsync_cancelled(self, rc: int) -> bool:
         # A Stop mid-transfer kills the subprocess via the
         # cancel_check in ``_do_rsync`` and surfaces as a nonzero exit.
         # That is cancelled work, not a pile of per-file
@@ -573,8 +607,8 @@ class _RsyncTransport:
         return rc != 0 and self._runner.cancellation_requested(
             self._job["id"])
 
-    def _transfer_queued(self, state, batch_st, *, rel, ssh_dest,
-                         rsync_target, extra_args):
+    def _transfer_queued(self, state: _ImportRunState, batch_st: _ImportBatchState, *, rel: str, ssh_dest: str,
+                         rsync_target: str, extra_args: list[str]) -> list[_TransferredFile]:
         """Rsync this batch's queued files; return the ones that landed.
 
         Each returned entry is ``(sf, dest_basename, src_hash, src_size,
@@ -653,8 +687,10 @@ class _RsyncTransport:
                 _emit_transfer(rel, len(transferred), batch_size, bn)
         return transferred
 
-    def _book_transferred(self, state, batch_st, *, rel, checker,
-                          transferred, rsync_target):
+    def _book_transferred(
+        self, state: _ImportRunState, batch_st: _ImportBatchState, *, rel: str,
+        checker: DuplicateChecker | None, transferred: list[_TransferredFile], rsync_target: str,
+    ) -> None:
         """Verify (under ``verify_by_hash``) and book each transferred file."""
         remote = self._remote
         rsync_bin = self._rsync_bin
@@ -716,7 +752,9 @@ class _RsyncTransport:
             _record_checker(state, checker, sf, dest_folder, src_hash)
 
 
-def _make_transport(job, runner, params, ctx):
+def _make_transport(
+    job: JobDict, runner: JobRunner, params: ImportParams, ctx: _DestContext,
+) -> _LocalTransport | _RsyncTransport:
     """Pick the run's byte transport from ``params.remote_target``.
 
     Local: every file is copied and hash-verified inside ``enqueue``.

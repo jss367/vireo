@@ -1,14 +1,25 @@
 """Companion (RAW+JPEG sibling) keys and destination slot logic."""
 
+from __future__ import annotations
+
 import os
 import stat as stat_mod
+from typing import TYPE_CHECKING
 
 from import_dedup import compute_file_hash
 from import_job.copy_verify import DestReadCancelled, _hash_dest_file
 from import_job.destination import _is_source_backed_dest
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _companion_key(source_file):
+    from import_dedup import DuplicateChecker
+    from import_job.destination import _DestContext
+    from import_job.import_types import CompanionKey, StopCheck
+    from import_job.state import _ImportBatchState
+
+
+def _companion_key(source_file: str | Path) -> CompanionKey:
     """Group key for card files that must share a destination stem."""
     return (
         os.path.dirname(str(source_file)),
@@ -16,7 +27,7 @@ def _companion_key(source_file):
     )
 
 
-def _companion_siblings(batch):
+def _companion_siblings(batch: list[Path]) -> dict[CompanionKey, list[Path]]:
     """Map companion key -> source files, for keys with 2+ files in ``batch``."""
     groups = {}
     for source_file in batch:
@@ -24,7 +35,7 @@ def _companion_siblings(batch):
     return {key: files for key, files in groups.items() if len(files) > 1}
 
 
-def _slot_for(counter, anchor):
+def _slot_for(counter: int, anchor: int | None) -> int:
     """The numeric suffix the collision walk's ``counter``-th probe tries.
 
     With no anchor (or anchor 0) this is the identity. With an anchor, the
@@ -39,9 +50,9 @@ def _slot_for(counter, anchor):
     return n if n < anchor else n + 1
 
 
-def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
-                          checker=None, stop_requested=None,
-                          claims=None, ctx=None):
+def _sibling_blocks_slot(batch_st: _ImportBatchState, source_file: Path, stem: str, slot: int, *,
+                          checker: DuplicateChecker | None = None, stop_requested: StopCheck | None = None,
+                          claims: dict[str, str | None] | None = None, ctx: _DestContext | None = None) -> bool:
     """True if a same-stem card sibling could not share this ``slot``.
 
     Blocks on anything that would push the sibling's own walk to a
@@ -114,7 +125,7 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
     return False
 
 
-def _claim_blocks_sibling(claimed_hash, sibling, checker):
+def _claim_blocks_sibling(claimed_hash: str | None, sibling: Path, checker: DuplicateChecker | None) -> bool:
     """True if a batch claim on the sibling's slot name would split the pair.
 
     The rsync half of ``_sibling_blocks_slot``: the claimed name is not
@@ -138,7 +149,9 @@ def _claim_blocks_sibling(claimed_hash, sibling, checker):
     return sib_hash is None or claimed_hash != sib_hash
 
 
-def _sibling_bytes_differ(path, sibling, checker, stop_requested):
+def _sibling_bytes_differ(
+    path: str, sibling: Path, checker: DuplicateChecker | None, stop_requested: StopCheck | None,
+) -> bool:
     """True unless the same-sized regular file at ``path`` holds exactly
     the sibling's bytes; any read failure counts as differing.
     """

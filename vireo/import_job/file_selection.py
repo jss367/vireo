@@ -1,14 +1,22 @@
 """The user's file selection and its effect on safe-to-format."""
 
-from typing import NamedTuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, NamedTuple
 
 # Shared with the pipeline readiness copy so "1 file" / "2 files" reads the
 # same way everywhere the UI states a count. pipeline_plan imports only
 # stdlib at module level, so this does not cycle back through import_job.
 from pipeline_plan import _plural
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _selection_blocks_format(*, deselected, vanished_paths):
+    from import_job.import_types import UnsafeFile
+    from import_job.state import ImportParams
+
+
+def _selection_blocks_format(*, deselected: int, vanished_paths: set[str]) -> bool:
     """True when the user's selection means the card is NOT fully archived.
 
     Deliberately separate from the ``(copied + skipped_duplicate) ==
@@ -58,15 +66,15 @@ class _Selection(NamedTuple):
     unpack.
     """
 
-    files: list
-    include_paths: set | None
+    files: list[Path]
+    include_paths: set[str] | None
     queued: int
     deselected: int
-    vanished_paths: set
+    vanished_paths: set[str]
     appeared: int
 
 
-def _apply_selection(files, params):
+def _apply_selection(files: list[Path], params: ImportParams) -> _Selection:
     """Filter the discovered files by the user's selection and measure drift.
 
     THE single home for the pre-copy-loop selection block, called by the
@@ -151,8 +159,8 @@ def _apply_selection(files, params):
     )
 
 
-def _selection_summary(params, include_paths, *, discovered, copied,
-                       skipped_duplicate, failed):
+def _selection_summary(params: ImportParams, include_paths: set[str] | None, *, discovered: int, copied: int,
+                       skipped_duplicate: int, failed: int) -> str:
     """The import step's summary line. Shared by both copy paths.
 
     Two forms; the discovered total appears exactly once in each.
@@ -189,8 +197,8 @@ def _selection_summary(params, include_paths, *, discovered, copied,
             f"{failed} failed of {discovered} discovered")
 
 
-def _append_selection_unsafe(unsafe_files, *, deselected, vanished_paths,
-                             appeared):
+def _append_selection_unsafe(unsafe_files: list[UnsafeFile], *, deselected: int, vanished_paths: set[str],
+                             appeared: int) -> None:
     """Append the selection-drift lines to ``unsafe_files``, in place.
 
     Shared by both copy paths, and the reporting counterpart to
