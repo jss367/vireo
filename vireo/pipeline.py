@@ -84,22 +84,6 @@ def _load_results_json(path):
         return None
 
 # Columns needed from photos table for pipeline stages 2-6
-_PIPELINE_PHOTO_COLS = """
-    p.id, p.folder_id, p.filename, p.timestamp,
-    p.width, p.height, p.latitude, p.longitude,
-    p.subject_size,
-    p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
-    p.crop_complete, p.bg_separation,
-    p.subject_clip_high, p.subject_clip_low, p.subject_y_median,
-    p.phash_crop,
-    p.dino_subject_embedding, p.dino_global_embedding,
-    p.dino_embedding_variant,
-    p.focal_length, p.burst_id, p.noise_estimate,
-    p.flag, p.rating,
-    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
-"""
-
-
 def _embedding_usable(stored_variant, expected_variant, emb_bytes):
     """Decide whether a stored embedding blob can be used under expected_variant.
 
@@ -168,46 +152,8 @@ def collection_covers_workspace(db, workspace_id, collection_id,
         return True
     else:
         covered_ids = _resolve_collection_photo_ids(db, collection_id)
-    ws_photo_ids = {
-        r["id"] for r in db.conn.execute(
-            """SELECT p.id
-                 FROM photos p
-                 JOIN photo_workspace_visibility wf
-                   ON wf.photo_id = p.id
-                WHERE wf.workspace_id = ?""",
-            (workspace_id,),
-        ).fetchall()
-    }
+    ws_photo_ids = db.pipeline_features.workspace_photo_ids(workspace_id)
     return ws_photo_ids.issubset(covered_ids)
-
-
-def _replace_temp_id_scope(conn, table_name, ids):
-    """Replace a connection-local temp ID table without leaking a transaction.
-
-    SQLite DML against a TEMP table opens a transaction on the connection. If
-    that transaction remains open while the caller reads the main WAL database,
-    a concurrent writer can advance the main database and make a later write on
-    this connection fail immediately with ``SQLITE_BUSY_SNAPSHOT`` (surfaced by
-    Python as ``database is locked``). Commit only when this helper opened the
-    transaction; an outer transaction still belongs entirely to the caller.
-    """
-    started_in_transaction = conn.in_transaction
-    try:
-        conn.execute(
-            f"CREATE TEMP TABLE IF NOT EXISTS {table_name} "
-            "(id INTEGER PRIMARY KEY)"
-        )
-        conn.execute(f"DELETE FROM {table_name}")
-        conn.executemany(
-            f"INSERT OR IGNORE INTO {table_name} (id) VALUES (?)",
-            [(photo_id,) for photo_id in ids],
-        )
-        if not started_in_transaction and conn.in_transaction:
-            conn.commit()
-    except Exception:
-        if not started_in_transaction and conn.in_transaction:
-            conn.rollback()
-        raise
 
 
 def load_photo_features(db, collection_id=None, config=None,
@@ -312,43 +258,22 @@ class _FeatureLoad:
         self.ws_id = ws_id
         self.config = config
         self.labels_fingerprint = labels_fingerprint
-        self.scope_sql = ""
-        self.scope_params = ()
+        self.scoped = False
+        self.weak_floor = None
         self.expected_variant = None
         self.variant_mismatches = 0
 
     def load_rows(self, scoped_photo_ids):
-        db = self.db
-        if scoped_photo_ids is not None:
-            scoped_photo_ids = sorted(scoped_photo_ids)
+        features = self.db.pipeline_features
+        scoped = scoped_photo_ids is not None
+        if scoped:
             # Stage the scope in a connection-local temp table instead of inline
             # placeholders — a large collection exceeds SQLite's bound-parameter
-            # cap (999 on legacy builds), and this scope is interpolated into
-            # three queries below.
-            _replace_temp_id_scope(
-                db.conn, "pipeline_scope_ids", scoped_photo_ids,
-            )
-            self.rows = db.conn.execute(
-                f"""SELECT {_PIPELINE_PHOTO_COLS}
-                    FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ?
-                      AND p.id IN (SELECT id FROM pipeline_scope_ids)
-                    ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-                (self.ws_id,),
-            ).fetchall()
-        else:
-            self.rows = db.conn.execute(
-                f"""SELECT {_PIPELINE_PHOTO_COLS}
-                    FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ?
-                    ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-                (self.ws_id,),
-            ).fetchall()
-
-        if scoped_photo_ids is not None:
-            self.scope_sql = " AND p.id IN (SELECT id FROM pipeline_scope_ids)"
+            # cap (999 on legacy builds), and this scope is applied to the
+            # subject and prediction queries too.
+            features.stage_scope_photo_ids(sorted(scoped_photo_ids))
+        self.rows = features.feature_rows(self.ws_id, scoped=scoped)
+        self.scoped = scoped
 
     def resolve_thresholds(self, effective_config):
         """Resolve the workspace-effective detector_confidence threshold once.
@@ -410,25 +335,12 @@ class _FeatureLoad:
         Only the small, preselected candidate set gets the lower floor in the
         subject and prediction queries below.
         """
-        self.detection_floor_sql = "AND d.detector_confidence >= ?"
-        self.detection_floor_params = (self.min_conf,)
+        self.weak_floor = None
         if self.weak_candidate_ids:
-            _replace_temp_id_scope(
-                self.db.conn, "pipeline_weak_detection_ids",
+            self.db.pipeline_features.stage_weak_detection_photo_ids(
                 self.weak_candidate_ids,
             )
-            self.detection_floor_sql = """AND (
-              d.detector_confidence >= ?
-              OR (
-                  d.detector_confidence >= ?
-                  AND d.detector_model = 'megadetector-v6'
-                  AND d.category = 'animal'
-                  AND d.photo_id IN (
-                      SELECT id FROM pipeline_weak_detection_ids
-                  )
-              )
-          )"""
-            self.detection_floor_params = (self.min_conf, self.weak_confidence)
+            self.weak_floor = self.weak_confidence
 
     def _below_floor(self, photo_id, det):
         """True when a detection-backed row misses the workspace threshold
@@ -448,25 +360,10 @@ class _FeatureLoad:
         disappear merely because classification failed or has not run for
         that detection.
         """
-        from subjects import primary_order_sql
-        subject_det_rows = self.db.conn.execute(
-            f"""SELECT d.id AS detection_id, d.photo_id,
-                       d.box_x, d.box_y, d.box_w, d.box_h,
-                       d.detector_confidence, d.category, d.detector_model,
-                       ds.crop AS suggested_crop, ds.quality_score AS subject_quality_score,
-                       ds.exposure_ev
-                FROM detections d
-                LEFT JOIN detection_subjects ds ON ds.detection_id=d.id
-                JOIN photos p ON p.id = d.photo_id
-                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                WHERE wf.workspace_id = ?
-                  {self.detection_floor_sql}
-                  AND d.detector_model != 'full-image'
-                  AND d.category = 'animal'
-                  {self.scope_sql}
-                ORDER BY d.photo_id, {primary_order_sql("d")}""",
-            (self.ws_id, *self.detection_floor_params, *self.scope_params),
-        ).fetchall()
+        subject_det_rows = self.db.pipeline_features.subject_detection_rows(
+            self.ws_id, min_conf=self.min_conf, weak_confidence=self.weak_floor,
+            scoped=self.scoped,
+        )
         subjects_by_photo = self.subjects_by_photo = defaultdict(list)
         subjects_by_detection = self.subjects_by_detection = {}
         for det in subject_det_rows:
@@ -508,53 +405,11 @@ class _FeatureLoad:
         otherwise pick the most recent one per (detection, model) so stale
         species from an old label set don't leak into the top-k.
         """
-        floor_sql = "AND d.detector_model = 'full-image'" if full_image_only else self.detection_floor_sql
-        floor_params = () if full_image_only else self.detection_floor_params
-        if continuity_only:
-            floor_sql = "AND d.id IN (SELECT id FROM pipeline_continuity_detections)"
-            floor_params = ()
-        if self.labels_fingerprint is not None:
-            return self.db.conn.execute(
-                f"""SELECT d.photo_id, d.id AS detection_id,
-                          pr.species, pr.confidence, pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id,
-                          pr.classifier_model AS model,
-                          d.detector_confidence, d.detector_model
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   JOIN photos p ON p.id = d.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE wf.workspace_id = ?
-                     {floor_sql}
-                     AND pr.labels_fingerprint = ?
-                     {self.scope_sql}
-                   ORDER BY d.photo_id, pr.confidence DESC""",
-                (
-                    self.ws_id, *floor_params,
-                    self.labels_fingerprint, *self.scope_params,
-                ),
-            ).fetchall()
-        return self.db.conn.execute(
-            f"""SELECT d.photo_id, d.id AS detection_id,
-                      pr.species, pr.confidence, pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id,
-                      pr.classifier_model AS model,
-                      d.detector_confidence, d.detector_model
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE wf.workspace_id = ?
-                 {floor_sql}
-                 {self.scope_sql}
-                 AND pr.labels_fingerprint = (
-                     SELECT pr2.labels_fingerprint FROM predictions pr2
-                     WHERE pr2.detection_id = pr.detection_id
-                       AND pr2.classifier_model = pr.classifier_model
-                     ORDER BY pr2.created_at DESC, pr2.id DESC
-                     LIMIT 1
-                 )
-               ORDER BY d.photo_id, pr.confidence DESC""",
-            (self.ws_id, *floor_params, *self.scope_params),
-        ).fetchall()
+        return self.db.pipeline_features.prediction_rows(
+            self.ws_id, min_conf=self.min_conf, weak_confidence=self.weak_floor,
+            scoped=self.scoped, labels_fingerprint=self.labels_fingerprint,
+            full_image_only=full_image_only, continuity_only=continuity_only,
+        )
 
     def load_predictions(self):
         pred_rows = self._query_predictions()
@@ -599,7 +454,7 @@ class _FeatureLoad:
             for d in detections:
                 d["predictions"] = []
                 by_detection[d["id"]] = d
-        _replace_temp_id_scope(self.db.conn, "pipeline_continuity_detections", sorted(by_detection))
+        self.db.pipeline_features.stage_continuity_detection_ids(sorted(by_detection))
         resolver = SpeciesResolver(db=self.db)
         for pr in self._query_predictions(continuity_only=True):
             identity = resolver.prediction(pr)
@@ -1804,18 +1659,7 @@ def prune_missing_photos(cache_dir, workspace_id, db):
     cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
     if not cached_ids:
         return False
-    _CHUNK = 900
-    present: set = set()
-    for i in range(0, len(cached_ids), _CHUNK):
-        chunk = cached_ids[i : i + _CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        rows = db.conn.execute(
-            f"""SELECT p.id FROM photos p
-                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            (workspace_id, *chunk),
-        ).fetchall()
-        present.update(row["id"] for row in rows)
+    present = db.pipeline_features.present_workspace_photo_ids(workspace_id, cached_ids)
     missing = [pid for pid in cached_ids if pid not in present]
     if not missing:
         return False
@@ -2025,19 +1869,7 @@ def _count_stage_targets(db):
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )
-    row = db.conn.execute(
-        """SELECT COUNT(DISTINCT p.id) AS n
-           FROM photos p
-           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-           JOIN folders f ON f.id = p.folder_id
-                         AND f.status IN ('ok', 'partial')
-           JOIN detections d ON d.photo_id = p.id
-                            AND d.detector_model != 'full-image'
-                            AND d.detector_confidence >= ?
-           WHERE wf.workspace_id = ?""",
-        (min_conf, ws),
-    ).fetchone()
-    detected = row["n"] or 0
+    detected = db.pipeline_features.count_detected_photos(ws, min_conf)
 
     return {"detected": detected}
 
@@ -2049,68 +1881,32 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
     non-null embedding (back-compat for callers that don't know the variant).
     """
     ws = db.require_workspace_id()
-    join_detection = ""
-    params_prefix = []
+    detection_min_conf = None
     if detected_only:
         import config as cfg
-        min_conf = db.get_effective_config(cfg.load()).get(
+        detection_min_conf = db.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
-        join_detection = (
-            "JOIN detections d ON d.photo_id = p.id "
-            "AND d.detector_model != 'full-image' "
-            "AND d.detector_confidence >= ?"
-        )
-        params_prefix.append(min_conf)
+    features = db.pipeline_features
 
     if expected_variant is None:
-        row = db.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) AS n
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id
-                             AND f.status IN ('ok', 'partial')
-               {join_detection}
-               WHERE wf.workspace_id = ?
-                 AND p.dino_subject_embedding IS NOT NULL""",
-            (*params_prefix, ws),
-        ).fetchone()
-        return row["n"] or 0
+        return features.count_subject_embeddings(
+            ws, detection_min_conf=detection_min_conf,
+        )
 
     try:
         from dino_embed import get_embedding_dim
         expected_bytes = get_embedding_dim(expected_variant) * 4
     except (ImportError, ValueError):
         # Unknown variant — only the exact-match branch can pass.
-        row = db.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) AS n
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id
-                             AND f.status IN ('ok', 'partial')
-               {join_detection}
-               WHERE wf.workspace_id = ?
-                 AND p.dino_subject_embedding IS NOT NULL
-                 AND p.dino_embedding_variant = ?""",
-            (*params_prefix, ws, expected_variant),
-        ).fetchone()
-        return row["n"] or 0
+        return features.count_subject_embeddings(
+            ws, detection_min_conf=detection_min_conf, variant=expected_variant,
+        )
 
-    row = db.conn.execute(
-        f"""SELECT COUNT(DISTINCT p.id) AS n
-           FROM photos p
-           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-           JOIN folders f ON f.id = p.folder_id
-                         AND f.status IN ('ok', 'partial')
-           {join_detection}
-           WHERE wf.workspace_id = ?
-             AND p.dino_subject_embedding IS NOT NULL
-             AND (p.dino_embedding_variant = ?
-                  OR (p.dino_embedding_variant IS NULL
-                      AND length(p.dino_subject_embedding) = ?))""",
-        (*params_prefix, ws, expected_variant, expected_bytes),
-    ).fetchone()
-    return row["n"] or 0
+    return features.count_subject_embeddings(
+        ws, detection_min_conf=detection_min_conf, variant=expected_variant,
+        legacy_bytes=expected_bytes,
+    )
 
 
 def _count_eye_keypoint_attempts(db):
@@ -2126,23 +1922,9 @@ def _count_eye_keypoint_attempts(db):
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )
-    row = db.conn.execute(
-        """SELECT COUNT(DISTINCT p.id) AS n
-           FROM photos p
-           JOIN photo_workspace_visibility wf
-             ON wf.photo_id = p.id AND wf.workspace_id = ?
-           JOIN folders f ON f.id = p.folder_id
-                         AND f.status IN ('ok', 'partial')
-           JOIN detections d
-             ON d.photo_id = p.id
-            AND d.detector_model != 'full-image'
-            AND d.detector_confidence >= ?
-           JOIN predictions pr ON pr.detection_id = d.id
-           WHERE p.mask_path IS NOT NULL
-             AND (p.eye_kp_fingerprint = ? OR p.eye_x IS NOT NULL)""",
-        (ws, min_conf, EYE_KP_FINGERPRINT_VERSION),
-    ).fetchone()
-    return row["n"] or 0
+    return db.pipeline_features.count_eye_keypoint_attempts(
+        ws, min_conf, EYE_KP_FINGERPRINT_VERSION,
+    )
 
 
 def _eye_keypoint_readiness_counts(db, total):
@@ -2429,9 +2211,7 @@ def _resolve_keypoint_model(db, photo_row):
     if not name:
         return None
     from taxonomy import classify_to_keypoint_group
-    row = db.conn.execute(
-        "SELECT inat_id FROM taxa WHERE name = ? LIMIT 1", (name,)
-    ).fetchone()
+    row = db.pipeline_features.taxon_by_name(name)
     if row is None:
         return None
     group = classify_to_keypoint_group(db, row[0] if not hasattr(row, "keys") else row["inat_id"])
@@ -2486,20 +2266,10 @@ def _current_primary_mask_for_eye(db, row, iw, ih):
     # the expensive keypoint inference on every run until another
     # operation refreshed the state.
     import config as cfg
-    from subjects import primary_order_sql
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )
-    selected = db.conn.execute(
-        f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
-              FROM detections d
-             WHERE d.photo_id = ?
-               AND d.detector_confidence >= ?
-               AND d.detector_model != 'full-image'
-             ORDER BY {primary_order_sql("d")}
-             LIMIT 1""",
-        (row["id"], min_conf),
-    ).fetchone()
+    selected = db.pipeline_features.effective_primary_box(row["id"], min_conf)
     # ``selected is None`` when a concurrent reclassify removed every
     # detection, or a workspace raised its confidence floor above all of
     # them, between the worklist build and this lock. Persisting an
@@ -2508,12 +2278,10 @@ def _current_primary_mask_for_eye(db, row, iw, ih):
     # effective primary (Codex P2 r4056478554).
     if selected is None or selected["id"] != row["detection_id"]:
         return None
-    current_mask = db.conn.execute(
-        "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
-    ).fetchone()
-    if current_mask is None or not current_mask["mask_path"]:
+    mask_path = db.masks_features.photo_mask_path(row["id"])
+    if not mask_path:
         return None
-    mask = _load_mask_array(current_mask["mask_path"])
+    mask = _load_mask_array(mask_path)
 
     # Resize mask to image dims if needed (masks are typically saved at
     # proxy resolution and must be compared to full-image keypoint coords).
