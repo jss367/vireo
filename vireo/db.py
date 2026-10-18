@@ -38,11 +38,13 @@ if TYPE_CHECKING:
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
+    from repositories.locations import LocationRepository
     from repositories.masks_features import MasksFeaturesRepository
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
     from repositories.photo_labels import PhotoLabelRepository
+    from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
@@ -4486,6 +4488,18 @@ class Database:
             photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
         )
 
+    @property
+    def locations(self) -> LocationRepository:
+        """The locations domain: ``db.locations.gps_discrepancy_rows(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_location_repository``, exactly as a forwarding
+        wrapper called at that moment would. Accessing it never needs a
+        workspace; the few scoped methods resolve the active one when called.
+        Do not hold the returned repository across ``set_active_workspace``.
+        """
+        return self._location_repository()
+
     def get_photo_location_statuses(self, photo_ids):
         """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
         return self._location_repository().get_photo_statuses(photo_ids)
@@ -6336,6 +6350,23 @@ class Database:
         catalog-wide, so it needs no active workspace.
         """
         return self._exif_search_repository()
+
+    def _photo_metadata_repository(self):
+        """Build the (catalog-wide) photo camera-metadata reads on this connection."""
+        from repositories.photo_metadata import PhotoMetadataRepository
+
+        return PhotoMetadataRepository(self.conn)
+
+    @property
+    def photo_metadata(self) -> PhotoMetadataRepository:
+        """Export's camera-metadata reads: ``db.photo_metadata.exif_data_by_ids(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_metadata_repository``, so the connection
+        is resolved per use. The reads are catalog-wide, so unlike
+        ``db.photos`` it never needs an active workspace.
+        """
+        return self._photo_metadata_repository()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.

@@ -50,26 +50,7 @@ def gps_discrepancies(db, photo_ids, minimum_distance_m=500, include_reviewed=Fa
     result = []
     for offset in range(0, len(photo_ids), 400):
         chunk = photo_ids[offset:offset + 400]
-        placeholders = ','.join('?' for _ in chunk)
-        rows = db.conn.execute(f"""
-            WITH ranked AS (
-                SELECT pk.photo_id, k.id keyword_id, k.name, k.latitude, k.longitude,
-                       ROW_NUMBER() OVER (PARTITION BY pk.photo_id
-                         ORDER BY (k.parent_id IS NULL) ASC, k.id DESC) rn
-                FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders}) AND k.type = 'location'
-                  AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
-            )
-            SELECT p.id, p.filename, p.companion_path, p.timestamp, p.latitude, p.longitude,
-                   f.path folder_path, k.keyword_id, k.name assigned_name,
-                   k.latitude assigned_latitude, k.longitude assigned_longitude,
-                   r.fingerprint reviewed_fingerprint
-            FROM ranked k JOIN photos p ON p.id = k.photo_id
-            JOIN folders f ON f.id = p.folder_id
-            LEFT JOIN location_gps_reviews r ON r.photo_id = p.id
-            WHERE k.rn = 1
-            ORDER BY p.timestamp, p.id
-        """, chunk).fetchall()
+        rows = db.locations.gps_discrepancy_rows(chunk)
         candidates = []
         for row in rows:
             photo = dict(row)
