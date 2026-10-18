@@ -273,13 +273,17 @@ def broad_handlers(tree):
                 del found[checkpoint:]
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             is_for = isinstance(node, (ast.For, ast.AsyncFor))
-            visit(node.iter if is_for else node.test, bindings, lexical, function_lexical, ordered, prefixes)
-            current = _scope_bindings([node.target], bindings) if is_for else bindings
+            condition = node.iter if is_for else node.test
+            visit(condition, bindings, lexical, function_lexical, ordered, prefixes)
+            # The condition/iterable is evaluated even on a zero-iteration path.
+            # Its named stores precede both the body and the loop's outgoing state.
+            incoming = _expression_bindings(condition, bindings)
+            current = _scope_bindings([node.target], incoming) if is_for else incoming
             after_body = body(node.body, current, nested_lexical, function_lexical, ordered, prefixes)
             # Else may run after zero iterations; break may bypass else.
-            after_else = body(node.orelse, _join_bindings(bindings, after_body),
+            after_else = body(node.orelse, _join_bindings(incoming, after_body),
                               nested_lexical, function_lexical, ordered, prefixes)
-            return _join_bindings(bindings, after_body, after_else)
+            return _join_bindings(incoming, after_body, after_else)
         elif isinstance(node, ast.Match):
             visit(node.subject, bindings, lexical, function_lexical, ordered, prefixes)
             fallthrough = bindings
@@ -690,6 +694,22 @@ def test_possible_branch_bindings(compound, count, scope):
 ])
 @pytest.mark.parametrize("scope", ["module", "class"])
 def test_try_paths_and_condition_stores(compound, count, scope):
+    source = "from contextlib import suppress as quiet\n" + compound
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("compound, count", [
+    ("while (quiet := replacement):\n    with quiet(Exception): pass\nelse:\n    with quiet(Exception): pass\nwith quiet(Exception): pass\n", 0),
+    ("while bool(quiet := replacement):\n    with quiet(Exception): pass\n", 0),
+    ("while condition and (quiet := replacement):\n    pass\nwith quiet(Exception): pass\n", 1),
+    ("while (other := condition):\n    with quiet(Exception): pass\n", 1),
+    ("for item in (quiet := values):\n    with quiet(Exception): pass\n", 0),
+    ("import contextlib as ctx\nwhile (ctx := replacement):\n    with ctx.suppress(Exception): pass\nelse:\n    with ctx.suppress(Exception): pass\n", 0),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_loop_condition_stores_precede_body_and_zero_iteration_exit(compound, count, scope):
     source = "from contextlib import suppress as quiet\n" + compound
     if scope == "class":
         source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())

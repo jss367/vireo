@@ -11,6 +11,7 @@ where the workspace is resolved.
 
 import ast
 import inspect
+import json
 import sqlite3
 import textwrap
 from datetime import datetime
@@ -303,6 +304,65 @@ def test_update_photo_hash_check_signature_defaults():
     assert params["file_hash"].default is None
     assert params["commit"].default is True
     assert params["clear_file_hash"].default is False
+
+
+# -- repairs -----------------------------------------------------------------
+
+
+def _count(db, table, photo_id):
+    return db.conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE photo_id = ?", (photo_id,)
+    ).fetchone()[0]
+
+
+def test_remove_orphan_rows_drops_dependents_and_rows_without_committing(db, library):
+    gone, kept = library["ids"]["a_ok"], library["ids"]["b_ok"]
+    for pid in (gone, kept):
+        db.tag_photo(pid, db.add_keyword(f"kw{pid}"))
+        db.queue_change(pid, "keyword_add", f"kw{pid}")
+        db.conn.execute(
+            "INSERT INTO photo_embedded_keyword_offered (photo_id, keyword_key) VALUES (?, 'k')",
+            (pid,),
+        )
+    rules = json.dumps([{"field": "photo_ids", "value": [gone, kept]}])
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("c", rules, library["other_ws"]),
+    ).lastrowid
+    db.conn.commit()
+
+    db.audit.remove_orphan_rows([gone])
+
+    assert db.in_transaction
+    assert _photo_row(db, gone) is not None  # not committed yet
+    db.commit()
+    assert _photo_row(db, gone) is None
+    for table in ("photo_keywords", "photo_embedded_keyword_offered", "pending_changes"):
+        assert _count(db, table, gone) == 0
+        assert _count(db, table, kept) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    assert stored[0]["value"] == [kept]
+
+
+def test_cataloged_names_in_folder_unions_filenames_and_companions(db, library):
+    db.conn.execute(
+        "UPDATE photos SET companion_path = 'a.xmp' WHERE id = ?", (library["ids"]["a_ok"],),
+    )
+    db.conn.commit()
+    db.set_active_workspace(library["other_ws"])  # catalog-wide
+
+    names = sorted(row[0] for row in db.audit.cataloged_names_in_folder("/lib/ok"))
+    assert names == ["a.jpg", "a.xmp", "b.jpg"]
+    assert db.audit.cataloged_names_in_folder("/lib/nowhere") == []
+
+
+def test_photo_location_returns_filename_and_folder_path(db, library):
+    db.set_active_workspace(library["other_ws"])  # catalog-wide
+    row = db.audit.photo_location(library["ids"]["a_ok"])
+    assert (row["filename"], row["path"]) == ("a.jpg", "/lib/ok")
+    assert db.audit.photo_location(999999) is None
 
 
 # -- workspace resolution ----------------------------------------------------

@@ -47,7 +47,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 # move a module's SQL into a repository; never raise one.
 CONN_USE_LIMITS = {
     "app.py": 8,
-    "audit.py": 10,
     "capture_time.py": 7,
     "card_cleanup.py": 4,
     "culling.py": 6,
@@ -57,15 +56,12 @@ CONN_USE_LIMITS = {
     "import_dedup.py": 7,
     "importer.py": 1,
     "ingest.py": 2,
-    "jobs.py": 6,
     "keyword_identity.py": 48,
     "label_source_identities.py": 8,
-    "local_masks.py": 1,
     "location_review.py": 1,
     "misses.py": 4,
     "move_cleanup.py": 11,
     "new_images.py": 5,
-    "pending_archives.py": 3,
     "pipeline.py": 18,
     "pipeline_job.py": 9,
     "pipeline_plan.py": 2,
@@ -74,8 +70,6 @@ CONN_USE_LIMITS = {
     "pipeline_stages/features.py": 4,
     "pipeline_stages/media.py": 2,
     "pipeline_stages/scanning.py": 1,
-    "preview_cache.py": 4,
-    "render_source.py": 2,
     "schema.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,
@@ -84,7 +78,6 @@ CONN_USE_LIMITS = {
     "sync.py": 5,
     "thumbnails.py": 11,
     "volume_reachability.py": 8,
-    "working_copy_cache.py": 9,
 }
 
 
