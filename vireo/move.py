@@ -1802,9 +1802,7 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     """
     dest_ci_root = _case_insensitive_root(dest_path)
     descendant = None
-    for row in db.conn.execute(
-        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
-    ):
+    for row in db.moves_merge.folders_except(folder_id):
         if _path_equal_or_descends(
             row["path"], dest_path,
             case_insensitive_root=dest_ci_root,
@@ -1915,9 +1913,7 @@ def _tracked_destination_ancestor(db, folder_id, dest_path):
     typing a fresh subfolder name into a UI, not chasing a stale catalog row
     that differs only by case).
     """
-    for row in db.conn.execute(
-        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
-    ):
+    for row in db.moves_merge.folders_except(folder_id):
         if _path_equal_or_descends(
             dest_path, row["path"],
             case_insensitive_root=None,
@@ -1957,9 +1953,7 @@ def _folder_subtree_photos(db, folder_id):
     Descendant matching is alias-aware (symlinks, case-folding volumes,
     Windows separators) — see the inline notes below.
     """
-    folder = db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (folder_id,)
-    ).fetchone()
+    folder = db.moves_merge.folder_path_row(folder_id)
     if not folder:
         raise ValueError("Folder not found")
 
@@ -1976,10 +1970,10 @@ def _folder_subtree_photos(db, folder_id):
     # prefilter's Unicode-aware LOWER_UNICODE helper so both sides agree on
     # non-ASCII stems (e.g. `C:\Älbum`).
     if sys.platform == "win32":
-        db.conn.create_function(
+        sql_functions = [(
             "LOWER_UNICODE", 1,
             lambda s: s.lower() if s is not None else None,
-        )
+        )]
         root = folder["path"].replace("\\", "/").rstrip("/").lower()
         prefix = root + "/"
         path_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
@@ -2024,20 +2018,14 @@ def _folder_subtree_photos(db, folder_id):
                 )
             return descendant_cache[candidate]
 
-        db.conn.create_function(
+        sql_functions = [(
             "VIREO_DATE_MOVE_DESCENDS", 1, _date_move_descends,
-        )
+        )]
         descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
         descendant_params = ()
-    return db.conn.execute(
-        f"""SELECT p.id, p.filename, p.exif_data, p.timestamp, p.file_mtime
-           FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           WHERE f.id = ?
-              OR {descendant_predicate}
-           ORDER BY p.id""",
-        (folder_id, *descendant_params),
-    ).fetchall()
+    return db.moves_merge.date_move_subtree_photos(
+        folder_id, descendant_predicate, descendant_params, sql_functions,
+    )
 
 
 def folder_date_move_photo_ids(db, folder_id):
@@ -2226,7 +2214,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     because photos in one source folder can fan out to many date
     destinations.
     """
-    source_row = db.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
+    source_row = db.moves_merge.folder_path_row(folder_id)
     source_path = source_row["path"] if source_row else None
     source_device = None
     source_inode = None
@@ -2573,25 +2561,24 @@ class _PhotoMove:
         """Ensure destination folder record exists (workspace link deferred until first successful move)."""
         db = self.db
         destination = self.destination
-        dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
+        dest_row = db.moves_merge.folder_id_row(destination)
         if dest_row:
             self.dest_folder_id = dest_row["id"]
         else:
             # Insert folder record without auto-linking to workspace (add_folder would auto-link).
             # Set parent_id from the nearest existing ancestor so the destination
             # nests correctly in the browse tree instead of floating as a root.
-            cur = db.conn.execute(
-                "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
-                (destination, os.path.basename(destination),
-                 db.nearest_ancestor_folder_id(destination)),
+            cur = db.moves_merge.insert_folder_if_absent(
+                destination, os.path.basename(destination),
+                db.nearest_ancestor_folder_id(destination),
             )
-            db.conn.commit()
+            db.commit()
             if cur.rowcount > 0:
                 self.dest_folder_id = cur.lastrowid
             else:
-                self.dest_folder_id = db.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (destination,)
-                ).fetchone()["id"]
+                self.dest_folder_id = db.moves_merge.folder_id_row(
+                    destination
+                )["id"]
 
     def load_destination_stem_origins(self):
         """Record which source folder each destination stem came from.
@@ -2605,10 +2592,8 @@ class _PhotoMove:
         """
         destination_stem_origins = self.destination_stem_origins
         destination_stem_exact = self.destination_stem_exact
-        for row in self.db.conn.execute(
-            "SELECT filename, last_move_source_folder_path "
-            "FROM photos WHERE folder_id = ?",
-            (self.dest_folder_id,),
+        for row in self.db.moves_merge.move_provenance_in_folder(
+            self.dest_folder_id,
         ):
             exact_stem = os.path.splitext(row["filename"])[0]
             stem = self.stem_key(exact_stem)
@@ -2636,10 +2621,7 @@ class _PhotoMove:
         for source_folder_id in {
             photo["folder_id"] for photo in self.photos_map.values()
         }:
-            for row in db.conn.execute(
-                "SELECT filename FROM photos WHERE folder_id = ?",
-                (source_folder_id,),
-            ):
+            for row in db.moves_merge.filenames_in_folder(source_folder_id):
                 source_stem = os.path.splitext(row["filename"])[0]
                 key = (source_folder_id, source_stem)
                 source_stem_counts[key] = source_stem_counts.get(key, 0) + 1
@@ -2655,9 +2637,7 @@ class _PhotoMove:
             self.errors.append(f"Photo {pid} not found in database")
             return None
 
-        folder_row = self.db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-        ).fetchone()
+        folder_row = self.db.moves_merge.folder_path_row(photo["folder_id"])
         src_dir = folder_row["path"]
         src_file = os.path.join(src_dir, photo["filename"])
         stem = os.path.splitext(photo["filename"])[0]
@@ -2837,24 +2817,16 @@ class _PhotoMove:
         # Link destination and repoint the photo together, before deleting
         # originals. A failed visibility write must not leave a folder-wide
         # link exposing unrelated destination siblings after a failed move.
-        db.conn.execute("SAVEPOINT photo_move_visibility")
-        try:
+        # The savepoint releases and commits on success, and rolls back to
+        # itself on any exception (including one from the release or commit).
+        moves = db.moves_merge
+        with moves.photo_move_savepoint():
             if link_destination:
                 db._add_workspace_folder_no_commit(
                     db.active_workspace_id, self.dest_folder_id, restore_removed=True,
                 )
             db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
-            db.conn.execute(
-                "UPDATE photos SET folder_id = ?, "
-                "last_move_source_folder_path = ? WHERE id = ?",
-                (self.dest_folder_id, item.src_dir, item.pid),
-            )
-            db.conn.execute("RELEASE photo_move_visibility")
-            db.conn.commit()
-        except BaseException:
-            db.conn.execute("ROLLBACK TO photo_move_visibility")
-            db.conn.execute("RELEASE photo_move_visibility")
-            raise
+            moves.repoint_moved_photo(item.pid, self.dest_folder_id, item.src_dir)
         if link_destination:
             self.workspace_linked = True
             db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
@@ -2950,22 +2922,12 @@ class _PhotoMove:
             # Python keeps ``foo.bar`` and ``foo`` from
             # collapsing under a naive ``LIKE 'foo.%'``.
             stale_ids = [
-                row["id"] for row in db.conn.execute(
-                    "SELECT id, filename FROM photos "
-                    "WHERE last_move_source_folder_path = ?",
-                    (src_dir,),
-                )
+                row["id"] for row in db.moves_merge.photos_moved_from(src_dir)
                 if os.path.splitext(row["filename"])[0] == stem
             ]
             if stale_ids:
-                placeholders = ",".join("?" for _ in stale_ids)
-                db.conn.execute(
-                    f"UPDATE photos SET "
-                    f"last_move_source_folder_path = NULL "
-                    f"WHERE id IN ({placeholders})",
-                    stale_ids,
-                )
-                db.conn.commit()
+                db.moves_merge.clear_move_source(stale_ids)
+                db.commit()
             self.destination_stem_origins[item.stem_key] = None
 
     def remove_originals(self, item):
@@ -3109,14 +3071,7 @@ def _moved_tree_photo_rows(db, src_path):
     # containment test (symlinks, Windows case folding, case-insensitive
     # POSIX), which is FS truth rather than string shape.
     prefix = _subtree_prefix(src_path)
-    return db.conn.execute(
-        """SELECT p.id, p.filename, p.file_mtime, p.file_size,
-                  f.path AS folder_path
-           FROM photos p JOIN folders f ON f.id = p.folder_id
-           WHERE f.path = ?
-              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
-        (src_path, len(prefix), prefix),
-    ).fetchall()
+    return db.moves_merge.subtree_photo_rows(src_path, prefix)
 
 
 def _moved_row_mtime_update(row, src_path, dest_path):
@@ -3288,9 +3243,7 @@ def _folder_move_source(db, folder_id, destination_name):
     Returns ``(src_path, folder_name, landing_name, error)``; ``error`` is
     ``move_folder``'s refusal dict (the other three None), else None.
     """
-    folder = db.conn.execute(
-        "SELECT id, path, name FROM folders WHERE id = ?", (folder_id,)
-    ).fetchone()
+    folder = db.moves_merge.folder_source_row(folder_id)
     if not folder:
         return None, None, None, {"moved": 0, "errors": ["Folder not found"]}
 
@@ -4055,12 +4008,7 @@ class _FolderMove:
         db = self.db
         src_path = self.src_path
         # Count photos for progress
-        all_photos = db.conn.execute(
-            """SELECT p.id FROM photos p
-               JOIN folders f ON f.id = p.folder_id
-               WHERE f.path = ? OR f.path LIKE ?""",
-            (src_path, src_path + "/%"),
-        ).fetchall()
+        all_photos = db.moves_merge.photo_ids_under_path(src_path)
         self.total_photos = len(all_photos)
 
         # One database transaction: no per-item count to show.
@@ -4110,19 +4058,8 @@ class _FolderMove:
         # recorded against a different timestamp -- including the ``-1``
         # sentinel used when a row had no mtime at all -- was made against a
         # state this correction knows nothing about, and is left alone.
-        cursor = db.conn.executemany(
-            "UPDATE photos SET file_mtime = ?,"
-            " working_copy_evicted_mtime = CASE"
-            "   WHEN working_copy_evicted_mtime IS ? THEN ?"
-            "   ELSE working_copy_evicted_mtime END,"
-            " working_copy_failed_mtime = CASE"
-            "   WHEN working_copy_failed_mtime IS ? THEN ?"
-            "   ELSE working_copy_failed_mtime END"
-            " WHERE id = ? AND file_mtime IS ? AND file_size IS ?",
-            [(fresh, stale, fresh, stale, fresh, photo_id, stale, size)
-             for fresh, photo_id, stale, size in mtime_updates],
-        )
-        self.mtimes_refreshed = cursor.rowcount
+        self.mtimes_refreshed = db.moves_merge.restamp_photo_mtimes(
+            mtime_updates)
         # Same reasoning as the working-copy markers, one table over.
         # ``offline_originals.source_mtime`` records the ``file_mtime`` its
         # cached copy was taken from, and ``offline_cache`` treats a
@@ -4131,12 +4068,8 @@ class _FolderMove:
         # cache preparation re-copy bytes that never changed. Only a row
         # pinned to the timestamp being corrected, for a file of the same
         # size, moves with it.
-        db.conn.executemany(
-            "UPDATE offline_originals SET source_mtime = ?"
-            " WHERE photo_id = ? AND source_mtime IS ? AND source_size IS ?",
-            mtime_updates,
-        )
-        db.conn.commit()
+        db.moves_merge.restamp_offline_original_mtimes(mtime_updates)
+        db.commit()
         log.info(
             "Re-stamped file_mtime for %d photo(s) under %s from the copy "
             "at %s -- the transfer did not carry their timestamps across",
@@ -4178,13 +4111,7 @@ class _FolderMove:
             # transfer this exists for moved 1099 in one go.
             thumb_rows = []
             for chunk in _chunks(list(fresh_by_id)):
-                placeholders = ",".join(["?"] * len(chunk))
-                thumb_rows.extend(db.conn.execute(
-                    f"SELECT id, thumb_path FROM photos"
-                    f" WHERE id IN ({placeholders})"
-                    f" AND thumb_path IS NOT NULL",
-                    chunk,
-                ).fetchall())
+                thumb_rows.extend(db.moves_merge.thumb_paths_for_ids(chunk))
             for row in thumb_rows:
                 fresh = fresh_by_id.get(row["id"])
                 if fresh is None:
@@ -4238,10 +4165,8 @@ class _FolderMove:
             # match a pattern like `/d_st/birds/%` and feed a bogus computed
             # old_path into relocate_developed_dir, mis-rebasing the wrong
             # developed subdir. Filter results by a literal prefix check.
-            descendant_rows = self.db.conn.execute(
-                "SELECT path FROM folders WHERE path LIKE ?",
-                (developed_base + "/%",),
-            ).fetchall()
+            descendant_rows = self.db.moves_merge.folder_paths_below(
+                developed_base)
             prefix = developed_base + "/"
             for row in descendant_rows:
                 new_child = row["path"]
