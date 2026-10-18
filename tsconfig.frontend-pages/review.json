@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/review.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/review/boot.js",
     "../vireo/static/review/collections.js",
     "../vireo/static/review/context-menu.js",

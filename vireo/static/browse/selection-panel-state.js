@@ -16,7 +16,7 @@
     return Object.freeze((values || []).slice());
   }
 
-  var Vireo = global.Vireo = global.Vireo || {};
+  var Vireo = global.Vireo = global.Vireo || /** @type {VireoNamespace} */ ({});
   Vireo.browse = Vireo.browse || {};
   Vireo.browse.selectionPanel = {
     keywords: {

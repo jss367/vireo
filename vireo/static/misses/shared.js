@@ -46,10 +46,6 @@ export function hasLightbox() {
 
 /** @param {number} id @param {string} filename @param {{id:number;filename?:string;missCategory:MissCategory}[]} photos */
 export function openLightbox(id, filename, photos) {
-  // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
-  // and the mouseup zoom-out path sets it to true. Without resetting here, a stale
-  // true from a prior session would swallow the first click-to-zoom.
-  window._lightboxZoomHandled = false;
   window.openLightbox(id, filename, photos);
 }
 
@@ -89,16 +85,13 @@ export function showDeleteDialog(ids, companions, callback) {
 }
 
 /**
- * The hooks the shared navbar and lightbox call by name on whatever page is
- * open. They are the page's only globals; `test_module_pages.py` holds the
- * list to MODULE_PAGES["misses"].
+ * Hand the page hooks the shared navbar and lightbox call to the page-hook
+ * registry (vireo-page-hooks.js). The page writes no globals;
+ * `test_module_pages.py` holds the names registered to the page's
+ * `pageHooks` in frontend-module-pages.json.
  *
- * @param {{afterHistoryChange:()=>Promise<void>;loadMisses:()=>Promise<void>;getActiveSelection:()=>number[];openBrowseShortcutPhoto:(fullscreen:boolean)=>boolean;handleMissesLightboxFlagShortcut:(photoId:number,flag:string)=>boolean}} hooks
+ * @param {VireoPageHooks} hooks
  */
-export function exposePageHooks(hooks) {
-  window.afterHistoryChange = hooks.afterHistoryChange;
-  window.loadMisses = hooks.loadMisses;
-  window.getActiveSelection = hooks.getActiveSelection;
-  window.openBrowseShortcutPhoto = hooks.openBrowseShortcutPhoto;
-  window.handleMissesLightboxFlagShortcut = hooks.handleMissesLightboxFlagShortcut;
+export function registerPageHooks(hooks) {
+  window.Vireo.registerPageHooks(hooks);
 }

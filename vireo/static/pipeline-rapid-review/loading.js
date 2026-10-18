@@ -2,68 +2,73 @@
 // and opening a burst with its seeded /group/state flags and keywords.
 // Classic page script; load boot.js after all definitions.
 
-// Undo/redo lives in the shared navbar. Boot registers these hooks where
-// the inline script assigned them.
-function registerRapidHistoryHooks() {
-  window.beforeHistoryChange = function() {
-    if (rapid.loadError) {
-      showToast('Rapid Review could not load. Use Retry before undoing or redoing saved edits.', 'error');
-      return false;
-    }
-    if (rapid.applying || (rapid.sessionIndex >= 0 && !rapid.seeded)) {
-      showToast('Wait for Rapid Review to finish loading or saving.', 'info');
-      return false;
-    }
-    if (hasStagedChanges() || isQueuePromptOpen()) {
-      showToast('Apply or discard your staged decisions before undoing saved edits.', 'info');
-      return false;
-    }
-    return true;
-  };
+// Undo/redo lives in the shared navbar. Boot registers these page hooks
+// (vireo-page-hooks.js) where the inline script assigned them.
+function rapidBeforeHistoryChange() {
+  if (rapid.loadError) {
+    showToast('Rapid Review could not load. Use Retry before undoing or redoing saved edits.', 'error');
+    return false;
+  }
+  if (rapid.applying || (rapid.sessionIndex >= 0 && !rapid.seeded)) {
+    showToast('Wait for Rapid Review to finish loading or saving.', 'info');
+    return false;
+  }
+  if (hasStagedChanges() || isQueuePromptOpen()) {
+    showToast('Apply or discard your staged decisions before undoing saved edits.', 'info');
+    return false;
+  }
+  return true;
+}
 
-  window.afterHistoryChange = async function() {
-    rapid.loadError = false;
-    rapid.historyRefreshFailed = false;
-    var previous = rapid.sessions[rapid.sessionIndex];
-    var previousIds = previous ? previous.ids.slice() : [];
-    rapid.openToken++;
-    rapid.applying = true;
+async function rapidAfterHistoryChange() {
+  rapid.loadError = false;
+  rapid.historyRefreshFailed = false;
+  var previous = rapid.sessions[rapid.sessionIndex];
+  var previousIds = previous ? previous.ids.slice() : [];
+  rapid.openToken++;
+  rapid.applying = true;
+  rapid.seeded = false;
+  renderApplyState();
+  try {
+    var results = await safeFetch('/api/pipeline/results', {}, {toast: false});
+    rapid.results = results;
+    rapid.photoMap = {};
+    (results.photos || []).forEach(function(photo) { rapid.photoMap[photo.id] = photo; });
+    rapid.allSessions = buildSessions(results);
+    rebuildFilteredSessions();
+    renderQueueControls();
+    renderBurstList();
+    var index = rapid.sessions.findIndex(function(session) {
+      return session.ids.some(function(id) { return previousIds.includes(id); });
+    });
+    if (index < 0 && rapid.sessions.length) index = 0;
+    if (index >= 0) await openSession(index);
+    else showEmptyQueue();
+  } catch (error) {
+    rapid.loadError = true;
+    rapid.historyRefreshFailed = true;
     rapid.seeded = false;
+    rapid.openToken++;
+    renderAll();
+    throw error;
+  } finally {
+    rapid.applying = false;
     renderApplyState();
-    try {
-      var results = await safeFetch('/api/pipeline/results', {}, {toast: false});
-      rapid.results = results;
-      rapid.photoMap = {};
-      (results.photos || []).forEach(function(photo) { rapid.photoMap[photo.id] = photo; });
-      rapid.allSessions = buildSessions(results);
-      rebuildFilteredSessions();
-      renderQueueControls();
-      renderBurstList();
-      var index = rapid.sessions.findIndex(function(session) {
-        return session.ids.some(function(id) { return previousIds.includes(id); });
-      });
-      if (index < 0 && rapid.sessions.length) index = 0;
-      if (index >= 0) await openSession(index);
-      else showEmptyQueue();
-    } catch (error) {
-      rapid.loadError = true;
-      rapid.historyRefreshFailed = true;
-      rapid.seeded = false;
-      rapid.openToken++;
-      renderAll();
-      throw error;
-    } finally {
-      rapid.applying = false;
-      renderApplyState();
-    }
-  };
+  }
+}
+
+function registerRapidHistoryHooks() {
+  Vireo.registerPageHooks({
+    beforeHistoryChange: rapidBeforeHistoryChange,
+    afterHistoryChange: rapidAfterHistoryChange,
+  });
 }
 
 /** @returns {Promise<void>} */
 async function retryRapidReview() {
   if (rapid.applying) return;
   try {
-    if (rapid.historyRefreshFailed) await window.afterHistoryChange();
+    if (rapid.historyRefreshFailed) await rapidAfterHistoryChange();
     else await openSession(rapid.sessionIndex);
   } catch (error) {
     showToast('Rapid Review could not refresh. Use Retry to try again.', 'error');

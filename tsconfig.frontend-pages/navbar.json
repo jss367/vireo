@@ -4,6 +4,7 @@
     "../types/pages/shared.d.ts",
     "../types/pages/navbar.d.ts",
     "../types/frontend.d.ts",
+    "../types/page-hooks.d.ts",
     "../types/dialogs.d.ts",
     "../types/panel-loaders.d.ts",
     "../types/navbar.d.ts",

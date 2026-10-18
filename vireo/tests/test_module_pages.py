@@ -10,8 +10,10 @@ These tests hold the template side of that contract. ESLint holds the file
 side (``eslint.config.mjs`` reads the same list): module parsing,
 ``no-undef`` so shared navbar globals are reached only through the page's
 ``shared.js``, no inline handler markup or ``on*`` properties, and no
-``window`` writes except the page hooks and shared latches the list names,
-made from ``shared.js``.
+``window`` writes except the shared latches the list names (``sharedWrites``),
+made from ``shared.js``. The functions the navbar and lightbox call on the
+page are registered with ``Vireo.registerPageHooks`` (``pageHooks``), not
+published on ``window``.
 
 Converting a page: move its route out of ``SPLIT_PAGES`` in
 ``test_inline_page_scripts.py`` and add it here (see CLAUDE.md and
@@ -108,16 +110,29 @@ def test_page_modules_import_only_sibling_files(page, contract):
 
 
 @pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)
-def test_page_hooks_are_exposed_only_by_shared_js(page, contract):
+def test_only_shared_js_writes_window_and_only_its_latches(page, contract):
     """The window writes ESLint allows in shared.js are exactly the listed
-    hooks and latches: a stale entry would silently allow a new global."""
+    latches: a stale entry would silently allow a new global."""
     shared = (STATIC / page / "shared.js").read_text(encoding="utf-8")
     written = set(re.findall(r"\bwindow\.([A-Za-z_$][\w$]*)\s*=(?!=)", shared))
-    assert written == set(contract["pageHooks"]) | set(contract["sharedWrites"])
+    assert written == set(contract["sharedWrites"])
     for path in sorted((STATIC / page).glob("*.js")):
         if path.name != "shared.js":
             text = path.read_text(encoding="utf-8")
             assert not re.search(r"\bwindow\.[A-Za-z_$][\w$]*\s*=(?!=)", text), path.name
+
+
+@pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)
+def test_page_registers_exactly_its_listed_hooks(page, contract):
+    """``pageHooks`` is what the page hands the navbar and lightbox through
+    Vireo.registerPageHooks (vireo-page-hooks.js), each a known hook name."""
+    from test_page_hooks import _registered_names, _registry_names
+
+    registered = []
+    for path in sorted((STATIC / page).glob("*.js")):
+        registered += _registered_names(path.read_text(encoding="utf-8"))
+    assert sorted(registered) == contract["pageHooks"]
+    assert set(registered) <= set(_registry_names())
 
 
 @pytest.mark.parametrize("page, contract", PAGES, ids=PAGE_IDS)

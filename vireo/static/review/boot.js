@@ -1,6 +1,19 @@
 // Page startup.
 // Classic page script; loads after every other Review page definition.
 
+// The shared navbar's native menu and the lightbox call these through
+// Vireo.pageHook (see vireo-page-hooks.js).
+Vireo.registerPageHooks({
+  getGroupModalSelection: grmNativeMenuSelection,
+  getPredictions: function() { return predictions; },
+  setReviewRating: setReviewRating,
+  setReviewFlag: setReviewFlag,
+  revealReviewPhoto: revealReviewPhoto,
+  acceptPrediction: acceptPrediction,
+  rejectPrediction: rejectPrediction,
+  acceptAllPending: acceptAllPending,
+});
+
 // Preserve the inline script's order: the boxes button, the shortcut config,
 // the bootstrap requests and filter bar, then each listener.
 document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);

@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/pipeline.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/pipeline/boot.js",
     "../vireo/static/pipeline/completion.js",
     "../vireo/static/pipeline/extract-config.js",

@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import {parse} from 'acorn';
 
 const actions = readFileSync('vireo/static/review/photo-actions.js', 'utf8');
+const pageHooks = readFileSync('vireo/static/vireo-page-hooks.js', 'utf8');
 const navbar = readFileSync('vireo/static/navbar-shared-helpers.js', 'utf8');
 const nativeActions = parse(navbar, {ecmaVersion: 'latest'}).body
   .filter(node => ['nativeMenuSetRating', 'nativeMenuSetFlag'].includes(node.id?.name))
@@ -26,7 +27,9 @@ function harness() {
     nativeMenuInfo: message => toasts.push({message, type: 'info'}),
   });
   ctx.window = ctx;
-  vm.runInContext(actions + '\n' + nativeActions, ctx);
+  vm.runInContext(pageHooks + '\n' + actions + '\n' + nativeActions, ctx);
+  // The hooks review/boot.js registers for the native menu.
+  ctx.Vireo.registerPageHooks({setReviewRating: ctx.setReviewRating, setReviewFlag: ctx.setReviewFlag});
   function confirm(index) { requests[index].resolve({ok: true, updated: 1}); }
   return {ctx, requests, copies, toasts, renders, confirm};
 }
