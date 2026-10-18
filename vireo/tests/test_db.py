@@ -14936,7 +14936,7 @@ def test_check_filename_collisions(db):
 
 
 def test_get_highlights_candidates(tmp_path):
-    """get_highlights_candidates returns photos with quality scores, species, and embeddings."""
+    """species_curation.get_highlights_candidates returns photos with quality scores, species, and embeddings."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/test/folder', name='folder')
@@ -14971,7 +14971,7 @@ def test_get_highlights_candidates(tmp_path):
     db.conn.commit()
 
     # min_quality=0.5 should return 3 photos (0.9, 0.7, 0.5), excluding None and 0.3
-    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.5)
+    results = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.5)
     assert len(results) == 3
     # Should be ordered by quality_score DESC
     scores = [r["quality_score"] for r in results]
@@ -14984,7 +14984,7 @@ def test_get_highlights_candidates(tmp_path):
 
 
 def test_get_highlights_candidates_includes_descendants(tmp_path):
-    """get_highlights_candidates(folder_id=parent) includes photos from descendant folders."""
+    """species_curation.get_highlights_candidates(folder_id=parent) includes photos from descendant folders."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
@@ -14996,7 +14996,7 @@ def test_get_highlights_candidates_includes_descendants(tmp_path):
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
     db.conn.commit()
 
-    results = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    results = db.species_curation.get_highlights_candidates(folder_id=root, min_quality=0.0)
     assert len(results) == 2
 
 
@@ -15015,7 +15015,7 @@ def test_get_highlights_candidates_skips_missing_descendants(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
     db.conn.commit()
 
-    candidates = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    candidates = db.species_curation.get_highlights_candidates(folder_id=root, min_quality=0.0)
     assert len(candidates) == 1
     assert candidates[0]["filename"] == 'a.jpg'
     # Consistent with count_filtered_photos
@@ -15039,7 +15039,7 @@ def test_get_highlights_candidates_excludes_rejected(tmp_path):
     db.conn.execute("UPDATE photos SET quality_score = 0.9, flag = 'rejected' WHERE id = ?", (bad_pid,))
     db.conn.commit()
 
-    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    results = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert len(results) == 1
     assert results[0]["filename"] == "good.jpg"
 
@@ -15062,7 +15062,7 @@ def test_get_highlights_candidates_workspace_wide(tmp_path):
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
     db.conn.commit()
 
-    results = db.get_highlights_candidates(folder_id=None, min_quality=0.0)
+    results = db.species_curation.get_highlights_candidates(folder_id=None, min_quality=0.0)
     filenames = {r["filename"] for r in results}
     assert filenames == {"day1.jpg", "day2.jpg"}
 
@@ -15080,13 +15080,13 @@ def test_get_highlights_candidates_photo_id_restricts_query(tmp_path):
                     (p1, p2))
     db.conn.commit()
 
-    only = db.get_highlights_candidates(folder_id=None, min_quality=0.0,
-                                        photo_id=p1)
+    only = db.species_curation.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                                         photo_id=p1)
     assert [r["id"] for r in only] == [p1]
 
     # Non-existent id yields no rows without erroring.
-    assert db.get_highlights_candidates(folder_id=None, min_quality=0.0,
-                                        photo_id=999999) == []
+    assert db.species_curation.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                                         photo_id=999999) == []
 
 
 def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
@@ -15109,7 +15109,7 @@ def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
                     (p_active, p_other))
     db.conn.commit()
 
-    results = db.get_highlights_candidates(folder_id=None, min_quality=0.0)
+    results = db.species_curation.get_highlights_candidates(folder_id=None, min_quality=0.0)
     filenames = {r["filename"] for r in results}
     assert filenames == {"a.jpg"}
 
@@ -15133,7 +15133,7 @@ def test_get_highlights_candidates_workspace_wide_respects_min_quality_and_rejec
                     (p_reject,))
     db.conn.commit()
 
-    results = db.get_highlights_candidates(folder_id=None, min_quality=0.5)
+    results = db.species_curation.get_highlights_candidates(folder_id=None, min_quality=0.5)
     filenames = [r["filename"] for r in results]
     assert filenames == ["keep.jpg"]
 
@@ -15158,7 +15158,7 @@ def test_get_highlights_candidates_returns_predicted_species(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    rows = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert len(rows) == 1
     assert rows[0]["predicted_species"] == "ʻApapane"
     assert abs(rows[0]["predicted_confidence"] - 0.82) < 1e-6
@@ -15195,7 +15195,7 @@ def test_get_highlights_candidates_predicted_picks_highest_confidence(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    rows = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert rows[0]["predicted_species"] == "Cool Bird"
     assert abs(rows[0]["predicted_confidence"] - 0.90) < 1e-6
 
@@ -15225,7 +15225,7 @@ def test_get_highlights_candidates_predicted_excludes_rejected(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    rows = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert rows[0]["predicted_species"] is None
     assert rows[0]["predicted_confidence"] is None
 
@@ -15261,7 +15261,7 @@ def test_get_highlights_candidates_predicted_uses_latest_fingerprint(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    rows = db.species_curation.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert rows[0]["predicted_species"] == "Fresh Bird"
     assert abs(rows[0]["predicted_confidence"] - 0.60) < 1e-6
 
@@ -15333,10 +15333,10 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     folders = db.get_folders_with_quality_data()
     by_name = {f["name"]: f for f in folders}
     # Parent should NOT inherit the child's scored photo, since the child is
-    # no longer in the active workspace. get_highlights_candidates would
+    # no longer in the active workspace. species_curation.get_highlights_candidates would
     # return 0 candidates for the parent, so the dropdown count must match.
     assert "p" not in by_name
-    assert db.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
+    assert db.species_curation.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
 
 
 def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path):
@@ -15365,7 +15365,7 @@ def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path)
     assert by_name["c"]["photo_count"] == 1
     assert "b" not in by_name
     assert by_name["a"]["photo_count"] == 1
-    assert [row["id"] for row in db.get_highlights_candidates(folder_id=a, min_quality=0.0)] == [pid]
+    assert [row["id"] for row in db.species_curation.get_highlights_candidates(folder_id=a, min_quality=0.0)] == [pid]
 
 
 def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
@@ -19075,7 +19075,7 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     """After repair leaves only a differently-spelled hierarchy leaf, the
     photo-detail life-list species must still surface the canonical root
     spelling. Otherwise ``api_photo_detail`` compares the leaf spelling
-    against ``get_species_representative_lists`` (keyed on the root) and the
+    against ``species_curation.get_representative_lists`` (keyed on the root) and the
     lightbox/context menu drops the "current representative" flag and offers
     to set it again for a taxon that is still eligibly attached."""
     from db import Database
@@ -19100,7 +19100,7 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     db.conn.commit()
     db.tag_photo(pid, nested)
 
-    assert db.get_photo_life_list_species(pid) == ["Verdin"]
+    assert db.species_curation.get_photo_life_list_species(pid) == ["Verdin"]
 
 
 def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
@@ -19141,7 +19141,7 @@ def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
     db.conn.commit()
     db.tag_photo(pid, alias)
 
-    assert db.get_photo_life_list_species(pid) == ["Auriparus flaviceps"]
+    assert db.species_curation.get_photo_life_list_species(pid) == ["Auriparus flaviceps"]
 
 
 def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
@@ -19216,7 +19216,7 @@ def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
     db.tag_photo(pid, upper)
     db.tag_photo(pid, lower)
 
-    assert set(db.get_photo_life_list_species(pid)) == {"Robin", "robin"}
+    assert set(db.species_curation.get_photo_life_list_species(pid)) == {"Robin", "robin"}
 
 
 def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
@@ -19252,7 +19252,7 @@ def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
     db.tag_photo(pid, nested)
     db.tag_photo(pid, root)
 
-    assert set(db.get_photo_life_list_species(pid)) == {"Foo", "foo"}
+    assert set(db.species_curation.get_photo_life_list_species(pid)) == {"Foo", "foo"}
 
 
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
@@ -23011,9 +23011,9 @@ def _seed_bird_taxonomy(db):
 
 
 def test_get_default_explorer_root_finds_aves(db):
-    assert db.get_explorer_root() is None  # no taxonomy yet
+    assert db.species_curation.get_explorer_root() is None  # no taxonomy yet
     ids = _seed_bird_taxonomy(db)
-    root = db.get_explorer_root()
+    root = db.species_curation.get_explorer_root()
     assert root["id"] == ids["Aves"]
     assert root["name"] == "Aves"
     assert root["rank"] == "class"
@@ -23040,7 +23040,7 @@ def test_life_list_taxon_ids_scope(db):
     db.conn.execute("UPDATE keywords SET is_species=1 WHERE id=?", (k2,))
     db.conn.commit()
 
-    found = db.get_life_list_taxon_ids()
+    found = db.species_curation.get_life_list_taxon_ids()
     assert found == {ids['Melospiza melodia']}
     unmatched = db.get_life_list_unmatched_species()
     assert 'Mystery Warbler' in unmatched
@@ -23064,7 +23064,7 @@ def test_life_list_taxon_ids_excludes_non_species_matches(db):
                     (ids['Melospiza'], k))
     db.conn.commit()
 
-    assert db.get_life_list_taxon_ids() == set()
+    assert db.species_curation.get_life_list_taxon_ids() == set()
     unmatched = db.get_life_list_unmatched_species()
     assert 'Melospiza sp.' in unmatched
 
@@ -23099,11 +23099,11 @@ def test_life_list_uncounted_suppresses_redundant_ancestor_per_photo(db):
     db.conn.commit()
 
     # The family tag is redundant on its only photo and disappears entirely.
-    assert db.get_life_list_uncounted_identifications() == []
+    assert db.species_curation.get_life_list_uncounted_identifications() == []
 
     db.tag_photo(broad_photo, family_kw)
     db.conn.commit()
-    rows = db.get_life_list_uncounted_identifications()
+    rows = db.species_curation.get_life_list_uncounted_identifications()
     assert len(rows) == 1
     import json
 
@@ -23168,7 +23168,7 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
     db.photo_review.set_flag(rejected_photo, 'rejected')
     db.conn.commit()
 
-    rows = db.get_life_list_uncounted_identifications()
+    rows = db.species_curation.get_life_list_uncounted_identifications()
     assert len(rows) == 1
     assert rows[0]['name'] == 'New World sparrows'
     assert rows[0]['photo_count'] == 1
@@ -23195,12 +23195,12 @@ def test_life_list_taxon_ids_excludes_rejected(db):
                     (ids['Melospiza melodia'], k))
     db.conn.commit()
     db.photo_review.set_flag(p, 'rejected')
-    assert db.get_life_list_taxon_ids() == set()
+    assert db.species_curation.get_life_list_taxon_ids() == set()
 
 
 def test_get_taxon_subtree(db):
     ids = _seed_bird_taxonomy(db)
-    rows = db.get_taxon_subtree(ids['Aves'])
+    rows = db.species_curation.get_taxon_subtree(ids['Aves'])
     by_name = {r['name']: r for r in rows}
     assert by_name['Aves']['rank'] == 'class'
     assert by_name['Melospiza melodia']['rank'] == 'species'
@@ -23208,15 +23208,15 @@ def test_get_taxon_subtree(db):
     assert by_name['Passeriformes']['parent_id'] == ids['Aves']
     assert by_name['Melospiza']['parent_id'] == ids['Passerellidae']
     # subtree of a genus is just its species + itself
-    sub = {r['name'] for r in db.get_taxon_subtree(ids['Melospiza'])}
+    sub = {r['name'] for r in db.species_curation.get_taxon_subtree(ids['Melospiza'])}
     assert sub == {'Melospiza', 'Melospiza melodia', 'Melospiza georgiana'}
 
 
 def test_get_classes_for_taxa(db):
     ids = _seed_bird_taxonomy(db)
-    classes = db.get_classes_for_taxa({ids['Melospiza melodia']})
+    classes = db.species_curation.get_classes_for_taxa({ids['Melospiza melodia']})
     assert [c['name'] for c in classes] == ['Aves']
-    assert db.get_classes_for_taxa(set()) == []
+    assert db.species_curation.get_classes_for_taxa(set()) == []
 
 
 def test_get_classes_for_taxa_chunks_large_id_lists(db):
@@ -23230,7 +23230,7 @@ def test_get_classes_for_taxa_chunks_large_id_lists(db):
     n_fillers = _SQLITE_PARAM_CHUNK_SIZE * 3 + 25
     seed = {10_000_000 + i for i in range(n_fillers)}
     seed.add(ids['Melospiza melodia'])
-    classes = db.get_classes_for_taxa(seed)
+    classes = db.species_curation.get_classes_for_taxa(seed)
     assert [c['name'] for c in classes] == ['Aves']
 
 
@@ -23253,7 +23253,7 @@ def test_best_photo_by_taxon(db):
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
     db.conn.commit()
-    best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
+    best = db.species_curation.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
 
 
@@ -23274,7 +23274,7 @@ def test_best_photo_by_taxon_chunks_large_id_list(db):
     db.conn.commit()
     # 3000 ids (> both the 900 chunk size and SQLite's 999 default var limit)
     big = list(range(900000, 903000)) + [ids['Melospiza melodia']]
-    best = db.get_life_list_best_photo_by_taxon(big)
+    best = db.species_curation.get_life_list_best_photo_by_taxon(big)
     assert best[ids['Melospiza melodia']]['filename'] == 'a.jpg'
     assert all(k in {ids['Melospiza melodia']} for k in best)  # no spurious keys
 
@@ -23314,13 +23314,13 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
         )
         db.conn.commit()
 
-        db.set_photo_preference("life_list", "Common Waxbill", pid)
+        db.species_curation.set_photo_preference("life_list", "Common Waxbill", pid)
         prefs = db.conn.execute(
             "SELECT DISTINCT species FROM photo_preferences"
         ).fetchall()
         assert {r["species"] for r in prefs} == {"Common waxbill"}
 
-        rank = db.add_species_highlight("Common Waxbill", pid)
+        rank = db.species_curation.add_highlight("Common Waxbill", pid)
         assert rank == 1
         rows = db.conn.execute(
             "SELECT species FROM species_highlights"
@@ -23329,9 +23329,9 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
 
         # Re-adding under yet another casing reuses the canonical row
         # instead of appending a second rank.
-        assert db.add_species_highlight("COMMON WAXBILL", pid) == 1
+        assert db.species_curation.add_highlight("COMMON WAXBILL", pid) == 1
 
-        removed = db.remove_species_highlight("Common Waxbill", pid)
+        removed = db.species_curation.remove_highlight("Common Waxbill", pid)
         assert removed == 1
     finally:
         db.close()
@@ -23644,8 +23644,8 @@ def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path)
     """A pre-existing keyword row bound to a valid higher-rank taxon
     (e.g. a ``Corvidae`` family observation) must keep that
     ``taxon_id`` when the next species-typed accept cannot find a
-    species-rank match. ``get_life_list_candidates`` and
-    ``get_life_list_locations`` now surface linked higher-rank
+    species-rank match. ``species_curation.get_life_list_candidates`` and
+    ``species_curation.get_life_list_locations`` now surface linked higher-rank
     identifications so their ``taxon_rank`` / ``scientific_name`` /
     ``taxonomic_class`` metadata powers the new genus / family /
     class Life List filters; clearing the ``taxon_id`` here would
@@ -24075,7 +24075,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
     """A fully typed taxonomy row already linked to a higher-rank taxon
     (genus/family/class) must retain that link on the next
     ``mark_species_keywords`` pass when no species-rank replacement is
-    available. ``get_life_list_candidates`` and ``get_life_list_locations``
+    available. ``species_curation.get_life_list_candidates`` and ``species_curation.get_life_list_locations``
     now surface linked higher-rank identifications so their
     ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
     powers the new genus / family / class Life List filters; clearing
@@ -24133,10 +24133,10 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
 def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     """``resolve_species_display_name`` routes a linked hierarchy alias
     (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
-    canonical root spelling, so ``add_species_highlight`` /
+    canonical root spelling, so ``species_curation.add_highlight`` /
     ``collect_highlight_buckets`` store an unconfirmed prediction's
     highlight under ``Verdin``. The prediction-fallback branch of
-    ``get_species_highlights(eligible_only=True)`` must apply the same
+    ``species_curation.get_highlights(eligible_only=True)`` must apply the same
     canonicalization when it looks up the photo's top prediction —
     otherwise the highlight vanishes on reload because ``pr.species``
     is still the raw ``Desert Verdin`` label.
@@ -24183,10 +24183,10 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     )
     db.conn.commit()
 
-    # add_species_highlight canonicalizes the label via
+    # species_curation.add_highlight canonicalizes the label via
     # resolve_species_display_name — the leaf's linked taxon resolves
     # back to root "Verdin", so the highlight lands under "Verdin".
-    db.add_species_highlight("Desert Verdin", pid)
+    db.species_curation.add_highlight("Desert Verdin", pid)
     stored = db.conn.execute(
         "SELECT species FROM species_highlights WHERE photo_id = ?", (pid,)
     ).fetchone()
@@ -24194,12 +24194,12 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
 
     # Prediction-fallback eligibility must canonicalize pr.species the
     # same way, so the stored highlight remains eligible on reload.
-    highlights = db.get_species_highlights(eligible_only=True)
+    highlights = db.species_curation.get_highlights(eligible_only=True)
     assert pid in highlights.get("Verdin", {}), (
         "highlight canonicalized to root spelling must still match a photo "
         "whose top prediction is the linked hierarchy alias"
     )
-    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    single = db.species_curation.get_highlights(species="Verdin", eligible_only=True)
     assert pid in single.get("Verdin", {})
 
 
@@ -24256,10 +24256,10 @@ def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path
     )
     # A highlight under a different root — must not become eligible for
     # a photo whose top prediction canonicalizes to another root.
-    db.add_species_highlight("American Robin", pid)
+    db.species_curation.add_highlight("American Robin", pid)
     db.conn.commit()
 
-    highlights = db.get_species_highlights(
+    highlights = db.species_curation.get_highlights(
         species="American Robin", eligible_only=True,
     )
     assert "American Robin" not in highlights, (
@@ -24343,7 +24343,7 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
     )
     db.conn.commit()
 
-    highlights = db.get_species_highlights(eligible_only=True)
+    highlights = db.species_curation.get_highlights(eligible_only=True)
     assert pid not in highlights.get("American Robin", {}), (
         "ambiguous prediction label must not silently canonicalize to an "
         "arbitrary root — the 'American Robin' highlight must not become "
@@ -24392,10 +24392,10 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["American Robin"], robin_root),
     )
-    db.add_species_highlight("American Robin", pid)
+    db.species_curation.add_highlight("American Robin", pid)
     db.conn.commit()
 
-    highlights = db.get_species_highlights(
+    highlights = db.species_curation.get_highlights(
         species="American Robin", eligible_only=True,
     )
     assert "American Robin" not in highlights, (
@@ -24411,7 +24411,7 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     leaf that points at a different taxon, the reload canonicalization
     must return the root's stored spelling, not the leaf's root spelling.
 
-    Without this, ``add_species_highlight`` stores the highlight under
+    Without this, ``species_curation.add_highlight`` stores the highlight under
     the root name (case 1) but the eligibility reload canonicalizes
     through the mismatched leaf's taxon and drops the saved highlight.
     """
@@ -24468,13 +24468,13 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
         "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
         (did,),
     )
-    # ``add_species_highlight`` funnels through
+    # ``species_curation.add_highlight`` funnels through
     # ``resolve_species_display_name``, which returns "Robin" (root-first)
     # for the label "Robin".
-    db.add_species_highlight("Robin", pid)
+    db.species_curation.add_highlight("Robin", pid)
     db.conn.commit()
 
-    highlights = db.get_species_highlights(
+    highlights = db.species_curation.get_highlights(
         species="Robin", eligible_only=True,
     )
     assert pid in highlights.get("Robin", {}), (
@@ -24493,12 +24493,12 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     name.
 
     Representative eligibility mirrors the widened
-    :meth:`get_life_list_candidates`, :meth:`get_photo_life_list_species`,
+    :meth:`species_curation.get_life_list_candidates`, :meth:`species_curation.get_photo_life_list_species`,
     and ``_photo_can_be_life_list_preference`` write path — the Life
     List renders higher-rank identifications so their photos must
     survive the ``eligible_only=True`` read that ``GET /api/photos/<id>``
     uses to decide whether the shared Set-Representative button is
-    current. ``get_species_highlights`` remains species-only, because
+    current. ``species_curation.get_highlights`` remains species-only, because
     the Highlights page still only surfaces species buckets.
     """
     from db import Database
@@ -24537,13 +24537,13 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
 
     # Curation rows stored under the "Puma" identification key.
     db.set_species_representative("Puma", pid)
-    db.add_species_highlight("Puma", pid)
+    db.species_curation.add_highlight("Puma", pid)
     db.conn.commit()
 
     # Representative eligibility matches the widened Life List siblings:
     # the higher-rank homonym is a valid representative for the "Puma"
     # entry the user actually renders under on the Life List.
-    reps = db.get_species_representative_lists(eligible_only=True)
+    reps = db.species_curation.get_representative_lists(eligible_only=True)
     assert reps.get("Puma") == [pid], (
         "higher-rank homonym 'Puma' must satisfy 'Puma' representative "
         "eligibility, matching the widened life-list write path"
@@ -24553,12 +24553,12 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     # Highlights remain species-only. The Highlights page surfaces
     # species buckets, so a genus-rank keyword named 'Puma' must not
     # keep the species 'Puma' highlight eligible.
-    highlights = db.get_species_highlights(eligible_only=True)
+    highlights = db.species_curation.get_highlights(eligible_only=True)
     assert pid not in highlights.get("Puma", {}), (
         "genus-rank taxonomy row named 'Puma' must not satisfy species "
         "'Puma' highlight eligibility"
     )
-    single = db.get_species_highlights(species="Puma", eligible_only=True)
+    single = db.species_curation.get_highlights(species="Puma", eligible_only=True)
     assert pid not in single.get("Puma", {})
 
     # Sanity check: when the row is rebound to the species-rank taxon,
@@ -24572,9 +24572,9 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     )
     db.conn.commit()
 
-    reps_after = db.get_species_representative_lists(eligible_only=True)
+    reps_after = db.species_curation.get_representative_lists(eligible_only=True)
     assert reps_after.get("Puma") == [pid]
-    highlights_after = db.get_species_highlights(eligible_only=True)
+    highlights_after = db.species_curation.get_highlights(eligible_only=True)
     assert pid in highlights_after.get("Puma", {})
 
 

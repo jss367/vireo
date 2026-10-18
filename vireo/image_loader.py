@@ -38,9 +38,13 @@ import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING, Final, Literal, overload
 
 from file_replace import replace_file
 from PIL import Image, ImageOps
+
+if TYPE_CHECKING:
+    from float_image import FloatImage
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +60,12 @@ class ScanCancelled(RuntimeError):
 RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
-RAW_DECODE_JPEG_FIRST = "jpeg_first"
-RAW_DECODE_CAMERA_RENDERED = "camera_rendered"
-RAW_DECODE_PRESERVE_HIGHLIGHTS = "preserve_highlights"
-RAW_DECODE_LINEAR = "linear"
+# Final, so each is its literal type and load_image's overloads can tell
+# the one mode that returns a FloatImage from the rest.
+RAW_DECODE_JPEG_FIRST: Final = "jpeg_first"
+RAW_DECODE_CAMERA_RENDERED: Final = "camera_rendered"
+RAW_DECODE_PRESERVE_HIGHLIGHTS: Final = "preserve_highlights"
+RAW_DECODE_LINEAR: Final = "linear"
 _RAW_DECODE_MODES = {
     RAW_DECODE_JPEG_FIRST,
     RAW_DECODE_CAMERA_RENDERED,
@@ -644,7 +650,20 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
         )
 
 
-def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
+@overload
+def load_image(
+    file_path: str | os.PathLike[str], max_size: int | None = ...,
+    raw_decode: Literal["jpeg_first", "camera_rendered", "preserve_highlights"] = ...,
+) -> Image.Image | None: ...
+
+
+@overload
+def load_image(
+    file_path: str | os.PathLike[str], max_size: int | None = ..., raw_decode: str = ...,
+) -> Image.Image | FloatImage | None: ...
+
+
+def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Load an image file, resized to max_size (Pillow or a float RAW buffer).
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).

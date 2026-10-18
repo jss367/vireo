@@ -2382,9 +2382,9 @@ def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
         hierarchical_keywords={"france|camargue|pont de gau"},
     )
     editor = SidecarEditor(xmp_path)
-    desc = editor._description()
+    desc = editor.document.description()
     desc.set(LOCATION_KEYWORDS_MARKER, "France|Camargue|Pont de Gau")
-    editor._dirty = True
+    editor.document.dirty = True
     editor.commit()
 
     payload = app.test_client().get("/api/sync/preview").get_json()

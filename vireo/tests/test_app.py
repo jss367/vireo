@@ -4433,7 +4433,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
     ).fetchone()["id"]
     old_kid = db.add_keyword("Old Species", is_species=True)
     db.tag_photo(photo_id, old_kid)
-    db.add_species_highlight("Old Species", photo_id)
+    db.species_curation.add_highlight("Old Species", photo_id)
     db.set_species_representative("Old Species", photo_id)
 
     det_id = db.save_detections(photo_id, [
@@ -8707,14 +8707,14 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
     kid = db.add_keyword("OldBird", is_species=True)
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     db.tag_photo(p1, kid)
-    db.set_photo_preference("life_list", "OldBird", p1)
-    db.set_photo_preference("highlights", "OldBird", p1)
+    db.species_curation.set_photo_preference("life_list", "OldBird", p1)
+    db.species_curation.set_photo_preference("highlights", "OldBird", p1)
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_photo_preferences("life_list") == {"NewBird": p1}
-    assert db.get_photo_preferences("highlights") == {"NewBird": p1}
+    assert db.species_curation.get_photo_preferences("life_list") == {"NewBird": p1}
+    assert db.species_curation.get_photo_preferences("highlights") == {"NewBird": p1}
 
 
 def test_rename_keyword_updates_species_representative(app_and_db):
@@ -8724,12 +8724,12 @@ def test_rename_keyword_updates_species_representative(app_and_db):
     kid = db.add_keyword("OldBird", is_species=True)
     p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     db.tag_photo(p1, kid)
-    db.set_photo_preference("species_representative", "OldBird", p1)
+    db.species_curation.set_photo_preference("species_representative", "OldBird", p1)
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_photo_preferences("species_representative") == {"NewBird": p1}
+    assert db.species_curation.get_photo_preferences("species_representative") == {"NewBird": p1}
 
 
 def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
@@ -8741,13 +8741,13 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     p_old = rows[0]["id"]
     p_new = rows[1]["id"]
     db.tag_photo(p_old, kid_old)
-    db.set_photo_preference("life_list", "OldBird", p_old)
-    db.set_photo_preference("life_list", "NewBird", p_new)
+    db.species_curation.set_photo_preference("life_list", "OldBird", p_old)
+    db.species_curation.set_photo_preference("life_list", "NewBird", p_new)
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+    assert db.species_curation.get_photo_preferences("life_list") == {"NewBird": p_new}
 
 
 def test_rename_keyword_updates_species_highlights(app_and_db):
@@ -8759,14 +8759,14 @@ def test_rename_keyword_updates_species_highlights(app_and_db):
     p1, p2 = rows[0]["id"], rows[1]["id"]
     db.tag_photo(p1, kid)
     db.tag_photo(p2, kid)
-    db.add_species_highlight("OldBird", p1)
-    db.add_species_highlight("OldBird", p2)
+    db.species_curation.add_highlight("OldBird", p1)
+    db.species_curation.add_highlight("OldBird", p2)
 
     resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("OldBird") == {}
-    highlights = db.get_species_highlights("NewBird")
+    assert db.species_curation.get_highlights("OldBird") == {}
+    highlights = db.species_curation.get_highlights("NewBird")
     assert highlights == {"NewBird": {p1: 1, p2: 2}}
 
 
@@ -8783,15 +8783,15 @@ def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db
     db.tag_photo(p_target, kid_new)
     db.tag_photo(p_moving_a, kid_old)
     db.tag_photo(p_moving_b, kid_old)
-    db.add_species_highlight("NewBird", p_target)
-    db.add_species_highlight("OldBird", p_moving_a)
-    db.add_species_highlight("OldBird", p_moving_b)
+    db.species_curation.add_highlight("NewBird", p_target)
+    db.species_curation.add_highlight("OldBird", p_moving_a)
+    db.species_curation.add_highlight("OldBird", p_moving_b)
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("OldBird") == {}
-    assert db.get_species_highlights("NewBird") == {
+    assert db.species_curation.get_highlights("OldBird") == {}
+    assert db.species_curation.get_highlights("NewBird") == {
         "NewBird": {p_target: 1, p_moving_a: 2, p_moving_b: 3}
     }
 
@@ -8808,15 +8808,15 @@ def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
     db.tag_photo(p_target, kid_new)
     db.tag_photo(p_shared, kid_old)
     db.tag_photo(p_shared, kid_new)
-    db.add_species_highlight("NewBird", p_target)
-    db.add_species_highlight("NewBird", p_shared)
-    db.add_species_highlight("OldBird", p_shared)
+    db.species_curation.add_highlight("NewBird", p_target)
+    db.species_curation.add_highlight("NewBird", p_shared)
+    db.species_curation.add_highlight("OldBird", p_shared)
 
     resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("OldBird") == {}
-    assert db.get_species_highlights("NewBird") == {
+    assert db.species_curation.get_highlights("OldBird") == {}
+    assert db.species_curation.get_highlights("NewBird") == {
         "NewBird": {p_target: 1, p_shared: 2}
     }
 
@@ -8847,15 +8847,15 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
             file_size=1, file_mtime=float(i),
         )
         db.tag_photo(pid, kid_old)
-        db.add_species_highlight("OldBird", pid)
+        db.species_curation.add_highlight("OldBird", pid)
         photo_ids.append(pid)
 
     pairs = [(pid, ws) for pid in photo_ids]
     moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
 
     assert moved == len(photo_ids)
-    assert db.get_species_highlights("OldBird") == {}
-    highlights = db.get_species_highlights("NewBird")
+    assert db.species_curation.get_highlights("OldBird") == {}
+    highlights = db.species_curation.get_highlights("NewBird")
     # Ranks preserve the original bucket order (1..N).
     assert highlights == {
         "NewBird": {pid: rank for rank, pid in enumerate(photo_ids, start=1)}
@@ -8869,10 +8869,13 @@ def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
     _highlight_score_bucket already applied on the visible photos."""
     from highlights_payload import apply_ordered_highlights
 
-    class FakeDb:
-        def get_species_highlights(self, eligible_only=False):
+    class FakeCuration:
+        def get_highlights(self, eligible_only=False):
             assert eligible_only is True
             return {"Robin": {999: 1}}
+
+    class FakeDb:
+        species_curation = FakeCuration()
 
     original = [
         {"id": 1, "highlight_score": 0.4, "flag": "flagged"},
@@ -8890,10 +8893,13 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     be re-sorted so the highlighted photo leads and follows the stored rank."""
     from highlights_payload import apply_ordered_highlights
 
-    class FakeDb:
-        def get_species_highlights(self, eligible_only=False):
+    class FakeCuration:
+        def get_highlights(self, eligible_only=False):
             assert eligible_only is True
             return {"Robin": {2: 1}}
+
+    class FakeDb:
+        species_curation = FakeCuration()
 
     buckets = [{
         "species": "Robin",
@@ -9029,7 +9035,7 @@ def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
     app, db = app_and_db
     fid, ids = _seed_anianiau_bucket(db)
 
-    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    candidates = db.species_curation.get_highlights_candidates(fid, min_quality=0.0)
     buckets, _unid = collect_highlight_buckets(candidates, 0.70)
     apply_ordered_highlights(db, buckets)
     # unanalyzed_count is assigned in apply_highlight_preferences (which
@@ -9067,7 +9073,7 @@ def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_an
     app, db = app_and_db
     fid, ids = _seed_anianiau_bucket(db)
 
-    candidates = db.get_highlights_candidates(fid, min_quality=0.5)
+    candidates = db.species_curation.get_highlights_candidates(fid, min_quality=0.5)
     buckets, _unid = collect_highlight_buckets(candidates, 0.70)
     bucket = next(b for b in buckets if b["species"] == "Anianiau")
     names = {p["filename"] for p in bucket["photos"]}
@@ -9168,7 +9174,7 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     # Sanity-check the pre-curation ordering: unscored non-picks form a
     # contiguous tail, so the tail count equals the total unscored non-pick
     # count (2). This is the state the divider was designed for.
-    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    candidates = db.species_curation.get_highlights_candidates(fid, min_quality=0.0)
     buckets, _unid = collect_highlight_buckets(candidates, 0.70)
     apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
@@ -9185,7 +9191,7 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     # analyzed content.
     db.set_species_representative("Iiwi", unscored_rep)
 
-    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    candidates = db.species_curation.get_highlights_candidates(fid, min_quality=0.0)
     buckets, _unid = collect_highlight_buckets(candidates, 0.70)
     apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
@@ -9239,12 +9245,12 @@ def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_d
     place_photo = rows[1]["id"]
     db.tag_photo(species_photo, species_kid)
     db.tag_photo(place_photo, place_kid)
-    db.set_photo_preference("life_list", "Robin", species_photo)
+    db.species_curation.set_photo_preference("life_list", "Robin", species_photo)
 
     resp = client.put(f"/api/keywords/{place_kid}", json={"name": "Backyard Robin"})
     assert resp.status_code == 200
 
-    assert db.get_photo_preferences("life_list") == {"Robin": species_photo}
+    assert db.species_curation.get_photo_preferences("life_list") == {"Robin": species_photo}
 
 
 def test_delete_keyword_queues_sidecar_removals(app_and_db):
@@ -13222,9 +13228,9 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
 
     # Alpha has only a highlight, Beta only a representative, Gamma has both,
     # and Delta has neither. Every pair of filters should intersect cleanly.
-    db.add_species_highlight("Alpha Bird", photo_ids["Alpha Bird"])
+    db.species_curation.add_highlight("Alpha Bird", photo_ids["Alpha Bird"])
     db.set_species_representative("Beta Bird", photo_ids["Beta Bird"])
-    db.add_species_highlight("Gamma Bird", photo_ids["Gamma Bird"])
+    db.species_curation.add_highlight("Gamma Bird", photo_ids["Gamma Bird"])
     db.set_species_representative("Gamma Bird", photo_ids["Gamma Bird"])
 
     def species_for(**filters):
@@ -13254,7 +13260,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     assert species_for(
         highlight_selection="no", species_representative="no"
     ) == {"Alpha Bird", "Delta Bird"}
-    assert db.get_species_highlights("Alpha Bird") == {
+    assert db.species_curation.get_highlights("Alpha Bird") == {
         "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
     }
     db.photo_review.set_flag(photo_ids["Alpha Bird"], "none")
@@ -13315,7 +13321,7 @@ def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and
         photo_ids.append(photo_id)
         prediction_ids.append(prediction_id)
     db.conn.commit()
-    db.add_species_highlight("Prediction Bird", photo_ids[0])
+    db.species_curation.add_highlight("Prediction Bird", photo_ids[0])
 
     response = client.get(
         "/api/highlights",
@@ -13520,7 +13526,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
     # Codex P2: a higher-rank taxonomy keyword (e.g. genus) must not count as
     # a confirmed species — otherwise Highlights Confirm would skip the photo
     # and never accept the species-rank prediction the user actually saw. The
-    # pre-skip must mirror get_highlights_candidates' rank filter.
+    # pre-skip must mirror species_curation.get_highlights_candidates' rank filter.
     app, db = app_and_db
     client = app.test_client()
     fid = db.conn.execute(
@@ -13813,8 +13819,8 @@ def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
     ).lastrowid
     db.tag_photo(p1, old_kid)
     db.tag_photo(p2, old_kid)
-    db.add_species_highlight("Bald Eagle", p1)
-    db.add_species_highlight("Bald Eagle", p2)
+    db.species_curation.add_highlight("Bald Eagle", p1)
+    db.species_curation.add_highlight("Bald Eagle", p2)
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -13822,8 +13828,8 @@ def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
     )
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("Bald Eagle") == {}
-    assert db.get_species_highlights("Golden Eagle") == {
+    assert db.species_curation.get_highlights("Bald Eagle") == {}
+    assert db.species_curation.get_highlights("Golden Eagle") == {
         "Golden Eagle": {p1: 1, p2: 2}
     }
 
@@ -13853,8 +13859,8 @@ def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
     ).lastrowid
     db.tag_photo(p_dest, new_kid)
     db.tag_photo(p_moving, db.add_keyword("Bald Eagle", is_species=True))
-    db.add_species_highlight("Golden Eagle", p_dest)
-    db.add_species_highlight("Bald Eagle", p_moving)
+    db.species_curation.add_highlight("Golden Eagle", p_dest)
+    db.species_curation.add_highlight("Bald Eagle", p_moving)
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -13862,8 +13868,8 @@ def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
     )
     assert resp.status_code == 200
 
-    assert db.get_species_highlights("Bald Eagle") == {}
-    assert db.get_species_highlights("Golden Eagle") == {
+    assert db.species_curation.get_highlights("Bald Eagle") == {}
+    assert db.species_curation.get_highlights("Golden Eagle") == {
         "Golden Eagle": {p_dest: 1, p_moving: 2}
     }
 
@@ -13925,7 +13931,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     ).lastrowid
     db.tag_photo(pid, old_kid)
     db.set_species_representative("Bald Eagle", pid)
-    db.add_species_highlight("Bald Eagle", pid)
+    db.species_curation.add_highlight("Bald Eagle", pid)
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -13933,7 +13939,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     )
     assert resp.status_code == 200
     assert db.get_species_representatives().get("Golden Eagle") == pid
-    assert pid in (db.get_species_highlights("Golden Eagle") or {}).get(
+    assert pid in (db.species_curation.get_highlights("Golden Eagle") or {}).get(
         "Golden Eagle", {}
     )
 
@@ -13943,7 +13949,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     reps = db.get_species_representatives()
     assert reps.get("Bald Eagle") == pid
     assert "Golden Eagle" not in reps
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Bald Eagle") or {})
     assert "Golden Eagle" not in hl
 
@@ -13953,7 +13959,7 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     reps_redo = db.get_species_representatives()
     assert reps_redo.get("Golden Eagle") == pid
     assert "Bald Eagle" not in reps_redo
-    hl_redo = db.get_species_highlights()
+    hl_redo = db.species_curation.get_highlights()
     assert pid in (hl_redo.get("Golden Eagle") or {})
     assert "Bald Eagle" not in hl_redo
 
@@ -13985,11 +13991,11 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
     ).lastrowid
     db.tag_photo(p1, old_kid)
     db.tag_photo(p2, old_kid)
-    db.add_species_highlight("Old Rank Bird", p1)
-    db.add_species_highlight("Old Rank Bird", p2)
+    db.species_curation.add_highlight("Old Rank Bird", p1)
+    db.species_curation.add_highlight("Old Rank Bird", p2)
 
     # Sanity: original ranks are 1 (p1) and 2 (p2).
-    assert db.get_species_highlights("Old Rank Bird") == {
+    assert db.species_curation.get_highlights("Old Rank Bird") == {
         "Old Rank Bird": {p1: 1, p2: 2}
     }
 
@@ -14002,7 +14008,7 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
     undone = db.undo_last_edit()
     assert undone is not None
 
-    restored = db.get_species_highlights("Old Rank Bird")["Old Rank Bird"]
+    restored = db.species_curation.get_highlights("Old Rank Bird")["Old Rank Bird"]
     # Before the fix, p1 landed at rank 3 (MAX(rank)+1) and appeared
     # after p2 in the ordered list.
     assert restored[p1] == 1
@@ -14034,7 +14040,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     # `keyword_add` (has_old_species stays False) rather than
     # `species_replace`.
     db.set_species_representative("Predicted Bird", pid)
-    db.add_species_highlight("Predicted Bird", pid)
+    db.species_curation.add_highlight("Predicted Bird", pid)
     det = db.save_detections(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
@@ -14050,7 +14056,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     assert resp.status_code == 200
     assert db.edit_history.list_recent(limit=1)[0]["action_type"] == "keyword_add"
     assert db.get_species_representatives().get("New Species") == pid
-    assert pid in (db.get_species_highlights("New Species") or {}).get(
+    assert pid in (db.species_curation.get_highlights("New Species") or {}).get(
         "New Species", {}
     )
 
@@ -14060,7 +14066,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     reps = db.get_species_representatives()
     assert reps.get("Predicted Bird") == pid
     assert "New Species" not in reps
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Predicted Bird") or {})
     assert "New Species" not in hl
 
@@ -14070,7 +14076,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     reps_redo = db.get_species_representatives()
     assert reps_redo.get("New Species") == pid
     assert "Predicted Bird" not in reps_redo
-    hl_redo = db.get_species_highlights()
+    hl_redo = db.species_curation.get_highlights()
     assert pid in (hl_redo.get("New Species") or {})
     assert "Predicted Bird" not in hl_redo
 
@@ -14098,8 +14104,8 @@ def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_an
     ).lastrowid
     db.tag_photo(pid, old_kid)
     # Highlighted under both species before the relabel.
-    db.add_species_highlight("Both Bird A", pid)
-    db.add_species_highlight("Both Bird B", pid)
+    db.species_curation.add_highlight("Both Bird A", pid)
+    db.species_curation.add_highlight("Both Bird B", pid)
 
     resp = client.post(
         "/api/highlights/relabel",
@@ -14107,14 +14113,14 @@ def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_an
     )
     assert resp.status_code == 200
     # Old-bucket row dropped; destination row retained.
-    assert db.get_species_highlights("Both Bird A") == {}
-    assert pid in (db.get_species_highlights("Both Bird B") or {}).get(
+    assert db.species_curation.get_highlights("Both Bird A") == {}
+    assert pid in (db.species_curation.get_highlights("Both Bird B") or {}).get(
         "Both Bird B", {}
     )
 
     undone = db.undo_last_edit()
     assert undone is not None
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     # Old bucket restored AND destination row survives — before the fix
     # the undo deleted the pre-existing (Both Bird B, pid) row.
     assert pid in (hl.get("Both Bird A") or {})
@@ -14214,7 +14220,7 @@ def test_highlights_relabel_undo_preserves_preexisting_target_representative(
 
     undone = db.undo_last_edit()
     assert undone is not None
-    reps_undone = db.get_species_representative_lists()
+    reps_undone = db.species_curation.get_representative_lists()
     # Both reps must be present after undo: A is restored from pref_prev,
     # and B must survive the pref_prev-driven cleanup because the target
     # rep row pre-existed the relabel.
@@ -14468,7 +14474,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     # relabels.
     db.tag_photo(pid, stale_kid)
     db.set_species_representative("Old Bird", pid)
-    db.add_species_highlight("Old Bird", pid)
+    db.species_curation.add_highlight("Old Bird", pid)
     db.untag_photo(pid, stale_kid)
     # Prediction added AFTER untag so the "predicted-only" relabel path
     # runs (has_old_species stays False → action_type = "keyword_add").
@@ -14493,7 +14499,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     # Stale Old Bird rep survives — it is NOT renamed to New Species.
     assert reps.get("Old Bird") == pid
     assert "New Species" not in reps
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Old Bird") or {})
     assert "New Species" not in hl
 
@@ -14543,7 +14549,7 @@ def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
     # Curation on the family-rank keyword: a highlight and a global
     # representative. Both must stay under 'Corvids' after the relabel
     # because the keyword itself is not being removed.
-    db.add_species_highlight("Corvids", pid)
+    db.species_curation.add_highlight("Corvids", pid)
     db.set_species_representative("Corvids", pid)
     db.conn.commit()
 
@@ -14570,7 +14576,7 @@ def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
 
     # The highlight and representative for the family name must remain
     # under 'Corvids', not be migrated to 'Common Raven'.
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Corvids") or {}), (
         "family-rank highlight must stay under its own species key"
     )
@@ -14641,7 +14647,7 @@ def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
     db.tag_photo(pid, leaf_kid)
     # Curation is keyed under the canonical root spelling — this is how
     # existing highlight/representative rows survive duplicate repair.
-    db.add_species_highlight("Verdin", pid)
+    db.species_curation.add_highlight("Verdin", pid)
     db.set_species_representative("Verdin", pid)
     db.conn.commit()
 
@@ -14654,7 +14660,7 @@ def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
     # The root-key highlight/representative rows must have been migrated
     # onto the relabel target, not left stranded under 'Verdin' — the
     # photo no longer carries any Verdin species tag.
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Common Raven") or {}), (
         "root-key highlight must migrate to the relabel target when the "
         "attached hierarchy leaf canonicalizes to the same taxon"
@@ -14679,7 +14685,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     ``resolve_species_display_name``.
 
     Regression: highlight buckets canonicalize the prediction label to its
-    unique-taxon root before saving (via ``add_species_highlight``), so a
+    unique-taxon root before saving (via ``species_curation.add_highlight``), so a
     starred unconfirmed alias bucket keyed on ``Desert Verdin`` lands under
     ``Verdin``. The relabel path built ``predicted_species_by_pid`` from
     the raw prediction label only. In the prediction-only branch
@@ -14734,15 +14740,15 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     )[0]
     # Raw prediction label uses the hierarchy alias.
     db.predictions.add(det, "Desert Verdin", 0.88, "m")
-    # Curation was saved against the alias but ``add_species_highlight``
+    # Curation was saved against the alias but ``species_curation.add_highlight``
     # /``set_species_representative`` canonicalize to the root spelling —
     # matching what ``collect_highlight_buckets`` and the buckets UI
     # would show for this photo.
-    db.add_species_highlight("Desert Verdin", pid)
+    db.species_curation.add_highlight("Desert Verdin", pid)
     db.set_species_representative("Desert Verdin", pid)
-    hl_before = db.get_species_highlights()
+    hl_before = db.species_curation.get_highlights()
     assert pid in (hl_before.get("Verdin") or {}), (
-        "sanity: add_species_highlight should canonicalize to the root "
+        "sanity: species_curation.add_highlight should canonicalize to the root "
         "spelling for a unique-taxon hierarchy alias"
     )
     db.conn.commit()
@@ -14753,7 +14759,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     )
     assert resp.status_code == 200, resp.get_data(as_text=True)
 
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("Common Raven") or {}), (
         "root-key highlight must migrate when the raw prediction label is "
         "a hierarchy alias that canonicalizes to the same root — otherwise "
@@ -14917,7 +14923,7 @@ def test_highlights_relabel_queues_remove_for_non_ascii_case_variant(app_and_db)
 def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     """Undoing a relabel that moved a secondary representative must
     restore it at its original ``selected_order`` — otherwise
-    ``_set_global_species_representative`` would assign MAX+1 and promote
+    ``species_curation.set_global_representative`` would assign MAX+1 and promote
     the restored photo above the pre-existing primary representative for
     the same species."""
     app, db = app_and_db
@@ -14946,7 +14952,7 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     # Select secondary first so primary ends up newest and lists first.
     db.set_species_representative("Order Bird", p_secondary)
     db.set_species_representative("Order Bird", p_primary)
-    assert db.get_species_representative_lists()["Order Bird"] == [
+    assert db.species_curation.get_representative_lists()["Order Bird"] == [
         p_primary, p_secondary,
     ]
 
@@ -14955,14 +14961,14 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
         json={"photo_ids": [p_secondary], "species": "Other Bird"},
     )
     assert resp.status_code == 200
-    assert db.get_species_representative_lists()["Order Bird"] == [p_primary]
+    assert db.species_curation.get_representative_lists()["Order Bird"] == [p_primary]
 
     undone = db.undo_last_edit()
     assert undone is not None
-    # Before the fix, undo called _set_global_species_representative and
+    # Before the fix, undo called species_curation.set_global_representative and
     # p_secondary landed at MAX(selected_order)+1 — jumping it ahead of
     # p_primary.
-    restored = db.get_species_representative_lists()["Order Bird"]
+    restored = db.species_curation.get_representative_lists()["Order Bird"]
     assert restored == [p_primary, p_secondary]
 
 
@@ -14970,7 +14976,7 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
     """Redoing a previously-undone relabel that moved a secondary
     representative must restore it at the original ``selected_order``
     captured before the first relabel. Before the fix, redo called
-    ``_set_global_species_representative`` and pushed the redone
+    ``species_curation.set_global_representative`` and pushed the redone
     representative above pre-existing entries under ``new_species``,
     changing which photo shows up as the Life List/Highlights primary
     after an undo/redo round trip."""
@@ -15003,7 +15009,7 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
     # p_source in at its lower captured order.
     db.set_species_representative("Redo Order Bird", p_source)
     db.set_species_representative("Redo Other Bird", p_target_primary)
-    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+    assert db.species_curation.get_representative_lists()["Redo Other Bird"] == [
         p_target_primary,
     ]
 
@@ -15012,29 +15018,29 @@ def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
         json={"photo_ids": [p_source], "species": "Redo Other Bird"},
     )
     assert resp.status_code == 200
-    after_relabel = db.get_species_representative_lists()["Redo Other Bird"]
+    after_relabel = db.species_curation.get_representative_lists()["Redo Other Bird"]
     # p_target_primary's global order is newer than p_source's, so the
     # migrated p_source lands as a secondary rep, not the primary.
     assert after_relabel == [p_target_primary, p_source]
 
     undone = db.undo_last_edit()
     assert undone is not None
-    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+    assert db.species_curation.get_representative_lists()["Redo Other Bird"] == [
         p_target_primary,
     ]
 
     redone = db.redo_last_undo()
     assert redone is not None
-    # Before the fix, redo called _set_global_species_representative and
+    # Before the fix, redo called species_curation.set_global_representative and
     # p_source landed at MAX(selected_order)+1, promoting it above
     # p_target_primary. With the captured order restored on redo, the
     # round trip preserves both the list and its primary photo.
-    redone_list = db.get_species_representative_lists()["Redo Other Bird"]
+    redone_list = db.species_curation.get_representative_lists()["Redo Other Bird"]
     assert redone_list == after_relabel
 
 
 def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
-    """``rename_species_representatives_species`` must chunk the IN(...)
+    """``species_curation.rename_representatives`` must chunk the IN(...)
     clause so a species tagged on thousands of photos doesn't blow
     SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` on legacy builds. Before the
     fix, ``rename_photo_preferences_species`` funneled every affected
@@ -15074,7 +15080,7 @@ def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_pat
         )
     db.conn.commit()
 
-    moved = db.rename_species_representatives_species(
+    moved = db.species_curation.rename_representatives(
         "Old Species", "New Species", photo_ids=photo_ids,
     )
     assert moved == len(photo_ids)
@@ -15337,7 +15343,7 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
         (fid,),
     ).lastrowid
     db.tag_photo(pid, old_kid)
-    db.add_species_highlight("Legacy Species", pid)
+    db.species_curation.add_highlight("Legacy Species", pid)
     # Pre-existing destination highlight, keyed on the taxonomy spelling
     # (which is what add_keyword would store for a "Robin" request).
     db.conn.execute(
@@ -15361,12 +15367,12 @@ def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
         (pid,),
     ).fetchall()
     assert [r["name"] for r in tagged] == ["robin"]
-    hl = db.get_species_highlights()
+    hl = db.species_curation.get_highlights()
     assert pid in (hl.get("robin") or {})
 
     undone = db.undo_last_edit()
     assert undone is not None
-    hl_after_undo = db.get_species_highlights()
+    hl_after_undo = db.species_curation.get_highlights()
     # The pre-existing `robin` highlight must survive the undo — before
     # the fix the snapshot recorded dst_existed=False (compared against
     # "Robin") and undo deleted the user's pre-existing row.
@@ -15429,7 +15435,7 @@ def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
     )
     db.conn.commit()
 
-    eligible = db.get_species_highlights("Robin", eligible_only=True)
+    eligible = db.species_curation.get_highlights("Robin", eligible_only=True)
     # Before the fix the whole-COALESCE NOCASE would match ``Robin`` to
     # the accepted ``robin`` and mark the highlight eligible. With the
     # branch-specific NOCASE, the accepted keyword compares EXACT.
@@ -15447,7 +15453,7 @@ def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
         (pid, legacy_kid),
     )
     db.conn.commit()
-    same_spelling = db.get_species_highlights("Robin", eligible_only=True)
+    same_spelling = db.species_curation.get_highlights("Robin", eligible_only=True)
     assert pid in (same_spelling.get("Robin") or {})
 
 

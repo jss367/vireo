@@ -186,7 +186,7 @@ class _HighlightsRelabel:
 
     def _snapshot_highlights(self):
         species = self.species
-        for row in self.db.get_species_highlight_rows_for_photos(self.photo_ids):
+        for row in self.db.species_curation.highlight_rows_for_photos(self.photo_ids):
             old_species_name = row["species"]
             if old_species_name == species:
                 self.hl_dst_preexisting.add(row["photo_id"])
@@ -223,32 +223,32 @@ class _HighlightsRelabel:
         # delete it. Un-gating the old-species restore from a destination
         # row lookup lets undo recover representatives even when the
         # relabel collided with another photo holding the slot.
-        self.pref_dst_taken = db.get_photo_preference_purposes_for_species(species)
+        self.pref_dst_taken = db.species_curation.preference_purposes_for_species(species)
         # Photos that already had a (species=<target>, photo_id) row in
         # species_representatives before the relabel.
-        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # species_curation.rename_representatives uses INSERT OR IGNORE, so
         # when the destination rep row is already present the relabel does
         # not create a new one and undo must not delete it. Applies to
         # both preference-covered moves (via pref_prev.rep_dst_existed in
         # _snapshot_preferences) and rep-only moves (via
         # rep_prev.dst_existed).
         self.rep_dst_preexisting.update(
-            db.get_representative_photo_ids_for_species(species, self.photo_ids)
+            db.species_curation.representative_photo_ids_for_species(species, self.photo_ids)
         )
         # Snapshot the original selected_order for every existing
         # species_representatives row on the retagged photos. Undo restores
         # each row at its captured order rather than the fresh MAX+1 that
-        # _set_global_species_representative would assign — so undoing a
+        # species_curation.set_global_representative would assign — so undoing a
         # relabel of a secondary representative does not promote it above
         # the pre-existing primary for that species.
-        for row in db.get_species_representative_rows_for_photos(self.photo_ids):
+        for row in db.species_curation.representative_rows_for_photos(self.photo_ids):
             self.rep_selected_order_by_pid_species[
                 (row["photo_id"], row["species"])
             ] = row["selected_order"]
 
     def _snapshot_preferences(self):
         species = self.species
-        for row in self.db.get_photo_preference_rows_for_photos(self.photo_ids):
+        for row in self.db.species_curation.preference_rows_for_photos(self.photo_ids):
             old_species_name = row["species"]
             if old_species_name == species:
                 continue
@@ -286,7 +286,7 @@ class _HighlightsRelabel:
         ``_snapshot_current_species``).
         """
         species = self.species
-        for row in self.db.get_species_representative_rows_for_photos(self.photo_ids):
+        for row in self.db.species_curation.representative_rows_for_photos(self.photo_ids):
             old_species_name = row["species"]
             pid = row["photo_id"]
             if old_species_name == species:
@@ -408,7 +408,7 @@ class _HighlightsRelabel:
                 _commit=False,
             )
         for old_species_name, pids in self.representative_renames.items():
-            db.rename_species_representatives_species(
+            db.species_curation.rename_representatives(
                 old_species_name,
                 species,
                 photo_ids=pids,
@@ -519,13 +519,13 @@ def create_highlights_blueprint(get_db, json_error):
     def _photo_can_be_life_list_preference(db, species, photo_id):
         # Accept a hierarchy leaf whose taxon links back to a root
         # identification with the same curation name. See the matching
-        # comment on Database.get_species_representative_lists: after
+        # comment on SpeciesCurationRepository.get_representative_lists: after
         # root-repair the photo may only carry the hierarchical leaf
         # ("verdin"), whose spelling differs from the root ("Verdin") even
         # though the same taxon is still attached. Without this fallback,
         # updating a preserved root-key preference would fail eligibility.
-        # Eligibility mirrors :meth:`Database.get_life_list_candidates` and
-        # `get_photo_life_list_species` — both admit linked higher-rank
+        # Eligibility mirrors :meth:`SpeciesCurationRepository.get_life_list_candidates` and
+        # `species_curation.get_photo_life_list_species` — both admit linked higher-rank
         # taxonomy identifications so a photo tagged only with a genus /
         # family / class entry can save the life-list representative for
         # the entry it actually renders under. Ancestor suppression is
@@ -533,12 +533,12 @@ def create_highlights_blueprint(get_db, json_error):
         # ancestor keyword (``Aves``) when the same photo carries a
         # descendant identification (``American Robin``); saving
         # ``Aves`` there would render as ``is_current_photo`` false on
-        # the next read (see :meth:`get_species_representative_lists`)
+        # the next read (see :meth:`species_curation.get_representative_lists`)
         # and leave a curation row nothing else considers eligible.
-        return db.is_photo_life_list_preference_eligible(species, photo_id)
+        return db.species_curation.photo_is_life_list_preference_eligible(species, photo_id)
 
     def _photo_can_be_highlights_preference(db, species, photo_id):
-        candidates = db.get_highlights_candidates(None, min_quality=0.0)
+        candidates = db.species_curation.get_highlights_candidates(None, min_quality=0.0)
         buckets, _unidentified = collect_highlight_buckets(
             candidates, confidence_threshold=0.0,
             canonicalize_species=species_canonicalizer(db),
@@ -578,7 +578,7 @@ def create_highlights_blueprint(get_db, json_error):
         # table so a cached Highlights page or older client doesn't silently
         # overwrite the species representative instead.
         if parsed["purpose"] == "highlights":
-            rank = db.add_species_highlight(
+            rank = db.species_curation.add_highlight(
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({"ok": True, **parsed, "rank": rank})
@@ -598,7 +598,7 @@ def create_highlights_blueprint(get_db, json_error):
             if _photo_can_be_highlights_preference(
                 db, parsed["species"], parsed["photo_id"]
             ):
-                rank = db.promote_species_highlight(
+                rank = db.species_curation.promote_highlight(
                     parsed["species"], parsed["photo_id"], _commit=False
                 )
             db.commit()
@@ -616,10 +616,10 @@ def create_highlights_blueprint(get_db, json_error):
             return json_error(error)
         # See the POST handler: `purpose=highlights` targets one row in the
         # ordered-highlights table, so it needs a photo_id (enforced by
-        # _parse_photo_preference_body) and routes to remove_species_highlight
+        # _parse_photo_preference_body) and routes to species_curation.remove_highlight
         # rather than clearing all representative rows for the species.
         if parsed["purpose"] == "highlights":
-            removed = db.remove_species_highlight(
+            removed = db.species_curation.remove_highlight(
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({
@@ -629,7 +629,7 @@ def create_highlights_blueprint(get_db, json_error):
                 "photo_id": parsed["photo_id"],
                 "removed": removed,
             })
-        db.clear_species_representative(parsed["species"])
+        db.species_curation.clear_representative(parsed["species"])
         return jsonify({
             "ok": True,
             "purpose": parsed["canonical_purpose"],
@@ -677,7 +677,7 @@ def create_highlights_blueprint(get_db, json_error):
             return json_error(
                 "photo_id is not eligible as a highlight for that species", 400,
             )
-        rank = db.add_species_highlight(parsed["species"], parsed["photo_id"])
+        rank = db.species_curation.add_highlight(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed, "rank": rank})
 
     @blueprint.route("/api/species-highlights", methods=["DELETE"])
@@ -690,7 +690,7 @@ def create_highlights_blueprint(get_db, json_error):
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
-        removed = db.remove_species_highlight(parsed["species"], parsed["photo_id"])
+        removed = db.species_curation.remove_highlight(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed, "removed": removed})
 
     @blueprint.route("/api/species-highlights/order", methods=["PATCH", "POST"])
@@ -703,7 +703,7 @@ def create_highlights_blueprint(get_db, json_error):
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
-        ok = db.move_species_highlight(
+        ok = db.species_curation.move_highlight(
             parsed["species"], parsed["photo_id"], parsed["direction"]
         )
         if not ok:
@@ -964,7 +964,7 @@ def create_highlights_blueprint(get_db, json_error):
         if not species:
             return json_error("species required")
 
-        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        candidates = db.species_curation.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = collect_highlight_buckets(
             candidates, confidence_threshold, confirmation_filter,
             canonicalize_species=species_canonicalizer(db),

@@ -13623,7 +13623,7 @@ def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_d
     staging = imported["config"]["managed_staging"]["destination"]
     photo_id = imported["result"]["photo_ids"][0]
     db.queue_change(photo_id, "keyword_add", "Osprey")
-    real_publish = xmp._write_tree_atomic
+    real_publish = xmp.document._write_tree_atomic
     cancelled = []
 
     def cancel_before_publish(tree, path):
@@ -13636,7 +13636,7 @@ def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_d
             cancelled.append(True)
         return real_publish(tree, path)
 
-    monkeypatch.setattr(xmp, "_write_tree_atomic", cancel_before_publish)
+    monkeypatch.setattr(xmp.document, "_write_tree_atomic", cancel_before_publish)
     monkeypatch.setattr(move, "_run_rsync_streamed",
                         lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()))
     client = app.test_client()

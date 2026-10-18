@@ -6,17 +6,63 @@ models (the run's config, outage latch and rollup totals); ``_SpecPass``
 holds one model's counters and pending inference batch.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime as dt
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 from pipeline_stages.context import PipelineRun
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from classifier import Classifier
+    from db import Database
+    from PIL import Image
+    from pipeline_stages.stage_types import (
+        CachedClassifyDetections,
+        ClassificationEtaProgress,
+        DetectionDict,
+        DetectState,
+        LoadedModels,
+        LoadModelBundle,
+        ModelSpec,
+        RecordUnattemptedCacheHit,
+        SourceOfflineReason,
+        SourceOfflineState,
+    )
+    from timm_classifier import TimmClassifier
+
+    # What ``_ClassifyPass._read_image`` returns: the crop (None when it
+    # could not be read), its folder and file paths, and whether classify
+    # gave up on a dead source.
+    _ImageRead = tuple[Image.Image | None, str, str, bool]
+
 log = logging.getLogger(__name__)
+
+# One classified (or cache-hit) detection as ``classify_job`` grouping and
+# storage consume it: ``photo``, ``detection_id``, ``prediction``,
+# ``confidence``, ``taxonomy``, ``embedding``, ... A cache hit adds
+# ``_existing``; fresh inference adds model-specific keys.
+_RawResult = dict[str, Any]
+
+
+class _InferenceEntry(TypedDict):
+    """A prepared crop waiting in the inference batch."""
+
+    input_recipe: str | None
+    photo: sqlite3.Row
+    detection_id: int
+    folder_path: str
+    image_path: str
+    img: Image.Image
 
 # Photos per progress batch: the UI hears from classify at this boundary.
 _PROGRESS_BATCH_SIZE = 32
@@ -25,19 +71,19 @@ _PROGRESS_BATCH_SIZE = 32
 def classify_stage(
     run: PipelineRun,
     *,
-    _MAX_SOURCE_OFFLINE_PAUSES,
-    _cached_classify_detections,
-    _classification_eta_progress,
-    _load_model_bundle,
-    _record_unattempted_cache_hit,
-    _release_classifier_cache_handle,
-    _remove_attempted_cache_hits,
-    _source_offline_reason,
-    detect_state,
-    effective_model_ids,
-    loaded_models,
-    source_offline_state,
-):
+    _MAX_SOURCE_OFFLINE_PAUSES: int,
+    _cached_classify_detections: CachedClassifyDetections,
+    _classification_eta_progress: ClassificationEtaProgress,
+    _load_model_bundle: LoadModelBundle,
+    _record_unattempted_cache_hit: RecordUnattemptedCacheHit,
+    _release_classifier_cache_handle: Callable[[LoadedModels], None],
+    _remove_attempted_cache_hits: Callable[[Iterable[int], set[int]], int],
+    _source_offline_reason: SourceOfflineReason,
+    detect_state: DetectState,
+    effective_model_ids: list[str],
+    loaded_models: LoadedModels,
+    source_offline_state: SourceOfflineState,
+) -> None:
     """Run one classifier per model against the pre-computed detections.
 
     Each model drives its own `classify:<model_id>` step so users see
@@ -97,8 +143,9 @@ def classify_stage(
 
 
 def _finish_without_classifying(
-    run, loaded_models, effective_model_ids, release_classifier_cache_handle,
-):
+    run: PipelineRun, loaded_models: LoadedModels, effective_model_ids: list[str],
+    release_classifier_cache_handle: Callable[[LoadedModels], None],
+) -> None:
     """Close every per-model row when classify will not run at all."""
     # Distinguish loader-driven abort (model resolution or preload
     # failure) from benign skips (skip_classify, user cancellation,
@@ -138,7 +185,9 @@ def _finish_without_classifying(
     run.update_stages(run.runner, run.job["id"], run.stages)
 
 
-def _stored_animal_boxes(thread_db, photo_id, min_conf, detector_model=None):
+def _stored_animal_boxes(
+    thread_db: Database, photo_id: int, min_conf: float, detector_model: str | None = None,
+) -> list[DetectionDict]:
     """Read a photo's real animal boxes from the database as classify inputs."""
     return [
         {
@@ -158,7 +207,7 @@ def _stored_animal_boxes(thread_db, photo_id, min_conf, detector_model=None):
     ]
 
 
-def _detection_confidence(detection):
+def _detection_confidence(detection: DetectionDict) -> float:
     return detection.get(
         "confidence", detection.get("detector_confidence", 0),
     )
@@ -169,9 +218,9 @@ class _SpecPass:
     """One model's pass over the collection: its identity and counters."""
 
     index: int
-    spec: dict
+    spec: ModelSpec
     step_id: str
-    clf: object
+    clf: Classifier | TimmClassifier
     model_type: str
     model_name: str
     # The fingerprint for THIS model's label set — pinned by
@@ -190,14 +239,14 @@ class _SpecPass:
     # photo the preflight never counted would deflate the projected
     # cache-hit rate for unrelated photos and prematurely inflate
     # ``remaining_uncached`` (Codex #1468 P2).
-    preflight_cached_ids: set = field(default_factory=set)
+    preflight_cached_ids: set[int] = field(default_factory=set)
     # Photos whose runtime path deterministically skips inference
     # because they have no eligible animal target but do have a
     # confident non-animal box. Without subtracting them, a
     # person/vehicle tail inflates the ETA even though runtime traverses
     # it without model work.
-    preflight_unclassifiable_ids: set = field(default_factory=set)
-    raw_results: list = field(default_factory=list)
+    preflight_unclassifiable_ids: set[int] = field(default_factory=set)
+    raw_results: list[_RawResult] = field(default_factory=list)
     failed: int = 0
     # Photos we never got to look at because the source volume was
     # offline. Kept apart from ``failed`` so the summary never reports
@@ -217,12 +266,12 @@ class _SpecPass:
     # ``cached``, incrementing ``count``) the moment any of its
     # detections actually runs inference. Per spec, so a photo can be
     # counted once per (photo × spec) — matching ``total``.
-    photos_cached: set = field(default_factory=set)
-    photos_inferred: set = field(default_factory=set)
+    photos_cached: set[int] = field(default_factory=set)
+    photos_inferred: set[int] = field(default_factory=set)
     # Includes failed inference attempts as well as successful ones.
     # ETA throughput is about completed model work, not only
     # predictions that happened to persist successfully.
-    photos_attempted: set = field(default_factory=set)
+    photos_attempted: set[int] = field(default_factory=set)
     # Preflight's ``cached_est`` counts any photo whose qualifying
     # detections all have classifier_runs rows, but the runtime
     # cache-hit predicate additionally requires actual predictions to
@@ -231,12 +280,12 @@ class _SpecPass:
     # end up in ``photos_inferred``, so subtract it from the preflight
     # estimate in the ETA calculation instead of leaving a phantom
     # future cache hit that collapses ``remaining_uncached`` to zero.
-    photos_cache_overcounted: set = field(default_factory=set)
+    photos_cache_overcounted: set[int] = field(default_factory=set)
     # Photos observed to hit the confident-non-animal skip branch this
     # spec. Paired with ``preflight_unclassifiable_ids`` so the ETA can
     # subtract the unvisited share from remaining work instead of
     # treating a fast tail as inference work (Codex #1468 P2).
-    photos_unclassifiable: set = field(default_factory=set)
+    photos_unclassifiable: set[int] = field(default_factory=set)
     # Photos whose per-photo iteration was actually entered in THIS
     # spec. Scopes the reclassify clear so it never wipes predictions
     # for photos this spec never opened — on a mount-scoped give-up we
@@ -246,7 +295,7 @@ class _SpecPass:
     # this, ``clear_predictions`` on a ``reclassify=True`` run would
     # delete the prior predictions for those photos even though nothing
     # in this run had a chance to rewrite them (Codex #1388 P1).
-    reached_photo_ids: set = field(default_factory=set)
+    reached_photo_ids: set[int] = field(default_factory=set)
     # Source skips scoped to just THIS spec's reads. Codex #1388 P2
     # (r3663642360): if the folder was unreachable for model A but
     # returned before model B, the run-wide skipped set would still
@@ -255,7 +304,7 @@ class _SpecPass:
     # ``INSERT OR IGNORE``, that stale row can win over the fresh result
     # and retain the wrong species/confidence. The run-wide set still
     # drives the outage rollup at end-of-run.
-    source_skipped_photo_ids: set = field(default_factory=set)
+    source_skipped_photo_ids: set[int] = field(default_factory=set)
     # Photos that iterated past the per-photo abort check IN THIS spec.
     # Used for the per-spec ``runner.update_step`` progress (bounded by
     # ``total``, not the multi-spec stage total) and the batch-end rate.
@@ -274,7 +323,7 @@ class _SpecPass:
     # seconds spent preparing images and inside ``_flush_batch`` here so
     # the ETA rate reflects inference throughput only (Codex #1468 P2).
     inference_seconds: float = 0.0
-    inference_batch: list = field(default_factory=list)
+    inference_batch: list[_InferenceEntry] = field(default_factory=list)
     has_flushed: bool = False
 
 
@@ -283,20 +332,20 @@ class _ClassifyPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
-        max_source_offline_pauses,
-        cached_classify_detections,
-        classification_eta_progress,
-        load_model_bundle,
-        record_unattempted_cache_hit,
-        release_classifier_cache_handle,
-        remove_attempted_cache_hits,
-        source_offline_reason,
-        detect_state,
-        loaded_models,
-        source_offline_state,
-    ):
+        max_source_offline_pauses: int,
+        cached_classify_detections: CachedClassifyDetections,
+        classification_eta_progress: ClassificationEtaProgress,
+        load_model_bundle: LoadModelBundle,
+        record_unattempted_cache_hit: RecordUnattemptedCacheHit,
+        release_classifier_cache_handle: Callable[[LoadedModels], None],
+        remove_attempted_cache_hits: Callable[[Iterable[int], set[int]], int],
+        source_offline_reason: SourceOfflineReason,
+        detect_state: DetectState,
+        loaded_models: LoadedModels,
+        source_offline_state: SourceOfflineState,
+    ) -> None:
         self.run = run
         self.max_source_offline_pauses = max_source_offline_pauses
         self.cached_classify_detections = cached_classify_detections
@@ -319,7 +368,7 @@ class _ClassifyPass:
 
     # -- setup -------------------------------------------------------
 
-    def _setup(self):
+    def _setup(self) -> None:
         import classify_job
         import config as cfg
 
@@ -399,7 +448,7 @@ class _ClassifyPass:
         # The previous spec's results, dropped before the next model loads.
         self.previous_raw_results = None
 
-    def _find_contextual_weak_ids(self):
+    def _find_contextual_weak_ids(self) -> set[int]:
         """Pick the weak detections worth classifying from their context.
 
         A low-confidence box is not globally promoted. Only select weak
@@ -436,7 +485,9 @@ class _ClassifyPass:
             )
         return contextual_weak_ids
 
-    def _prepare_pipeline_image(self, photo, detection):
+    def _prepare_pipeline_image(
+        self, photo: sqlite3.Row, detection: DetectionDict | None,
+    ) -> tuple[Image.Image | None, str, str]:
         kwargs = {"raw_analysis": self.raw_session} if self.raw_session is not None else {}
         img, folder_path, image_path = self.classify_job._prepare_image(
             photo, self.folders, detection, **kwargs,
@@ -447,14 +498,14 @@ class _ClassifyPass:
                 self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
         return img, folder_path, image_path
 
-    def _should_stop(self):
+    def _should_stop(self) -> bool | str | None:
         return self.run.control.should_abort(self.run.abort) or self.offline_reason
 
-    def _uses_cache(self):
+    def _uses_cache(self) -> bool:
         """Whether classifier_runs may satisfy work instead of inference."""
         return not self.run.params.reclassify and not self.run.params.raw_subject_analysis
 
-    def _portable_identity(self):
+    def _portable_identity(self) -> tuple[str | None, dict[str, Any] | None, str]:
         """The loaded model's identity for classifier runtime fingerprints."""
         return (
             self.loaded_models.get("labels_fingerprint_full"),
@@ -464,13 +515,13 @@ class _ClassifyPass:
 
     # -- the run -----------------------------------------------------
 
-    def run_all(self):
+    def run_all(self) -> None:
         self._setup()
         for spec_idx, active_spec in enumerate(self.specs):
             self._classify_with_spec(spec_idx, active_spec)
         self._finalize()
 
-    def _classify_with_spec(self, spec_idx, active_spec):
+    def _classify_with_spec(self, spec_idx: int, active_spec: ModelSpec) -> None:
         run = self.run
         step_id = f"classify:{active_spec['id']}"
         if run.control.should_abort(run.abort):
@@ -556,7 +607,7 @@ class _ClassifyPass:
 
         self._finish_spec_step(spec, preds, spec_failed)
 
-    def _tally_stored_spec(self, spec, preds):
+    def _tally_stored_spec(self, spec: _SpecPass, preds: int) -> bool:
         """Add a finished spec to the stage totals; ``True`` if its row failed."""
         self.total_predictions_stored += preds
         self.total_full_image_fallbacks += spec.full_image_fallbacks
@@ -581,7 +632,9 @@ class _ClassifyPass:
             self.completed_step_ids.add(spec.step_id)
         return spec_failed
 
-    def _activate_model(self, spec_idx, active_spec, step_id):
+    def _activate_model(
+        self, spec_idx: int, active_spec: ModelSpec, step_id: str,
+    ) -> tuple[Classifier | TimmClassifier, str, str] | None:
         """Load this spec's classifier; ``None`` when the spec is skipped."""
         run = self.run
         loaded_models = self.loaded_models
@@ -661,7 +714,7 @@ class _ClassifyPass:
 
     # -- preflight ---------------------------------------------------
 
-    def _preflight(self, spec):
+    def _preflight(self, spec: _SpecPass) -> None:
         """Estimate cached and unclassifiable photos before inference starts.
 
         One indexed query so the UI can display "~M cached, ~K to
@@ -731,7 +784,7 @@ class _ClassifyPass:
         stage = self.run.stages["classify"]
         stage["cached_estimate"] = stage.get("cached_estimate", 0) + spec.cached_est
 
-    def _expected_runtime_by_detector_runtime(self):
+    def _expected_runtime_by_detector_runtime(self) -> dict[str | None, str | None] | None:
         """Map each detector runtime in this batch to its classifier runtime.
 
         Passing this map lets the preflight reject obsolete-runtime
@@ -773,7 +826,7 @@ class _ClassifyPass:
 
     # -- the photo loop ----------------------------------------------
 
-    def _classify_photos(self, spec):
+    def _classify_photos(self, spec: _SpecPass) -> None:
         for batch_start in range(0, self.total, _PROGRESS_BATCH_SIZE):
             if self._should_stop():
                 break
@@ -799,7 +852,7 @@ class _ClassifyPass:
             self._drain_pending_inference(spec)
             self._emit_batch_progress(spec)
 
-    def _classify_photo(self, spec, photo):
+    def _classify_photo(self, spec: _SpecPass, photo: sqlite3.Row) -> None:
         run = self.run
         spec.processed += 1
         run.stages["classify"]["seen"] = run.stages["classify"].get("seen", 0) + 1
@@ -847,7 +900,7 @@ class _ClassifyPass:
             ):
                 self._flush_pending_inference(spec)
 
-    def _detections_to_classify(self, spec, photo):
+    def _detections_to_classify(self, spec: _SpecPass, photo: sqlite3.Row) -> tuple[list[DetectionDict], bool] | None:
         """Pick the boxes to classify as ``(detections, full_image_fallback)``.
 
         Pull every qualifying detection for this photo from the
@@ -902,7 +955,7 @@ class _ClassifyPass:
             "detector_model": "full-image",
         }], True
 
-    def _qualifying_animal_boxes(self, photo_id):
+    def _qualifying_animal_boxes(self, photo_id: int) -> list[DetectionDict]:
         """The real animal boxes eligible for classification, if any."""
         is_contextual_weak = photo_id in self.contextual_weak_ids
         detection_floor = (
@@ -970,7 +1023,7 @@ class _ClassifyPass:
             )[:1]
         return photo_dets
 
-    def _has_confident_non_animal(self, photo_id):
+    def _has_confident_non_animal(self, photo_id: int) -> bool:
         if photo_id in self.cached_detections:
             return any(
                 d.get("detector_model") != "full-image"
@@ -986,7 +1039,7 @@ class _ClassifyPass:
             )
         )
 
-    def _full_image_detection_id(self, photo_id):
+    def _full_image_detection_id(self, photo_id: int) -> int:
         """Reuse or write the synthetic full-image detection for a photo."""
         existing_full = self.thread_db.get_detections(
             photo_id,
@@ -1029,7 +1082,9 @@ class _ClassifyPass:
         )
         return full_det_ids[0]
 
-    def _use_cached_result(self, spec, photo, detection, n_detections):
+    def _use_cached_result(
+        self, spec: _SpecPass, photo: sqlite3.Row, detection: DetectionDict, n_detections: int,
+    ) -> bool:
         """Apply the classifier-run gate; ``True`` when no inference is needed.
 
         Skip work when this exact (detection, classifier_model,
@@ -1105,7 +1160,7 @@ class _ClassifyPass:
                 spec.photos_cache_overcounted.add(photo["id"])
         return False
 
-    def _classifier_run_key_gate(self, detection):
+    def _classifier_run_key_gate(self, detection: DetectionDict) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
         """``(run_keys, rejected_keys)`` recorded for this detection."""
         thread_db = self.thread_db
         expected_classifier_runtime = None
@@ -1142,7 +1197,7 @@ class _ClassifyPass:
             rejected_keys = set()
         return run_keys, rejected_keys
 
-    def _count_cache_hit(self, spec, photo):
+    def _count_cache_hit(self, spec: _SpecPass, photo: sqlite3.Row) -> None:
         spec.skipped_existing += 1
         # Photo-scoped ``cached`` bucket: only the FIRST cached
         # detection per photo (per spec) ticks the counter. A subsequent
@@ -1156,7 +1211,10 @@ class _ClassifyPass:
         ):
             self.run.stages["classify"]["cached"] += 1
 
-    def _cached_raw_result(self, spec, photo, detection, top, n_detections):
+    def _cached_raw_result(
+        self, spec: _SpecPass, photo: sqlite3.Row, detection: DetectionDict, top: sqlite3.Row,
+        n_detections: int,
+    ) -> _RawResult:
         folder_path = self.folders.get(photo["folder_id"], "")
         timestamp = None
         if photo["timestamp"]:
@@ -1195,7 +1253,7 @@ class _ClassifyPass:
             "_existing": True,
         }
 
-    def _read_image(self, spec, photo, detection):
+    def _read_image(self, spec: _SpecPass, photo: sqlite3.Row, detection: DetectionDict | None) -> _ImageRead:
         """Load the crop, waiting out a dropped source.
 
         Returns ``(img, folder_path, image_path, gave_up)``. ``img`` is
@@ -1296,13 +1354,13 @@ class _ClassifyPass:
         spec.inference_seconds += prep_seconds
         return img, folder_path, image_path, False
 
-    def _mark_source_skipped(self, spec, photo):
+    def _mark_source_skipped(self, spec: _SpecPass, photo: sqlite3.Row) -> None:
         self.source_skipped_photo_ids.add(photo["id"])
         spec.source_skipped_photo_ids.add(photo["id"])
 
     # -- source outages ----------------------------------------------
 
-    def _handle_source_offline(self, reason, step_id=None):
+    def _handle_source_offline(self, reason: str, step_id: str | None = None) -> bool:
         """Park on a dead source; report whether we may continue.
 
         Returns True when the run was paused and then resumed, so
@@ -1381,7 +1439,7 @@ class _ClassifyPass:
         self._clear_pause_reason(step_id)
         return True
 
-    def _publish_pause_reason(self, reason, step_id):
+    def _publish_pause_reason(self, reason: str, step_id: str | None) -> None:
         """Surface the offline reason on transient progress/pause state.
 
         Codex #1388 P1 r3663383513: the pause itself was only
@@ -1417,7 +1475,7 @@ class _ClassifyPass:
             pause_reason=message,
         )
 
-    def _clear_pause_reason(self, step_id):
+    def _clear_pause_reason(self, step_id: str | None) -> None:
         """Drop the pause banner once the user has resumed.
 
         Leaving a stale ``pause_reason`` on ``job['progress']``
@@ -1441,21 +1499,21 @@ class _ClassifyPass:
 
     # -- inference batches -------------------------------------------
 
-    def _drain_pending_inference(self, spec):
+    def _drain_pending_inference(self, spec: _SpecPass) -> None:
         """Run the pending batch, or discard it if the job was cancelled."""
         if self.run.control.should_abort(self.run.abort):
             self._close_pending_inference(spec)
         else:
             self._flush_pending_inference(spec)
 
-    def _close_pending_inference(self, spec):
+    def _close_pending_inference(self, spec: _SpecPass) -> None:
         for entry in spec.inference_batch:
             # Releasing decoded images; a close failure frees nothing more.
             with contextlib.suppress(Exception):
                 entry["img"].close()
         spec.inference_batch.clear()
 
-    def _flush_pending_inference(self, spec):
+    def _flush_pending_inference(self, spec: _SpecPass) -> None:
         if not spec.inference_batch:
             return
         stage = self.run.stages["classify"]
@@ -1519,7 +1577,7 @@ class _ClassifyPass:
             spec.photos_inferred.update(newly_inferred)
             stage["count"] = stage.get("count", 0) + len(newly_inferred)
 
-    def _emit_batch_progress(self, spec):
+    def _emit_batch_progress(self, spec: _SpecPass) -> None:
         run = self.run
         n_specs = len(self.specs)
         run.stages["classify"]["total"] = self.total * n_specs
@@ -1559,7 +1617,7 @@ class _ClassifyPass:
 
     # -- finishing a spec --------------------------------------------
 
-    def _finish_cancelled_spec(self, spec):
+    def _finish_cancelled_spec(self, spec: _SpecPass) -> None:
         run = self.run
         run.emit_progress(
             run.runner, run.job["id"], run.stages, "classify",
@@ -1580,7 +1638,7 @@ class _ClassifyPass:
             ),
         )
 
-    def _store_results(self, spec):
+    def _store_results(self, spec: _SpecPass) -> int:
         """Persist this spec's predictions; returns how many were stored."""
         thread_db = self.thread_db
         # Reclassify clear, deferred until classification finished so a
@@ -1655,7 +1713,7 @@ class _ClassifyPass:
         )
         return group_result["predictions_stored"]
 
-    def _purge_stale_detections(self):
+    def _purge_stale_detections(self) -> None:
         """Drop pre-run detections the reclassify did not reproduce.
 
         Only runs after the FIRST successful model has written fresh
@@ -1731,7 +1789,7 @@ class _ClassifyPass:
                 len(pre_ids) - len(purge_ids & pre_ids.keys()),
             )
 
-    def _finish_spec_step(self, spec, preds, spec_failed):
+    def _finish_spec_step(self, spec: _SpecPass, preds: int, spec_failed: bool) -> None:
         total = self.total
         parts = [f"{preds} predictions"]
         if spec.skipped_existing:
@@ -1781,7 +1839,7 @@ class _ClassifyPass:
 
     # -- finishing the stage -----------------------------------------
 
-    def _finalize(self):
+    def _finalize(self) -> None:
         run = self.run
         total = self.total
         # Cancellation takes precedence over the all-models-failed-to-load
@@ -1853,7 +1911,7 @@ class _ClassifyPass:
             "skipped_model_names": self.skipped_model_names,
         }
 
-    def _report_source_outage(self, n_source_skipped_photos):
+    def _report_source_outage(self, n_source_skipped_photos: int) -> None:
         """Name a dead source or unreachable folders as a classify failure."""
         run = self.run
         if self.offline_reason:
@@ -1891,7 +1949,7 @@ class _ClassifyPass:
                 f"again to classify the rest."
             )
 
-    def fail(self, e):
+    def fail(self, e: Exception) -> None:
         run = self.run
         run.errors.append(f"[classify] Fatal: {e}")
         log.exception("Pipeline classify stage failed")

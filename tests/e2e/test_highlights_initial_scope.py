@@ -420,7 +420,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
     # it to the top of the bucket via apply_ordered_highlights.
     highlighted_id = data["photos"][1]
     unhighlighted_id = data["photos"][0]
-    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+    db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
 
     _goto_highlights(page, live_server["url"])
     hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
@@ -490,7 +490,7 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
     )
     db.conn.commit()
 
-    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+    db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
 
     _goto_highlights(page, live_server["url"])
     hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
@@ -981,8 +981,8 @@ def test_highlights_curation_filter_controls_combine(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
-    db.add_species_highlight("Red-tailed Hawk", data["photos"][0])
-    db.add_species_highlight("American Robin", data["photos"][3])
+    db.species_curation.add_highlight("Red-tailed Hawk", data["photos"][0])
+    db.species_curation.add_highlight("American Robin", data["photos"][3])
     db.set_species_representative("American Robin", data["photos"][3])
 
     _goto_highlights(page, live_server["url"])
@@ -1095,7 +1095,7 @@ def test_ordered_highlight_updates_top_photo_timestamp(live_server):
     _seed_quality_scores_and_species(db, data)
 
     highlighted = data["photos"][2]
-    db.add_species_highlight("Red-tailed Hawk", highlighted)
+    db.species_curation.add_highlight("Red-tailed Hawk", highlighted)
 
     base = live_server["url"]
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:

@@ -723,7 +723,7 @@ def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(
         db.set_active_workspace(guest)
         assert not db.workspace_has_folder_link(parent)
         assert not db.workspace_has_folder_link(child)
-        candidates = db.get_highlights_candidates(parent, min_quality=.1)
+        candidates = db.species_curation.get_highlights_candidates(parent, min_quality=.1)
         assert [row["id"] for row in candidates] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
         assert counts[parent] == counts[child] == len(candidates) == 1
@@ -753,6 +753,6 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         assert {row["id"] for row in db.photos.list_page(folder_id=parent)} == {root_photo, shared}
         assert db.get_browse_summary(folder_id=parent)["filtered_total"] == 2
         assert db.photos.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
-        assert [row["id"] for row in db.get_highlights_candidates(parent, min_quality=.1)] == [shared]
+        assert [row["id"] for row in db.species_curation.get_highlights_candidates(parent, min_quality=.1)] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
         assert counts[parent] == counts[day] == 1

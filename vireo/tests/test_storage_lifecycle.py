@@ -405,8 +405,11 @@ def test_paired_render_publication_waits_until_eviction_finishes(app_and_db, tmp
     def publish():
         started.set()
         with app.app_context():
-            render = SimpleNamespace(vireo_dir=str(root), photo_id=1, recipe=None)
-            response = media._OriginalPhotoRequest._render_paired_original(render, "raw", "synthetic-source", str(path))
+            render = SimpleNamespace(
+                vireo_dir=str(root), photo_id=1, recipe=None,
+                pair_source="raw", pair_source_path="synthetic-source",
+            )
+            response = media._PairedRawOriginal._render_paired_original(render, str(path))
             responses.append(response.get_data())
     cleaner, publisher = threading.Thread(target=clear), threading.Thread(target=publish)
     cleaner.start()
