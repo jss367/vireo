@@ -66,7 +66,6 @@ CONN_USE_LIMITS = {
     "misses.py": 4,
     "move.py": 31,
     "move_cleanup.py": 11,
-    "new_images.py": 5,
     "pending_archives.py": 3,
     "pipeline.py": 18,
     "pipeline_job.py": 9,
