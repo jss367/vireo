@@ -7,8 +7,8 @@ trees, parent repair, folder health and missing originals, relocation and
 merge into an existing folder, ``delete_folder``, counts, and the
 quality-data folder list. Where a method composes other ``Database``
 methods (``add_workspace_folder``, ``delete_photos``,
-``_merge_into_existing``, ``_transfer_gps_review_for_merge``,
-``nearest_ancestor_folder_id``), the tests patch the façade method to pin
+``folders.merge_into_existing``, ``_transfer_gps_review_for_merge``,
+``folders.nearest_ancestor_id``), the tests patch the façade method to pin
 that the call still routes through it.
 """
 
@@ -25,6 +25,7 @@ import unicodedata
 import db as db_module
 import pytest
 from db import Database, MissingPhotosCancelled
+from repositories.folders import FolderRepository
 from repositories.stats import StatsRepository
 
 
@@ -195,29 +196,29 @@ def test_add_folder_new_row_commits_once(db, monkeypatch):
     assert commits == [1]
 
 
-# -- get_folder / get_folder_tree / get_folder_subtree_ids --------------------
+# -- folders.get / folders.tree / get_folder_subtree_ids --------------------
 
 
 def test_get_folder_returns_row_or_none(db):
     fid = db.add_folder("/p/a", name="a")
-    row = db.get_folder(fid)
+    row = db.folders.get(fid)
     assert set(row.keys()) == {"id", "path", "name", "parent_id", "status", "photo_count"}
     assert (row["id"], row["path"], row["name"], row["status"]) == (fid, "/p/a", "a", "ok")
-    assert db.get_folder(fid + 999) is None
+    assert db.folders.get(fid + 999) is None
     db.set_active_workspace(None)
-    assert db.get_folder(fid)["id"] == fid  # catalog-wide
+    assert db.folders.get(fid)["id"] == fid  # catalog-wide
 
 
 def test_get_folder_paths_is_catalog_wide(db, monkeypatch):
-    assert db.get_folder_paths([]) == {}
+    assert db.folders.paths_by_id([]) == {}
     a = db.add_folder("/p/a", name="a")
     b = _raw_folder(db, "/p/b")  # linked to no workspace
     db.set_active_workspace(None)
-    assert db.get_folder_paths([a, b, a + b + 999]) == {a: "/p/a", b: "/p/b"}
+    assert db.folders.paths_by_id([a, b, a + b + 999]) == {a: "/p/a", b: "/p/b"}
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    assert db.get_folder_paths([a, b]) == {a: "/p/a", b: "/p/b"}
+    assert db.folders.paths_by_id([a, b]) == {a: "/p/a", b: "/p/b"}
     db.conn.set_trace_callback(None)
     assert len([s for s in statements if "SELECT id, path FROM folders" in s]) == 2
 
@@ -238,7 +239,7 @@ def test_get_folder_tree_filters_status_and_rewrites_parents(db):
     _link(db, ws, orphan, 1)
     db.conn.commit()
 
-    rows = db.get_folder_tree()
+    rows = db.folders.tree()
     assert [r["path"] for r in rows] == ["/t", "/t/hidden/g", "/t/missing/u", "/t/partial", "/x/o"]
     by_id = {r["id"]: r for r in rows}
     assert set(rows[0].keys()) == {
@@ -253,7 +254,7 @@ def test_get_folder_tree_filters_status_and_rewrites_parents(db):
 
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.get_folder_tree()
+        db.folders.tree()
 
 
 def test_get_folder_subtree_ids_walks_hidden_nodes_but_returns_only_visible_descendants(db):
@@ -283,22 +284,22 @@ def test_folder_subtree_ids_by_path_uses_paths_and_local_mappings(db):
     sibling = _raw_folder(db, "/lib/rootish")
     staged = _raw_folder(db, "/local-folders/1/staged")
     _map_local(db, staged, "/lib/root/staged", "/local-folders/1/staged")
-    ids = db._folder_subtree_ids_by_path(root)
+    ids = db.folders.subtree_ids_by_path(root)
     assert sorted(ids) == sorted([root, legacy, win, staged])
     assert sibling not in ids
-    assert db._folder_subtree_ids_by_path(99999) == [99999]
+    assert db.folders.subtree_ids_by_path(99999) == [99999]
     empty = _raw_folder(db, "")
-    assert db._folder_subtree_ids_by_path(empty) == [empty]
+    assert db.folders.subtree_ids_by_path(empty) == [empty]
 
 
 def test_folder_subtree_ids_by_path_routes_local_lookup_through_facade(db, monkeypatch):
     root = _raw_folder(db, "/lib/root")
     seen = []
     monkeypatch.setattr(
-        Database, "_local_source_descendant_ids",
+        FolderRepository, "local_source_descendant_ids",
         lambda self, path: (seen.append(path), [4242])[1],
     )
-    assert sorted(db._folder_subtree_ids_by_path(root)) == sorted([root, 4242])
+    assert sorted(db.folders.subtree_ids_by_path(root)) == sorted([root, 4242])
     assert seen == ["/lib/root"]
 
 
@@ -309,12 +310,12 @@ def test_local_source_descendant_ids(db):
     _map_local(db, a, "/src/root", "/local/a")
     _map_local(db, b, "C:\\src\\root\\b", "/local/b")
     _map_local(db, c, "/src/rootish", "/local/c")
-    assert db._local_source_descendant_ids("") == []
-    assert db._local_source_descendant_ids(None) == []
-    got = db._local_source_descendant_ids("/src/root")
+    assert db.folders.local_source_descendant_ids("") == []
+    assert db.folders.local_source_descendant_ids(None) == []
+    got = db.folders.local_source_descendant_ids("/src/root")
     assert got == [a]
     assert all(isinstance(x, int) for x in got)
-    assert db._local_source_descendant_ids("C:/src/root") == [b]
+    assert db.folders.local_source_descendant_ids("C:/src/root") == [b]
 
 
 # -- nearest ancestor / parent repair -----------------------------------------
@@ -324,25 +325,25 @@ def test_nearest_ancestor_folder_id(db):
     top = _raw_folder(db, "/n")
     mid = _raw_folder(db, "/n/m/")
     _raw_folder(db, "/nm")
-    assert db.nearest_ancestor_folder_id("/n/m/x") == mid
-    assert db.nearest_ancestor_folder_id("\\n\\m\\x") == mid
-    assert db.nearest_ancestor_folder_id("/n/m/x", exclude_id=mid) == top
-    assert db.nearest_ancestor_folder_id("/n") is None  # equal is not an ancestor
-    assert db.nearest_ancestor_folder_id("/elsewhere/x") is None
+    assert db.folders.nearest_ancestor_id("/n/m/x") == mid
+    assert db.folders.nearest_ancestor_id("\\n\\m\\x") == mid
+    assert db.folders.nearest_ancestor_id("/n/m/x", exclude_id=mid) == top
+    assert db.folders.nearest_ancestor_id("/n") is None  # equal is not an ancestor
+    assert db.folders.nearest_ancestor_id("/elsewhere/x") is None
 
 
 def test_relink_parents_by_path_does_not_commit_and_skips_unknown(db, monkeypatch):
     top = _raw_folder(db, "/r")
     child = _raw_folder(db, "/r/c")
     calls = []
-    real = Database.nearest_ancestor_folder_id
+    real = FolderRepository.nearest_ancestor_id
 
     def recording(self, path, exclude_id=None):
         calls.append((path, exclude_id))
         return real(self, path, exclude_id=exclude_id)
 
-    monkeypatch.setattr(Database, "nearest_ancestor_folder_id", recording)
-    db._relink_parents_by_path([child, 99999])
+    monkeypatch.setattr(FolderRepository, "nearest_ancestor_id", recording)
+    db.folders.relink_parents_by_path([child, 99999])
     assert calls == [("/r/c", child)]
     assert db.conn.in_transaction
     assert _folder_row(db, child)["parent_id"] == top
@@ -355,7 +356,7 @@ def test_repair_missing_folder_parents(db):
     child = _raw_folder(db, "/m/c")
     orphan = _raw_folder(db, "/zz/c")
     root = _raw_folder(db, "/")
-    db.repair_missing_folder_parents()
+    db.folders.repair_missing_parents()
     with _reader(db) as r:
         rows = dict(r.execute("SELECT id, parent_id FROM folders").fetchall())
     assert rows[child] == top
@@ -363,7 +364,7 @@ def test_repair_missing_folder_parents(db):
     assert rows[orphan] is None
     assert rows[root] is None  # "/" has no parent path; never self-parented
     # No-op: nothing to update, no transaction left open.
-    db.repair_missing_folder_parents()
+    db.folders.repair_missing_parents()
     assert not db.conn.in_transaction
 
 
@@ -385,9 +386,9 @@ def test_repair_stale_folder_parents(db, monkeypatch, caplog):
     db.conn.commit()
 
     calls = []
-    real = Database.nearest_ancestor_folder_id
+    real = FolderRepository.nearest_ancestor_id
     monkeypatch.setattr(
-        Database, "nearest_ancestor_folder_id",
+        FolderRepository, "nearest_ancestor_id",
         lambda self, path, exclude_id=None: (
             calls.append((path, exclude_id)), real(self, path, exclude_id=exclude_id)
         )[1],
@@ -436,7 +437,7 @@ def test_check_folder_health_updates_status_and_clears_provenance(db, tmp_path):
     )
     db.conn.commit()
 
-    assert db.check_folder_health() == 4
+    assert db.folders.check_health() == 4
     with _reader(db) as r:
         status = dict(r.execute("SELECT id, status FROM folders").fetchall())
         prov = dict(r.execute("SELECT id, last_move_source_folder_path FROM photos").fetchall())
@@ -446,7 +447,7 @@ def test_check_folder_health_updates_status_and_clears_provenance(db, tmp_path):
     }
     assert prov == {pid: None, other: str(present)}
     # Second pass: nothing changes, nothing is left uncommitted.
-    assert db.check_folder_health() == 0
+    assert db.folders.check_health() == 0
     assert not db.conn.in_transaction
 
 
@@ -459,7 +460,7 @@ def test_check_folder_health_chunks_provenance_clear(db, tmp_path):
     db.conn.commit()
     statements = []
     db.conn.set_trace_callback(statements.append)
-    assert db.check_folder_health() == n
+    assert db.folders.check_health() == n
     db.conn.set_trace_callback(None)
     clears = [s for s in statements if s.startswith("UPDATE photos SET last_move_source_folder_path = NULL")]
     assert len(clears) == 2
@@ -474,16 +475,16 @@ def test_get_missing_folders_scoped_with_counts(db):
     db.conn.commit()
     _photo(db, a, "1.jpg")
     _photo(db, a, "2.jpg")
-    rows = db.get_missing_folders()
+    rows = db.folders.missing()
     assert [(r["id"], r["photo_count"]) for r in rows] == [(a, 2), (b, 0)]
     assert set(rows[0].keys()) == {"id", "path", "name", "parent_id", "photo_count"}
     assert ok not in {r["id"] for r in rows} and foreign not in {r["id"] for r in rows}
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
-    assert db.get_missing_folders() == []
+    assert db.folders.missing() == []
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_missing_folders()
+        db.folders.missing()
 
 
 def test_get_folder_health_version(db):
@@ -533,7 +534,7 @@ def test_get_missing_photos_skips_missing_and_offline_folders(db, tmp_path):
 def test_get_missing_photos_unreadable_folder_is_treated_as_offline(db, tmp_path, monkeypatch):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
     real_scandir = os.scandir
-    sub_path = db.get_folder(fsub)["path"]
+    sub_path = db.folders.get(fsub)["path"]
 
     def scandir(path):
         if path == sub_path:
@@ -605,7 +606,7 @@ def test_get_missing_photos_cancel(db, tmp_path):
 
 def test_get_missing_photos_subtree_goes_through_facade(db, tmp_path, monkeypatch):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
-    monkeypatch.setattr(Database, "_folder_subtree_ids_by_path", lambda self, fid: [])
+    monkeypatch.setattr(FolderRepository, "subtree_ids_by_path", lambda self, fid: [])
     assert db.get_missing_photos(folder_id=froot) == []
 
 
@@ -630,7 +631,7 @@ def test_relocate_folder_rejects_conflict_with_ok_source(db):
     a = db.add_folder("/rel/a")
     b = db.add_folder("/rel/b")
     with pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
-        db.relocate_folder(a, "/rel/b")
+        db.folders.relocate(a, "/rel/b")
 
 
 def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, tmp_path):
@@ -641,7 +642,7 @@ def test_relocate_folder_conflict_revalidates_missing_source_that_came_back(db, 
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (a,))
     db.conn.commit()
     with pytest.raises(ValueError, match=f"Path is already tracked as folder {b}"):
-        db.relocate_folder(a, "/rel/b")
+        db.folders.relocate(a, "/rel/b")
     with _reader(db) as r:
         assert r.execute("SELECT status FROM folders WHERE id = ?", (a,)).fetchone()[0] == "ok"
 
@@ -653,10 +654,10 @@ def test_relocate_folder_conflict_merges_missing_source_via_facade(db, monkeypat
     db.conn.commit()
     calls = []
     monkeypatch.setattr(
-        Database, "_merge_into_existing",
+        FolderRepository, "merge_into_existing",
         lambda self, *args, **kw: (calls.append((args, kw)), ["merged"])[1],
     )
-    assert db.relocate_folder(a, "/rel/b") == ["merged"]
+    assert db.folders.relocate(a, "/rel/b") == ["merged"]
     assert calls == [((a, b, "/rel/b"), {})]
 
 
@@ -687,12 +688,12 @@ def test_relocate_folder_moves_row_cascades_children_and_rebases(db, tmp_path, m
     _set_provenance(db, p3, "/old/absent")
 
     relinked = []
-    real = Database._relink_parents_by_path
+    real = FolderRepository.relink_parents_by_path
     monkeypatch.setattr(
-        Database, "_relink_parents_by_path",
+        FolderRepository, "relink_parents_by_path",
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
-    cascaded = db.relocate_folder(old, str(new_root))
+    cascaded = db.folders.relocate(old, str(new_root))
     assert cascaded == [
         {"id": kid, "old_path": "/old/kid", "new_path": str(new_root / "kid")},
         {"id": deep, "old_path": "/old/kid/deep", "new_path": str(new_root / "kid" / "deep")},
@@ -715,8 +716,8 @@ def test_relocate_folder_moves_row_cascades_children_and_rebases(db, tmp_path, m
 
 def test_relocate_folder_unknown_id_and_same_path(db):
     a = db.add_folder("/same")
-    assert db.relocate_folder(a, "/same") == []
-    assert db.relocate_folder(99999, "/nowhere") == []
+    assert db.folders.relocate(a, "/same") == []
+    assert db.folders.relocate(99999, "/nowhere") == []
     assert _folder_row(db, a)["status"] == "ok"
 
 
@@ -756,12 +757,12 @@ def test_merge_into_existing_moves_drops_and_transfers(db, tmp_path, monkeypatch
         lambda self, losing, surviving: transfers.append((losing, surviving)),
     )
     relinked = []
-    real = Database._relink_parents_by_path
+    real = FolderRepository.relink_parents_by_path
     monkeypatch.setattr(
-        Database, "_relink_parents_by_path",
+        FolderRepository, "relink_parents_by_path",
         lambda self, ids: (relinked.append(list(ids)), real(self, ids))[1],
     )
-    cascaded = db._merge_into_existing(source, target, str(target_dir))
+    cascaded = db.folders.merge_into_existing(source, target, str(target_dir))
     assert cascaded == [{"id": kid, "old_path": "/src/kid", "new_path": str(target_dir / "kid")}]
     assert transfers == [(dup, survivor)]
     assert relinked == [[kid]]
@@ -805,7 +806,7 @@ def test_merge_into_existing_repoints_collection_photo_ids(db, tmp_path):
     ).lastrowid
     db.conn.commit()
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     rules = json.loads(db.conn.execute(
         "SELECT rules FROM collections WHERE id = ?", (coll,),
@@ -819,7 +820,7 @@ def test_merge_into_existing_without_commit_leaves_transaction_open(db, tmp_path
     source = db.add_folder("/gone-src")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
-    assert db._merge_into_existing(source, target, str(tmp_path), commit=False) == []
+    assert db.folders.merge_into_existing(source, target, str(tmp_path), commit=False) == []
     assert db.conn.in_transaction
     db.conn.rollback()
     assert _folder_row(db, source) is not None
@@ -829,7 +830,7 @@ def test_merge_into_existing_preserves_non_root_link(db, tmp_path):
     ws = db._ws_id()
     target = db.add_folder(str(tmp_path), link_to_workspace=False)
     source = db.add_folder("/nr-src", workspace_root=False)
-    db._merge_into_existing(source, target, str(tmp_path))
+    db.folders.merge_into_existing(source, target, str(tmp_path))
     assert _links(db, target) == {(ws, 0)}
 
 
@@ -855,7 +856,7 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     assert db.keywords.embedded_offered_keys(dup) == {"robin"}
     assert db.keywords.embedded_offered_keys(survivor) == set()
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     with _reader(db) as r:
         offered_rows = r.execute(
@@ -885,7 +886,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
     phantom = _photo(db, source, "gone.jpg")
     db.keywords.record_embedded_offered_keys(phantom, ["robin"])
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     with _reader(db) as r:
         offered_rows = r.execute(
@@ -926,7 +927,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     db.keywords.record_embedded_offered_keys(dup, ["robin"])
     db.conn.commit()
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     with _reader(db) as r:
         tag_names = {
@@ -972,7 +973,7 @@ def test_folder_merge_respects_embedded_keyword_removals(
         for keyword in db.keywords.get_for_photo(survivor):
             db.untag_photo(survivor, keyword["id"])
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
@@ -988,9 +989,9 @@ def test_folders_linked_in_other_workspace(db):
     a = db.add_folder("/l/a")
     b = db.add_folder("/l/b")
     _link(db, other, b, 0)
-    assert db._folders_linked_in_other_workspace([a, b], ws) == {b}
-    assert db._folders_linked_in_other_workspace([a, b], None) == {a, b}
-    assert db._folders_linked_in_other_workspace([], ws) == set()
+    assert db.folders.linked_in_other_workspace([a, b], ws) == {b}
+    assert db.folders.linked_in_other_workspace([a, b], None) == {a, b}
+    assert db.folders.linked_in_other_workspace([], ws) == set()
 
 
 def test_folders_linked_in_other_workspace_chunks(db):
@@ -1000,7 +1001,7 @@ def test_folders_linked_in_other_workspace_chunks(db):
     ids = list(range(100000, 100000 + db_module._SQLITE_PARAM_CHUNK_SIZE + 5)) + [b]
     statements = []
     db.conn.set_trace_callback(statements.append)
-    assert db._folders_linked_in_other_workspace(ids, db._ws_id()) == {b}
+    assert db.folders.linked_in_other_workspace(ids, db._ws_id()) == {b}
     db.conn.set_trace_callback(None)
     assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 2
 
@@ -1128,32 +1129,32 @@ def test_count_folders(db):
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (b,))
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (c,))
     db.conn.commit()
-    assert db.count_folders() == 2
+    assert db.folders.count() == 2
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.count_folders()
+        db.folders.count()
 
 
 def test_count_all_folders_is_catalog_wide(db):
-    before = db.count_all_folders()
+    before = db.folders.count_all()
     db.add_folder("/every/a")
     _raw_folder(db, "/every/unlinked")
     _raw_folder(db, "/every/gone", status="missing")
-    assert db.count_all_folders() == before + 3
+    assert db.folders.count_all() == before + 3
     # Needs no active workspace.
     db.set_active_workspace(None)
-    assert db.count_all_folders() == before + 3
+    assert db.folders.count_all() == before + 3
 
 
 def test_get_all_folders_is_catalog_wide(db):
     a = db.add_folder("/all/a", name="a")
     gone = _raw_folder(db, "/all/gone", status="missing", name="gone")
-    rows = {r["id"]: dict(r) for r in db.get_all_folders()}
+    rows = {r["id"]: dict(r) for r in db.folders.all_rows()}
     # Not scoped to a workspace or a status, and needs no active workspace.
     assert rows[a] == {"id": a, "path": "/all/a", "name": "a"}
     assert rows[gone] == {"id": gone, "path": "/all/gone", "name": "gone"}
     db.set_active_workspace(None)
-    assert {r["id"] for r in db.get_all_folders()} == set(rows)
+    assert {r["id"] for r in db.folders.all_rows()} == set(rows)
 
 
 def test_count_present_photos_under_path(db):
@@ -1173,11 +1174,11 @@ def test_count_present_photos_under_path(db):
     db.conn.commit()
     # ok + partial folders anywhere in the catalog; the missing folder and the
     # prefix-sharing sibling are left out, and a backslash path is folded.
-    assert db.count_present_photos_under_path("/arc") == 5
-    assert db.count_present_photos_under_path("/arc/2024") == 1
-    assert db.count_present_photos_under_path("/nowhere") == 0
+    assert db.folders.present_photo_count_under("/arc") == 5
+    assert db.folders.present_photo_count_under("/arc/2024") == 1
+    assert db.folders.present_photo_count_under("/nowhere") == 0
     db.set_active_workspace(None)
-    assert db.count_present_photos_under_path("/arc") == 5
+    assert db.folders.present_photo_count_under("/arc") == 5
 
 
 def test_get_photo_ids_under_path(db):
@@ -1196,18 +1197,18 @@ def test_get_photo_ids_under_path(db):
     db.conn.commit()
     everything = sorted([a, b, c, m, u])
     # Any status, any workspace.
-    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
+    assert sorted(db.folders.photo_ids_under("/photos/lib")) == everything
     # The root itself matches by exact stored path, so a trailing slash
     # finds only the descendants.
-    assert sorted(db.get_photo_ids_under_path("/photos/lib/")) == sorted([c, m, u])
-    assert db.get_photo_ids_under_path("/photos/lib/c") == [c]
+    assert sorted(db.folders.photo_ids_under("/photos/lib/")) == sorted([c, m, u])
+    assert db.folders.photo_ids_under("/photos/lib/c") == [c]
     # A sibling sharing the prefix is not a descendant.
     sib = db.add_folder("/photos/library", name="library")
     _photo(db, sib, "s.jpg")
-    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
-    assert db.get_photo_ids_under_path("/photos/nowhere") == []
+    assert sorted(db.folders.photo_ids_under("/photos/lib")) == everything
+    assert db.folders.photo_ids_under("/photos/nowhere") == []
     db.set_active_workspace(None)
-    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
+    assert sorted(db.folders.photo_ids_under("/photos/lib")) == everything
 
 
 @pytest.mark.parametrize("sibling", ["/a/myXtrip", "/a/my-trip"])
@@ -1220,7 +1221,7 @@ def test_photo_ids_under_path_treats_underscore_literally(db, sibling):
     mine = [_photo(db, trip, "t.jpg"), _photo(db, day, "d.jpg")]
     _photo(db, other, "x.jpg")
     _photo(db, other_day, "y.jpg")
-    assert sorted(db.get_photo_ids_under_path("/a/my_trip")) == sorted(mine)
+    assert sorted(db.folders.photo_ids_under("/a/my_trip")) == sorted(mine)
 
 
 def test_photo_ids_under_path_treats_percent_literally(db):
@@ -1232,9 +1233,9 @@ def test_photo_ids_under_path_treats_percent_literally(db):
     mine = [_photo(db, pct, "p.jpg"), _photo(db, pct_day, "q.jpg")]
     _photo(db, sibling, "s.jpg")
     _photo(db, sibling_day, "t.jpg")
-    assert sorted(db.get_photo_ids_under_path("/a/100%")) == sorted(mine)
+    assert sorted(db.folders.photo_ids_under("/a/100%")) == sorted(mine)
     # Nor does a ``%`` folder swallow everything below its parent's prefix.
-    assert db.get_photo_ids_under_path("/a/100%/day1") == [mine[1]]
+    assert db.folders.photo_ids_under("/a/100%/day1") == [mine[1]]
 
 
 def test_photo_ids_under_path_folds_backslash_separators(db):
@@ -1247,8 +1248,8 @@ def test_photo_ids_under_path_folds_backslash_separators(db):
     mine = [_photo(db, root, "r.jpg"), _photo(db, day, "d.jpg"),
             _photo(db, deep, "b.jpg")]
     _photo(db, sibling, "s.jpg")
-    assert sorted(db.get_photo_ids_under_path("C:\\Pictures\\Trip")) == sorted(mine)
-    assert sorted(db.get_photo_ids_under_path("C:\\Pictures\\Trip\\day1")) == sorted(mine[1:])
+    assert sorted(db.folders.photo_ids_under("C:\\Pictures\\Trip")) == sorted(mine)
+    assert sorted(db.folders.photo_ids_under("C:\\Pictures\\Trip\\day1")) == sorted(mine[1:])
 
 
 def test_photo_ids_under_path_is_case_sensitive(db):
@@ -1262,8 +1263,8 @@ def test_photo_ids_under_path_is_case_sensitive(db):
     lower_day = db.add_folder("/photos/trip/day1", name="day1", parent_id=lower)
     mine = [_photo(db, upper, "u.jpg"), _photo(db, upper_day, "v.jpg")]
     theirs = [_photo(db, lower, "l.jpg"), _photo(db, lower_day, "m.jpg")]
-    assert sorted(db.get_photo_ids_under_path("/Photos/Trip")) == sorted(mine)
-    assert sorted(db.get_photo_ids_under_path("/photos/trip")) == sorted(theirs)
+    assert sorted(db.folders.photo_ids_under("/Photos/Trip")) == sorted(mine)
+    assert sorted(db.folders.photo_ids_under("/photos/trip")) == sorted(theirs)
 
 
 def test_get_folders_with_quality_data(db):
@@ -1288,7 +1289,7 @@ def test_get_folders_with_quality_data(db):
         db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
     _photo(db, empty, "unscored.jpg", timestamp="2027-01-01T00:00:00")
     db.conn.commit()
-    rows = db.get_folders_with_quality_data()
+    rows = db.folders.with_quality_data()
     assert {r["id"]: (r["photo_count"], r["latest_photo"]) for r in rows} == {
         below_gap: (1, "2025-01-01T00:00:00"),
         sub: (1, "2024-06-01T00:00:00"),
@@ -1297,7 +1298,7 @@ def test_get_folders_with_quality_data(db):
     assert set(rows[0].keys()) == {"id", "path", "name", "photo_count", "latest_photo"}
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_folders_with_quality_data()
+        db.folders.with_quality_data()
 
 
 def test_update_folder_counts_recomputes_and_commits(db):
@@ -1308,23 +1309,23 @@ def test_update_folder_counts_recomputes_and_commits(db):
     db.conn.execute("UPDATE folders SET photo_count = 99")
     db.conn.commit()
     db.set_active_workspace(None)
-    db.update_folder_counts()
+    db.folders.update_counts()
     with _reader(db) as r:
         counts = dict(r.execute("SELECT id, photo_count FROM folders").fetchall())
     assert counts == {a: 2, b: 0}
 
 
-# -- get_folder_id_by_path / get_folder_source_path --------------------------
+# -- folders.id_by_path / folders.source_path --------------------------
 
 
 def test_get_folder_id_by_path_matches_the_stored_path_exactly(db):
     a = _raw_folder(db, "/u/by-path")
     db.conn.commit()
     db.set_active_workspace(None)
-    assert db.get_folder_id_by_path("/u/by-path") == a
-    assert db.get_folder_id_by_path("/u/by-path/") is None
-    assert db.get_folder_id_by_path("/U/BY-PATH") is None
-    assert db.get_folder_id_by_path("/u/nowhere") is None
+    assert db.folders.id_by_path("/u/by-path") == a
+    assert db.folders.id_by_path("/u/by-path/") is None
+    assert db.folders.id_by_path("/U/BY-PATH") is None
+    assert db.folders.id_by_path("/u/nowhere") is None
 
 
 def _stage_root(db, root_id, source_path, *, mapped_folder_id=None, is_root=1):
@@ -1349,33 +1350,43 @@ def test_get_folder_source_path_prefers_the_root_mapping(db):
     # A non-root mapping is not consulted: the folder answers its own path.
     _stage_root(db, root, "/archive/birds/day1", mapped_folder_id=child, is_root=0)
     db.set_active_workspace(None)
-    assert db.get_folder_source_path(root) == "/archive/birds"
-    assert db.get_folder_source_path(child) == "/local-folders/1/birds/day1"
-    assert db.get_folder_source_path(plain) == "/u/plain"
-    assert db.get_folder_source_path(999999) is None
+    assert db.folders.source_path(root) == "/archive/birds"
+    assert db.folders.source_path(child) == "/local-folders/1/birds/day1"
+    assert db.folders.source_path(plain) == "/u/plain"
+    assert db.folders.source_path(999999) is None
 
 
 # -- structure ----------------------------------------------------------------
 
+# The folder methods that stay on ``Database``: the ones that coordinate other
+# domains (the workspace link, photo deletion, the new-images cache, the
+# pipeline-cache prune), and ``get_folder_subtree_ids``, which
+# ``PhotoRepository`` binds from the façade by name (``FACADE_METHODS``) and
+# the species-curation and location factories hand over bound.
 _DELEGATING_FOLDER_METHODS = (
-    "repair_missing_folder_parents",
     "repair_stale_folder_parents",
+    "add_folder",
+    "get_folder_subtree_ids",
+    "get_missing_photos",
+    "delete_folder",
+)
+
+# The forwarding wrappers this domain used to have on ``Database``; callers
+# reach the same methods through ``db.folders`` now.
+_REMOVED_FOLDER_WRAPPERS = (
+    "repair_missing_folder_parents",
     "_folder_subtree_ids_by_path",
     "_local_source_descendant_ids",
-    "add_folder",
     "get_folder_tree",
-    "get_folder_subtree_ids",
     "get_folder",
     "get_folder_paths",
     "check_folder_health",
     "get_missing_folders",
-    "get_missing_photos",
     "nearest_ancestor_folder_id",
     "_relink_parents_by_path",
     "relocate_folder",
     "_merge_into_existing",
     "_folders_linked_in_other_workspace",
-    "delete_folder",
     "count_folders",
     "count_all_folders",
     "get_all_folders",
@@ -1393,16 +1404,19 @@ def _method_ast(name):
     return ast.parse(source).body[0]
 
 
-@pytest.mark.parametrize("name", _DELEGATING_FOLDER_METHODS)
-def test_folder_method_delegates_to_repository(name):
-    fn = _method_ast(name)
-    attrs = {
+def _self_attrs(fn):
+    return {
         node.attr
         for node in ast.walk(fn)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_FOLDER_METHODS)
+def test_folder_method_delegates_to_repository(name):
+    attrs = _self_attrs(_method_ast(name))
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to FolderRepository"
     )
@@ -1411,27 +1425,39 @@ def test_folder_method_delegates_to_repository(name):
     )
 
 
+def test_folders_has_no_other_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.folders``; Database keeps no aliases."""
+    for name in _REMOVED_FOLDER_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.folders"
+    accessor = Database.__dict__["folders"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = _self_attrs(ast.parse(source).body[0])
+    assert "_folder_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_folders_accessor_builds_a_fresh_repository_and_resolves_the_workspace_lazily(db):
+    first = db.folders
+    assert db.folders is not first
+    assert first.conn is db.conn
+    db.set_active_workspace(None)
+    repo = db.folders
+    # Catalog-wide methods need no workspace; scoped reads raise.
+    assert repo.count_all() >= 0
+    with pytest.raises(RuntimeError):
+        repo.tree()
+
+
 # Façade methods a folder wrapper hands to the repository, so the call still
 # routes through ``Database`` (and its monkeypatches) at the same point in the
 # SQL.
 _FACADE_CALLBACKS = {
-    "repair_stale_folder_parents": {"nearest_ancestor_id": "nearest_ancestor_folder_id"},
-    "_folder_subtree_ids_by_path": {
-        "local_source_descendant_ids": "_local_source_descendant_ids",
-    },
-    "_relink_parents_by_path": {"nearest_ancestor_id": "nearest_ancestor_folder_id"},
-    "relocate_folder": {
-        "merge_into_existing": "_merge_into_existing",
-        "relink_parents_by_path": "_relink_parents_by_path",
-    },
-    "_merge_into_existing": {
+    "_folder_repository": {
         "transfer_gps_review": "_transfer_gps_review_for_merge",
         "transfer_embedded_offered": "keywords.transfer_embedded_offered_keys",
-        "relink_parents_by_path": "_relink_parents_by_path",
     },
     "delete_folder": {
-        "subtree_ids_by_path": "_folder_subtree_ids_by_path",
-        "linked_in_other_workspace": "_folders_linked_in_other_workspace",
         "delete_photos": "delete_photos",
         "remember_removals": "_remember_workspace_folder_removals",
     },
@@ -1485,7 +1511,8 @@ def test_folder_repository_chunks_by_its_chunk_size(db):
     repo = FolderRepository(
         db.conn, None, commit_with_retry=None, path_for_subtree_match=None,
         stored_parent_path=None, subtree_prefix=None, subtree_relative=None,
-        join_subtree_path=None, chunk_size=2,
+        join_subtree_path=None, chunk_size=2, transfer_gps_review=None,
+        transfer_embedded_offered=None, keyword_source_conflict_sql="",
     )
     assert list(repo._chunks(range(5))) == [[0, 1], [2, 3], [4]]
     assert list(repo._chunks([])) == []

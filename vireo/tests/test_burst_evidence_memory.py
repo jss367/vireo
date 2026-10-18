@@ -253,7 +253,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     db = types.SimpleNamespace(
         photos=types.SimpleNamespace(get=get_photo),
         get_detections=lambda pid: boxes if detections is None else detections,
-        get_folder=lambda fid: {"path": "/invented"},
+        folders=types.SimpleNamespace(get=lambda fid: {"path": "/invented"}),
         get_effective_config=lambda cfg: cfg,
         masks_features=types.SimpleNamespace(
             photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt
@@ -397,7 +397,7 @@ def malformed_and_bound():
         result, events = focus(args={"size": value})
         assert result[1] == 400 and not any(e[0] == "loader" for e in events)
     folder_db = types.SimpleNamespace(
-        get_folder=lambda fid: {"id": fid, "path": "/invented", "name": "invented"},
+        folders=types.SimpleNamespace(get=lambda fid: {"id": fid, "path": "/invented", "name": "invented"}),
         get_workspace_visible_folder_ids=lambda ids: ids,
     )
     folder_ns = dict(

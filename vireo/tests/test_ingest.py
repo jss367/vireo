@@ -1221,7 +1221,7 @@ def test_ingest_duplicate_folders_prefers_live_folder_over_stale(tmp_path):
     from scanner import scan
     scan(str(dst), db)
 
-    # Mark one of the folders as stale at the DB level, as check_folder_health
+    # Mark one of the folders as stale at the DB level, as folders.check_health
     # would if the directory had disappeared between scans.
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE path = ?",

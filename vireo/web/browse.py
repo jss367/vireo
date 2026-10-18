@@ -442,11 +442,11 @@ def create_browse_blueprint(
         # This is the first read in the explicit transaction above, so every
         # photo / folder / keyword / collection read below shares the same
         # health snapshot. Ordering alone is insufficient: if the background
-        # health loop commits after this query but before get_folder_tree(),
+        # health loop commits after this query but before folders.tree(),
         # and the navbar's initial poll already finished, no immediate poll
         # remains to repair the mixed response (Codex reviews r3686317681 and
         # r3687501744).
-        missing_folder_ids = [f["id"] for f in db.get_missing_folders()]
+        missing_folder_ids = [f["id"] for f in db.folders.missing()]
         folder_health_version = db.get_folder_health_version()
 
         # First paint is scope-only (folder / collection / sort); metadata
@@ -469,7 +469,7 @@ def create_browse_blueprint(
             except _BadFirstPaintScope as exc:
                 db.rollback()
                 return json_error(str(exc), 400)
-        folders = db.get_folder_tree()
+        folders = db.folders.tree()
         keywords = db.keywords.get_tree()
         collections = db.collections.list_all()
 

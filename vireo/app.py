@@ -1809,7 +1809,7 @@ def _start_missing_originals(app, db_path):
     # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
     # ``app_and_db`` fixture seeds folders at fictional paths like
     # ``/photos/2024`` that don't exist on disk. After the 30s grace period
-    # this loop calls ``check_folder_health`` on the tmp_path DB, sees the
+    # this loop calls ``folders.check_health`` on the tmp_path DB, sees the
     # paths missing, and flips folder status to ``'missing'`` — which causes
     # ``get_photos`` to filter the seeded photos out and any subsequent
     # assertion against them to fail with ``IndexError``. On the slow

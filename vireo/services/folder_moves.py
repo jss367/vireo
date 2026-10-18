@@ -462,7 +462,7 @@ class FolderMoves:
         keep_visible = cfg.load().get("move_keep_visible_in_other_workspaces", True)
         chain = MoveChain(chained_from=chained_from, serialize_lock=serialize_lock)
         if target.get("transport") == "mounted":
-            folder = thread_db.get_folder(folder_id)
+            folder = thread_db.folders.get(folder_id)
             if not folder:
                 raise RuntimeError("folder no longer exists")
             destination = os.path.join(mount_path, *posixpath.dirname(subpath).split("/"))
@@ -521,7 +521,7 @@ def _ssh_move_request(
     # build_remote_move_spec returns.
     remote = cast("RemoteMoveSpec", move_mod.build_remote_move_spec(
         target, posixpath.dirname(subpath), rsync_bin, ssh_bin))
-    folder = thread_db.get_folder(folder_id)
+    folder = thread_db.folders.get(folder_id)
     if not folder:
         raise RuntimeError("folder no longer exists")
     landing_name = folder["name"] \

@@ -2587,7 +2587,7 @@ class _RuleQueryBuilder:
         # wildcards. Stored folder paths use the platform separator
         # (``str(Path(...))`` in scanner.scan — backslashes on Windows),
         # so normalize both sides to forward slashes the same way
-        # ``_folder_subtree_ids_by_path`` does; otherwise a Windows
+        # ``folders.subtree_ids_by_path`` does; otherwise a Windows
         # library's ``C:\Photos\Birds`` row never matches a rule whose
         # LIKE pattern hard-codes ``C:/Photos/%``.
         base = self._repo._path_for_subtree_match(str(value or ""))

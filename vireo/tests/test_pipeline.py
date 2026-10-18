@@ -3138,7 +3138,7 @@ def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypat
     ]
     monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
 
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     _process_photo_for_eye(db, row, folders, C=0.5, T=0.5, k_window=0.08)
 
     fp_row = db.conn.execute(
@@ -3171,7 +3171,7 @@ def test_eye_stage_rejects_other_detector_with_identical_box(tmp_path, monkeypat
     monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: [
         {"name": "left_eye", "x": 300., "y": 300., "conf": .88},
     ])
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     _process_photo_for_eye(db, row, folders, C=.5, T=.5, k_window=.08)
     assert _read_eye_fields(db, pid) == (None, None, None, None)
     assert db.conn.execute("SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,)).fetchone()[0] is None

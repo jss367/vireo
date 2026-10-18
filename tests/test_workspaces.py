@@ -143,7 +143,7 @@ def test_existing_folder_is_reparented_when_surrounding_root_is_added(db):
         workspace_root=False,
     ) == year_id
 
-    tree = {f["id"]: f for f in db.get_folder_tree()}
+    tree = {f["id"]: f for f in db.folders.tree()}
     roots = [f for f in tree.values() if f["parent_id"] is None]
 
     assert [f["id"] for f in roots] == [usa_id]
@@ -181,7 +181,7 @@ def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
     reopened = Database(db_path)
     reopened.set_active_workspace(ws_id)
     try:
-        tree = {f["id"]: f for f in reopened.get_folder_tree()}
+        tree = {f["id"]: f for f in reopened.folders.tree()}
     finally:
         reopened.close()
 
@@ -764,7 +764,7 @@ def test_count_folders_scoped_to_workspace(db):
     f2 = db.add_folder("/photos/usa", name="usa")
     db.add_workspace_folder(ws, f1)
     db.set_active_workspace(ws)
-    assert db.count_folders() == 1
+    assert db.folders.count() == 1
 
 
 def test_get_folder_tree_scoped_to_workspace(db):
@@ -773,7 +773,7 @@ def test_get_folder_tree_scoped_to_workspace(db):
     f2 = db.add_folder("/photos/usa", name="usa")
     db.add_workspace_folder(ws, f1)
     db.set_active_workspace(ws)
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     assert len(folders) == 1
     assert folders[0]["path"] == "/photos/kenya"
 

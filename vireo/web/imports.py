@@ -94,7 +94,7 @@ def _all_folders(db):
     see this tree". A transfer is defined by a path on disk, so resolve it
     from the path.
     """
-    return db.get_all_folders()
+    return db.folders.all_rows()
 
 
 def _staging_folder_ids(db, staging_destination):
@@ -794,7 +794,7 @@ class _ImportFullRun:
         job = self.job
         self.thread_db = self.ctx.thread_db()
         # Check folder health before scanning to prevent duplicate imports
-        if self.thread_db.check_folder_health():
+        if self.thread_db.folders.check_health():
             self.invalidate_missing_originals()
         job["_start_time"] = time.time()
 
@@ -1005,7 +1005,7 @@ class _ImportFullRun:
             # filed them under the catalog's spelling of the root, which
             # differs from ``scan_target`` when the user typed a case or
             # symlink alias of an already-cataloged folder; match that.
-            photo_ids = thread_db.get_photo_ids_under_path(
+            photo_ids = thread_db.folders.photo_ids_under(
                 catalog_scan_root(thread_db, self.scan_target)
             )
         return photo_ids
@@ -1810,7 +1810,7 @@ def create_imports_blueprint(
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
 
-        folder_rows = db.get_all_folders()
+        folder_rows = db.folders.all_rows()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
 
         files = []
@@ -1898,7 +1898,7 @@ def create_imports_blueprint(
             # "the archive" — so the callout's "N photos" matches what the
             # merge actually considers present. Pure catalog read; no on-disk
             # check.
-            return db.count_present_photos_under_path(archive_path)
+            return db.folders.present_photo_count_under(archive_path)
 
         managed_archives = []
         managed_archive = None

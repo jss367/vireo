@@ -70,7 +70,7 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
         folders = folder_paths
         granted_paths = {}
     else:
-        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in db.folders.tree()}
         # Photo-scoped, never unioned into ``folders``: widening the grant
         # back to folder scope would let an unrelated photo in the same
         # folder resolve to a valid sidecar path on the next sync.
@@ -1136,7 +1136,7 @@ def sync_from_xmp(db, photo_ids):
         db: Database instance
         photo_ids: list of photo ids to re-sync
     """
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
 
     for photo_id in photo_ids:
         photo = db.photos.get(photo_id)

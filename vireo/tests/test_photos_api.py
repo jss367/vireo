@@ -174,7 +174,7 @@ def test_api_photos_reports_and_filters_coordinate_sources(app_and_db):
 def test_api_photos_filter_folder(app_and_db):
     """GET /api/photos?folder_id= filters by folder."""
     app, db = app_and_db
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     jan = [f for f in folders if f['name'] == 'January'][0]
 
     client = app.test_client()
@@ -187,7 +187,7 @@ def test_api_photos_filter_folder(app_and_db):
 def test_api_photo_ids_matches_browse_filters(app_and_db):
     """GET /api/photos/ids returns every ID matching the current Browse filters."""
     app, db = app_and_db
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     jan = [f for f in folders if f['name'] == 'January'][0]
     expected = [p["id"] for p in db.photos.list_page(folder_id=jan["id"], sort="name")]
 
@@ -261,14 +261,14 @@ def test_browse_init_captures_missing_baseline_before_folder_tree(
     the direction of a possible inconsistency (Codex reviews r3686317681 and
     r3687501744).
     """
-    from db import Database
+    from repositories.folders import FolderRepository
 
     app, _ = app_and_db
     client = app.test_client()
 
     call_order = []
-    real_missing = Database.get_missing_folders
-    real_tree = Database.get_folder_tree
+    real_missing = FolderRepository.missing
+    real_tree = FolderRepository.tree
 
     def spy_missing(self):
         call_order.append("missing")
@@ -278,8 +278,8 @@ def test_browse_init_captures_missing_baseline_before_folder_tree(
         call_order.append("tree")
         return real_tree(self)
 
-    monkeypatch.setattr(Database, "get_missing_folders", spy_missing)
-    monkeypatch.setattr(Database, "get_folder_tree", spy_tree)
+    monkeypatch.setattr(FolderRepository, "missing", spy_missing)
+    monkeypatch.setattr(FolderRepository, "tree", spy_tree)
 
     resp = client.get("/api/browse/init")
     assert resp.status_code == 200
@@ -297,7 +297,7 @@ def test_browse_init_reports_focus_photo_index_in_requested_sort(app_and_db):
     """Deep links can locate a target without probing every preceding page."""
     app, db = app_and_db
     january = next(
-        folder for folder in db.get_folder_tree() if folder["name"] == "January"
+        folder for folder in db.folders.tree() if folder["name"] == "January"
     )
     target_id = db.photos.list_page(folder_id=january["id"])[0]["id"]
     db.add_photo(
@@ -331,7 +331,7 @@ def test_browse_init_reports_focus_photo_index_in_requested_sort(app_and_db):
 def test_browse_init_focus_index_is_null_outside_scope(app_and_db):
     """A focus id must not leak a position from another Browse folder scope."""
     app, db = app_and_db
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     january = next(folder for folder in folders if folder["name"] == "January")
     outside_id = next(
         photo["id"]
@@ -394,7 +394,7 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
 
     app, db = app_and_db
     january = next(
-        folder for folder in db.get_folder_tree() if folder["name"] == "January"
+        folder for folder in db.folders.tree() if folder["name"] == "January"
     )
     baseline_id = db.photos.list_page(folder_id=january["id"])[0]["id"]
     # Insert five photos earlier in the sort order so the baseline no
@@ -13516,7 +13516,7 @@ def test_api_filter_values_respects_scope(app_and_db):
     grid rows than the count promised."""
     app, db = app_and_db
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     jan = [f for f in folders if f["name"] == "January"][0]
     db.conn.execute(
         "UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
@@ -13640,7 +13640,7 @@ def test_api_browse_summary_reports_analysis_coverage(app_and_db):
 def test_api_browse_summary_analysis_respects_folder_scope(app_and_db):
     app, db = app_and_db
     _seed_browse_summary_analysis(db)
-    jan = [f for f in db.get_folder_tree() if f['name'] == 'January'][0]
+    jan = [f for f in db.folders.tree() if f['name'] == 'January'][0]
     client = app.test_client()
 
     data = client.get(f'/api/browse/summary?folder_id={jan["id"]}').get_json()

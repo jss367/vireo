@@ -883,7 +883,7 @@ class _InPlaceImportRun:
     def _start(self, cfg: ModuleType) -> None:
         thread_db = self.thread_db
         thread_db.set_active_workspace(self.plan.active_ws)
-        if thread_db.check_folder_health():
+        if thread_db.folders.check_health():
             self.plan.service.invalidate_missing_originals()
         effective_cfg = thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = effective_cfg.get("pipeline", {})

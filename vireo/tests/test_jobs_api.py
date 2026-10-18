@@ -3886,7 +3886,7 @@ def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db)
     would silently skip legacy descendant photos the rest of the app still
     treats as part of that folder subtree. Every other subtree consumer
     (folder deletion, rescan, missing-originals) already reads through
-    ``_folder_subtree_ids_by_path`` — this route must too."""
+    ``folders.subtree_ids_by_path`` — this route must too."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
     # Insert a descendant folder whose path is under the root but whose
@@ -4923,7 +4923,7 @@ def test_import_readiness_counts_photos_in_stale_missing_folders(
 ):
     """A workspace root that was marked ``status='missing'`` while its
     drive was unplugged, then reconnected, still carries a stale status
-    until ``check_folder_health`` next runs. The readiness count must
+    until ``folders.check_health`` next runs. The readiness count must
     include those photos anyway — otherwise the Import page would report
     ``0`` repairable rows in the reconnection window and users would have
     no button to click even though the repair job could scan the drive.

@@ -156,7 +156,7 @@ def _issue_report_app_state(get_db):
         ws_id = db.active_workspace_id
         ws = db.workspaces.get(ws_id) if ws_id is not None else None
         ws_name = ws["name"] if ws else "unknown"
-        folder_count = db.count_all_folders()
+        folder_count = db.folders.count_all()
         photo_count = db.photos.count_all()
         # Predictions are global now; workspace scoping happens through
         # the detection -> photo -> workspace_folders join.
@@ -243,7 +243,7 @@ def _issue_report_private_values(db):
     if db is not None:
         try:
             private_paths = [
-                row["path"] for row in db.get_all_folders() if row["path"]
+                row["path"] for row in db.folders.all_rows() if row["path"]
             ]
         except sqlite3.Error:
             log.warning(
@@ -427,7 +427,7 @@ def create_system_blueprint(
             photo = db.photos.get(pid_int, verify_workspace=not duplicate_scope)
             if not photo:
                 return None, False, json_error("photo not found", 404)
-            folder_row = db.get_folder(photo["folder_id"])
+            folder_row = db.folders.get(photo["folder_id"])
             folder_path = folder_row["path"] if folder_row else ""
             if not folder_path or not photo["filename"]:
                 return None, False, jsonify({"ok": False, "reason": "no path"})
@@ -437,7 +437,7 @@ def create_system_blueprint(
                 fid_int = int(fid_raw)
             except (TypeError, ValueError):
                 return None, False, json_error("folder_id must be an integer")
-            folder = db.get_folder(fid_int)
+            folder = db.folders.get(fid_int)
             if not folder:
                 return None, False, json_error("folder not found", 404)
             # Reject reveal for folders not linked to the active workspace,
@@ -784,8 +784,8 @@ def create_system_blueprint(
             {
                 "photo_count": db.photos.count_in_workspace(),
                 "accessible_photo_count": db.photos.count(),
-                "missing_folder_count": len(db.get_missing_folders()),
-                "folder_count": db.count_folders(),
+                "missing_folder_count": len(db.folders.missing()),
+                "folder_count": db.folders.count(),
                 "keyword_count": db.keywords.count_in_workspace(),
                 "pending_changes": db.pending_changes.count(),
                 "db_size": db_size,

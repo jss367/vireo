@@ -67,7 +67,7 @@ def test_collection_service_reads_resolve_workspace_at_use(db):
 def test_local_copy_activation_can_be_rolled_back_as_one_transaction(db, tmp_path, kind):
     workspace_id = db.active_workspace_id
     folder_id = db.add_folder(str(tmp_path / "source"))
-    original_path = db.get_folder(folder_id)["path"]
+    original_path = db.folders.get(folder_id)["path"]
     folder = {
         "folder_id": folder_id,
         "source_path": original_path,
@@ -90,7 +90,7 @@ def test_local_copy_activation_can_be_rolled_back_as_one_transaction(db, tmp_pat
     assert db.local_folders.last_change_count() == 1
     repo.activate(owner, 2.0)
     assert repo.get_state(owner)["state"] == "active"
-    assert db.get_folder(folder_id)["path"] == folder["local_path"]
+    assert db.folders.get(folder_id)["path"] == folder["local_path"]
 
     # A second reader sees none of the activation until the service commits.
     other = sqlite3.connect(db._db_path)
@@ -101,7 +101,7 @@ def test_local_copy_activation_can_be_rolled_back_as_one_transaction(db, tmp_pat
     db.rollback()
     assert repo.get_state(owner) is None
     assert repo.mappings(owner) == []
-    assert db.get_folder(folder_id)["path"] == original_path
+    assert db.folders.get(folder_id)["path"] == original_path
 
 
 def test_explicit_local_workspace_ids_do_not_follow_the_active_workspace(db):
@@ -121,7 +121,7 @@ def test_staging_rebase_detects_a_changed_catalog_path(db, tmp_path):
               "local_path": str(tmp_path / "local")}
     db.local_folders.rebase_folder_if_unchanged(folder)
     assert db.local_folders.last_change_count() == 0
-    assert db.get_folder(folder_id)["path"] == str(tmp_path / "new-source")
+    assert db.folders.get(folder_id)["path"] == str(tmp_path / "new-source")
     db.rollback()
 
 
