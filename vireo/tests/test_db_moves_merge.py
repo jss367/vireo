@@ -1106,7 +1106,7 @@ def test_merge_moves_embedded_keyword_offered_onto_the_survivor(db, tmp_path):
     the archive-side photo with a keyword the user had already removed.
     """
     t = _collision_tree(db, tmp_path)
-    db.record_embedded_keyword_offered(t["staged"], ["robin"])
+    db.keywords.record_embedded_offered_keys(t["staged"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1129,7 +1129,7 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
     aborts on the FK.
     """
     t = _collision_tree(db, tmp_path, same_hash=False)
-    db.record_embedded_keyword_offered(t["survivor"], ["robin"])
+    db.keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1155,7 +1155,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
     assert _import_embedded_keywords_for_photo(db, losing, metadata)
-    keyword = db.get_photo_keywords(losing)[0]
+    keyword = db.keywords.get_for_photo(losing)[0]
     source = db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (losing, keyword["id"]),
@@ -1166,10 +1166,10 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
-    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
-    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     if not removed_on_survivor:
         assert db.conn.execute(
@@ -1186,7 +1186,7 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
     losing, survivor = ((t["staged"], t["survivor"]) if same_hash
                         else (t["survivor"], t["staged"]))
     _import_embedded_keywords_for_photo(db, losing, {"XMP": {"Subject": ["Robin"]}})
-    keyword = db.get_photo_keywords(losing)[0]
+    keyword = db.keywords.get_for_photo(losing)[0]
     db.tag_photo(survivor, keyword["id"])
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])

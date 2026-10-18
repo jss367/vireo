@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
+    from repositories.keyword_merges import KeywordMergeRepository
     from repositories.keyword_provenance import KeywordProvenanceRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
@@ -1249,7 +1250,7 @@ class Database:
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
         # above.
-        self.ensure_default_genre_keywords()
+        self.keywords.ensure_default_genres()
         from species_identity_repair import repair_on_upgrade
         repaired = repair_on_upgrade(self)
         if repaired:
@@ -1736,26 +1737,6 @@ class Database:
     # safety margin. Module-level constant so tests can monkeypatch.
     _FILTER_SUBJECT_CHUNK = 800
 
-    def filter_out_subject_tagged(self, photo_ids, subject_types):
-        """Return the subset of photo_ids whose photos do NOT have any keyword
-        of a type in subject_types. Empty subject_types or empty photo_ids
-        returns photo_ids unchanged (preserving input order).
-
-        Photo ids are chunked under SQLite's bind-variable limit so callers
-        can safely pass arbitrarily large lists. The classify job sources
-        photo ids from get_collection_photos(per_page=999999), which can
-        exceed older SQLite builds' 999-variable cap and trip
-        OperationalError: too many SQL variables.
-
-        When ``'taxonomy'`` is among the requested types, legacy species rows
-        (``is_species=1`` with a non-taxonomy ``type``) also count as
-        subject-tagged. Upgraded databases carry these rows until the
-        background ``mark_species_keywords`` pass retypes them; without this
-        guard, already-identified photos would still be classified and would
-        appear in 'Needs Identification' during that window.
-        """
-        return self._keyword_repository().filter_out_subject_tagged(photo_ids, subject_types)
-
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
         ws = self.workspaces.get(self._ws_id())
@@ -2232,21 +2213,6 @@ class Database:
             return default_id
         return self.create_workspace("Default")
 
-    def ensure_default_genre_keywords(self):
-        """Insert the default genre keywords if none exist of type='genre'.
-
-        Idempotent: a single existing genre keyword (user-created or otherwise)
-        short-circuits the insert. Keywords are global, so this runs once per
-        database (not per workspace).
-
-        Upgrade path: if a same-name top-level keyword exists with type='general'
-        (legacy free-form tag with the same name as a default genre), promote
-        it to type='genre' rather than silently leaving it as 'general'. Other
-        explicit user types (individual, location) are preserved — the user
-        meant something specific.
-        """
-        return self._keyword_repository().ensure_default_genres()
-
     def _species_curation_repository(self):
         """Build the species-curation repository on this connection.
 
@@ -2617,7 +2583,7 @@ class Database:
             commit=commit,
             transfer_gps_review=self._transfer_gps_review_for_merge,
             transfer_embedded_offered=(
-                self.transfer_embedded_keyword_offered_for_merge),
+                self.keywords.transfer_embedded_offered_keys),
             relink_parents_by_path=self._relink_parents_by_path,
             KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
@@ -3630,27 +3596,6 @@ class Database:
         """Photos in ``ok``/``partial`` folders at ``path`` or below, in any workspace."""
         return self._folder_repository(scoped=False).present_photo_count_under(path)
 
-    def count_keywords(self):
-        """Return count of keywords used by photos in the active workspace.
-
-        Filters out keywords whose only photos sit in folders flagged
-        ``'missing'``. For the dashboard's headline (which must agree with
-        the unfiltered top_keywords chart in ``get_dashboard_stats``), use
-        ``count_keywords_in_workspace`` instead.
-        """
-        return self._keyword_repository().count()
-
-    def count_keywords_in_workspace(self):
-        """Return count of keywords used by photos in the active workspace,
-        including photos in folders flagged ``'missing'``.
-
-        Pairs with the unfiltered ``top_keywords`` query in
-        ``get_dashboard_stats`` so the dashboard's Keywords headline can't
-        disagree with the Top Species / Other Keywords charts when a drive
-        is unmounted (e.g. headline says 0 while charts list keywords).
-        """
-        return self._keyword_repository().count_in_workspace()
-
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and
@@ -4612,18 +4557,6 @@ class Database:
             photo_ids, verify_workspace=verify_workspace,
         )
 
-    def get_accepted_species(self):
-        """Return distinct marker species from geolocated photos in the active workspace.
-
-        Uses the same "geolocated" definition as get_geolocated_photos: a
-        photo is included if it has EXIF coords OR a ``type='location'``
-        keyword with coords. That keeps the species filter dropdown in sync
-        with which photos can actually appear as markers — otherwise photos
-        placed via location-keyword coords would render on the map but their
-        species would be missing from the filter.
-        """
-        return self._keyword_repository().get_accepted_species()
-
     def count_photos_without_gps(self):
         """Backward-compatible alias for :meth:`count_photos_without_coordinates`."""
         return self.count_photos_without_coordinates()
@@ -5235,10 +5168,14 @@ class Database:
 
     @property
     def keywords(self) -> KeywordRepository:
-        """Fresh domain API; scoped methods resolve the workspace at use.
+        """Keyword rows and tagging reads: ``db.keywords.get_for_photo(photo_id)`` and friends.
 
-        Existing coordinated façade methods and their bound callbacks stay
-        in place. Do not retain this repository across a workspace switch.
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped methods resolve the workspace at use.
+        Do not retain one across a workspace switch. The methods the keyword
+        repositories bind from the façade by name (``FACADE_METHODS``:
+        ``add_keyword``, ``resolve_species_display_name`` ...) keep their
+        ``Database`` wrappers, as does ``untag_photo`` beside ``tag_photo``.
         """
         return self._keyword_repository()
 
@@ -5298,7 +5235,11 @@ class Database:
 
     @property
     def keyword_provenance(self) -> KeywordProvenanceRepository:
-        """The ``photo_keywords`` writers without a ``Database`` wrapper: ``db.keyword_provenance.carry_companion_keywords(...)``.
+        """The ``photo_keywords`` writers without a ``Database`` wrapper: ``db.keyword_provenance.link_keyword_to_place(...)``.
+
+        ``tag_photo``, ``_merge_keyword_into`` and ``accept_prediction`` keep
+        theirs: the provenance contract, the repositories' ``FACADE_METHODS``
+        and ``test_route_contract`` find them by those names.
 
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_keyword_provenance_repository``, which resolves
@@ -5306,6 +5247,20 @@ class Database:
         returned repository across ``set_active_workspace``.
         """
         return self._keyword_provenance_repository()
+
+    @property
+    def keyword_merges(self) -> KeywordMergeRepository:
+        """The statements behind ``keyword_identity``: ``db.keyword_merges.alias_owner(key)`` and friends.
+
+        Import-alias lookups and writes, the identity-group counts, and the
+        reads and survivor writes of the explicit keyword and location
+        merges. A domain accessor, not a cached attribute: every access
+        builds a fresh repository on this connection. Catalog-wide, so it
+        needs no active workspace; nothing in it commits.
+        """
+        from repositories.keyword_merges import KeywordMergeRepository
+
+        return KeywordMergeRepository(self.conn)
 
     def detect_keyword_case_convention(self):
         """Detect the casing convention used by existing species keywords.
@@ -5492,10 +5447,6 @@ class Database:
             name, source_taxon_id, parent_id=parent_id, _commit=_commit,
         )
 
-    def relink_source_species_keywords(self):
-        """Refresh local foreign keys after importing source taxa; caller commits."""
-        return self._keyword_repository().relink_source_species()
-
     def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True, source_taxon_id=None,
                     _resolve_alias=False):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
@@ -5521,45 +5472,6 @@ class Database:
         """
         return self._keyword_repository().add(
             name, parent_id=parent_id, is_species=is_species, kw_type=kw_type, _commit=_commit, source_taxon_id=source_taxon_id, _resolve_alias=_resolve_alias,
-        )
-
-    def _upsert_one_keyword(
-        self, name, parent_id, place_id=None, latitude=None, longitude=None,
-        reuse_location_component=False,
-    ):
-        """Insert-or-fetch a single ``type='location'`` keyword row.
-
-        Two dedupe modes:
-
-        * ``place_id`` is given: dedupe on the partial unique index over
-          ``place_id``. If a row with that ``place_id`` already exists, update
-          its name/parent/coords (the user just re-picked the same Google
-          place) and return its id.
-        * ``place_id`` is ``None``: dedupe on ``(name, parent_id)`` among rows
-          whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
-          ``INSERT OR IGNORE``) so we never collide a coordless parent row
-          with a place_id-bearing leaf that happens to share a name+parent.
-        * ``reuse_location_component`` is true only for administrative address
-          components. In that case, a matching location hierarchy row can be
-          reused even if it already carries a place id. A coordless matching
-          row can also absorb the selected administrative place's id and
-          coordinates instead of creating a suffixed duplicate.
-
-        Cross-type collision handling: the table-level ``UNIQUE(name,
-        parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
-        keyword of a *different* type with the same ``(name, parent_id)`` can
-        cause our INSERT to raise ``sqlite3.IntegrityError``. Rather than
-        silently merging into an unrelated keyword (which would corrupt the
-        user's existing tags), we catch that error, re-SELECT to confirm
-        what's actually there, and raise a descriptive ``RuntimeError``. If
-        the existing row turns out to be a coordless ``type='location'``
-        row that our narrow SELECT somehow missed, we defensively return its
-        id.
-        """
-        return self._keyword_provenance_repository().upsert_one_keyword(
-            name, parent_id, place_id=place_id, latitude=latitude,
-            longitude=longitude,
-            reuse_location_component=reuse_location_component,
         )
 
     def _restore_misclassified_location_ancestor(
@@ -5770,7 +5682,7 @@ class Database:
         for comp in self._location_parent_components(components, leaf_name, leaf_types):
             if not comp.get("name"):
                 continue
-            component_id = self._upsert_one_keyword(
+            component_id = self.keyword_provenance.upsert_one_keyword(
                 name=comp["name"],
                 parent_id=parent_id,
                 place_id=None,
@@ -5821,7 +5733,7 @@ class Database:
                 ),
             )
             parent_id = chain[-1] if chain else None
-            leaf_id = self._upsert_one_keyword(
+            leaf_id = self.keyword_provenance.upsert_one_keyword(
                 name=name,
                 parent_id=parent_id,
                 place_id=details["place_id"],
@@ -5890,7 +5802,7 @@ class Database:
                 "hierarchies reserve it as the level delimiter"
             )
         with self._location_repository().transaction():
-            return self._upsert_one_keyword(
+            return self.keyword_provenance.upsert_one_keyword(
                 name=stripped,
                 parent_id=None,
                 place_id=None,
@@ -5934,22 +5846,6 @@ class Database:
         ones. Caller owns the transaction."""
         self._location_repository().save_gps_reviews(reviews)
 
-    def link_keyword_to_place(self, keyword_id, details):
-        """Attach Google place data to an existing keyword.
-
-        ``details`` has the same shape as :meth:`upsert_place_chain`'s input.
-        Builds the parent chain, then tries to UPDATE the target keyword with
-        ``place_id``, coords, name, and the deepest parent's id. If another
-        keyword already has the target ``place_id`` (UNIQUE collision on the
-        partial index), the existing canonical row absorbs all
-        ``photo_keywords`` rows from the target, and the now-empty target
-        row is deleted.
-
-        Returns ``{"keyword_id": <final id>, "merged": <bool>}``. ``merged``
-        is True when an existing place-bearing row absorbed the target.
-        """
-        return self._keyword_provenance_repository().link_keyword_to_place(keyword_id, details)
-
     @staticmethod
     def _reverse_geocode_grid(lat, lng):
         """Round (lat, lng) to a ~110m grid cell.
@@ -5984,38 +5880,6 @@ class Database:
         self._location_repository().reverse_geocode_cache_put(
             lat_grid, lng_grid, place_id, response_json,
         )
-
-    def merge_duplicate_keywords(self):
-        """Find and merge normalized duplicate keywords in active workspace.
-
-        Duplicates are grouped by (normalized name, parent_id, type,
-        species-bearing) — name alone is not identity: the location system
-        deliberately creates same-name keywords under different parents
-        (Springfield under Illinois vs. Missouri), and same-name keywords of
-        different types (species vs. genre) are distinct by design. Legacy
-        ``type='general', is_species=1`` rows are also distinct from ordinary
-        general homonyms. Merging across those slots retags photos with the
-        wrong place/kind.
-
-        A keyword is in scope when it — or any descendant — is tagged on a
-        photo in the active workspace. XMP import only tags the leaf of a
-        hierarchical keyword ("Birds > Heron" tags Heron, not Birds), so
-        duplicate ancestors usually have no photo_keywords rows of their
-        own; walking up from the tagged leaves brings them in scope while
-        still leaving other workspaces' keywords untouched.
-
-        Keeps the lowest ID (earliest created), moves all photo associations,
-        reparents any child keywords onto the survivor (the parent_id FK
-        would otherwise block the DELETE), and deletes the duplicates.
-        Runs passes until convergence so case-duplicate parent chains
-        ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
-        only become same-parent duplicates after their parents merge.
-        The whole pass is all-or-nothing: an exception rolls back every
-        pending merge instead of leaving a half-merged tree on the
-        connection for a later unrelated commit to persist.
-        Returns count of merges performed.
-        """
-        return self._keyword_repository().merge_duplicates()
 
     def _merge_duplicate_keywords_pass(self, ws):
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
@@ -6067,24 +5931,13 @@ class Database:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
-                self._normalize_keyword_row_name(keep_id)
+                self.keywords.normalize_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(
                         rid, keep_id, pending_source_only=True,
                     )
 
         return total_merged
-
-    def _normalize_keyword_row_name(self, keyword_id):
-        """Trim stray edge punctuation from a surviving keyword row name.
-
-        Stored names are already normalized, so this is a no-op in the
-        common case — it exists so the duplicate cleanup can canonicalize a
-        survivor whose spelling predates normalization.
-        ``_rename_keyword_dependents`` then carries the new spelling into
-        every string that mirrors it.
-        """
-        return self._keyword_repository().normalize_row_name(keyword_id)
 
     def _rename_keyword_dependents(self, keyword_id, old_name, new_name):
         """Carry a keyword row's rename into every string that mirrors its name.
@@ -6159,10 +6012,6 @@ class Database:
         return self._keyword_provenance_repository().merge_keyword_into(
             src_id, dst_id, pending_source_only=pending_source_only,
         )
-
-    def get_keyword_tree(self):
-        """Return keywords used by photos in the active workspace, plus ancestors."""
-        return self._keyword_repository().get_tree()
 
     def tag_photo(
         self, photo_id, keyword_id, source=KEYWORD_SOURCE_MANUAL, _commit=True,
@@ -6256,146 +6105,15 @@ class Database:
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
 
+        Stays a ``Database`` method beside ``tag_photo``: the structural
+        guards that keep keyword re-tagging on the façade (moves/merge,
+        species curation, predictions) find both writers by these names.
+
         Args:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
         return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
-
-    def get_keyword_name(self, keyword_id):
-        """The stored name of one keyword, or None when the id is unknown."""
-        return self._keyword_repository().name_of(keyword_id)
-
-    def get_top_level_species_keyword(self, name):
-        """The keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
-
-        Taxonomy or general rows only, matched case-insensitively, taxonomy
-        first, then lowest id.
-        """
-        return self._keyword_repository().top_level_species_keyword(name)
-
-    def get_keyword_row(self, keyword_id):
-        """Row (``id``, ``name``, ``type``) of one keyword, or None when the id is unknown."""
-        return self._keyword_repository().get_row(keyword_id)
-
-    def get_photo_ids_with_keyword(self, keyword_id, photo_ids):
-        """The set of ``photo_ids`` that carry ``keyword_id``."""
-        return self._keyword_repository().photo_ids_tagged_with(keyword_id, photo_ids)
-
-    def get_keyword_parent_rows(self):
-        """Every keyword's ``id``, ``name`` and ``parent_id``."""
-        return self._keyword_repository().parent_rows()
-
-    def get_keyword_rename_state(self, keyword_id):
-        """Row (``name``, ``is_species``, ``type``) of one keyword, or None when the id is unknown."""
-        return self._keyword_repository().rename_state(keyword_id)
-
-    def get_photo_workspaces_with_keyword(self, keyword_id):
-        """Rows (``photo_id``, ``workspace_id``) for each photo carrying the
-        keyword, once per workspace that can see it."""
-        return self._keyword_repository().photo_workspaces_tagged_with(keyword_id)
-
-    def get_keyword_subtree_photo_workspaces(self, keyword_id):
-        """Distinct rows (``photo_id``, ``workspace_id``) for photos tagged with
-        the keyword or any keyword below it, once per workspace that can see them."""
-        return self._keyword_repository().subtree_photo_workspaces(keyword_id)
-
-    def get_keyword_duplicate_groups(self, workspace_id):
-        """Rows (``lname``, ``ids``, ``names``, ``cnt``) of keywords tagged in
-        ``workspace_id`` that share a merge slot (``None`` matches nothing)."""
-        return self._keyword_repository().workspace_duplicate_groups(workspace_id)
-
-    def get_keyword_workspace_photo_count(self, keyword_id, workspace_id):
-        """Row (``name``, ``cnt``) of the keyword's photos visible in ``workspace_id``."""
-        return self._keyword_repository().workspace_photo_count(keyword_id, workspace_id)
-
-    def search_species_keyword_names(self, query, match_case, whole_word):
-        """Names of ``is_species`` keywords matching ``query`` (keyword text-match rules)."""
-        return self._keyword_repository().species_names_matching(
-            query, match_case, whole_word,
-        )
-
-    def delete_keyword(self, keyword_id):
-        """Delete a keyword (children become roots, photo links go) and commit."""
-        self._keyword_repository().delete(keyword_id)
-
-    def get_species_root_keyword(self, name, *, prefer_taxonomy=False):
-        """Root species keyword row (``id``, ``name``, ``taxon_id``) named ``name`` (NOCASE), or None.
-
-        ``prefer_taxonomy`` picks taxonomy rows first, then the lowest id;
-        without it SQLite returns whichever matching row it finds first.
-        """
-        return self._keyword_repository().species_root_by_name(
-            name, prefer_taxonomy=prefer_taxonomy,
-        )
-
-    def get_other_linked_species_names(self, taxon_id, keyword_id):
-        """Names of taxon-linked species keywords on another taxon (or, unlinked, another row)."""
-        return self._keyword_repository().other_linked_species_names(taxon_id, keyword_id)
-
-    def get_previous_species_candidates(self, photo_ids, name, linked_root_taxon):
-        """Species-rank rows on ``photo_ids`` named ``name`` or linked to ``linked_root_taxon``."""
-        return self._keyword_repository().previous_species_candidates(
-            photo_ids, name, linked_root_taxon,
-        )
-
-    def get_attached_species_rows(self, photo_ids):
-        """Rows (``photo_id``, ``id``, ``name``, ``taxon_id``) of the species-rank keywords on ``photo_ids``."""
-        return self._keyword_repository().attached_species_rows(photo_ids)
-
-    def get_species_rank_keywords_for_photo(self, photo_id):
-        """Rows (``id``, ``name``, ``is_species``, ``type``) of a photo's
-        species-rank identification keywords, ``is_species`` first, then
-        most recently tagged first."""
-        return self._keyword_repository().species_rank_keywords_for_photo(photo_id)
-
-    def get_photo_ids_with_species_rank_keyword(self, photo_ids):
-        """Which of ``photo_ids`` carry a species-rank identification keyword."""
-        return self._keyword_repository().photo_ids_with_species_rank_keyword(photo_ids)
-
-    def get_photo_keywords(self, photo_id):
-        """Return all keywords for a photo."""
-        return self._keyword_repository().get_for_photo(photo_id)
-
-    def get_keywords_for_photos(self, photo_ids):
-        """Return keywords for a batch of photos keyed by photo id."""
-        return self._keyword_repository().get_for_photos(photo_ids)
-
-    def get_species_keyword_identity_rows(self):
-        """Every species/taxonomy keyword: ``id``, ``name``, ``source_id``, ``scientific_name``.
-
-        ``source_id`` is ``source_taxon_id`` falling back to the linked
-        taxon's ``inat_id``; unordered, catalog-wide.
-        """
-        return self._keyword_repository().species_identity_rows()
-
-    def get_species_keywords_for_photos(self, photo_ids, include_identities=False):
-        """Return deduplicated species-rank keyword names for photos.
-
-        Returns a dict mapping photo_id -> list of species name strings.
-        With include_identities, each entry contains the stored name and a
-        source-aware identity key for comparisons that must preserve homonyms.
-
-        A linked taxon must actually have rank ``species``; linked family,
-        genus, and other ancestor keywords remain taxonomy keywords but are
-        not presented as species. Taxonomy rows without a resolvable taxon
-        retain the legacy behavior so user-created/offline species tags do
-        not disappear.
-
-        Multiple keyword nodes can represent the same taxon (for example a
-        Lightroom hierarchy leaf plus an older top-level confirmation row).
-        Collapse those by taxon_id and canonicalize to the same-taxon root's
-        stored spelling when one exists — species_representatives,
-        species_highlights, and life-list preference rows key on that root
-        spelling, so a photo whose only surviving species tag is a hierarchy
-        leaf ("verdin" after repair detached the redundant "Verdin" root)
-        would otherwise miss those curation lookups. Falls back to the
-        row's own name when no root exists, and taxonomy-less legacy rows
-        continue to use the normalized keyword name.
-        """
-        return self._keyword_repository().get_species_for_photos(
-            photo_ids, include_identities=include_identities,
-        )
 
     def get_photos_with_equivalent_species(
         self, photo_ids, keyword_id, exclude_keyword_ids=None,
@@ -6988,10 +6706,6 @@ class Database:
         self._keyword_repository().apply_update(keyword_id, updates)
         return keyword_id
 
-    def get_all_keywords(self):
-        """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""
-        return self._keyword_repository().list_all()
-
     # -- Predictions --
 
     def _prediction_repository(self):
@@ -7289,14 +7003,6 @@ class Database:
         self._masks_features_repository().upsert_embedding(
             photo_id, model, embedding_bytes, variant,
         )
-
-    def is_keyword_species(self, keyword_id):
-        """Return True if the keyword represents a species-rank taxon.
-
-        Preserve the legacy flag/type fallback when no taxonomy row can be
-        resolved, but do not call a linked family/genus keyword a species.
-        """
-        return self._keyword_repository().is_species(keyword_id)
 
     def accept_prediction(
         self,
@@ -7992,44 +7698,6 @@ class Database:
         if not changes:
             return []
         return self._sync_repository().claim_for_sync(changes)
-
-    def get_embedded_keyword_offered_keys(self, photo_id):
-        """Normalized keys the scanner has imported from the image file itself.
-
-        The pending-removal filter (``db.pending_changes.keyword_removal_keys``)
-        suppresses a value only until the next XMP sync clears the queue
-        entry, but Vireo never writes into image files, so a later full scan
-        or image rewrite re-reads the same embedded value. The scanner records every embedded value it offers to
-        a photo here so ``_import_embedded_keywords_for_photo`` can filter
-        them out on later passes -- a user removal is not silently undone when
-        the queued removal has already been synced away.
-        """
-        return self._keyword_repository().embedded_offered_keys(photo_id)
-
-    def record_embedded_keyword_offered(self, photo_id, keys, _commit=True):
-        """Record that the scanner offered these embedded keys to a photo.
-
-        See ``get_embedded_keyword_offered_keys``. Idempotent, and empty
-        ``keys`` is a no-op. ``_commit=False`` lets a caller batch several
-        edits (e.g. an inline scan loop) into its own transaction.
-        """
-        self._keyword_repository().record_embedded_offered_keys(
-            photo_id, keys, _commit=_commit,
-        )
-
-    def transfer_embedded_keyword_offered_for_merge(
-            self, losing_id, surviving_id):
-        """Move suppression records onto the survivor before deleting a row.
-
-        Every merge path that drops a photo row with another row inheriting
-        its identity must call this before the ``DELETE FROM photos`` --
-        ``photo_embedded_keyword_offered``'s FK is non-cascading, so a
-        leftover row aborts the delete with ``FOREIGN KEY constraint
-        failed``. No commit; the merge folds it into its own transaction.
-        """
-        self._keyword_repository().transfer_embedded_offered_keys(
-            losing_id, surviving_id,
-        )
 
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
@@ -9347,42 +9015,6 @@ class Database:
         return self._keyword_repository().resolve_species_by_lineage(
             species_name, expected_ancestors,
         )
-
-    def mark_species_keywords(self, taxonomy):
-        """Mark keywords that are recognized species in the taxonomy.
-
-        Retypes untyped and ``type='general'`` keywords whose names match a
-        taxon lookup, and repairs incomplete ``type='taxonomy'`` rows. Explicit
-        non-taxonomy types such as ``location``, ``genre``, and ``individual``
-        are user intent and must be preserved even when their names are taxon
-        homonyms (for example, the location "California" is also a plant
-        genus).
-
-        Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
-        local taxa table is populated and the lookup resolves to a
-        species-rank taxon) a ``taxon_id`` link by iNaturalist id. Lookup
-        results below species rank (for example Eastern Fox Squirrel or
-        Red-eared Slider subspecies) link to their species ancestor: the Life
-        List keeps the precise stored label while the Explorer credits the
-        containing species once.
-        ``taxon_id`` is left NULL when the row had no prior link and only
-        a higher-rank (genus/family) match exists — binding an unlinked
-        row to a non-species-rank taxon would auto-promote it in a way the
-        classifier callers never asked for. A ``type='taxonomy'`` row
-        whose ``taxon_id`` was bound by the old species-agnostic lookup
-        to a non-species-rank taxon (genus/family) is rebound to the
-        species-rank taxon whenever ``taxonomy.lookup`` resolves to one;
-        when no species-rank replacement exists, the higher-rank link is
-        preserved so ``get_life_list_candidates`` can keep surfacing the
-        row's ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class``
-        metadata for genus/family/class Life List filters.
-
-        Uses the local taxonomy only (no network requests).
-
-        Args:
-            taxonomy: a Taxonomy instance with a lookup() method
-        """
-        return self._keyword_repository().mark_species(taxonomy)
 
     def create_default_collections_for_all_workspaces(self):
         """Create missing default smart collections in every workspace."""

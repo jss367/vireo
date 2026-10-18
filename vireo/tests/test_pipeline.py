@@ -3930,7 +3930,7 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
         assert [e['photo_count'] for e in after] == [14]
         assert after[0]['species'][0] == 'Common Yellowthroat'
         assert any(t['decision'] == 'kept_weak_detection' for t in after[0]['trace'])
-        assert all(not db.get_photo_keywords(pid) for pid in ids)
+        assert all(not db.keywords.get_for_photo(pid) for pid in ids)
         # A newer label set contradicting the anchors must supersede the
         # matching old fallback. Explicit fingerprint selection still works.
         db.predictions.add(fallback_detection_id, 'Song Sparrow', 0.99, 'BioCLIP-2.5',

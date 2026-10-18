@@ -40,7 +40,7 @@ def check_drift(db):
         base = os.path.splitext(photo["filename"])[0]
         xmp_path = os.path.join(folder_path, base + ".xmp")
 
-        db_keywords = {k["name"] for k in db.get_photo_keywords(photo["id"])}
+        db_keywords = {k["name"] for k in db.keywords.get_for_photo(photo["id"])}
 
         if not os.path.exists(xmp_path):
             # No XMP file — if DB has keywords, that's a pending sync
@@ -636,7 +636,7 @@ def resolve_drift(db, photo_id, direction):
     """
     if direction == "use_db":
         # Queue all current DB keywords as pending writes
-        keywords = db.get_photo_keywords(photo_id)
+        keywords = db.keywords.get_for_photo(photo_id)
         for kw in keywords:
             db.queue_change(photo_id, "keyword_add", kw["name"])
     elif direction == "use_xmp":

@@ -8131,7 +8131,7 @@ def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     assert result["tagging"]["tagged_photos"] == 2
     assert result["tagging"]["errors"] == []
     for photo_id in result["photo_ids"]:
-        names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+        names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
         assert {"Kenya trip", "Portfolio"} <= names
 
 
@@ -11881,7 +11881,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
             result["tagging"]
         )
         for pid in seed_ids:
-            names = {row["name"] for row in db.get_photo_keywords(pid)}
+            names = {row["name"] for row in db.keywords.get_for_photo(pid)}
             assert tag_name in names, (pid, names)
         # ``keyword_id`` didn't change under us — the tag apply must
         # reuse the same keyword rather than create a shadow.

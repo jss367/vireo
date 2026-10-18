@@ -218,10 +218,10 @@ def create_predictions_blueprint(
             )
             d["effective_category"] = effective_category
             if prediction_is_ambiguous(effective_category, d.get("category")):
-                keywords = db.get_photo_keywords(d["photo_id"])
+                keywords = db.keywords.get_for_photo(d["photo_id"])
                 d["existing_species"] = [
                     k["name"] for k in keywords
-                    if db.is_keyword_species(k["id"])
+                    if db.keywords.is_species(k["id"])
                 ]
             # Attach alternatives
             key = (d.get("detection_id"), d.get("model"))
@@ -1044,7 +1044,7 @@ def create_predictions_blueprint(
                 identity.display_name, is_species=True, _commit=False,
                 source_taxon_id=identity.taxon_id if explicit else None,
             )
-            species = db.get_keyword_name(keyword_id)
+            species = db.keywords.name_of(keyword_id)
         already_tagged = db.get_photos_with_equivalent_species(all_photo_ids, keyword_id)
         for photo_id in all_photo_ids:
             if photo_id in already_tagged:
@@ -1067,7 +1067,7 @@ def create_predictions_blueprint(
             if old_meta.get("no_tag"):
                 continue
             photo_id = item["photo_id"]
-            item_species = db.get_keyword_name(int(item["new_value"]))
+            item_species = db.keywords.name_of(int(item["new_value"]))
             flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
             # accept_prediction queues an add directly. Reconcile it
             # with any pending removal before applying the shared helper.
@@ -1864,7 +1864,7 @@ def create_predictions_blueprint(
                     local_species, is_species=True, _commit=False,
                 )
                 # Queue/record the stored spelling (see api_add_keyword).
-                stored_name = db.get_keyword_name(kid)
+                stored_name = db.keywords.name_of(kid)
                 if stored_name:
                     local_species = stored_name
                 already_has_species = db.get_photos_with_equivalent_species(

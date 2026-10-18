@@ -263,7 +263,7 @@ def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
 
     # Hierarchical leaves already represent their flat spelling.
     existing_keys = {keyword_match_key(k["name"])
-                     for k in db.get_photo_keywords(photo["id"])} | hierarchy_leaf_keys
+                     for k in db.keywords.get_for_photo(photo["id"])} | hierarchy_leaf_keys
     for kw_name in kw_data["flat_keywords"]:
         if not keyword_match_key(kw_name) or keyword_match_key(kw_name) in existing_keys:
             continue

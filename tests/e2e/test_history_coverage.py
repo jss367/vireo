@@ -16,7 +16,7 @@ def test_navbar_buttons_round_trip_saved_actions(live_server, page, action):
         return {
             'flag': photo['flag'], 'rating': photo['rating'],
             'color': db.photo_labels.get(pid),
-            'keywords': [dict(row) for row in db.get_photo_keywords(pid)],
+            'keywords': [dict(row) for row in db.keywords.get_for_photo(pid)],
             'locations': [db.edit_history.photo_location_state(p) for p in pids],
             'prediction': db.predictions.current_status(pred_id),
             'recipe': db.get_photo_edit_recipe(pid),

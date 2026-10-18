@@ -397,7 +397,7 @@ def create_batch_blueprint(
         if keyword_id is not None:
             if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
                 return json_error("keyword_id must be an integer")
-            keyword_row = db.get_keyword_row(keyword_id)
+            keyword_row = db.keywords.get_row(keyword_id)
             if keyword_row is None:
                 return json_error("keyword not found", 404)
             kid = keyword_row["id"]
@@ -419,11 +419,11 @@ def create_batch_blueprint(
             except ValueError as exc:
                 return json_error(str(exc))
             # Queue/record the stored spelling (see api_add_keyword).
-            stored = db.get_keyword_name(kid)
+            stored = db.keywords.name_of(kid)
             if stored is not None:
                 name = stored
 
-        already_tagged = db.get_photo_ids_with_keyword(kid, photo_ids)
+        already_tagged = db.keywords.photo_ids_tagged_with(kid, photo_ids)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
 
         with db.transaction():
@@ -538,7 +538,7 @@ def create_batch_blueprint(
         if not clean_ids:
             return json_error("photo_ids required")
 
-        keyword_row = db.get_keyword_row(keyword_id)
+        keyword_row = db.keywords.get_row(keyword_id)
         if keyword_row is None:
             return json_error("keyword not found", 404)
 
@@ -548,7 +548,7 @@ def create_batch_blueprint(
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        tagged_set = db.get_photo_ids_with_keyword(keyword_id, clean_ids)
+        tagged_set = db.keywords.photo_ids_tagged_with(keyword_id, clean_ids)
         removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
         is_location = (keyword_row["type"] or "") == "location"

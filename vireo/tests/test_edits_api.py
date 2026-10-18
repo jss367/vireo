@@ -448,7 +448,7 @@ def test_add_keyword_to_photo(app_and_db):
                        json={'name': 'Woodpecker'})
     assert resp.status_code == 200
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     kw_names = {k['name'] for k in keywords}
     assert 'Woodpecker' in kw_names
 
@@ -463,13 +463,13 @@ def test_remove_keyword_from_photo(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     kid = keywords[0]['id']
 
     resp = client.delete(f'/api/photos/{pid}/keywords/{kid}')
     assert resp.status_code == 200
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     assert len(keywords) == 0
 
     changes = db.pending_changes.list_all()
@@ -483,7 +483,7 @@ def test_undo_keyword_remove_clears_pending_change(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     kid = keywords[0]['id']
     kw_name = keywords[0]['name']
 
@@ -493,7 +493,7 @@ def test_undo_keyword_remove_clears_pending_change(app_and_db):
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {kw_name}
 
     changes = db.pending_changes.list_all()
@@ -510,7 +510,7 @@ def test_readding_removed_keyword_cancels_pending_remove(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     kid = keywords[0]['id']
     kw_name = keywords[0]['name']
 
@@ -1537,7 +1537,7 @@ def test_edit_history_recorded_on_keyword_remove(app_and_db):
     client = app.test_client()
     photos = db.photos.list_page()
     pid = photos[0]['id']
-    keywords = db.get_photo_keywords(pid)
+    keywords = db.keywords.get_for_photo(pid)
     kid = keywords[0]['id']
 
     client.delete(f'/api/photos/{pid}/keywords/{kid}')
@@ -1660,7 +1660,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     # Verify accepted state (review status lives in prediction_review per workspace)
     ws_id = db._active_workspace_id
     assert db.predictions.get_review_status(pred_id, ws_id) == 'accepted'
-    kws = {k['name'] for k in db.get_photo_keywords(pid)}
+    kws = {k['name'] for k in db.keywords.get_for_photo(pid)}
     assert 'Blue Jay' in kws
 
     # Undo
@@ -1671,7 +1671,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     assert db.predictions.get_review_status(pred_id, ws_id) == 'pending'
 
     # Keyword removed
-    kws = {k['name'] for k in db.get_photo_keywords(pid)}
+    kws = {k['name'] for k in db.keywords.get_for_photo(pid)}
     assert 'Blue Jay' not in kws
 
     # Pending keyword change removed
@@ -2040,13 +2040,13 @@ def test_undo_keyword_add_removes_keyword(app_and_db):
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Heron'})
-    kw_names = {k['name'] for k in db.get_photo_keywords(pid)}
+    kw_names = {k['name'] for k in db.keywords.get_for_photo(pid)}
     assert 'Heron' in kw_names
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
-    kw_names = {k['name'] for k in db.get_photo_keywords(pid)}
+    kw_names = {k['name'] for k in db.keywords.get_for_photo(pid)}
     assert 'Heron' not in kw_names
 
     changes = db.pending_changes.list_all()
@@ -2135,13 +2135,13 @@ def test_undo_batch_keyword_add_removes_from_all_photos(app_and_db):
 
     client.post('/api/batch/keyword', json={'photo_ids': pids, 'name': 'Owl'})
     for pid in pids:
-        assert 'Owl' in {k['name'] for k in db.get_photo_keywords(pid)}
+        assert 'Owl' in {k['name'] for k in db.keywords.get_for_photo(pid)}
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
     for pid in pids:
-        assert 'Owl' not in {k['name'] for k in db.get_photo_keywords(pid)}
+        assert 'Owl' not in {k['name'] for k in db.keywords.get_for_photo(pid)}
 
     changes = db.pending_changes.list_all()
     assert not any(c['change_type'] == 'keyword_add' and c['value'] == 'Owl' for c in changes)
@@ -2171,7 +2171,7 @@ def test_multiple_sequential_undos(app_and_db):
     # Undo 3: keyword add reversed
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert 'Finch' not in {k['name'] for k in db.get_photo_keywords(pid)}
+    assert 'Finch' not in {k['name'] for k in db.keywords.get_for_photo(pid)}
 
     # Undo 2: flag reversed
     resp = client.post('/api/undo')

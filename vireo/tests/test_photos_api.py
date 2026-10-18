@@ -10496,11 +10496,11 @@ def test_location_review_saved_suggestions_are_nearby_and_workspace_used(
 ):
     app, db = app_and_db
     p1, p2, _ = [p["id"] for p in db.photos.list_page(sort="name")]
-    near_id = db._upsert_one_keyword(
+    near_id = db.keyword_provenance.upsert_one_keyword(
         "Anza-Borrego Desert State Park", None,
         latitude=33.255, longitude=-116.405,
     )
-    far_id = db._upsert_one_keyword(
+    far_id = db.keyword_provenance.upsert_one_keyword(
         "Yosemite Valley", None,
         latitude=37.7456, longitude=-119.5936,
     )

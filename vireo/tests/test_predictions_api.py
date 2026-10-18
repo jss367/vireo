@@ -105,7 +105,7 @@ def test_accept_prediction(app_and_db):
     assert db.predictions.get_review_status(pred['id'], db._active_workspace_id) == 'accepted'
 
     # Species keyword should have been added to the photo
-    keywords = db.get_photo_keywords(photos[2]['id'])
+    keywords = db.keywords.get_for_photo(photos[2]['id'])
     kw_names = {k['name'] for k in keywords}
     assert 'Blue Jay' in kw_names
 
@@ -194,7 +194,7 @@ def test_reject_prediction(app_and_db):
     assert db.predictions.get_review_status(pred['id'], db._active_workspace_id) == 'rejected'
 
     # Verify no species keyword was added
-    keywords = db.get_photo_keywords(photos[0]['id'])
+    keywords = db.keywords.get_for_photo(photos[0]['id'])
     kw_names = {k['name'] for k in keywords}
     assert 'Northern Cardinal' not in kw_names
 
@@ -331,7 +331,7 @@ def test_prediction_group_apply(app_and_db):
     pick_photo = db.photos.get(pick_id)
     assert pick_photo['flag'] == 'flagged'
 
-    pick_kws = {k['name'] for k in db.get_photo_keywords(pick_id)}
+    pick_kws = {k['name'] for k in db.keywords.get_for_photo(pick_id)}
     assert 'Northern Cardinal' in pick_kws
 
     # Reject photo should be rejected
@@ -495,7 +495,7 @@ def test_accept_alternative_prediction(app_and_db):
     assert db.predictions.get_review_status(robin['id'], ws_id) == 'rejected'
 
     # Sparrow keyword should be on the photo
-    keywords = db.get_photo_keywords(photos[0]['id'])
+    keywords = db.keywords.get_for_photo(photos[0]['id'])
     kw_names = {k['name'] for k in keywords}
     assert 'Sparrow' in kw_names
 
@@ -925,7 +925,7 @@ def test_decision_routes_leave_no_transaction_open(app_and_db):
                                       photo_index=3)
     resp = client.post(f'/api/predictions/{fresh}/accept')
     assert resp.status_code == 200
-    kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
+    kw_names = {k['name'] for k in db.keywords.get_for_photo(photo_id)}
     assert 'Florida Scrub Jay' in kw_names
 
 
@@ -945,12 +945,12 @@ def test_undo_of_an_accept_still_works_under_the_decision_lock(app_and_db):
     pred_id, photo_id = _one_prediction(db, species='Unicolored Jay')
     assert client.post(f'/api/predictions/{pred_id}/accept').status_code == 200
     assert db.predictions.get_review_status(pred_id, ws) == 'accepted'
-    kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
+    kw_names = {k['name'] for k in db.keywords.get_for_photo(photo_id)}
     assert 'Unicolored Jay' in kw_names
 
     assert client.post('/api/undo').status_code == 200
     assert db.predictions.get_review_status(pred_id, ws) == 'pending'
-    kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
+    kw_names = {k['name'] for k in db.keywords.get_for_photo(photo_id)}
     assert 'Unicolored Jay' not in kw_names
 
     assert client.post('/api/redo').status_code == 200
@@ -1057,7 +1057,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
     assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
     accepted_keywords_before = {
-        k['name'] for k in db.get_photo_keywords(accepted_photo)}
+        k['name'] for k in db.keywords.get_for_photo(accepted_photo)}
     assert 'Azure Jay' in accepted_keywords_before
 
     # Stale group apply arrives with the mirror decisions: it asks to
@@ -1082,7 +1082,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     # The keyword the accept added is still attached — same-side
     # confirmation that status and keyword did not drift apart.
     accepted_keywords_after = {
-        k['name'] for k in db.get_photo_keywords(accepted_photo)}
+        k['name'] for k in db.keywords.get_for_photo(accepted_photo)}
     assert 'Azure Jay' in accepted_keywords_after
 
     # And the mirror: the stale *pick* on the already-rejected photo must
@@ -1091,7 +1091,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     # that stays ``rejected`` — the same contradiction, entered from the
     # other side. Skipping the photo before any write is what closes it.
     rejected_keywords = {
-        k['name'] for k in db.get_photo_keywords(rejected_photo)}
+        k['name'] for k in db.keywords.get_for_photo(rejected_photo)}
     assert 'Azure Jay' not in rejected_keywords
     assert (db.photos.get(rejected_photo)['flag'] or 'none') == 'none'
 
@@ -1176,7 +1176,7 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # alone would still have written.
     assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
     assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
-    assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
+    assert 'Azure Jay' not in {k['name'] for k in db.keywords.get_for_photo(photo_a)}
 
     # The rest of the burst still applied.
     assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
@@ -1278,7 +1278,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
 
     # Nothing was written for photo A, which the loop reached first.
     assert (db.photos.get(photo_a)['flag'] or 'none') == 'none'
-    assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
+    assert 'Azure Jay' not in {k['name'] for k in db.keywords.get_for_photo(photo_a)}
     assert db.predictions.get_review_status(pred_a, ws) == 'pending'
     assert not [
         c for c in db.pending_changes.list_all() if c['photo_id'] == photo_a
@@ -1347,7 +1347,7 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
     assert db.predictions.get_review_status(pred_a, ws) == 'pending'
     assert db.predictions.get_review_status(new_pred_a, ws) == 'pending'
     assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
-    assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
+    assert 'Azure Jay' not in {k['name'] for k in db.keywords.get_for_photo(photo_a)}
 
     # Photo B, whose detections were untouched, still applies.
     assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
@@ -1476,11 +1476,11 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert db.predictions.get_review_status(member, ws) == 'accepted'
     assert db.predictions.get_review_status(runner_up, ws) == 'rejected'
-    assert 'Canada Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert 'Canada Jay' in {k['name'] for k in db.keywords.get_for_photo(pick)}
 
     # Undo reverses the keyword and the pick's statuses together.
     assert client.post('/api/undo').status_code == 200
-    assert 'Canada Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert 'Canada Jay' not in {k['name'] for k in db.keywords.get_for_photo(pick)}
     assert db.predictions.get_review_status(member, ws) == 'pending'
     assert db.predictions.get_review_status(runner_up, ws) == 'alternative'
 
@@ -1537,13 +1537,13 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
-    assert 'Azure Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert 'Azure Jay' in {k['name'] for k in db.keywords.get_for_photo(pick)}
 
     # Undo must land the row back at ``rejected`` — not ``pending`` or
     # ``alternative`` — so the user's earlier decision is not silently
     # forgotten and the prediction stays out of the pending queue.
     assert client.post('/api/undo').status_code == 200
-    assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert 'Azure Jay' not in {k['name'] for k in db.keywords.get_for_photo(pick)}
     assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
 
     # Redo re-applies the accept, and a second undo still restores the

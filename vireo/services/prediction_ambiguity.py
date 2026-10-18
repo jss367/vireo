@@ -94,7 +94,7 @@ def effective_category_resolver(db, photo_ids):
         taxonomy = None
     from species_identity import SpeciesResolver
     resolver = SpeciesResolver(db=db)
-    species_by_photo = db.get_species_keywords_for_photos(photo_ids, include_identities=True)
+    species_by_photo = db.keywords.get_species_for_photos(photo_ids, include_identities=True)
     return _category_resolver(
         db, resolver, photo_ids, species_by_photo,
         compare_prediction_to_keywords, taxonomy,

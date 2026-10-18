@@ -2152,7 +2152,7 @@ def _register_job_blueprints(app, w):
             json_error,
             lambda: app._job_runner,
             db_path,
-            count_keywords=w.init_db.count_keywords,
+            count_keywords=lambda: w.init_db.keywords.count(),
         )
     )
     app.register_blueprint(

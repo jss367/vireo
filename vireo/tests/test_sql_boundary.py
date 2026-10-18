@@ -57,7 +57,6 @@ CONN_USE_LIMITS = {
     "import_dedup.py": 7,
     "importer.py": 1,
     "ingest.py": 2,
-    "keyword_identity.py": 48,
     "label_source_identities.py": 8,
     "local_masks.py": 1,
     "location_review.py": 1,

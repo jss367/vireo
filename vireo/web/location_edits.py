@@ -296,7 +296,7 @@ class LocationErrors:
         """Return an error response unless ``keyword_id`` is a location keyword."""
         if keyword_id is None:
             return self._json_error("invalid keyword_id", 400)
-        row = db.get_keyword_row(keyword_id)
+        row = db.keywords.get_row(keyword_id)
         if row is None:
             return self.keyword_not_found_error()
         if row["type"] != "location":

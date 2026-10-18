@@ -626,7 +626,7 @@ def test_upsert_place_chain_commits_and_excludes_existing_leaf(db):
 
 
 def test_upsert_place_chain_rolls_back_on_failure(db, monkeypatch):
-    real = db._upsert_one_keyword
+    real = db.keyword_provenance.upsert_one_keyword
     calls = []
 
     def fail_on_leaf(**kwargs):
@@ -635,7 +635,12 @@ def test_upsert_place_chain_rolls_back_on_failure(db, monkeypatch):
             raise RuntimeError("leaf failed")
         return real(**kwargs)
 
-    monkeypatch.setattr(db, "_upsert_one_keyword", fail_on_leaf)
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    monkeypatch.setattr(
+        KeywordProvenanceRepository, "upsert_one_keyword",
+        lambda _repo, **kwargs: fail_on_leaf(**kwargs),
+    )
     with pytest.raises(RuntimeError, match="leaf failed"):
         db.upsert_place_chain({
             "place_id": "pl-2", "name": "Mara",
@@ -795,14 +800,14 @@ def test_get_or_create_text_location_prefers_exact_spelling(db):
 def test_link_keyword_to_place_requires_place_id(db):
     kid = _kw(db, "Somewhere")
     with pytest.raises(ValueError, match=r"requires details\['place_id'\]"):
-        db.link_keyword_to_place(kid, {"name": "x"})
+        db.keyword_provenance.link_keyword_to_place(kid, {"name": "x"})
 
 
 def test_link_keyword_to_place_disambiguates_under_a_parent(db):
     kid = _kw(db, "Old text")
     country = _kw(db, "Kenya")
     _kw(db, "Mara", parent_id=country)
-    result = db.link_keyword_to_place(kid, {
+    result = db.keyword_provenance.link_keyword_to_place(kid, {
         "place_id": "ChIJ-abcdefgh12345678", "name": "Mara",
         "address_components": [{"long_name": "Kenya", "types": ["country"]}],
     })
@@ -1056,8 +1061,8 @@ def test_location_method_delegates_to_repository(name):
         ),
         ("_merge_duplicate_location_roots", {"_merge_keyword_into"}),
         ("set_photo_location", {"tag_photo"}),
-        ("upsert_place_chain", {"_upsert_location_parent_chain", "_upsert_one_keyword"}),
-        ("get_or_create_text_location", {"_upsert_one_keyword"}),
+        ("upsert_place_chain", {"_upsert_location_parent_chain", "keyword_provenance"}),
+        ("get_or_create_text_location", {"keyword_provenance"}),
     ],
 )
 def test_cross_domain_calls_stay_on_the_facade(name, facade_calls):
@@ -1105,7 +1110,7 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
         if changed:
             return
         if operation == 'delete':
-            writer.delete_keyword(selected)
+            writer.keywords.delete(selected)
         else:
             writer._merge_keyword_into(selected, remaining)
             writer.commit()

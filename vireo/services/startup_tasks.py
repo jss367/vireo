@@ -184,7 +184,7 @@ class StartupTasks:
             log.debug("[%s] taxonomy not loaded; deferring species marking", log_label)
             return
         try:
-            updated = db.mark_species_keywords(tax)
+            updated = db.keywords.mark_species(tax)
             if updated:
                 log.info("[%s] Marked %d keywords as species from taxonomy",
                          log_label, updated)

@@ -81,8 +81,8 @@ def create_models_blueprint(
 
     The darktable download records the installed binary through
     ``config.read_raw_config_file`` under ``config.settings_write_lock``.
-    ``count_keywords`` is the startup
-    database's ``count_keywords`` (``init_db`` in ``create_app``), which
+    ``count_keywords`` calls the startup
+    database's ``keywords.count`` (``init_db`` in ``create_app``), which
     ``/api/classify/config`` reports as the taxonomy species count.
     """
     blueprint = Blueprint("models", __name__)

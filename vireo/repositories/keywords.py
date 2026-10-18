@@ -29,11 +29,17 @@ handed the ``Database`` itself to a helper (``resolve_import_alias(self,
 now pass ``self.db``, the façade, since ``self`` is the repository here. The
 SQL text, parameter order, chunk sizes and commit placement are unchanged.
 
+Callers reach it through the ``db.keywords`` accessor, which builds a fresh
+repository per access. The methods ``FACADE_METHODS`` binds back from the
+façade (``add_keyword``, ``resolve_species_display_name`` ...) keep their
+``Database`` wrappers, as does ``untag_photo``, which the structural guards
+pair with ``tag_photo``.
+
 What lives in ``repositories/keyword_provenance.py`` instead: the
 ``photo_keywords`` writers that create or converge an association
 (``tag_photo``, ``_merge_keyword_into``, ``link_keyword_to_place``), which ``test_keyword_provenance_contract`` keys
 to that module, and the keyword methods that call ``_merge_keyword_into``
-in the middle of their own work (``_upsert_one_keyword``). This module writes
+in the middle of their own work (``upsert_one_keyword``). This module writes
 no ``photo_keywords``
 association itself; a structural test fails if it ever references one of
 those writers.
@@ -137,11 +143,15 @@ class KeywordRepository:
         return self._resolve_workspace_id()
 
     def embedded_offered_keys(self, photo_id):
-        """Normalized embedded keyword keys the scanner has offered this photo.
+        """Normalized keys the scanner has imported from the image file itself.
 
-        Backs ``Database.get_embedded_keyword_offered_keys`` -- see there for
-        why the record exists. Returns a set so callers can test membership
-        in O(1) when they filter candidate keywords.
+        The pending-removal filter (``db.pending_changes.keyword_removal_keys``)
+        suppresses a value only until the next XMP sync clears the queue
+        entry, but Vireo never writes into image files, so a later full scan
+        or image rewrite re-reads the same embedded value. The scanner records every embedded value it offers to
+        a photo here so ``_import_embedded_keywords_for_photo`` can filter
+        them out on later passes -- a user removal is not silently undone when
+        the queued removal has already been synced away.
         """
         return {
             row["keyword_key"]
@@ -155,8 +165,7 @@ class KeywordRepository:
     def record_embedded_offered_keys(self, photo_id, keys, _commit=True):
         """Mark these normalized keys as embedded-offered for the photo.
 
-        Backs ``Database.record_embedded_keyword_offered`` -- see there for
-        why the record exists. Idempotent (INSERT OR IGNORE on the composite
+        See ``embedded_offered_keys`` for why the record exists. Idempotent (INSERT OR IGNORE on the composite
         primary key). ``keys`` empty is a no-op. ``_commit=False`` leaves the
         commit to the caller for batch work.
         """

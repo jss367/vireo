@@ -229,7 +229,7 @@ class _HomonymConflicts:
         if cache_key in self.cache:
             return self.cache[cache_key]
         conflict = False
-        for name in self.db.get_other_linked_species_names(
+        for name in self.db.keywords.other_linked_species_names(
             target_taxon_id, target_kid_id,
         ):
             if keyword_match_key(name) == self.old_target_key:
@@ -477,7 +477,7 @@ class _SpeciesConfirmation:
         # type='taxonomy' (the Keywords type dropdown) doesn't set the
         # legacy is_species column, and the rest of the app treats
         # (is_species = 1 OR type = 'taxonomy') as species.
-        self.old_kid_row = self.db.get_species_root_keyword(previous_species)
+        self.old_kid_row = self.db.keywords.species_root_by_name(previous_species)
         if self.old_kid_row is not None and self.old_kid_row["taxon_id"] is None:
             # Unlinked root: ``previous_species`` names a specific
             # legacy row whose identity is that row's own id, not a
@@ -540,7 +540,7 @@ class _SpeciesConfirmation:
         # preserves the existing behavior for attached same-name rows under
         # a different taxon (a legitimate homonym duplicate repair leaves
         # alone).
-        candidate_rows = self.db.get_previous_species_candidates(
+        candidate_rows = self.db.keywords.previous_species_candidates(
             self.photo_ids, self.previous_species, linked_root_taxon,
         )
         for row in candidate_rows:
@@ -570,7 +570,7 @@ class _SpeciesConfirmation:
         if self.remove_mode:
             # Nothing is being added: never create a keyword row just to
             # remove it. Report the existing root's id when one exists.
-            stored = db.get_species_root_keyword(
+            stored = db.keywords.species_root_by_name(
                 self.species, prefer_taxonomy=True,
             )
             self.kid = stored["id"] if stored else None
@@ -579,7 +579,7 @@ class _SpeciesConfirmation:
             return
         self.kid = db.add_keyword(self.species, is_species=True, _commit=False)
         # Queue/record the stored spelling (see api_add_keyword).
-        stored = db.get_keyword_name(self.kid)
+        stored = db.keywords.name_of(self.kid)
         if stored:
             self.species = stored
 
@@ -622,7 +622,7 @@ class _SpeciesConfirmation:
 
     def _collect_old_rows(self, old_target_key, homonym_conflicts):
         """Group every attached row equivalent to the previous species by photo."""
-        for row in self.db.get_attached_species_rows(self.photo_ids):
+        for row in self.db.keywords.attached_species_rows(self.photo_ids):
             photo_old = self.per_photo_old_row.get(row["photo_id"])
             if photo_old is None:
                 # ``previous_species`` did not resolve to any
@@ -809,7 +809,7 @@ class _SpeciesConfirmation:
         """Whether every frame carries the edited list, and the shared keys."""
         from pipeline_results import species_key_set
 
-        self.actual_by_photo = self.db.get_species_keywords_for_photos(
+        self.actual_by_photo = self.db.keywords.get_species_for_photos(
             self.photo_ids,
         )
         actual_sets = [

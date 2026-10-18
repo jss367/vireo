@@ -1519,7 +1519,7 @@ def test_location_review_ranks_saved_and_google_places_by_distance(
             "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
             (32.750, -117.000, target_id),
         )
-        saved_id = live_server["db"]._upsert_one_keyword(
+        saved_id = live_server["db"].keyword_provenance.upsert_one_keyword(
             "Far Saved Place", None, latitude=32.938, longitude=-117.000,
         )
         live_server["db"].conn.execute(
