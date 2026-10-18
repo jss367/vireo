@@ -297,7 +297,7 @@ def test_handoff_hides_misses_when_source_has_dashboard_collection_scope(
 
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
-    collection_id = db.add_collection("All JPGs", rules)
+    collection_id = db.collections.add("All JPGs", rules)
 
     url = live_server["url"]
     page.goto(f"{url}/browse?collection_id={collection_id}&dashboard_scope=1")
@@ -328,7 +328,7 @@ def test_handoff_hides_misses_when_review_has_collection_scope(
 
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
-    collection_id = db.add_collection("All JPGs", rules)
+    collection_id = db.collections.add("All JPGs", rules)
 
     url = live_server["url"]
     page.goto(f"{url}/review")

@@ -1577,7 +1577,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
                       model="BioCLIP", labels_fingerprint="legacy")
 
     # Seed a collection the classify path can consume.
-    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
 
     # Force the classifier constructor to raise — simulates
     # weight-corruption or missing-weights at load time.
@@ -1656,7 +1656,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     db.add_prediction(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
-    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
 
     runner = FakeRunner()
 
@@ -1780,7 +1780,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
         model="BioCLIP", labels_fingerprint="legacy",
     )
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -1887,7 +1887,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -4763,7 +4763,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
 
     # Set up mock DB
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "bird.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
@@ -4835,7 +4835,7 @@ def test_api_route_calls_run_classify_job(app_and_db):
 
     # Create a collection so the request is valid
     import json as _json
-    col_id = db.add_collection("Test", _json.dumps([{"type": "all"}]))
+    col_id = db.collections.add("Test", _json.dumps([{"type": "all"}]))
 
     captured = {}
 
@@ -5023,7 +5023,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
@@ -5273,7 +5273,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     # Tag p1 with a genre keyword so the skip-gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
@@ -5350,7 +5350,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     # Tag with a genre keyword so the subject-skip gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
@@ -6526,7 +6526,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # cancel-recovery path; the "untouched" one was never reached by
     # detection so it has no entry in detection_map.
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "processed.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
@@ -6651,7 +6651,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     job = _make_job()
 
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "processed.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
@@ -7043,7 +7043,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     mock_db_instance = MagicMock()
     # Two photos: photo 1 was re-detected as empty (state mutated),
     # photo 2 was never reached.
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "empty.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
@@ -7176,7 +7176,7 @@ def test_empty_collection_finalizes_all_step_rows(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    coll_id = db.add_collection("empty", "[]")
+    coll_id = db.collections.add("empty", "[]")
 
     runner = FakeRunner()
     job = _make_job()
@@ -7219,7 +7219,7 @@ def test_precancelled_job_finalizes_all_step_rows(tmp_path):
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + "]}]",
     )
 
@@ -7948,7 +7948,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8016,7 +8016,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
     db.model_runs.record_classifier_run(
         det_id, "timm-inat21", "fp-cached", prediction_count=1,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8131,7 +8131,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "empty", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8188,7 +8188,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         detection_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     db.conn.commit()
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "legacy", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
@@ -8252,7 +8252,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8373,7 +8373,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8461,7 +8461,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8725,7 +8725,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8797,7 +8797,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     db.model_runs.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8870,7 +8870,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                                  prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c",
         '[{"field":"photo_ids","value":['
         + str(pid_a) + ',' + str(pid_b) + ']}]',
@@ -9325,7 +9325,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 

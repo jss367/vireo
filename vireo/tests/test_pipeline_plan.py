@@ -3082,7 +3082,7 @@ def test_api_pipeline_plan_rejects_visual_collection(app_and_db):
     import json as json_mod
 
     app, db = app_and_db
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Visual pipeline scope",
         json_mod.dumps([]),
         visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
@@ -4123,7 +4123,7 @@ def test_regroup_plan_skips_empty_resolved_scope(tmp_path, scope):
     if scope == "folder":
         selection = {"photo_ids": []}
     elif scope == "collection":
-        selection = {"collection_id": db.add_collection(
+        selection = {"collection_id": db.collections.add(
             "Empty selection", '[{"field": "rating", "op": ">=", "value": 5}]',
         )}
     else:

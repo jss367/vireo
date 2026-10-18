@@ -3945,7 +3945,7 @@ def test_pipeline_regroup_accepts_collection_id(app_and_db):
     # Create a smart collection containing all photos
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     photo_ids = [p["id"] for p in photos]
-    cid = db.add_collection("test-pipeline", '[{"field":"photo_ids","value":' + str(photo_ids) + '}]')
+    cid = db.collections.add("test-pipeline", '[{"field":"photo_ids","value":' + str(photo_ids) + '}]')
 
     # The job will fail because no pipeline features exist, but the route
     # should accept collection_id without error
@@ -4017,7 +4017,7 @@ def test_compare_predictions_api(app_and_db):
     # Create a collection containing all photos
     import json
     rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
-    cid = db.add_collection("Test Collection", rules)
+    cid = db.collections.add("Test Collection", rules)
 
     # Create detections, then add predictions from two models
     det_ids_0 = db.save_detections(photo_ids[0], [
@@ -4079,7 +4079,7 @@ def test_compare_predictions_api_can_refresh_selected_photos(app_and_db):
             "SELECT id FROM photos ORDER BY id LIMIT 2"
         ).fetchall()
     ]
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Targeted comparison",
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
@@ -4099,7 +4099,7 @@ def test_compare_predictions_api_limits_targeted_photo_ids(app_and_db):
     from web.request_args import MAX_SELECTION_PHOTOS
 
     app, db = app_and_db
-    cid = db.add_collection("Target limit", "[]")
+    cid = db.collections.add("Target limit", "[]")
     query = [("collection_id", str(cid))]
     query.extend(
         ("photo_id", str(photo_id))
@@ -4125,7 +4125,7 @@ def test_collection_photo_narrowing_wraps_any_rules(app_and_db):
             "SELECT id FROM photos ORDER BY id LIMIT 3"
         ).fetchall()
     ]
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Any-mode target",
         json.dumps({
             "mode": "any",
@@ -4136,7 +4136,7 @@ def test_collection_photo_narrowing_wraps_any_rules(app_and_db):
         }),
     )
 
-    rows = db.get_collection_photos(cid, photo_ids=[photo_ids[1]])
+    rows = db.collections.get_photos(cid, photo_ids=[photo_ids[1]])
 
     assert [row["id"] for row in rows] == [photo_ids[1]]
 
@@ -4156,7 +4156,7 @@ def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
         }],
         detector_model="MDV6",
     )[0]
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Unclassified Subject",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -4186,7 +4186,7 @@ def test_compare_predictions_api_exposes_miss_flags(app_and_db):
     db.conn.commit()
 
     rules = json.dumps([{"field": "photo_ids", "value": [p_miss, p_clean]}])
-    cid = db.add_collection("Miss Flag Collection", rules)
+    cid = db.collections.add("Miss Flag Collection", rules)
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert resp.status_code == 200
@@ -4209,7 +4209,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     species_id = db.add_keyword("Cardinal", is_species=True)
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
-    cid = db.add_collection("Single Photo", rules)
+    cid = db.collections.add("Single Photo", rules)
 
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
@@ -4252,7 +4252,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     species_id = db.add_keyword("Cardinal", is_species=True)
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
-    cid = db.add_collection("Pending Match", rules)
+    cid = db.collections.add("Pending Match", rules)
 
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
@@ -4279,7 +4279,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     species_id = db.add_keyword("Cardinal", is_species=True)
     db.tag_photo(photo_id, species_id)
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
-    cid = db.add_collection("Accepted Matches", rules)
+    cid = db.collections.add("Accepted Matches", rules)
 
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
@@ -4335,7 +4335,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
     db.conn.commit()
 
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
-    cid = db.add_collection("Alias Compare", rules)
+    cid = db.collections.add("Alias Compare", rules)
     det_id = db.save_detections(
         photo_id,
         [{
@@ -7185,7 +7185,7 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
     assert rating_resp.status_code == 200
     assert [r["photo"]["id"] for r in rating_resp.get_json()["results"]] == [p3]
 
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Search Scope",
         json.dumps([{"field": "photo_ids", "value": [p2, p3, missing_pid]}]),
     )
@@ -15553,7 +15553,7 @@ def test_highlights_save(app_and_db):
     assert "id" in data
 
     # Verify collection was created
-    collections = db.get_collections()
+    collections = db.collections.list_all()
     names = [c["name"] for c in collections]
     assert "Highlights - save_test" in names
 
@@ -16570,7 +16570,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
     db.set_photo_edit_recipe(collection_pids[0], {"rotation": 90})
 
     import json as _json
-    cid = db.add_collection(
+    cid = db.collections.add(
         "robins-only",
         _json.dumps([{"field": "photo_ids", "value": collection_pids}]),
     )
@@ -16819,10 +16819,10 @@ def test_collections_list_survives_one_unresolvable_rule(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    good = db.add_collection(
+    good = db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
-    bad = db.add_collection(
+    bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
 
@@ -16849,15 +16849,14 @@ def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
     import json
     import sqlite3
 
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
 
-    good = db.add_collection(
+    good = db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
-    bad = db.add_collection(
+    bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
 
@@ -16870,7 +16869,9 @@ def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
             "count_collection_photo_availability should not run on browse init"
         )
 
-    monkeypatch.setattr(Database, "count_collection_photo_availability", boom)
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "count_photo_availability", boom)
 
     resp = client.get("/api/browse/init")
     assert resp.status_code == 200
@@ -16912,12 +16913,11 @@ def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
     import json
     import sqlite3
 
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
 
-    db.add_collection(
+    db.collections.add(
         "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
     )
 
@@ -16927,7 +16927,9 @@ def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
     def boom(self, _cid):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(Database, "count_collection_photo_availability", boom)
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "count_photo_availability", boom)
 
     resp = client.get("/api/collections")
     # Not a 200 with count_error — a real 5xx so the incident is visible.
@@ -16945,7 +16947,7 @@ def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    bad = db.add_collection(
+    bad = db.collections.add(
         "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
     )
 
@@ -17021,7 +17023,7 @@ def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch
     # A static photo_ids collection whose count query fails at rule-resolve
     # time: the shape looks like a manual-add target, but the DB can't
     # count it, so it lands in the count_error path.
-    bad = db.add_collection(
+    bad = db.collections.add(
         "Broken static",
         json.dumps([
             {"field": "photo_ids", "value": [1, 2, 3]},
@@ -17222,7 +17224,7 @@ def test_collection_preview_returns_match_count(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    collections_before = len(db.get_collections())
+    collections_before = len(db.collections.list_all())
 
     # The fixture creates 3 photos; p1 has rating=3, p3 has rating=5.
     # Empty rules -> all photos in workspace.
@@ -17239,7 +17241,7 @@ def test_collection_preview_returns_match_count(app_and_db):
     assert resp.get_json()["count"] == 1
 
     # No collection row was persisted as a side effect of previewing.
-    assert len(db.get_collections()) == collections_before
+    assert len(db.collections.list_all()) == collections_before
 
 
 def test_collection_preview_rejects_malformed_rules(app_and_db):
@@ -17327,7 +17329,6 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     """
     import sqlite3
 
-    from db import Database
 
     app, _db = app_and_db
     client = app.test_client()
@@ -17338,7 +17339,9 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     def boom(self, _rules):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(Database, "count_photos_for_rules", boom)
+    from repositories.collections import CollectionRepository
+
+    monkeypatch.setattr(CollectionRepository, "count_photos_for_rules", boom)
 
     resp = client.post("/api/collections/preview", json={"rules": []})
     # Flask's default for an unhandled exception is 500; the important thing
@@ -24902,7 +24905,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
     ], detector_model="MDV6")[0]
     db.add_prediction(det_id, "Desert Verdin", 1.0, "model-a")
     db.add_prediction(det_id, "Verdin", 0.9, "model-b")
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Aliases", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
@@ -24947,7 +24950,7 @@ def test_compare_payload_carries_canonical_species(app_and_db, tmp_path):
     db.add_prediction(det_id, "Western Cattle-Egret", 1.0, "model-a")
     db.add_prediction(det_id, "Bubulcus ibis", 0.9, "model-b")
     db.add_prediction(det_id, "Mystery Beast", 0.5, "model-c")
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Canonical", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
@@ -25051,7 +25054,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
     # a label that flips case with model sort order is the same
     # order-dependence in miniature.
     db.add_prediction(det_id, "verdin", 0.8, "model-c")
-    cid = db.add_collection(
+    cid = db.collections.add(
         "AliasDisplay",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -25121,7 +25124,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
     db.add_prediction(det_id, "Bubulcus ibis", 1.0, "model-a")
-    cid = db.add_collection(
+    cid = db.collections.add(
         "CaseFallback",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
@@ -26162,7 +26165,7 @@ def test_compare_keeps_native_scientific_identities_with_shared_common_name(app_
     path = tmp_path / "taxonomy.json"
     path.write_text(json.dumps({"taxa_by_common": {}, "ambiguous_common_names": ["shared name"],
                                 "taxa_by_scientific": {e["scientific_name"].lower(): e for e in entries}}))
-    cid = db.add_collection("Native identities", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
+    cid = db.collections.add("Native identities", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
     with patch("taxonomy.load_local_taxonomy", return_value=Taxonomy(path)):
         response = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert response.status_code == 200
@@ -26199,7 +26202,7 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
         path.write_text(json.dumps({"taxa_by_common": {}, "taxa_by_scientific":
                                     entries if taxonomy_state == "scientific_only" else {}}))
         tax = Taxonomy(path)
-    cid = db.add_collection("Exact keyword", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
+    cid = db.collections.add("Exact keyword", json.dumps([{"field": "photo_ids", "value": [photo_id]}]))
     with patch("taxonomy.load_local_taxonomy", return_value=tax):
         response = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
     assert response.status_code == 200

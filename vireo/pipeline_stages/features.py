@@ -271,7 +271,7 @@ class _MaskPass:
         os.makedirs(self.masks_dir, exist_ok=True)
 
         self.photos = self.filter_excluded(
-            self.thread_db.get_collection_photos(self.run.collection_id, per_page=999999),
+            self.thread_db.collections.get_photos(self.run.collection_id, per_page=999999),
         )
 
         # The mask loop applies two detection-confidence floors: a

@@ -1026,7 +1026,7 @@ def create_job_launchers_blueprint(
         if not raw_ids and collection_id is not None:
             raw_ids = [
                 p["id"]
-                for p in db.get_collection_photos(collection_id, per_page=999999)
+                for p in db.collections.get_photos(collection_id, per_page=999999)
             ]
         if not raw_ids:
             return json_error("photo_ids or collection_id required")
@@ -1432,7 +1432,7 @@ def create_job_launchers_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         work_units = runtime_warning_work_units(
             "classify collection",
-            lambda: db.count_collection_photos(collection_id),
+            lambda: db.collections.count_photos(collection_id),
         )
         runtime_warning = build_cpu_runtime_warning(
             "classify",
@@ -1538,7 +1538,7 @@ def create_job_launchers_blueprint(
 
         work_units = runtime_warning_work_units(
             "extract-masks collection" if collection_id else "extract-masks workspace",
-            lambda: db.count_collection_photos(collection_id)
+            lambda: db.collections.count_photos(collection_id)
             if collection_id
             else db.count_photos(),
         )
@@ -1756,7 +1756,7 @@ class _MaskExtractionRun:
 
     def _collection_candidates(self):
         thread_db = self.thread_db
-        coll_photos = thread_db.get_collection_photos(
+        coll_photos = thread_db.collections.get_photos(
             self.collection_id, per_page=999999
         )
         photos = []
@@ -2560,7 +2560,7 @@ class _PreviewWarmup:
                     photos.append(scoped_photo)
             return photos
         if self.collection_id:
-            return thread_db.get_collection_photos(self.collection_id, per_page=999999)
+            return thread_db.collections.get_photos(self.collection_id, per_page=999999)
         return thread_db.get_photos(per_page=999999)
 
     def _warm_photo(self, photo):

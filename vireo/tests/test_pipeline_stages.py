@@ -89,7 +89,7 @@ def test_concurrent_runs_keep_their_created_collections(tmp_path, monkeypatch):
             assert observed[workspace_id] == result["collection_id"]
             assert result["errors"] == []
             db.set_active_workspace(workspace_id)
-            ids = db.get_collection_photo_ids(result["collection_id"])
+            ids = db.collections.get_photo_ids(result["collection_id"])
             assert [db.get_photo(photo_id)["filename"] for photo_id in ids] == [
                 f"photo-{index}.jpg",
             ]

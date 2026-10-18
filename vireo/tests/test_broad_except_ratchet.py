@@ -167,6 +167,14 @@ def _join_bindings(*states):
     }
 
 
+def _possible_aliases(bindings):
+    """Only imported aliases matter to a function's possible module globals."""
+    return {
+        name: value for name, value in bindings.items()
+        if _binding_options(value) & {"contextlib", "suppress"}
+    }
+
+
 def _irrefutable_pattern(pattern):
     if isinstance(pattern, ast.MatchAs):
         return pattern.pattern is None or _irrefutable_pattern(pattern.pattern)
@@ -189,6 +197,12 @@ def _expression_bindings(node, bindings):
         current = _expression_bindings(node.values[0], bindings)
         for value in node.values[1:]:
             current = _join_bindings(current, _expression_bindings(value, current))
+        return current
+    if isinstance(node, ast.Compare):
+        current = _expression_bindings(node.left, bindings)
+        for index, value in enumerate(node.comparators):
+            evaluated = _expression_bindings(value, current)
+            current = evaluated if index == 0 else _join_bindings(current, evaluated)
         return current
     if isinstance(node, ast.IfExp):
         current = _expression_bindings(node.test, bindings)
@@ -214,9 +228,12 @@ def broad_handlers(tree):
     possible statement-prefix states; named stores in conditions flow into
     both branches, without inferring which values make a condition true. Loop
     bodies are inspected once after their finite incoming alias sets stabilize.
+    Function globals retain possible ordered module states from the definition
+    onward; this does not infer calls or when the function actually executes.
     """
     found = []
     state_only = False
+    module_prefixes, definition_offsets, definition_globals = [], {}, {}
     def body(statements, bindings, lexical, function_lexical, ordered, prefixes=()):
         current = dict(bindings)
         for collector in prefixes:
@@ -241,12 +258,16 @@ def broad_handlers(tree):
                 current = _expression_bindings(expression, current)
                 for collector in prefixes:
                     collector.append(current)
-            if isinstance(node, ast.ClassDef):
-                class_lexical = current if lexical is bindings else lexical
-                body(node.body, class_lexical, class_lexical, function_lexical, True)
-            else:
-                local = _scope_bindings(node.body, function_lexical, node.args)
-                body(node.body, local, local, local, False)
+            if any(collector is module_prefixes for collector in prefixes):
+                definition_offsets[id(node)] = len(module_prefixes), _possible_aliases(current)
+            if not state_only:
+                definition_lexical = definition_globals.get(id(node), function_lexical)
+                if isinstance(node, ast.ClassDef):
+                    class_lexical = current if lexical is bindings else lexical
+                    body(node.body, class_lexical, class_lexical, definition_lexical, True)
+                else:
+                    local = _scope_bindings(node.body, definition_lexical, node.args)
+                    body(node.body, local, local, local, False)
             return dict(current, **{node.name: None})
         if isinstance(node, ast.ExceptHandler):
             if _is_broad_type(node.type):
@@ -374,8 +395,27 @@ def broad_handlers(tree):
         return None
 
     initial = {"contextlib": "contextlib"}
-    function_lexical = _scope_bindings(tree.body, initial)
-    body(tree.body, initial, None, function_lexical, True)
+    # A function may run before a later module rebinding, or after a later
+    # import. Collect ordered module states without entering deferred bodies,
+    # then join only the suffix from each definition (no call-graph inference).
+    state_only = True
+    body(tree.body, initial, None, initial, True, (module_prefixes,))
+    state_only = False
+    found.clear()
+    suffix, suffixes = {}, {}
+    offsets = {offset for offset, _seed in definition_offsets.values()}
+    for index in range(len(module_prefixes), -1, -1):
+        if index < len(module_prefixes):
+            suffix = _join_bindings(_possible_aliases(module_prefixes[index]), suffix)
+        if index in offsets:
+            suffixes[index] = suffix
+    definition_globals.update({
+        key: _join_bindings(seed, suffixes[offset])
+        for key, (offset, seed) in definition_offsets.items()
+    })
+    module_prefixes.clear()
+    definition_offsets.clear()
+    body(tree.body, initial, None, initial, True)
     return found
 
 
@@ -925,3 +965,36 @@ def test_lambda_default_stores_bind_conservative_function_locals(statement):
         + "\n    with quiet(Exception): pass\n"
     )
     assert len(broad_handlers(ast.parse(source))) == 0
+
+
+@pytest.mark.parametrize("expression, count", [
+    ("2 < 1 < (quiet := replacement)", 1),
+    ("left < middle < (quiet := replacement) < last", 1),
+    ("left < (quiet := replacement)", 0),
+    ("left < (quiet := replacement) < last", 0),
+    ("(quiet := replacement) < middle < last", 0),
+    ("left < middle < (quiet := replacement) < (quiet := other)", 1),
+    ("left < middle < (other := replacement)", 1),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_chained_comparison_stores_preserve_short_circuit_paths(expression, count, scope):
+    source = "from contextlib import suppress as quiet\nresult = " + expression + "\nwith quiet(Exception): pass"
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("source, count", [
+    ("from contextlib import suppress as quiet\ndef f():\n    with quiet(Exception): pass\nf()\nquiet = replacement", 1),
+    ("import contextlib as ctx\ndef f():\n    with ctx.suppress(Exception): pass\nf()\nctx = replacement", 1),
+    ("quiet = replacement\ndef f():\n    with quiet(Exception): pass\nfrom contextlib import suppress as quiet\nf()", 1),
+    ("from contextlib import suppress as quiet\nquiet = replacement\ndef f():\n    with quiet(Exception): pass", 0),
+    ("from contextlib import suppress as quiet\ndef f(quiet):\n    with quiet(Exception): pass\nquiet = replacement", 0),
+    ("from contextlib import suppress as quiet\ndef f():\n    quiet = replacement\n    with quiet(Exception): pass\nquiet = replacement", 0),
+    ("class C:\n    from contextlib import suppress as quiet\ndef f():\n    with quiet(Exception): pass", 0),
+    ("from contextlib import suppress as quiet\nclass C:\n    def f(self):\n        with quiet(Exception): pass\nC().f()\nquiet = replacement", 1),
+    ("from contextlib import suppress as quiet\ndef outer():\n    quiet = replacement\n    def inner():\n        with quiet(Exception): pass\nquiet = replacement", 0),
+    ("from contextlib import suppress as quiet\nif condition:\n    def f():\n        with quiet(Exception), quiet(BaseException): pass\nf()\nquiet = replacement", 2),
+])
+def test_functions_keep_possible_module_globals_from_definition_onward(source, count):
+    assert len(broad_handlers(ast.parse(source))) == count

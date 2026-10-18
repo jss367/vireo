@@ -70,7 +70,7 @@ def test_identity_counts_filters_and_paths(catalog):
     assert db.count_keywords_in_workspace() == 1
     rules = [{'field': 'keyword_identity', 'op': 'equals', 'value': group['identity']},
              {'field': 'timestamp', 'op': '<=', 'value': '2024-06-30'}]
-    assert set(db.query_photo_ids(rules)) == set(photos[:2])
+    assert set(db.collections.query_photo_ids(rules)) == set(photos[:2])
     db.conn.execute("UPDATE folders SET status = 'missing'")
     db.conn.commit()
     assert db.get_dashboard_stats()['top_keywords'][0]['photo_count'] == 3

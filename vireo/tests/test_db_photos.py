@@ -578,7 +578,7 @@ def test_listing_keyword_uses_distinct_and_color_join_param_order(db, lib):
 
 
 def test_listing_collection_restriction(db, lib):
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Just A", json.dumps([{"field": "photo_ids", "value": [lib["a"]]}]),
     )
     assert [r["id"] for r in db.get_photos(collection_id=cid)] == [lib["a"]]
@@ -627,25 +627,27 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
     façade, so patches of those Database methods reach the listing reads."""
     calls = []
     real_subtree = db.get_folder_subtree_ids
-    real_coll = db._build_collection_query
-    real_sort = db._photo_sort_clause
+    from repositories.collections import CollectionRepository
+
+    real_coll = CollectionRepository._build_collection_query
+    real_sort = CollectionRepository._photo_sort_clause
 
     def subtree(fid):
         calls.append(("subtree", fid))
         return real_subtree(fid)
 
-    def coll(cid):
+    def coll(self, cid):
         calls.append(("coll", cid))
-        return real_coll(cid)
+        return real_coll(self, cid)
 
-    def sort(key):
+    def sort(self, key):
         calls.append(("sort", key))
-        return real_sort(key)
+        return real_sort(self, key)
 
     monkeypatch.setattr(db, "get_folder_subtree_ids", subtree)
-    monkeypatch.setattr(db, "_build_collection_query", coll)
-    monkeypatch.setattr(db, "_photo_sort_clause", sort)
-    cid = db.add_collection("All", json.dumps([{"field": "all"}]))
+    monkeypatch.setattr(CollectionRepository, "_build_collection_query", coll)
+    monkeypatch.setattr(CollectionRepository, "_photo_sort_clause", sort)
+    cid = db.collections.add("All", json.dumps([{"field": "all"}]))
     db.get_photos(folder_id=lib["root"], collection_id=cid, sort="name")
     db.get_photo_ids(folder_id=lib["root"], collection_id=cid)
     db.count_filtered_photos(folder_id=lib["root"], collection_id=cid)
@@ -913,10 +915,10 @@ def test_delete_photos_goes_through_facade_resolver(db, lib, monkeypatch):
 
 
 def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
-    flat = db.add_collection(
+    flat = db.collections.add(
         "flat", json.dumps([{"field": "photo_ids", "value": [lib["a"], lib["b"]]}]),
     )
-    nested = db.add_collection("nested", json.dumps([
+    nested = db.collections.add("nested", json.dumps([
         {"match": "any", "rules": [
             {"field": "photo_ids", "value": [lib["a"]]},
             {"field": "rating", "op": ">=", "value": 3},
@@ -927,8 +929,8 @@ def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
         {"field": "photo_ids"},
         "junk",
     ])
-    untouched = db.add_collection("odd", odd)
-    other = db.add_collection(
+    untouched = db.collections.add("odd", odd)
+    other = db.collections.add(
         "other", json.dumps([{"field": "photo_ids", "value": [lib["c"]]}]),
     )
     # Photos are global, so a collection in another workspace is cleaned too.
@@ -978,7 +980,7 @@ def test_deleted_photo_id_reused_by_sqlite_does_not_join_foreign_collection(db, 
 
     assert reused == doomed
     db.set_active_workspace(lib["other_ws"])
-    assert db.get_collection_photo_ids(foreign) == []
+    assert db.collections.get_photo_ids(foreign) == []
 
 
 def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
@@ -1415,7 +1417,7 @@ def test_composition_stays_on_the_facade():
     assert "get_effective_config" in _self_attrs("get_browse_summary")
     for name in ("get_photos", "get_photo_ids", "count_filtered_photos"):
         assert {
-            "get_folder_subtree_ids", "_build_collection_query",
+            "get_folder_subtree_ids", "collections",
             "_append_location_status_filter",
         } <= _self_attrs(name), name
     for name in ("get_calendar_data", "get_browse_summary"):

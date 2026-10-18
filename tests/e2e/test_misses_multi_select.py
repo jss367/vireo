@@ -61,7 +61,7 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
     db = live_server["db"]
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
@@ -128,7 +128,7 @@ def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
     if scope_key == "collection_id":
-        scope_id = db.add_collection(
+        scope_id = db.collections.add(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
@@ -152,7 +152,7 @@ def test_filter_bootstrap_failure_keeps_requested_scope_closed(
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
     if scope_key == "collection_id":
-        scope_id = db.add_collection(
+        scope_id = db.collections.add(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
@@ -343,7 +343,7 @@ def test_collections_fetch_failure_fails_closed(live_server, page):
     db = live_server["db"]
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )

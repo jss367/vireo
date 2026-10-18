@@ -3090,7 +3090,7 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
     app, db_path = setup
 
     db = Database(db_path)
-    collection_id = db.add_collection("Existing photos", json.dumps([]))
+    collection_id = db.collections.add("Existing photos", json.dumps([]))
     db.close()
 
     import pipeline_job

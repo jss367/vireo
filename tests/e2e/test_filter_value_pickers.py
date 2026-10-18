@@ -162,7 +162,7 @@ def test_saved_multi_value_rules_survive_collection_editor(live_server, page):
     rules = {'mode': 'all', 'rules': [
         {'field': 'keyword', 'op': 'in', 'value': ['Red-tailed Hawk', 'American Robin']},
     ]}
-    cid = live_server['db'].add_collection('Selected birds', json.dumps(rules))
+    cid = live_server['db'].collections.add('Selected birds', json.dumps(rules))
     _open_browse(page, live_server)
     page.evaluate('cid => editCollection(cid)', cid)
     expect(page.locator('.collection-preserved-rule')).to_contain_text('Red-tailed Hawk, American Robin')

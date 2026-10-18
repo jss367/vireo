@@ -137,7 +137,7 @@ def _resolve_collection_photo_ids(db, collection_id):
     Returns:
         set of photo IDs (empty set if collection not found or has no photos)
     """
-    rows = db.get_collection_photos(collection_id, page=1, per_page=1_000_000)
+    rows = db.collections.get_photos(collection_id, page=1, per_page=1_000_000)
     return {r["id"] for r in rows} if rows else set()
 
 
