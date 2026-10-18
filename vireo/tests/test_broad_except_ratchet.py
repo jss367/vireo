@@ -109,8 +109,10 @@ def _scope_bindings(body, inherited, args=None):
             continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bindings[node.id] = None
-        elif isinstance(node, ast.ExceptHandler) and node.name:
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             bindings[node.name] = None
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bindings[node.rest] = None
     if args is not None:
         for arg in args.posonlyargs + args.args + args.kwonlyargs:
             bindings[arg.arg] = None
@@ -169,8 +171,33 @@ def broad_handlers(tree):
             if node.name:
                 bindings = dict(bindings, **{node.name: None})
         elif isinstance(node, (ast.With, ast.AsyncWith)):
-            found.extend(("suppress", node) for item in node.items
-                         if _is_broad_suppress(item.context_expr, bindings))
+            current = dict(bindings)
+            for item in node.items:
+                if _is_broad_suppress(item.context_expr, current):
+                    found.append(("suppress", node))
+                visit(item.context_expr, current, lexical, function_lexical, ordered)
+                if item.optional_vars is not None:
+                    current = _scope_bindings([item.optional_vars], current)
+            body(node.body, current, current if lexical is bindings else lexical,
+                 function_lexical, ordered)
+            return
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            # The iterable sees the incoming binding, the body sees its target.
+            visit(node.iter, bindings, lexical, function_lexical, ordered)
+            current = _scope_bindings([node.target], bindings)
+            nested_lexical = current if lexical is bindings else lexical
+            body(node.body, current, nested_lexical, function_lexical, ordered)
+            body(node.orelse, current, nested_lexical, function_lexical, ordered)
+            return
+        elif isinstance(node, ast.Match):
+            visit(node.subject, bindings, lexical, function_lexical, ordered)
+            for case in node.cases:
+                current = _scope_bindings([case.pattern], bindings)
+                nested_lexical = current if lexical is bindings else lexical
+                if case.guard is not None:
+                    visit(case.guard, current, nested_lexical, function_lexical, ordered)
+                body(case.body, current, nested_lexical, function_lexical, ordered)
+            return
         for _field, value in ast.iter_fields(node):
             if isinstance(value, list) and value and all(isinstance(n, ast.stmt) for n in value):
                 body(value, bindings, lexical, function_lexical, ordered)
@@ -492,3 +519,35 @@ if __name__ == "__main__":
     if sys.argv[1:] != ["--write-baseline"]:
         sys.exit(f"usage: {sys.argv[0]} --write-baseline")
     sys.exit(write_baseline())
+
+
+@pytest.mark.parametrize("compound", [
+    "for quiet in values:\n    with quiet(Exception): pass\n",
+    "for (quiet, other) in values:\n    with quiet(Exception): pass\n",
+    "with factory() as quiet:\n    with quiet(Exception): pass\n",
+    "with factory() as quiet, quiet(Exception): pass\n",
+    "match value:\n    case quiet:\n        with quiet(Exception): pass\n",
+    "match value:\n    case [*quiet]:\n        with quiet(Exception): pass\n",
+    'match value:\n    case {"key": _, **quiet}:\n        with quiet(Exception): pass\n',
+])
+@pytest.mark.parametrize("scope", ["module", "class", "function"])
+def test_compound_targets_shadow_alias_before_body(compound, scope):
+    source = "from contextlib import suppress as quiet\n" + compound
+    if scope != "module":
+        header = "class C:" if scope == "class" else "def f():"
+        source = header + "\n" + "\n".join("    " + line for line in source.splitlines())
+    assert not broad_handlers(ast.parse(source))
+
+
+def test_with_context_resolves_before_its_own_target_and_after_earlier_targets():
+    source = ("from contextlib import suppress as quiet\n"
+              "with quiet(Exception) as quiet, quiet(Exception): pass\n")
+    assert len(broad_handlers(ast.parse(source))) == 1
+
+
+def test_compound_unrelated_targets_preserve_suppress_alias():
+    source = ("from contextlib import suppress as quiet\n"
+              "for other in values:\n    with quiet(Exception): pass\n"
+              "with factory() as other:\n    with quiet(Exception): pass\n"
+              "match value:\n    case other:\n        with quiet(Exception): pass\n")
+    assert len(broad_handlers(ast.parse(source))) == 3

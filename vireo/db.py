@@ -46,7 +46,9 @@ if TYPE_CHECKING:
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
     from repositories.stats import StatsRepository
+    from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
+    from repositories.taxa import TaxaRepository
     from repositories.working_copies import WorkingCopyRepository
     from repositories.workspace_folders import WorkspaceFolderRepository
     from repositories.workspaces import WorkspaceRepository
@@ -2285,6 +2287,26 @@ class Database:
 
     def _next_species_representative_order(self):
         return self._species_curation_repository().next_representative_order()
+
+    # -- Reference taxonomy (``taxonomy.py`` loaders own the commits) --
+
+    def _taxa_repository(self):
+        """Build the (catalog-wide) reference-taxonomy repository on this connection."""
+        from repositories.taxa import TaxaRepository
+
+        return TaxaRepository(self.conn)
+
+    @property
+    def taxa(self) -> TaxaRepository:
+        """The reference-taxonomy domain: ``db.taxa.upsert_taxon(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_taxa_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection is resolved per
+        use. Nothing in it is workspace-scoped and nothing in it commits; the
+        ``taxonomy.py`` loaders keep their own commit points.
+        """
+        return self._taxa_repository()
 
     # -- Folders --
 
@@ -5350,6 +5372,31 @@ class Database:
         ``list_photos_for_eye_keypoint_stage``, ``upsert_photo_embedding``).
         """
         return self._masks_features_repository()
+
+    def _subjects_repository(self):
+        """Build the subject-analysis repository on this connection.
+
+        ``detection_subjects``, ``photo_subject_state`` and
+        ``photo_subject_choices`` are catalog-wide, so the repository takes
+        no workspace id; the one workspace-dependent read receives it from
+        its caller.
+        """
+        from repositories.subjects import SubjectsRepository
+
+        return SubjectsRepository(self.conn)
+
+    @property
+    def subjects(self) -> SubjectsRepository:
+        """Per-subject analysis and the primary subject: ``db.subjects.choice(pid)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_subjects_repository``, exactly as a forwarding
+        wrapper called at that moment would. The tables are catalog-wide, so
+        the accessor needs no active workspace. The decisions (which detection
+        is primary, whether the active mask still matches it) and the commit
+        points stay in ``subjects``.
+        """
+        return self._subjects_repository()
 
     def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
