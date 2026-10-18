@@ -228,6 +228,7 @@ def broad_handlers(tree):
                 if _is_broad_suppress(item.context_expr, current):
                     found.append(("suppress", node))
                 visit(item.context_expr, current, lexical, function_lexical, ordered, prefixes)
+                current = _expression_bindings(item.context_expr, current)
                 if item.optional_vars is not None:
                     current = _scope_bindings([item.optional_vars], current)
             return body(node.body, current, nested_lexical, function_lexical, ordered, prefixes)
@@ -286,12 +287,13 @@ def broad_handlers(tree):
             return _join_bindings(incoming, after_body, after_else)
         elif isinstance(node, ast.Match):
             visit(node.subject, bindings, lexical, function_lexical, ordered, prefixes)
-            fallthrough = bindings
+            fallthrough = _expression_bindings(node.subject, bindings)
             outcomes = []
             for case in node.cases:
                 current = _scope_bindings([case.pattern], fallthrough)
                 if case.guard is not None:
                     visit(case.guard, current, lexical, function_lexical, ordered, prefixes)
+                    current = _expression_bindings(case.guard, current)
                 after_body = body(case.body, current, nested_lexical, function_lexical, ordered, prefixes)
                 guard = case.guard.value if isinstance(case.guard, ast.Constant) else None
                 if case.guard is None or guard is not False:
@@ -710,6 +712,27 @@ def test_try_paths_and_condition_stores(compound, count, scope):
 ])
 @pytest.mark.parametrize("scope", ["module", "class"])
 def test_loop_condition_stores_precede_body_and_zero_iteration_exit(compound, count, scope):
+    source = "from contextlib import suppress as quiet\n" + compound
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("compound, count", [
+    ("with factory(quiet := replacement):\n    with quiet(Exception): pass\n", 0),
+    ("with factory(quiet := replacement), quiet(Exception): pass\n", 0),
+    ("with factory(quiet := replacement): pass\nwith quiet(Exception): pass\n", 0),
+    ("with factory(condition and (quiet := replacement)):\n    with quiet(Exception): pass\n", 1),
+    ("with quiet(Exception, (quiet := replacement)):\n    with quiet(Exception): pass\n", 1),
+    ("match (quiet := replacement):\n    case _:\n        with quiet(Exception): pass\n", 0),
+    ("match value:\n    case _ if (quiet := replacement):\n        with quiet(Exception): pass\n    case _:\n        with quiet(Exception): pass\n", 0),
+    ("match value:\n    case _ if (quiet := replacement): pass\n    case _: pass\nwith quiet(Exception): pass\n", 0),
+    ("match value:\n    case 1 if (quiet := replacement): pass\n    case _:\n        with quiet(Exception): pass\n", 1),
+    ("match value:\n    case _ if condition and (quiet := replacement): pass\n    case _:\n        with quiet(Exception): pass\n", 1),
+    ("match (condition and (quiet := replacement)):\n    case _:\n        with quiet(Exception): pass\n", 1),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_context_and_match_expression_stores(compound, count, scope):
     source = "from contextlib import suppress as quiet\n" + compound
     if scope == "class":
         source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
