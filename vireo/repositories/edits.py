@@ -5,7 +5,8 @@ a look that is the same in every workspace), so the repository takes no
 workspace id. The optional active-workspace check on recipe writes stays on
 ``Database``, which runs it before delegating here.
 
-Callers reach the batch recipe read and the presets as ``db.edits`` (a fresh
+Callers reach the batch recipe read, the edit-mask sweep's
+local-adjustment read and the presets as ``db.edits`` (a fresh
 repository per access, see ``Database.edits``); there are no forwarding
 wrappers on ``Database``. The single-photo recipe read, write and clear stay
 on ``Database`` (``get_photo_edit_recipe``, ``set_photo_edit_recipe``,
@@ -114,6 +115,19 @@ class EditsRepository:
         return cur.rowcount > 0
 
     # -- edit presets (global reusable development settings) -------------------
+
+    def recipes_with_local_adjustments(self) -> list[str | None]:
+        """``recipe_json`` of every recipe that may hold a local adjustment.
+
+        A ``LIKE '%"local"%'`` prefilter, for the edit-mask snapshot sweep
+        (``local_masks.gc_edit_masks``), which parses the mask refs itself.
+        """
+        return [
+            row["v"] for row in self.conn.execute(
+                "SELECT recipe_json AS v FROM photo_edit_recipes "
+                "WHERE recipe_json LIKE '%\"local\"%'"
+            ).fetchall()
+        ]
 
     def list_presets(self) -> list[dict[str, Any]]:
         """Return all edit presets, sorted case-insensitively by name.

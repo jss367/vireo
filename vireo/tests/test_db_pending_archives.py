@@ -98,6 +98,34 @@ def test_set_state_commits_by_id_in_any_workspace(db):
     assert tuple(_committed(db, "a")) == ("sending", "")
 
 
+def test_register_commits_once_per_id_and_get_is_workspace_scoped(db):
+    ws = db.require_workspace_id()
+    db.pending_archives.register("a1", "/nas/a1", "/staging/a1", {"host": "nas", "port": 22})
+    assert not db.in_transaction
+    assert _committed(db, "a1")[0] == "pending"
+    # A second register for the same id keeps the first row.
+    db.pending_archives.register("a1", "/nas/other", "/staging/other", {})
+    row = db.pending_archives.get("a1")
+    assert (row["workspace_id"], row["destination"], row["staging_destination"]) == (
+        ws, "/nas/a1", "/staging/a1",
+    )
+    assert row["target_json"] == '{"host": "nas", "port": 22}'
+    assert db.pending_archives.get("missing") is None
+    other = db.create_workspace("Other")
+    db.set_active_workspace(other)
+    assert db.pending_archives.get("a1") is None
+
+
+def test_module_helpers_read_and_write_through_the_accessor(db):
+    from pending_archives import get_pending_archive, register_pending_archive
+
+    register_pending_archive(db, "m1", "/nas/m1", "/staging/m1", ["x"])
+    archive = get_pending_archive(db, "m1")
+    assert isinstance(archive, dict)
+    assert (archive["id"], archive["target_json"]) == ("m1", '["x"]')
+    assert get_pending_archive(db, "nope") is None
+
+
 def test_scoped_operations_raise_before_any_sql_without_a_workspace(db):
     """The listing and discard need a workspace, exactly where the wrappers did.
 
@@ -115,6 +143,10 @@ def test_scoped_operations_raise_before_any_sql_without_a_workspace(db):
             repo.open_with_review_collection()
         with pytest.raises(RuntimeError):
             repo.delete("kept")
+        with pytest.raises(RuntimeError):
+            repo.get("kept")
+        with pytest.raises(RuntimeError):
+            repo.register("new", "/nas/new", "/staging/new", {})
     finally:
         db.conn.set_trace_callback(None)
     assert statements == []
