@@ -16,14 +16,45 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 from pipeline_stages.context import PipelineRun
 
 if TYPE_CHECKING:
+    import threading
+    from collections.abc import Iterator
+    from contextlib import AbstractContextManager
+    from pathlib import Path
+    from types import ModuleType
+
     from db import Database
+    from import_dedup import DuplicateChecker
+    from pipeline_stages.stage_types import FilterExcluded
+    from scanner import ScanControl, ScanHooks, ScanOptions
 
 log = logging.getLogger(__name__)
+
+
+class RemoteArchive(TypedDict):
+    """A saved remote target resolved for one run (``resolve_remote_archive``)."""
+
+    # The validated remote-target settings (``config.get_remote_target``).
+    target: dict[str, Any]
+    subpath: str
+    parent_subpath: str
+    ssh_final: str
+    mount_final: str
+    display: str
+
+
+class _ScanFunction(Protocol):
+    """``scanner.scan``, as the stage calls it."""
+
+    def __call__(
+        self, root: str, db: Database | None, *, options: ScanOptions | None = None,
+        hooks: ScanHooks | None = None, control: ScanControl | None = None,
+        reported_photo_identities: dict[int, Any] | None = None,
+    ) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -36,13 +67,13 @@ class ScanStageSettings:
 
     skip_scan: bool = False
     """Repair metadata over the collection instead of cataloging sources."""
-    snapshot_paths: Any = None
+    snapshot_paths: list[str] | None = None
     """The file paths of the new-images snapshot the run is scoped to, or
     None."""
-    final_destination: Any = None
+    final_destination: str | None = None
     """The archive a locally processed run ends up in (for a remote target,
     its local mount path); None otherwise."""
-    remote_archive: Any = None
+    remote_archive: RemoteArchive | None = None
     """The resolved remote archive target, or None."""
     effective_vireo_dir: str | None = None
     effective_thumb_cache_dir: str | None = None
@@ -52,12 +83,14 @@ class ScanStageSettings:
 class ScanStageHooks:
     """The pipeline job's helpers the scanner stage calls."""
 
-    filter_excluded: Callable[..., Any]
+    filter_excluded: FilterExcluded
     """Drops the photos the user excluded in the preview."""
-    find_broken_metadata_folders: Callable[..., Any]
-    missing_archive_mount_root: Callable[..., Any]
+    find_broken_metadata_folders: Callable[[Database, list[int]], list[tuple[str, list[str]]]]
+    """``(folder_path, file_paths)`` for each folder holding photos whose
+    metadata needs repair."""
+    missing_archive_mount_root: Callable[[str], str | None]
     """The archive volume's mount root when it is not mounted, else None."""
-    missing_originals_invalidator: Callable[[], Any] | None = None
+    missing_originals_invalidator: Callable[[], object] | None = None
     """Drops the Missing Originals cache after the scan changed the catalog."""
 
 
@@ -65,11 +98,12 @@ class ScanStageHooks:
 class ScanHandoff:
     """How scanned photos reach the thumbnail stage's queue."""
 
-    put_scan_item: Callable[[Any], Any]
-    """Queues one ``(photo_id, path)`` item, or ``sentinel`` at the end."""
-    sentinel: Any
+    put_scan_item: Callable[[object], bool]
+    """Queues one ``(photo_id, path)`` item, or ``sentinel`` at the end;
+    False when the run aborted first."""
+    sentinel: object
     """The end-of-stream item."""
-    prepare_scan_item: Callable[[Any], Any] | None = None
+    prepare_scan_item: Callable[[object], AbstractContextManager[Callable[[], None] | None]] | None = None
     """Context manager that waits for queue room before the photo id is
     published, yielding the enqueue (or None when the run aborted)."""
 
@@ -80,8 +114,8 @@ def scanner_stage(
     settings: ScanStageSettings,
     hooks: ScanStageHooks,
     handoff: ScanHandoff,
-    collected_photo_ids: list,
-):
+    collected_photo_ids: list[int],
+) -> None:
     # Note: stages["scan"]["status"] is NOT set to "running" here. It is
     # flipped to "running" just before each do_scan() call below, so
     # numScan doesn't pulse during the ingest sub-phase.
@@ -119,11 +153,11 @@ class _ProgressAccumulator:
     prior: int = 0
     last_total: int = 0
 
-    def fold(self, current, total):
+    def fold(self, current: int, total: int) -> tuple[int, int]:
         self.last_total = total
         return self.prior + current, self.prior + total
 
-    def advance(self):
+    def advance(self) -> None:
         self.prior += self.last_total
         self.last_total = 0
 
@@ -138,14 +172,14 @@ class _IngestTotals:
     skipped: int = 0
     failed: int = 0
 
-    def add(self, result_info):
+    def add(self, result_info: dict[str, Any]) -> None:
         self.copied_paths.extend(result_info.get("copied_paths", []))
         self.duplicate_folders.update(result_info.get("duplicate_folders", []))
         self.copied += result_info.get("copied", 0)
         self.skipped += result_info.get("skipped_duplicate", 0)
         self.failed += result_info.get("failed", 0)
 
-    def summary(self):
+    def summary(self) -> str:
         parts = []
         if self.copied:
             parts.append(f"{self.copied} copied")
@@ -156,7 +190,7 @@ class _IngestTotals:
         return ", ".join(parts) or "0 files"
 
 
-def _rebased_folder_suffix(folder, root_real, dest_ci_root):
+def _rebased_folder_suffix(folder: str, root_real: str, dest_ci_root: str | None) -> str | None:
     """The part of ``folder`` below the destination root, or None.
 
     Extract the below-root portion of the folder path so we can rebase
@@ -186,22 +220,28 @@ def _rebased_folder_suffix(folder, root_real, dest_ci_root):
 class _ScannedPhotoCallback:
     """Separate blocking pipeline preparation from atomic ID publication."""
 
-    def __init__(self, scan):
+    def __init__(self, scan: _ScanPass) -> None:
         self.scan = scan
 
-    def __call__(self, photo_id, path):
+    def __call__(self, photo_id: int, path: str) -> None:
         self.scan._on_scanned_photo(photo_id, path)
 
     @contextlib.contextmanager
-    def prepare_publication(self, photo_id, path):
+    def prepare_publication(self, photo_id: int, path: str) -> Iterator[Callable[[], None]]:
         scan = self.scan
         if photo_id in scan._reported_photo_ids:
             yield lambda: None
             return
         canonical = scan._canonical_photo_path(photo_id, path)
         published = False
-        with scan.handoff.prepare_scan_item((photo_id, canonical)) as enqueue:
-            def publish():
+        # ``_ScanPass._scan`` installs this callback only when the handoff
+        # has ``prepare_scan_item``.
+        prepare_scan_item = cast(
+            "Callable[[object], AbstractContextManager[Callable[[], None] | None]]",
+            scan.handoff.prepare_scan_item,
+        )
+        with prepare_scan_item((photo_id, canonical)) as enqueue:
+            def publish() -> None:
                 nonlocal published
                 if enqueue is None:
                     return
@@ -220,7 +260,7 @@ class _ScannedPhotoCallback:
                                    current_file=os.path.basename(canonical))
 
 
-def _incomplete_archive_message(archive_report, incomplete):
+def _incomplete_archive_message(archive_report: dict[str, list[str]], incomplete: list[str]) -> str:
     """Why the run refuses empty or partial files at incoming archive paths."""
     # Only surface incomplete-file paths in
     # this branch: the message tells the user
@@ -266,13 +306,13 @@ class _ScanPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
         settings: ScanStageSettings,
         hooks: ScanStageHooks,
         handoff: ScanHandoff,
-        collected_photo_ids: list,
-    ):
+        collected_photo_ids: list[int],
+    ) -> None:
         self.run = run
         self.settings = settings
         self.hooks = hooks
@@ -328,9 +368,21 @@ class _ScanPass:
             raise RuntimeError("scan pass used before run_all opened its database")
         return self.thread_db
 
+    def _destination(self) -> str:
+        """The copy-mode destination; ``run_all`` ingests only when it is set."""
+        return cast("str", self.run.params.destination)
+
+    def _final_destination(self) -> str:
+        """The archive destination, set on every local-processing run."""
+        return cast("str", self.settings.final_destination)
+
+    def _remote_archive(self) -> RemoteArchive:
+        """The remote archive; read only on the branches that checked it is set."""
+        return cast("RemoteArchive", self.settings.remote_archive)
+
     # -- the run -----------------------------------------------------
 
-    def run_all(self, cfg, do_scan, scan_cancelled):
+    def run_all(self, cfg: ModuleType, do_scan: _ScanFunction, scan_cancelled: type[Exception]) -> None:
         run = self.run
         self.do_scan = do_scan
         self.scan_cancelled = scan_cancelled
@@ -362,7 +414,7 @@ class _ScanPass:
             self._scan_in_place(sources)
         self._finish_scan_step()
 
-    def finish(self):
+    def finish(self) -> None:
         """Invalidate caches for every scanned root, then end the queue."""
         run = self.run
         # Invalidate the new-images cache for every root fed to do_scan,
@@ -402,18 +454,18 @@ class _ScanPass:
 
     # -- scanner callbacks and shared step updates -------------------
 
-    def cancel_requested(self):
+    def cancel_requested(self) -> bool:
         run = self.run
         return run.control.should_abort(run.abort) or run.control.cancellation_requested()
 
-    def mark_scan_cancelled(self):
+    def mark_scan_cancelled(self) -> None:
         run = self.run
         run.stages["scan"]["status"] = "skipped"
         run.runner.update_step(
             run.job["id"], "scan", status="completed", summary="Cancelled",
         )
 
-    def _on_scanned_photo(self, photo_id, path):
+    def _on_scanned_photo(self, photo_id: int, path: str) -> None:
         run = self.run
         if photo_id in self._reported_photo_ids:
             # The scanner reports an unchanged companion JPEG under
@@ -441,7 +493,7 @@ class _ScanPass:
         run.runner.update_step(run.job["id"], "scan",
                                current_file=os.path.basename(canonical))
 
-    def _on_merged_photo(self, old_id, new_id, path):
+    def _on_merged_photo(self, old_id: int, new_id: int | None, path: str | None) -> None:
         """Replace an id the scan's pairing pass merged into a RAW.
 
         Only a JPEG that was already a photo of its own reaches that pass
@@ -462,9 +514,10 @@ class _ScanPass:
         if new_id is None or new_id in self._collected_ids:
             self.run.stages["scan"]["count"] = len(self.collected_photo_ids)
         else:
-            self._on_scanned_photo(new_id, path)
+            # The scanner reports a path with every surviving ``new_id``.
+            self._on_scanned_photo(new_id, cast("str", path))
 
-    def _canonical_photo_path(self, photo_id, path):
+    def _canonical_photo_path(self, photo_id: int, path: str) -> str:
         """Return the catalog's own path for ``photo_id`` (RAW path for pairs).
 
         When the scanner's companion-credit callback hands us a JPEG path
@@ -518,10 +571,13 @@ class _ScanPass:
             return path
         return canonical
 
-    def _on_scan_status(self, message, phase_current=None, phase_total=None, phase_label=None):
+    def _on_scan_status(
+        self, message: str, phase_current: int | None = None, phase_total: int | None = None,
+        phase_label: str | None = None,
+    ) -> None:
         run = self.run
         run.runner.update_step(run.job["id"], "scan", current_file=message)
-        extra = {"current_file": message}
+        extra: dict[str, Any] = {"current_file": message}
         if phase_current is not None or phase_total is not None:
             extra.update({
                 "phase_current": phase_current,
@@ -533,7 +589,7 @@ class _ScanPass:
             phase_label or message, **extra,
         )
 
-    def _scan_pause_requested(self):
+    def _scan_pause_requested(self) -> bool:
         # Non-blocking pause probe for scanner.scan. When the
         # pipeline is about to pause, this returns True *before*
         # ``cancel_check`` parks — giving the scanner a chance to
@@ -545,7 +601,7 @@ class _ScanPass:
         probe = getattr(run.runner, "pause_requested", None)
         return bool(probe and probe(run.job["id"]))
 
-    def _on_scan_progress(self, current, total):
+    def _on_scan_progress(self, current: int, total: int) -> None:
         run = self.run
         cum_current, cum_total = self.scan_progress.fold(current, total)
         run.stages["scan"]["count"] = cum_current
@@ -585,7 +641,7 @@ class _ScanPass:
             f"grant Vireo access."
         )
 
-    def _scan(self, root, *, options=None, hooks=None):
+    def _scan(self, root: str, *, options: ScanOptions | None = None, hooks: ScanHooks | None = None) -> None:
         """Run scanner.scan with the callbacks and settings every scan shares.
 
         ``options`` and ``hooks`` carry what differs per call; this fills in
@@ -632,7 +688,7 @@ class _ScanPass:
             reported_photo_identities=self._reported_photo_identities,
         )
 
-    def _start_scan_step(self):
+    def _start_scan_step(self) -> None:
         # Flip scan to running and reset job progress so status
         # events during enumeration don't carry ingest's numbers.
         run = self.run
@@ -642,7 +698,7 @@ class _ScanPass:
         run.job["progress"]["total"] = 0
         run.update_stages(run.runner, run.job["id"], run.stages)
 
-    def _summary_with_metadata_warning(self, summary):
+    def _summary_with_metadata_warning(self, summary: str) -> str:
         from metadata import scan_metadata_warning
 
         metadata_warning = scan_metadata_warning()
@@ -652,7 +708,7 @@ class _ScanPass:
 
     # -- collection mode: metadata repair ----------------------------
 
-    def _repair_collection_metadata(self):
+    def _repair_collection_metadata(self) -> None:
         """Repair the collection's broken metadata, or skip the scan.
 
         Collection mode: no scan targets, but check whether any
@@ -671,7 +727,7 @@ class _ScanPass:
         # rewritten as a side effect of repair.
         in_scope_photos = self.hooks.filter_excluded(coll_photos)
         broken = self.hooks.find_broken_metadata_folders(
-            self.thread_db, [p["id"] for p in in_scope_photos],
+            self._db(), [p["id"] for p in in_scope_photos],
         )
         if not broken:
             run.stages["scan"]["status"] = "skipped"
@@ -717,7 +773,7 @@ class _ScanPass:
         )
         self.handoff.put_scan_item(self.handoff.sentinel)
 
-    def _on_repaired_photo(self, photo_id, path):
+    def _on_repaired_photo(self, photo_id: int, path: str) -> None:
         # Display-only callback for the repair path: updates the
         # scan step's current_file indicator but does NOT enqueue
         # into scan_to_thumb. In collection mode thumbnail_stage
@@ -730,7 +786,7 @@ class _ScanPass:
             current_file=os.path.basename(path),
         )
 
-    def _repair_folders(self, broken):
+    def _repair_folders(self, broken: list[tuple[str, list[str]]]) -> int:
         """Rescan each broken folder; return how many were unreachable."""
         from scanner import ScanHooks, ScanOptions
 
@@ -782,7 +838,7 @@ class _ScanPass:
 
     # -- copy mode: preflight and ingest -----------------------------
 
-    def _prepare_import(self, sources):
+    def _prepare_import(self, sources: list[str]) -> bool:
         """Load the duplicate oracle and run the local-processing preflight.
 
         Returns False when the storage preflight refused the run.
@@ -807,7 +863,7 @@ class _ScanPass:
             return self._run_storage_preflight(sources)
         return True
 
-    def _fresh_checker(self):
+    def _fresh_checker(self) -> DuplicateChecker | None:
         if self.catalog_index is None:
             return None
         from import_dedup import DuplicateChecker
@@ -818,7 +874,7 @@ class _ScanPass:
             times_cache=self.dedup_times_cache,
         )
 
-    def _ingest_sources(self, sources):
+    def _ingest_sources(self, sources: list[str]) -> _IngestTotals:
         run = self.run
         run.stages["ingest"]["status"] = "running"
         run.runner.update_step(run.job["id"], "ingest", status="running")
@@ -850,7 +906,7 @@ class _ScanPass:
             totals.add(result_info)
         return totals
 
-    def _on_ingest_progress(self, current, total, filename):
+    def _on_ingest_progress(self, current: int, total: int, filename: str) -> None:
         run = self.run
         cum_current, cum_total = self.ingest_progress.fold(current, total)
         run.stages["ingest"]["count"] = cum_current
@@ -863,7 +919,7 @@ class _ScanPass:
             current_file=filename,
         )
 
-    def _finish_ingest_step(self, totals):
+    def _finish_ingest_step(self, totals: _IngestTotals) -> bool:
         """Close the ingest step; return False when the run must stop."""
         run = self.run
         # In local-processing mode, ingest failures must fail the
@@ -942,7 +998,7 @@ class _ScanPass:
 
     # -- copy mode: local-processing storage preflight ---------------
 
-    def _bail_storage(self, msg):
+    def _bail_storage(self, msg: str) -> None:
         # collection_stage spins on stages["scan"]["status"]
         # until it reaches a terminal value, so a storage
         # failure that skips scan and ingest entirely must
@@ -964,7 +1020,7 @@ class _ScanPass:
         run.abort.set()
         self.handoff.put_scan_item(self.handoff.sentinel)
 
-    def _run_storage_preflight(self, sources):
+    def _run_storage_preflight(self, sources: list[str]) -> bool:
         """Check the staging and archive volumes before any copying.
 
         Returns False after ``_bail_storage`` refused the run.
@@ -988,7 +1044,7 @@ class _ScanPass:
                     return False
                 archive_parent, archive_space_path = checked
 
-            os.makedirs(run.params.destination, exist_ok=True)
+            os.makedirs(self._destination(), exist_ok=True)
             selected_files = selected_source_files(
                 sources,
                 run.params.file_types,
@@ -1022,11 +1078,11 @@ class _ScanPass:
             return False
         return True
 
-    def _check_remote_archive(self):
+    def _check_remote_archive(self) -> bool:
         """Refuse a remote archive with no GNU rsync or no connection."""
         import move as move_mod
 
-        remote_archive = self.settings.remote_archive
+        remote_archive = self._remote_archive()
         # Refuse BEFORE staging/processing hours of
         # work, in the same spirit as the local
         # archive-parent checks below: a missing GNU
@@ -1063,7 +1119,7 @@ class _ScanPass:
             return False
         return True
 
-    def _check_tracked_destination(self):
+    def _check_tracked_destination(self) -> bool:
         """Refuse an archive destination above a tracked folder.
 
         A tracked archive destination (the import lands at
@@ -1121,7 +1177,7 @@ class _ScanPass:
             return False
         return True
 
-    def _check_local_archive_parent(self):
+    def _check_local_archive_parent(self) -> tuple[str, str] | None:
         """Prove a local archive destination can be created and written.
 
         Returns ``(archive_parent, archive_space_path)``, or None after
@@ -1148,7 +1204,7 @@ class _ScanPass:
         legitimately be unmounted while archiving
         over SSH (that's the point of this mode).
         """
-        final_destination = self.settings.final_destination
+        final_destination = self._final_destination()
         archive_parent = os.path.dirname(
             os.path.normpath(final_destination),
         )
@@ -1199,7 +1255,7 @@ class _ScanPass:
             return None
         return archive_parent, archive_space_path
 
-    def _check_archive_conflicts(self, selected_files):
+    def _check_archive_conflicts(self, selected_files: list[Path]) -> bool:
         """Refuse when the archive holds other files at incoming paths.
 
         Returns False after ``_bail_storage`` refused the run.
@@ -1229,12 +1285,12 @@ class _ScanPass:
         # — ingest will not copy it, so it cannot
         # conflict at archive time.
         archive_report = archive_conflict_report(
-            self.settings.final_destination,
+            self._final_destination(),
             selected_files,
             self.run.params.folder_template,
             duplicate_checker=self._fresh_checker(),
             indexed_paths=self._indexed_archive_paths(
-                self.settings.final_destination,
+                self._final_destination(),
             ),
         )
         archive_conflicts = (
@@ -1336,7 +1392,9 @@ class _ScanPass:
             )
         return indexed
 
-    def _plan_storage(self, selected_files, archive_space_path):
+    def _plan_storage(
+        self, selected_files: list[Path], archive_space_path: str | None,
+    ) -> tuple[dict[str, Any], list[str]]:
         """Size the import; return the storage plan and remote summary bits."""
         from local_processing import non_duplicate_files, total_file_bytes
 
@@ -1368,18 +1426,18 @@ class _ScanPass:
         # already published so the preflight doesn't
         # reject a retry whose remaining delta would fit.
         existing_bytes = existing_archive_bytes(
-            self.settings.final_destination,
+            self._final_destination(),
             planning_files,
             run.params.folder_template,
         )
         plan = storage_plan(
-            run.params.destination, source_bytes,
+            self._destination(), source_bytes,
             archive_parent=archive_space_path,
             archive_existing_bytes=existing_bytes,
         )
         return plan, []
 
-    def _plan_remote_storage(self, source_bytes):
+    def _plan_remote_storage(self, source_bytes: int) -> tuple[dict[str, Any], list[str]]:
         """Plan staging locally and probe the remote archive's free space.
 
         Staging-only local plan (the archive volume
@@ -1398,10 +1456,10 @@ class _ScanPass:
         )
         from move import _remote_free_bytes
 
-        remote_archive = self.settings.remote_archive
+        remote_archive = self._remote_archive()
         remote_summary_bits = []
         plan = storage_plan(
-            self.run.params.destination, source_bytes,
+            self._destination(), source_bytes,
         )
         target = remote_archive["target"]
         # No merge/resume credit for a remote archive:
@@ -1460,7 +1518,7 @@ class _ScanPass:
             )
         return plan, remote_summary_bits
 
-    def _record_storage_plan(self, plan):
+    def _record_storage_plan(self, plan: dict[str, Any]) -> None:
         run = self.run
         run.result["local_processing"] = {
             **plan,
@@ -1480,7 +1538,7 @@ class _ScanPass:
                 ),
             }
 
-    def _bail_insufficient_space(self, plan, archive_parent):
+    def _bail_insufficient_space(self, plan: dict[str, Any], archive_parent: str | None) -> None:
         from local_processing import format_bytes
 
         # Tell the user which volume came up short — the
@@ -1526,7 +1584,7 @@ class _ScanPass:
 
     # -- the scans ---------------------------------------------------
 
-    def _destination_restrict_dirs(self, totals):
+    def _destination_restrict_dirs(self, totals: _IngestTotals) -> list[str] | None:
         """The destination subfolders the copy-mode scan should walk.
 
         Scan only the destination subfolders that actually contain
@@ -1546,7 +1604,7 @@ class _ScanPass:
         """
         from pathlib import Path
 
-        dest_p = Path(os.path.normpath(self.run.params.destination))
+        dest_p = Path(os.path.normpath(self._destination()))
 
         def _under_destination(path: str) -> bool:
             return Path(os.path.normpath(path)).is_relative_to(dest_p)
@@ -1562,14 +1620,14 @@ class _ScanPass:
         )
         return sorted(restrict_set) if restrict_set else None
 
-    def _scan_destination(self, totals):
+    def _scan_destination(self, totals: _IngestTotals) -> None:
         from scanner import ScanHooks, ScanOptions
 
         restrict = self._destination_restrict_dirs(totals)
         self._start_scan_step()
-        self.scanned_roots.append(self.run.params.destination)
+        self.scanned_roots.append(self._destination())
         self._scan(
-            self.run.params.destination,
+            self._destination(),
             options=ScanOptions(restrict_dirs=restrict),
             hooks=ScanHooks(
                 photo=self._on_scanned_photo,
@@ -1578,7 +1636,7 @@ class _ScanPass:
             ),
         )
 
-    def _scan_in_place(self, sources):
+    def _scan_in_place(self, sources: list[str]) -> None:
         """Scan-in-place: scan each source folder independently."""
         from scanner import ScanHooks, ScanOptions
 
@@ -1632,7 +1690,7 @@ class _ScanPass:
             finally:
                 self.scan_progress.advance()
 
-    def _finish_scan_step(self):
+    def _finish_scan_step(self) -> None:
         run = self.run
         if self.cancel_requested():
             self.mark_scan_cancelled()
@@ -1659,10 +1717,10 @@ class _ScanPass:
 def _collection_stage_body(
     run: PipelineRun,
     *,
-    collected_photo_ids,
-    skip_scan,
-    snapshot_paths,
-):
+    collected_photo_ids: list[int],
+    skip_scan: bool,
+    snapshot_paths: list[str] | None,
+) -> None:
 
     if skip_scan:
         return
@@ -1733,9 +1791,9 @@ def _collection_stage_body(
 def collection_stage(
     run: PipelineRun,
     *,
-    _collection_stage_body,
-    collection_ready,
-):
+    _collection_stage_body: Callable[[], None],
+    collection_ready: threading.Event,
+) -> None:
     """Wait for scan to finish, build collection, signal classifier."""
     # Every exit must set ``collection_ready``: detect_stage waits on it
     # unconditionally, so an exception that skipped the set (e.g. the
