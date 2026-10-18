@@ -48,11 +48,8 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 CONN_USE_LIMITS = {
     "app.py": 8,
     "capture_time.py": 7,
-    "card_cleanup.py": 4,
     "culling.py": 6,
-    "duplicate_scan.py": 1,
     "export.py": 2,
-    "file_identity.py": 2,
     "import_dedup.py": 7,
     "importer.py": 1,
     "ingest.py": 2,
@@ -74,7 +71,6 @@ CONN_USE_LIMITS = {
     "site_export.py": 3,
     "species_identity.py": 5,
     "species_identity_repair.py": 3,
-    "staging_recovery.py": 1,
     "sync.py": 5,
     "volume_reachability.py": 8,
 }

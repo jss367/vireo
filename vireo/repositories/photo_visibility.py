@@ -200,6 +200,25 @@ class PhotoVisibilityRepository:
             (workspace_id,),
         ).fetchall()
 
+    def name_size_matches(self, workspace_id: int, filename: str, size: int) -> list[sqlite3.Row]:
+        """Photos visible in ``workspace_id`` named ``filename`` with ``size`` bytes.
+
+        Rows carry ``photo_id``, ``filename``, ``file_size`` and
+        ``folder_path``, ordered by folder path then id: the archive
+        candidates staging recovery checks a staged file against. ``size``
+        is bound as ``int(size)``.
+        """
+        return self.conn.execute(
+            """SELECT p.id AS photo_id, p.filename, p.file_size, f.path AS folder_path
+             FROM photos p
+             JOIN folders f ON f.id = p.folder_id
+             JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                                      AND wf.workspace_id = ?
+            WHERE p.filename = ? AND p.file_size = ?
+            ORDER BY f.path, p.id""",
+            (workspace_id, filename, int(size)),
+        ).fetchall()
+
     def folder_rows_for_photos(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
         ph = ",".join("?" for _ in chunk)
         return self.conn.execute(

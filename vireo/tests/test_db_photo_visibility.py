@@ -83,6 +83,26 @@ def test_scoped_methods_read_the_workspace_active_at_the_call(db):
     assert [w["id"] for w in db.photo_visibility.affected_workspaces([pid])] == [home]
 
 
+def test_name_size_matches_reads_the_given_workspace_in_path_order(db):
+    """Staging recovery's archive candidates: name and size, visible in the workspace."""
+    home = db.require_workspace_id()
+    other = db.create_workspace("Other")
+    _, b_pid = _photo(db, "b/bird.jpg")
+    _, a_pid = _photo(db, "a/bird.jpg")
+    _, resized = _photo(db, "c/bird.jpg")
+    db.conn.execute("UPDATE photos SET filename = 'bird.jpg'")
+    db.conn.execute("UPDATE photos SET file_size = 999 WHERE id = ?", (resized,))
+    db.commit()
+    db.set_active_workspace(None)
+
+    rows = db.photo_visibility.name_size_matches(home, "bird.jpg", "1000")
+    assert [(r["photo_id"], r["filename"], r["file_size"], r["folder_path"]) for r in rows] == [
+        (a_pid, "bird.jpg", 1000, "/photos/a/bird.jpg"),
+        (b_pid, "bird.jpg", 1000, "/photos/b/bird.jpg"),
+    ]
+    assert db.photo_visibility.name_size_matches(other, "bird.jpg", 1000) == []
+
+
 # -- structure ------------------------------------------------------------------
 
 _REMOVED_PHOTO_VISIBILITY_WRAPPERS = (
