@@ -235,7 +235,7 @@ def _shift_arg(minutes):
 
 
 def _photo_paths(db, photo):
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     if not folder:
         return []
     paths = [os.path.join(folder["path"], photo["filename"])]

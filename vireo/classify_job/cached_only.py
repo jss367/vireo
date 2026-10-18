@@ -100,7 +100,7 @@ def _finalize_cached_only(
             job["id"], "classify", label_source=label_source_text,
         )
 
-    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
     photo_ids = [p["id"] for p in photos]
     detection_map = _cached_only_detection_map(thread_db, photo_ids)
 

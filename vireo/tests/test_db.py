@@ -169,13 +169,13 @@ def test_non_schema_operational_error_propagates(tmp_path, monkeypatch):
 
 
 def test_add_and_get_folder(tmp_path):
-    """add_folder creates a folder, get_folder_tree returns it."""
+    """add_folder creates a folder, folders.tree returns it."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos/2024', name='2024')
     assert fid is not None
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     assert len(tree) == 1
     assert tree[0]['path'] == '/photos/2024'
     assert tree[0]['name'] == '2024'
@@ -188,7 +188,7 @@ def test_folder_hierarchy(tmp_path):
     parent_id = db.add_folder('/photos', name='photos')
     child_id = db.add_folder('/photos/2024', name='2024', parent_id=parent_id)
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     assert len(tree) == 2
     child = [f for f in tree if f['name'] == '2024'][0]
     assert child['parent_id'] == parent_id
@@ -302,7 +302,7 @@ def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp
                  file_size=100, file_mtime=3.0)
     # add_photo does not grant visibility back to the detached intermediate.
     assert db.get_folder_subtree_ids(a) == [a, c]
-    tree = {row['id']: row for row in db.get_folder_tree()}
+    tree = {row['id']: row for row in db.folders.tree()}
     assert b not in tree
     assert tree[c]['parent_id'] == a
     results = db.photos.list_page(folder_id=a)
@@ -5280,7 +5280,7 @@ def test_get_calendar_data_basic(tmp_path):
 def test_get_calendar_data_filters(tmp_path):
     """get_calendar_data respects folder_id and rating_min filters."""
     db = _make_calendar_db(tmp_path)
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     jan = [f for f in folders if f["name"] == "January"][0]
     data = db.photos.get_calendar_data(year=2024, folder_id=jan["id"])
     assert list(data["days"].keys()) == ["2024-01-20"]
@@ -9307,7 +9307,7 @@ def test_folder_status_column_exists(tmp_path):
 
 
 def test_check_folder_health_marks_missing(tmp_path):
-    """check_folder_health sets status='missing' for non-existent folders."""
+    """folders.check_health sets status='missing' for non-existent folders."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9318,7 +9318,7 @@ def test_check_folder_health_marks_missing(tmp_path):
     fid_real = db.add_folder(real_dir, name="real")
     fid_gone = db.add_folder("/nonexistent/folder", name="gone")
 
-    changed = db.check_folder_health()
+    changed = db.folders.check_health()
     assert changed == 1
 
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_gone,)).fetchone()
@@ -9328,7 +9328,7 @@ def test_check_folder_health_marks_missing(tmp_path):
 
 
 def test_check_folder_health_recovers(tmp_path):
-    """check_folder_health sets status back to 'ok' when folder reappears."""
+    """folders.check_health sets status back to 'ok' when folder reappears."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9341,17 +9341,17 @@ def test_check_folder_health_recovers(tmp_path):
     db.conn.commit()
 
     # Folder doesn't exist yet -> stays missing
-    db.check_folder_health()
+    db.folders.check_health()
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "missing"
 
     # Create folder -> recovery
     os.makedirs(folder)
-    db.check_folder_health()
+    db.folders.check_health()
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
 
 
 def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
-    """check_folder_health must NOT overwrite 'partial' with 'ok'.
+    """folders.check_health must NOT overwrite 'partial' with 'ok'.
 
     Regression: the app runs this health check in a 10-minute background loop.
     If it blindly sets every existing folder to 'ok', a folder flagged
@@ -9371,7 +9371,7 @@ def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
     db.conn.commit()
 
-    changed = db.check_folder_health()
+    changed = db.folders.check_health()
     assert changed == 0, "partial folder on disk should not change status"
     status = db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (fid,)
@@ -9396,7 +9396,7 @@ def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
     db.conn.commit()
 
-    changed = db.check_folder_health()
+    changed = db.folders.check_health()
     assert changed == 1
     status = db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (fid,)
@@ -9405,7 +9405,7 @@ def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
 
 
 def test_get_missing_folders(tmp_path):
-    """get_missing_folders returns missing folders with photo counts."""
+    """folders.missing returns missing folders with photo counts."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9417,7 +9417,7 @@ def test_get_missing_folders(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
     db.conn.commit()
 
-    missing = db.get_missing_folders()
+    missing = db.folders.missing()
     assert len(missing) == 1
     assert missing[0]["path"] == "/gone/folder"
     assert missing[0]["photo_count"] == 1
@@ -9440,11 +9440,11 @@ def test_get_missing_folders_scoped_to_active_workspace(tmp_path):
     db.conn.commit()
 
     db.set_active_workspace(ws_a)
-    missing = db.get_missing_folders()
+    missing = db.folders.missing()
     assert [row["path"] for row in missing] == ["/gone/in_a"]
 
     db.set_active_workspace(ws_b)
-    missing = db.get_missing_folders()
+    missing = db.folders.missing()
     assert [row["path"] for row in missing] == ["/gone/in_b"]
 
 
@@ -9477,7 +9477,7 @@ def test_get_missing_photos_returns_photos_with_missing_source(tmp_path):
 
 
 def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
-    """Photos in folders flagged 'missing' are surfaced by get_missing_folders;
+    """Photos in folders flagged 'missing' are surfaced by folders.missing;
     don't double-count them here."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -9795,7 +9795,7 @@ def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
 
 
 def test_relocate_folder(tmp_path):
-    """relocate_folder updates path and sets status to 'ok'."""
+    """folders.relocate updates path and sets status to 'ok'."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9807,7 +9807,7 @@ def test_relocate_folder(tmp_path):
 
     new_path = str(tmp_path / "new_location")
     os.makedirs(new_path)
-    db.relocate_folder(fid, new_path)
+    db.folders.relocate(fid, new_path)
 
     row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
     assert row["path"] == new_path
@@ -9815,7 +9815,7 @@ def test_relocate_folder(tmp_path):
 
 
 def test_relocate_folder_cascade(tmp_path):
-    """relocate_folder returns child folders that also exist at new location."""
+    """folders.relocate returns child folders that also exist at new location."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9829,7 +9829,7 @@ def test_relocate_folder_cascade(tmp_path):
     new_root = str(tmp_path / "new_root")
     os.makedirs(os.path.join(new_root, "sub"))
 
-    cascaded = db.relocate_folder(parent, new_root)
+    cascaded = db.folders.relocate(parent, new_root)
     assert len(cascaded) == 1
     assert cascaded[0]["id"] == child
 
@@ -9839,7 +9839,7 @@ def test_relocate_folder_cascade(tmp_path):
 
 
 def test_nearest_ancestor_folder_id(tmp_path):
-    """nearest_ancestor_folder_id returns the longest proper-ancestor row."""
+    """folders.nearest_ancestor_id returns the longest proper-ancestor row."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9849,14 +9849,14 @@ def test_nearest_ancestor_folder_id(tmp_path):
     usa_2026 = db.add_folder("/vol/USA/2026", name="2026", parent_id=usa)
 
     # Longest ancestor wins over the shallower one.
-    assert db.nearest_ancestor_folder_id("/vol/USA/2026/2026-05-30") == usa_2026
+    assert db.folders.nearest_ancestor_id("/vol/USA/2026/2026-05-30") == usa_2026
     # Falls back to the nearest existing ancestor when the immediate one has
     # no row.
-    assert db.nearest_ancestor_folder_id("/vol/USA/gap/leaf") == usa
+    assert db.folders.nearest_ancestor_id("/vol/USA/gap/leaf") == usa
     # No ancestor row -> None (folder is a root).
-    assert db.nearest_ancestor_folder_id("/elsewhere/x") is None
+    assert db.folders.nearest_ancestor_id("/elsewhere/x") is None
     # A row is never its own ancestor.
-    assert db.nearest_ancestor_folder_id("/vol/USA", exclude_id=usa) is None
+    assert db.folders.nearest_ancestor_id("/vol/USA", exclude_id=usa) is None
 
 
 def test_relocate_folder_relinks_parent_by_path(tmp_path):
@@ -9876,7 +9876,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
     db.conn.commit()
 
     # User moved it onto the USA volume and re-points Vireo at the new path.
-    db.relocate_folder(date, "/vol/USA/2026-05-30")
+    db.folders.relocate(date, "/vol/USA/2026-05-30")
 
     row = db.conn.execute(
         "SELECT parent_id FROM folders WHERE id = ?", (date,)
@@ -9886,7 +9886,7 @@ def test_relocate_folder_relinks_parent_by_path(tmp_path):
 
 
 def test_relocate_folder_merge_into_existing(tmp_path):
-    """relocate_folder merges photos into existing folder when paths conflict."""
+    """folders.relocate merges photos into existing folder when paths conflict."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9913,7 +9913,7 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     pid_b_existing = db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
     pid_c = db.add_photo(fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
 
-    cascaded = db.relocate_folder(fid_missing, existing_path)
+    cascaded = db.folders.relocate(fid_missing, existing_path)
 
     # Missing folder should be deleted
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
@@ -9936,7 +9936,7 @@ def test_relocate_folder_merge_into_existing(tmp_path):
 
 
 def test_relocate_folder_merge_revalidates_source_path(tmp_path):
-    """relocate_folder rejects merge if source path came back on disk."""
+    """folders.relocate rejects merge if source path came back on disk."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9955,7 +9955,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
 
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
-        db.relocate_folder(fid_source, target_path)
+        db.folders.relocate(fid_source, target_path)
 
     # Source should be refreshed to ok, not deleted
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_source,)).fetchone()
@@ -9964,7 +9964,7 @@ def test_relocate_folder_merge_revalidates_source_path(tmp_path):
 
 
 def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
-    """relocate_folder raises ValueError when source folder is not missing."""
+    """folders.relocate raises ValueError when source folder is not missing."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -9981,7 +9981,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
 
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
-        db.relocate_folder(fid_a, dir_b)
+        db.folders.relocate(fid_a, dir_b)
 
     # Both folders should remain unchanged
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_a,)).fetchone() is not None
@@ -9989,7 +9989,7 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
 
 
 def test_relocate_folder_merge_updates_photo_count(tmp_path):
-    """_merge_into_existing recomputes photo_count on the target folder."""
+    """folders.merge_into_existing recomputes photo_count on the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10009,14 +10009,14 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
     db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
     db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
 
-    db.relocate_folder(fid_missing, existing_path)
+    db.folders.relocate(fid_missing, existing_path)
 
     row = db.conn.execute("SELECT photo_count FROM folders WHERE id = ?", (fid_existing,)).fetchone()
     assert row["photo_count"] == 2
 
 
 def test_relocate_folder_merge_marks_target_ok(tmp_path):
-    """_merge_into_existing sets target folder status to ok."""
+    """folders.merge_into_existing sets target folder status to ok."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10031,14 +10031,14 @@ def test_relocate_folder_merge_marks_target_ok(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing'")
     db.conn.commit()
 
-    db.relocate_folder(fid_missing, existing_path)
+    db.folders.relocate(fid_missing, existing_path)
 
     row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_existing,)).fetchone()
     assert row["status"] == "ok"
 
 
 def test_relocate_folder_merge_reparents_children(tmp_path):
-    """_merge_into_existing reparents child folders to the target folder."""
+    """folders.merge_into_existing reparents child folders to the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10054,7 +10054,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.relocate_folder(fid_missing, existing_path)
+    db.folders.relocate(fid_missing, existing_path)
 
     # Source folder should be gone
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
@@ -10065,7 +10065,7 @@ def test_relocate_folder_merge_reparents_children(tmp_path):
 
 
 def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
-    """_merge_into_existing transfers workspace visibility to the target folder."""
+    """folders.merge_into_existing transfers workspace visibility to the target folder."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
@@ -10094,7 +10094,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.relocate_folder(fid_missing, existing_path)
+    db.folders.relocate(fid_missing, existing_path)
 
     # Target folder should now be visible in BOTH workspaces
     ws_links = db.conn.execute(
@@ -10107,7 +10107,7 @@ def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
 
 
 def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
-    """_merge_into_existing must not promote materialized descendants to roots."""
+    """folders.merge_into_existing must not promote materialized descendants to roots."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
@@ -10131,7 +10131,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    db.relocate_folder(fid_missing, existing_path)
+    db.folders.relocate(fid_missing, existing_path)
 
     row = db.conn.execute(
         """SELECT is_root FROM workspace_folders
@@ -10143,7 +10143,7 @@ def test_relocate_folder_merge_preserves_non_root_workspace_link(tmp_path):
 
 
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):
-    """relocate_folder skips cascading a child if its target path is already tracked."""
+    """folders.relocate skips cascading a child if its target path is already tracked."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10161,7 +10161,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     # Add a folder that already occupies the child's target path
     db.add_folder(child_target, name="conflict")
 
-    cascaded = db.relocate_folder(parent, new_root)
+    cascaded = db.folders.relocate(parent, new_root)
     # Child should NOT be in cascaded list since its target is already taken
     assert len(cascaded) == 0
 
@@ -10172,7 +10172,7 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
 
 
 def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
-    """relocate_folder skips descendants when their ancestor's path conflicts."""
+    """folders.relocate skips descendants when their ancestor's path conflicts."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10192,7 +10192,7 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
     # Add a folder that conflicts with the child's target path
     db.add_folder(child_target, name="conflict")
 
-    cascaded = db.relocate_folder(parent, new_root)
+    cascaded = db.folders.relocate(parent, new_root)
     # Neither child nor grandchild should be cascaded
     assert len(cascaded) == 0
 
@@ -10222,7 +10222,7 @@ def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(t
     os.makedirs(grand_target)
     db.add_folder(child_target, name="conflict")
 
-    cascaded = db.relocate_folder(parent, new_root)
+    cascaded = db.folders.relocate(parent, new_root)
     assert cascaded == []
 
     for fid, expected_path in [
@@ -10695,7 +10695,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
 
 
 def test_missing_folder_hidden_from_folder_tree(tmp_path):
-    """Missing folders don't appear in get_folder_tree."""
+    """Missing folders don't appear in folders.tree."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -10704,19 +10704,19 @@ def test_missing_folder_hidden_from_folder_tree(tmp_path):
     fid_ok = db.add_folder("/ok/folder", name="ok")
     fid_gone = db.add_folder("/gone/folder", name="gone")
 
-    assert len(db.get_folder_tree()) == 2
+    assert len(db.folders.tree()) == 2
 
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
     db.conn.commit()
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     assert len(tree) == 1
     assert tree[0]["name"] == "ok"
 
 
 def test_folder_tree_orphan_parent_becomes_root(tmp_path):
     """If a folder's parent_id points to a folder not linked to the active
-    workspace, get_folder_tree returns the folder with parent_id=None so the
+    workspace, folders.tree returns the folder with parent_id=None so the
     browse sidebar renders it at root instead of hiding it under an unreachable
     parent bucket."""
     from db import Database
@@ -10732,7 +10732,7 @@ def test_folder_tree_orphan_parent_becomes_root(tmp_path):
     # Child references the unlinked parent.
     fid_child = db.add_folder("/photos/2024", name="2024", parent_id=fid_parent)
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     assert len(tree) == 1
     assert tree[0]["id"] == fid_child
     assert tree[0]["parent_id"] is None
@@ -10748,7 +10748,7 @@ def test_folder_tree_linked_parent_preserved(tmp_path):
     fid_parent = db.add_folder("/photos", name="photos")
     fid_child = db.add_folder("/photos/2024", name="2024", parent_id=fid_parent)
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     child = [f for f in tree if f["id"] == fid_child][0]
     assert child["parent_id"] == fid_parent
 
@@ -10767,7 +10767,7 @@ def test_folder_tree_walks_past_unlinked_ancestor(tmp_path):
     db.remove_workspace_folder(ws, fid_mid)
     fid_leaf = db.add_folder("/photos/2024/trip", name="trip", parent_id=fid_mid)
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     paths = {f["id"]: f["parent_id"] for f in tree}
     assert fid_gp in paths
     assert fid_mid not in paths  # not linked -> not returned
@@ -10788,11 +10788,11 @@ def test_folder_tree_walks_past_missing_ancestor(tmp_path):
     fid_leaf = db.add_folder("/photos/2024/trip", name="trip", parent_id=fid_mid)
 
     # Mark the middle folder as missing on disk — it stays linked to the
-    # workspace but is filtered out by get_folder_tree's status='ok' clause.
+    # workspace but is filtered out by folders.tree's status='ok' clause.
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_mid,))
     db.conn.commit()
 
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     ids = {f["id"] for f in tree}
     assert fid_mid not in ids
     leaf_row = [f for f in tree if f["id"] == fid_leaf][0]
@@ -10807,7 +10807,7 @@ def test_folder_tree_null_parent_stays_null(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/photos", name="photos")
-    tree = db.get_folder_tree()
+    tree = db.folders.tree()
     assert len(tree) == 1
     assert tree[0]["id"] == fid
     assert tree[0]["parent_id"] is None
@@ -10832,13 +10832,13 @@ def test_folder_tree_orphan_resolution_is_workspace_scoped(tmp_path):
 
     # In A: parent is linked -> preserved.
     db.set_active_workspace(ws_a)
-    tree_a = db.get_folder_tree()
+    tree_a = db.folders.tree()
     child_a = [f for f in tree_a if f["id"] == fid_child][0]
     assert child_a["parent_id"] == fid_parent
 
     # In B: parent is not linked -> reparented to None.
     db.set_active_workspace(ws_b)
-    tree_b = db.get_folder_tree()
+    tree_b = db.folders.tree()
     assert len(tree_b) == 1
     assert tree_b[0]["id"] == fid_child
     assert tree_b[0]["parent_id"] is None
@@ -10973,7 +10973,7 @@ def test_move_folder_path_relinks_parent(db, destination):
     db.move_folder_path(date, new_path)
 
     expected_parent = {"/photos/2026": year, "/archive": archive}.get(destination)
-    tree = {row["id"]: row for row in db.get_folder_tree()}
+    tree = {row["id"]: row for row in db.folders.tree()}
     assert tree[date]["path"] == new_path
     assert tree[date]["parent_id"] == expected_parent
     assert tree[child]["path"] == new_path + "/edits"
@@ -11014,7 +11014,7 @@ def test_startup_repairs_stale_folder_parent(tmp_path, startup):
         assert {r["id"]: r for r in response.json}[date]["parent_id"] == year
 
     with Database(db_path, initialize_schema=(startup == "database")) as reopened:
-        tree = {r["id"]: r for r in reopened.get_folder_tree()}
+        tree = {r["id"]: r for r in reopened.folders.tree()}
         assert tree[date]["parent_id"] == year
         assert tree[child]["parent_id"] == date
         assert date not in reopened.get_folder_subtree_ids(month)
@@ -11045,11 +11045,11 @@ def test_repair_stale_folder_parents_uses_nearest_ancestor(db, base):
     db.conn.commit()
 
     assert db.repair_stale_folder_parents() == 2
-    assert db.get_folder(moved)["parent_id"] == year
-    assert db.get_folder(moved)["status"] == "missing"
-    assert db.get_folder(detached)["parent_id"] is None
-    assert db.get_folder(valid)["parent_id"] == root
-    assert db.get_folder(independent)["parent_id"] is None
+    assert db.folders.get(moved)["parent_id"] == year
+    assert db.folders.get(moved)["status"] == "missing"
+    assert db.folders.get(detached)["parent_id"] is None
+    assert db.folders.get(valid)["parent_id"] == root
+    assert db.folders.get(independent)["parent_id"] is None
     assert db.repair_stale_folder_parents() == 0
 
 
@@ -11074,13 +11074,13 @@ def test_repair_stale_folder_parents_preserves_managed_local_links(db, managed_k
     db.conn.commit()
 
     assert db.repair_stale_folder_parents() == 0
-    assert db.get_folder(child)["parent_id"] == parent
+    assert db.folders.get(child)["parent_id"] == parent
     # Deferred links are reconsidered once the managed session is gone.
     db.conn.execute("DELETE FROM local_folder_mappings")
     db.conn.execute("DELETE FROM local_workspace_folders")
     db.conn.commit()
     assert db.repair_stale_folder_parents() == 1
-    assert db.get_folder(child)["parent_id"] is None
+    assert db.folders.get(child)["parent_id"] is None
 
 
 def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
@@ -11571,7 +11571,7 @@ def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
     the reconciliation repoints the staged root to ``/Photos/2026/NewShoot``
     with ``parent_id=NULL`` — floating it outside the managed archive tree
     and breaking every parent-based subtree operation (cascade path
-    renames, ``_folder_subtree_ids_by_path``, tree UI). The merge must
+    renames, ``folders.subtree_ids_by_path``, tree UI). The merge must
     materialize the missing intermediate rows top-down so the staged
     root's ``parent_id`` resolves to the freshly-created ``/Photos/2026``
     row, and each intermediate must be linked to the active workspace as
@@ -14497,7 +14497,7 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     """The remap moves pending rows by ``photo_id`` alone, so it also moves
     rows owned by a workspace other than the one running the merge. That
     workspace never linked the archive folder, and
-    ``sync._resolve_xmp_paths`` builds its map from ``get_folder_tree`` --
+    ``sync._resolve_xmp_paths`` builds its map from ``folders.tree`` --
     so without help the preserved row would stay queued and fail every
     future sync as inaccessible, with nothing saying why. Grant the
     sibling workspace sync-only access to the survivor's folder instead --
@@ -14558,8 +14558,8 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
         # But the survivor's folder is NOT part of the sibling
         # workspace's library membership: it is not in
         # ``workspace_folders`` and does not show up in
-        # ``get_folder_tree``.
-        assert date_id not in {f["id"] for f in db.get_folder_tree()}
+        # ``folders.tree``.
+        assert date_id not in {f["id"] for f in db.folders.tree()}
         assert db.conn.execute(
             "SELECT COUNT(*) AS n FROM workspace_folders "
             "WHERE workspace_id = ?", (sibling_ws,),
@@ -14643,7 +14643,7 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
         resolved = _resolve_xmp_paths(db, [new_pid])
         assert resolved[new_pid] == str(date_dir / "dup.xmp")
         # No workspace_folders link -- browse/library queries stay clean.
-        assert survivor_folder not in {f["id"] for f in db.get_folder_tree()}
+        assert survivor_folder not in {f["id"] for f in db.folders.tree()}
     finally:
         db.set_active_workspace(ws)
     # Grant names the survivor itself, so it resolves through whatever
@@ -15288,7 +15288,7 @@ def test_get_folders_with_quality_data(tmp_path):
     )
     db.conn.commit()
 
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     assert len(folders) == 1
     assert folders[0]["name"] == "scored"
     assert folders[0]["photo_count"] > 0
@@ -15306,7 +15306,7 @@ def test_get_folders_with_quality_data_rolls_up_subtree(tmp_path):
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
     db.conn.commit()
 
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     # Both the parent and the child appear; each counts the single scored photo
     by_name = {f["name"]: f for f in folders}
     assert by_name["p"]["photo_count"] == 1
@@ -15330,7 +15330,7 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     db.add_workspace_folder(other_ws, child)
     db.conn.commit()
 
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     by_name = {f["name"]: f for f in folders}
     # Parent should NOT inherit the child's scored photo, since the child is
     # no longer in the active workspace. species_curation.get_highlights_candidates would
@@ -15359,7 +15359,7 @@ def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path)
     db.add_workspace_folder(other_ws, b)
     db.conn.commit()
 
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     by_name = {f["name"]: f for f in folders}
     # C still shows up (its own photo counts).
     assert by_name["c"]["photo_count"] == 1
@@ -15383,7 +15383,7 @@ def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
     db.conn.commit()
 
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     by_name = {f["name"]: f for f in folders}
     assert by_name["p"]["photo_count"] == 1  # only the ok-child photo
     assert "gone" not in by_name
@@ -16665,7 +16665,7 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     """Partial folders must stay in the tree so the browse sidebar can render
     a badge and the user can rescan. Also, the returned rows must carry
     ``status`` so the UI can tell ok from partial. Missing folders are still
-    excluded — they have their own ``get_missing_folders`` path.
+    excluded — they have their own ``folders.missing`` path.
     """
     from db import Database
 
@@ -16684,7 +16684,7 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
     )
     db.conn.commit()
 
-    rows = {row["id"]: dict(row) for row in db.get_folder_tree()}
+    rows = {row["id"]: dict(row) for row in db.folders.tree()}
 
     assert ok_id in rows, "ok folder must appear in tree"
     assert partial_id in rows, (

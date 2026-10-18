@@ -1,6 +1,9 @@
 """Which photos get a working copy, and the entry points that extract them."""
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING
 
 from image_loader import (
     RAW_EXTENSIONS,
@@ -8,8 +11,22 @@ from image_loader import (
 )
 from scanner.working_copy_batch import _FAILURE_RETRY_AFTER, _working_copy_quota_mb, _WorkingCopyBatch
 
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterable, Sequence
 
-def _subtree_like_pattern(path, sep=None):
+    from db import Database
+    from scanner.scan_types import (
+        CheckCallback,
+        ProgressCallback,
+        SourcePaths,
+        StatusCallback,
+        StrPath,
+        WorkingCopyScopeEntry,
+    )
+
+
+def _subtree_like_pattern(path: str, sep: str | None = None) -> str:
     """Build a SQLite LIKE parameter that matches ``path`` + any descendant.
 
     Intended for use with ``LIKE ? ESCAPE '\\'``. Escapes ``\\``, ``%``, and
@@ -28,13 +45,13 @@ def _subtree_like_pattern(path, sep=None):
     while path.endswith(sep):
         path = path[: -len(sep)]
 
-    def _escape(s):
+    def _escape(s: str) -> str:
         return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     return _escape(path) + _escape(sep) + "%"
 
 
-def _working_copy_candidate_predicate(wc_max_size, alias=""):
+def _working_copy_candidate_predicate(wc_max_size: int | None, alias: str = "") -> tuple[str, list[object]]:
     """Build the WHERE-clause fragment selecting photos eligible for working-copy
     extraction, plus its bind parameters.
 
@@ -54,7 +71,7 @@ def _working_copy_candidate_predicate(wc_max_size, alias=""):
     """
     p = (alias + ".") if alias else ""
     placeholders = ",".join("?" for _ in RAW_EXTENSIONS)
-    params = list(RAW_EXTENSIONS)
+    params: list[object] = list(RAW_EXTENSIONS)
     jpeg_clause = ""
     if wc_max_size and wc_max_size > 0:
         jpeg_clause = (
@@ -79,7 +96,7 @@ def _working_copy_candidate_predicate(wc_max_size, alias=""):
     return where, params
 
 
-def working_copy_backfill_candidate_count(db):
+def working_copy_backfill_candidate_count(db: Database) -> int:
     """Count photos that ``_extract_working_copies`` would actually process.
 
     Used by ``backfill_working_copies`` for accurate before/after reporting.
@@ -100,9 +117,12 @@ def working_copy_backfill_candidate_count(db):
     return db.working_copies.candidate_count(where, params)
 
 
-def _extract_working_copies(db, vireo_dir, progress_callback=None,
-                            status_callback=None, scope=None,
-                            cancel_check=None, source_paths=None):
+def _extract_working_copies(
+    db: Database, vireo_dir: StrPath, progress_callback: ProgressCallback | None = None,
+    status_callback: StatusCallback | None = None,
+    scope: Sequence[WorkingCopyScopeEntry] | None = None, cancel_check: CheckCallback | None = None,
+    source_paths: SourcePaths | None = None,
+) -> None:
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -178,7 +198,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     ).run()
 
 
-def _working_copy_scope_clause(db, scope):
+def _working_copy_scope_clause(db: Database, scope: Iterable[WorkingCopyScopeEntry]) -> str:
     """Load ``scope`` into a TEMP table; return the SQL clause matching it."""
     scope_rows = []
     for entry in scope:
@@ -203,7 +223,9 @@ def _working_copy_scope_clause(db, scope):
     return db.working_copies.load_scope(scope_rows)
 
 
-def _working_copy_candidate_rows(db, wc_max_size, scope):
+def _working_copy_candidate_rows(
+    db: Database, wc_max_size: int | None, scope: Iterable[WorkingCopyScopeEntry] | None,
+) -> list[sqlite3.Row]:
     """Snapshot the rows this pass should extract, newest import first."""
     # Candidate criteria (NULL working_copy_path + RAW or oversized JPEG +
     # not blocked by a stale failure marker) is shared with summary counts
@@ -230,8 +252,10 @@ def _working_copy_candidate_rows(db, wc_max_size, scope):
     ]
 
 
-def backfill_working_copies(db, vireo_dir, progress_callback=None,
-                            status_callback=None, cancel_check=None):
+def backfill_working_copies(
+    db: Database, vireo_dir: StrPath, progress_callback: ProgressCallback | None = None,
+    status_callback: StatusCallback | None = None, cancel_check: CheckCallback | None = None,
+) -> dict[str, int]:
     """Library-wide backfill of missing working copies.
 
     Convenience wrapper around ``_extract_working_copies`` with no folder

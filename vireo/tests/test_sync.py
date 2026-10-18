@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from PIL import Image
+from repositories.folders import FolderRepository
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -1588,10 +1589,10 @@ def test_sync_resolves_paths_once_per_run_and_folder(tmp_path, monkeypatch):
         db.queue_change(sibling, "keyword_add", "Osprey")
 
     tree_calls = []
-    original_tree = db.get_folder_tree
+    original_tree = FolderRepository.tree
     monkeypatch.setattr(
-        db, "get_folder_tree",
-        lambda: (tree_calls.append(1), original_tree())[1],
+        FolderRepository, "tree",
+        lambda self: (tree_calls.append(1), original_tree(self))[1],
     )
     isdir_calls = []
     original_isdir = os.path.isdir

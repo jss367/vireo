@@ -141,7 +141,7 @@ def create_pipeline_blueprint(
         # the path-based fallback, legacy folders with parent_id=NULL
         # (whose paths sit under the selected root) are silently omitted
         # from the plan even though the run walks them via
-        # _folder_subtree_ids_by_path.
+        # folders.subtree_ids_by_path.
         for fid in folder_ids:
             if not db.get_workspace_visible_folder_ids([fid]):
                 return None, json_error("folder not found", 404)
@@ -150,7 +150,7 @@ def create_pipeline_blueprint(
             # folder set so nothing leaks in from another workspace that
             # happens to share a path prefix.
             subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db._folder_subtree_ids_by_path(fid),
+                db.folders.subtree_ids_by_path(fid),
             ))
         return [
             r["id"]
@@ -858,7 +858,7 @@ def create_pipeline_blueprint(
             # banner would understate the scope.
             subtree_ids = set(db.get_folder_subtree_ids(folder_id))
             subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db._folder_subtree_ids_by_path(folder_id),
+                db.folders.subtree_ids_by_path(folder_id),
             ))
             photo_ids = [
                 r["id"]
@@ -2259,7 +2259,7 @@ class _PipelineLaunch:
         if err is not None:
             return err
         photo_ids = self._folder_scope_photo_ids(subtree_ids)
-        first = self.db.get_folder(folder_ids[0])
+        first = self.db.folders.get(folder_ids[0])
         leaf = os.path.basename(
             (first["path"] or "").rstrip("/\\")
         ) or "folders"
@@ -2328,7 +2328,7 @@ class _PipelineLaunch:
             # under the requested folder — never appear. Every other
             # subtree consumer in db.py (folder deletion, rescan,
             # missing-originals, workspace linking) already reads through
-            # _folder_subtree_ids_by_path for exactly this reason;
+            # folders.subtree_ids_by_path for exactly this reason;
             # without the same fallback here, processing a workspace root
             # would silently skip legacy descendant photos the rest of
             # the app still treats as part of that folder. Intersect the
@@ -2337,7 +2337,7 @@ class _PipelineLaunch:
             # share a path prefix. The repository splits large legacy
             # subtrees across multiple IN(...) statements.
             subtree_ids.update(db.get_workspace_visible_folder_ids(
-                db._folder_subtree_ids_by_path(fid),
+                db.folders.subtree_ids_by_path(fid),
             ))
         return subtree_ids, None
 
@@ -2363,7 +2363,7 @@ class _PipelineLaunch:
         if excluded_paths_set:
             folder_path_by_id = {
                 fid: path or ""
-                for fid, path in db.get_folder_paths(subtree_id_list).items()
+                for fid, path in db.folders.paths_by_id(subtree_id_list).items()
             }
         photo_ids = []
         # Read (id, folder_id, filename) so we can compose each photo's

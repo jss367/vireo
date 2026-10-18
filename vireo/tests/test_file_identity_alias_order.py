@@ -21,8 +21,7 @@ def test_alias_selection_preserves_path_only_catalog_order(monkeypatch):
         db = SimpleNamespace(
             conn=conn,
             local_folders=LocalFolderRepository(conn),
-            get_all_folders=lambda: conn.execute("SELECT id, path, name FROM folders").fetchall(),
-            get_folder_id_by_path=lambda path: None,
+            folders=SimpleNamespace(all_rows=lambda: conn.execute("SELECT id, path, name FROM folders").fetchall(), id_by_path=lambda path: None),
         )
         fake_path = SimpleNamespace(
             normpath=posixpath.normpath, abspath=lambda path: path,

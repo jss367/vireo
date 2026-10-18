@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/misses.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/misses/badges.js",
     "../vireo/static/misses/boot.js",
     "../vireo/static/misses/card-events.js",

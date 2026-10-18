@@ -325,7 +325,7 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     dst = str(tmp_path / "move_folder_dst")
     os.makedirs(dst)
 
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     fid = folders[0]["id"]
 
     client = app.test_client()
@@ -353,7 +353,7 @@ def test_move_folder_job_partial_move_is_failed_with_both_counts(
     app, db = app_and_db
     parent = tmp_path / "partial_dst"
     parent.mkdir()
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
     stale_key = cache_key(db, None)
     app._missing_originals_cache[stale_key] = {"status": "ready", "photos": []}
 
@@ -384,7 +384,7 @@ def test_move_folder_job_passes_explicit_destination_name(
     app, db = app_and_db
     parent = tmp_path / "move_folder_dst"
     parent.mkdir()
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
     captured = {}
 
     def fake_move_folder(
@@ -414,7 +414,7 @@ def test_move_folder_job_passes_explicit_destination_name(
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
     assert captured["destination_name"] == "2026-07-12"
-    assert job["config"]["source_path"] == db.get_folder_tree()[0]["path"]
+    assert job["config"]["source_path"] == db.folders.tree()[0]["path"]
     assert job["config"]["resolved_destination"] == str(
         parent / "2026-07-12"
     )
@@ -562,7 +562,7 @@ def test_move_folder_job_invalidates_missing_originals_cache(
     app, db = app_and_db
     dst = tmp_path / "move_folder_dst"
     dst.mkdir()
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
     key = _seed_missing_originals_cache(app, db)
 
     def fake_move_folder(
@@ -709,7 +709,7 @@ def test_move_folder_merge_param_accepted(app_and_db, tmp_path):
     dst = str(tmp_path / "merge_dst")
     os.makedirs(dst)
 
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
 
     client = app.test_client()
     resp = client.post("/api/jobs/move-folder", json={
@@ -726,7 +726,7 @@ def test_move_folder_preflight_dest_missing(app_and_db, tmp_path):
     app, db = app_and_db
     dst = str(tmp_path / "nowhere")  # not created on disk
 
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     client = app.test_client()
     resp = client.post("/api/move-folder/preflight", json={
         "folder_id": folder["id"],
@@ -746,7 +746,7 @@ def test_move_folder_preflight_dest_exists(app_and_db, tmp_path):
     dst = tmp_path / "dest"
     dst.mkdir()
 
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
     landing = dst / folder_name
     landing.mkdir()
@@ -772,7 +772,7 @@ def test_move_folder_preflight_uses_explicit_destination_name(
     app, db = app_and_db
     parent = tmp_path / "dest"
     parent.mkdir()
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
 
     client = app.test_client()
     resp = client.post("/api/move-folder/preflight", json={
@@ -990,7 +990,7 @@ def test_move_folder_preflight_rejects_invalid_destination_name(
 ):
     """The final folder name is one component, never a hidden path override."""
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     client = app.test_client()
 
     resp = client.post("/api/move-folder/preflight", json={
@@ -1013,7 +1013,7 @@ def test_move_folder_preflight_rejects_drive_qualified_destination_name(
     catalog_path — outside the selected destination.
     """
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     client = app.test_client()
 
     resp = client.post("/api/move-folder/preflight", json={
@@ -1032,7 +1032,7 @@ def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_p
     dst = tmp_path / "dest"
     dst.mkdir()
 
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
     landing = dst / folder_name
     landing.mkdir()
@@ -1057,7 +1057,7 @@ def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, 
     dst = tmp_path / "dest"
     dst.mkdir()
 
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
     landing = dst / folder_name
     landing.mkdir()
@@ -1127,7 +1127,7 @@ def test_move_folder_preflight_exact_mode_counts_past_quick_cap(app_and_db, tmp_
     dst = tmp_path / "dest"
     dst.mkdir()
 
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
     landing = dst / folder_name
     landing.mkdir()
@@ -1163,7 +1163,7 @@ def test_move_folder_preflight_exact_mode_is_capped_not_unbounded(
     app, db = app_and_db
     dst = tmp_path / "dest"
     dst.mkdir()
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
     landing = dst / folder_name
     landing.mkdir()
@@ -1276,7 +1276,7 @@ def test_move_folder_preflight_preview_omitted_when_dest_missing(app_and_db, tmp
     """No preview block when the destination doesn't exist — there is nothing
     to merge into, so a fresh move copies everything."""
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
 
     client = app.test_client()
     resp = client.post("/api/move-folder/preflight", json={
@@ -1344,7 +1344,7 @@ def test_move_folder_rejects_remote_target_with_relative_mount_path(
     import config as cfg
 
     app, db = app_and_db
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     fid = folders[0]["id"]
 
     fake_target = {

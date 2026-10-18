@@ -1,11 +1,11 @@
 // Page startup: the module the template loads. Importing it loads the rest of
-// the page's modules; this file then exposes the page hooks, binds every
+// the page's modules; this file then registers the page hooks, binds every
 // listener (including the controls that used to carry inline onclick
 // attributes), and starts the filter bar, the config load and the first load.
 // ES module.
 
 import { state } from './state.js';
-import { VireoFilter, exposePageHooks } from './shared.js';
+import { VireoFilter, registerPageHooks } from './shared.js';
 import { getSinceParam } from './helpers.js';
 import { applyMissFilters, cloneMissFilterPayload, missFilterPayload } from './filters.js';
 import { applyLegacyMissScopes, noteLegacyScopeError } from './scope.js';
@@ -24,9 +24,10 @@ import { deleteSelectedMisses } from './delete.js';
 import { bindMissKeyboard } from './keyboard.js';
 import { bindMissLifeListEvents, bindMissLightboxFlagEvents } from './badges.js';
 
-// The shared navbar and lightbox call these by name. The classic page had
-// them as globals from the moment its scripts parsed, so expose them first.
-exposePageHooks({
+// The shared navbar and lightbox call these through the page-hook registry.
+// The classic page had them as globals from the moment its scripts parsed, so
+// register them first.
+registerPageHooks({
   afterHistoryChange: afterHistoryChange,
   loadMisses: loadMisses,
   getActiveSelection: getActiveSelection,

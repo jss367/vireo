@@ -239,7 +239,7 @@ def test_relocating_a_missing_folder_onto_an_existing_one_prunes_collections(db,
     phantom = _photo(db, source, "phantom.jpg")
     coll = _static_collection(db, other_ws, "c", [dup, phantom])
 
-    db._merge_into_existing(source, target, str(target_dir))
+    db.folders.merge_into_existing(source, target, str(target_dir))
 
     assert _ids(db, coll) == [survivor]
     assert _dangling(db) == set()

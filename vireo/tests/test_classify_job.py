@@ -4772,7 +4772,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
         {"id": 1, "filename": "bird.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
-    mock_db_instance.get_folder_tree.return_value = [
+    mock_db_instance.folders.tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
@@ -6547,7 +6547,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T11:00:00"},
     ]
-    mock_db_instance.get_folder_tree.return_value = [
+    mock_db_instance.folders.tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
@@ -6670,7 +6670,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
         {"id": 1, "filename": "processed.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
-    mock_db_instance.get_folder_tree.return_value = [
+    mock_db_instance.folders.tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
@@ -7066,7 +7066,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T11:00:00"},
     ]
-    mock_db_instance.get_folder_tree.return_value = [
+    mock_db_instance.folders.tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()

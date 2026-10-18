@@ -241,7 +241,7 @@ def _create_dest_folder(
         return None
 
     # Promote any pre-existing folder row for this destination out of
-    # ``'missing'``. Standalone scans run ``check_folder_health()`` as
+    # ``'missing'``. Standalone scans run ``folders.check_health()`` as
     # their preflight, so a reattached archive drive transitions
     # ``missing`` → ``ok`` before its files become visible in the
     # workspace again. The import path calls ``scanner.scan()``

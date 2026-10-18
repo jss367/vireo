@@ -109,7 +109,7 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
         return False
     # A relocation keeps folder_id, but changes which live source the
     # renderer selects. Resolve its current path just as each request does.
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     if not folder:
         return False
     source_path = os.path.join(folder["path"], photo["companion_path"])
@@ -1088,7 +1088,7 @@ def create_job_launchers_blueprint(
             folder_id = body["folder_id"]
             if isinstance(folder_id, bool) or not isinstance(folder_id, int):
                 return json_error("folder_id must be an integer")
-            visible_folders = {folder["id"] for folder in db.get_folder_tree()}
+            visible_folders = {folder["id"] for folder in db.folders.tree()}
             if ctx.workspace_id is None or folder_id not in visible_folders:
                 return json_error("folder does not belong to the active workspace", 403)
             photo_ids = db.caches.offline_original_ids(
@@ -1244,7 +1244,7 @@ def create_job_launchers_blueprint(
             )
 
         request_db = get_db()
-        folder = request_db.get_folder(folder_id)
+        folder = request_db.folders.get(folder_id)
         if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
@@ -1692,7 +1692,7 @@ class _MaskExtractionRun:
         else:
             photos = self._workspace_candidates()
 
-        folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in self.thread_db.folders.tree()}
         self.total = len(photos)
         self.masked = 0
         self.skipped = 0
@@ -2139,7 +2139,7 @@ class _FullResolutionPreparation:
             )
             self.folders = {
                 folder["id"]: folder["path"]
-                for folder in thread_db.get_folder_tree()
+                for folder in thread_db.folders.tree()
             }
             self.ready = 0
             self.copied = 0
@@ -2508,7 +2508,7 @@ class _PreviewWarmup:
 
         photos = self._photos()
 
-        self.folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+        self.folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
         total = len(photos)
         self.generated = 0
         self.skipped = 0
@@ -2686,7 +2686,7 @@ def _run_develop(ctx, job, photo_ids, settings):
     if not photos:
         return {"developed": 0, "errors": 0, "total": 0}
 
-    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
     total = len(photos)
     developed = 0
     errors = 0
@@ -2790,7 +2790,7 @@ def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
 
     thread_db = ctx.thread_db()
     photos_map = thread_db.photos.get_by_ids(photo_ids)
-    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
 
     cached = 0
     skipped = 0

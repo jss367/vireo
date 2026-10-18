@@ -1,9 +1,15 @@
 """Calling a scan's status callback with or without the phase keywords."""
 
+from __future__ import annotations
+
 import inspect
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scanner.scan_types import StatusCallback
 
 
-def _status_callback_supports_phase(status_callback):
+def _status_callback_supports_phase(status_callback: StatusCallback | None) -> bool:
     """Return whether a callback binds the scanner's phase keyword fields."""
     if status_callback is None:
         return False
@@ -27,9 +33,9 @@ def _status_callback_supports_phase(status_callback):
 
 
 def _call_status_callback(
-    status_callback, message, *, phase_current=None, phase_total=None,
-    phase_label=None, supports_phase=None,
-):
+    status_callback: StatusCallback, message: str, *, phase_current: int | None = None, phase_total: int | None = None,
+    phase_label: str | None = None, supports_phase: bool | None = None,
+) -> None:
     """Invoke a status callback once using its prevalidated argument shape."""
     has_phase = (
         phase_current is not None

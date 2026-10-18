@@ -1859,7 +1859,8 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
   // failure here must not reject the delete flow or block the caller's
   // own loadMissingPhotos() refresh.
-  if (typeof loadMisses === 'function') {
+  var loadMisses = Vireo.pageHook('loadMisses');
+  if (loadMisses) {
     try {
       await loadMisses();
     } catch (err) {

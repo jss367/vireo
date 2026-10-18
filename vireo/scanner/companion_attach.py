@@ -14,9 +14,12 @@ waiting on, decides each group once all its files have been seen, and
 attaches and publishes the JPEGs it pairs.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from metadata import exif_summary_columns
 from scanner.companion_keep import _apply_companion_gap_fill, _companion_columns, _lock_companion_owner
@@ -31,6 +34,16 @@ from scanner.companions import (
 )
 from scanner.keywords import _import_embedded_keywords_for_photo
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from pathlib import Path
+
+    from db import Database
+    from scanner.companion_keep import _KnownCompanionKeeper
+    from scanner.indexing import _IndexedFile
+    from scanner.run_state import _ScanTally
+    from scanner.scan_types import CompanionOwnership, PairingRow, StrPath
+
 log = logging.getLogger(__name__)
 
 
@@ -38,7 +51,7 @@ class _CompanionAttachRefused(Exception):
     """Rolls back a row-less companion attach whose owner changed."""
 
 
-def _companion_group_key(image_path):
+def _companion_group_key(image_path: Path) -> tuple[str, str]:
     """``(directory, stem)``: the files pairing considers together."""
     return (str(image_path.parent), image_path.stem)
 
@@ -47,9 +60,10 @@ class _CompanionGroups:
     """Same-stem groups whose uncataloged JPEGs wait for their RAW."""
 
     def __init__(
-        self, db, *, tally, keeper, catalog_file, extract_full_metadata,
-        vireo_dir, thumb_cache_dir,
-    ):
+        self, db: Database, *, tally: _ScanTally, keeper: _KnownCompanionKeeper,
+        catalog_file: Callable[[_IndexedFile], None], extract_full_metadata: bool,
+        vireo_dir: StrPath | None, thumb_cache_dir: StrPath | None,
+    ) -> None:
         self.db = db
         self.tally = tally
         self.keeper = keeper
@@ -62,7 +76,7 @@ class _CompanionGroups:
         self._unseen_group_members = defaultdict(int)
         self._waiting_companions = defaultdict(list)
 
-    def track_companion_groups(self, files_to_process):
+    def track_companion_groups(self, files_to_process: Iterable[Path]) -> None:
         """Count each same-stem group's RAW/JPEG files in this scan.
 
         A JPEG waits until the loop has seen every file of its group, so
@@ -82,7 +96,7 @@ class _CompanionGroups:
                     _companion_group_key(image_path)
                 ] += 1
 
-    def wait_for_group(self, item):
+    def wait_for_group(self, item: _IndexedFile) -> None:
         """Hold an uncataloged JPEG until its group has been seen."""
         # Decide whether this JPEG is a photo or a RAW's companion
         # before it gets a row (see ``resolve_companion_group``).
@@ -90,7 +104,7 @@ class _CompanionGroups:
             item,
         )
 
-    def mark_group_member_seen(self, image_path):
+    def mark_group_member_seen(self, image_path: Path) -> None:
         key = _companion_group_key(image_path)
         remaining = self._unseen_group_members.get(key)
         if remaining is None:
@@ -103,13 +117,13 @@ class _CompanionGroups:
         if key in self._waiting_companions:
             self.resolve_companion_group(key)
 
-    def resolve_remaining_groups(self):
+    def resolve_remaining_groups(self) -> None:
         # Every group's last member has been seen by now; this only
         # matters if a path appeared in ``files_to_process`` twice.
         for key in list(self._waiting_companions):
             self.resolve_companion_group(key)
 
-    def resolve_companion_group(self, key):
+    def resolve_companion_group(self, key: tuple[str, str]) -> None:
         """Pair the group's uncataloged JPEGs, or catalog them as photos.
 
         The candidates are the cataloged rows of the group plus each waiting
@@ -142,7 +156,7 @@ class _CompanionGroups:
             # ``photo_merged_callback`` reporting the merge).
             self.catalog_file(item)
 
-    def _uncataloged_member(self, item):
+    def _uncataloged_member(self, item: _IndexedFile) -> PairingRow:
         """``item`` shaped like a ``_pairing_rows_for_stem`` row, ``id`` None."""
         file_meta = item.meta.file_meta
         summary = exif_summary_columns(file_meta) if file_meta else {}
@@ -157,7 +171,7 @@ class _CompanionGroups:
             "companion_path": None,
         }
 
-    def _attach_companion(self, item, owner):
+    def _attach_companion(self, item: _IndexedFile, owner: PairingRow) -> bool:
         """Record ``item`` as ``owner``'s companion without a row; True if done.
 
         Does what inserting the JPEG and merging it used to leave on the
@@ -219,7 +233,7 @@ class _CompanionGroups:
         self.tally.report_progress()
         return True
 
-    def _owner_still_compatible(self, owner_id, item):
+    def _owner_still_compatible(self, owner_id: int, item: _IndexedFile) -> bool:
         """Whether the owner row, as it stands now, still pairs with ``item``.
 
         Only a row that is present and incompatible refuses the attach; the
@@ -246,7 +260,7 @@ class _CompanionGroups:
             },
         )
 
-    def _publish_attached_companion(self, image_path, owner, ownership):
+    def _publish_attached_companion(self, image_path: Path, owner: PairingRow, ownership: CompanionOwnership) -> None:
         """Drop the RAW's display caches and report the committed attach."""
         owner_id = owner["id"]
         photo_callback = self.tally.photo_callback

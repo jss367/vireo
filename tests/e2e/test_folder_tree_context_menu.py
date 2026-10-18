@@ -73,7 +73,7 @@ def test_folder_tree_removes_workspace_root_without_deleting_folder(
         ).click()
 
     expect(item).to_have_count(0)
-    assert db.get_folder(folder_id) is not None
+    assert db.folders.get(folder_id) is not None
     assert folder_id not in {
         row["id"] for row in db.get_workspace_folders(workspace_id)
     }
@@ -262,7 +262,7 @@ def test_folder_tree_does_not_offer_remove_for_inherited_descendant(
 
 def test_folder_tree_move_opens_move_page_with_source_selected(live_server, page):
     """Move… opens Quick Move with the right-clicked folder as its source."""
-    live_server["db"].update_folder_counts()
+    live_server["db"].folders.update_counts()
     url = live_server["url"]
     page.goto(f"{url}/browse")
 
@@ -476,7 +476,7 @@ def test_folder_tree_fallback_anchor_does_not_bleed_into_siblings(
     """A fallback anchor's status must not spread through unrelated siblings.
 
     When a hidden local session is anchored to its nearest visible ancestor
-    (its own row was pruned because check_folder_health flipped the rebased
+    (its own row was pruned because folders.check_health flipped the rebased
     ``folders.path`` to missing), only the ancestor should carry LOCAL ISSUE
     / SYNCING / REMOVING. Recursively applying the status through every
     visible descendant would mislabel healthy remote siblings — the ancestor
@@ -1006,7 +1006,7 @@ def test_folder_tree_shows_associated_workspaces(live_server, page):
     """The folder context menu opens a list of every linked workspace."""
     db = live_server["db"]
     active_workspace = db.workspaces.get(db._active_workspace_id)
-    folder_id = db.get_folder_tree()[0]["id"]
+    folder_id = db.folders.tree()[0]["id"]
     shared_workspace_id = db.create_workspace("Shared Bird Library")
     db.add_workspace_folder(shared_workspace_id, folder_id)
 
@@ -1039,7 +1039,7 @@ def test_folder_tree_shows_associated_workspaces(live_server, page):
 def test_folder_workspace_modal_ignores_stale_response(live_server, page):
     """A slower first request cannot overwrite a newer folder's modal."""
     db = live_server["db"]
-    folders = db.get_folder_tree()
+    folders = db.folders.tree()
     first_id = folders[0]["id"]
     second_id = folders[1]["id"]
     held_route = {"route": None}
@@ -1060,7 +1060,7 @@ def test_folder_workspace_modal_ignores_stale_response(live_server, page):
     ):
         page.evaluate("fid => { showFolderWorkspaces(fid); }", second_id)
 
-    expected_path = db.get_folder(second_id)["path"]
+    expected_path = db.folders.get(second_id)["path"]
     expect(page.locator("#folderWorkspacesPath")).to_have_text(expected_path)
 
     held_route["route"].fulfill(

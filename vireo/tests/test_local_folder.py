@@ -60,7 +60,7 @@ def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
         ]
         assert result["local_path"].startswith(str(vireo_dir / "local-folders"))
 
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").write_bytes(b"edited through either workspace")
         assert workspace_status(db, second, str(vireo_dir))["folders"][0]["changes"] == {
             "created": 0,
@@ -70,7 +70,7 @@ def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
 
         sync_folder(db, folder_id, str(vireo_dir))
         assert (source / "bird.jpg").read_bytes() == b"edited through either workspace"
-        assert db.get_folder(folder_id)["path"] == str(source)
+        assert db.folders.get(folder_id)["path"] == str(source)
         assert workspace_status(db, first, str(vireo_dir))["state"] == "remote"
         assert workspace_status(db, second, str(vireo_dir))["state"] == "remote"
     finally:
@@ -87,7 +87,7 @@ def test_custom_local_destination_is_used_and_removed_after_sync(tmp_path):
 
         local_root = local_parent / "photos"
         assert result["local_path"] == str(local_root)
-        assert db.get_folder(folder_id)["path"] == str(local_root)
+        assert db.folders.get(folder_id)["path"] == str(local_root)
         assert (local_root / "bird.jpg").read_bytes() == b"original"
         assert (vireo_dir / "local-folders" / str(folder_id) / "manifest.json").is_file()
 
@@ -114,7 +114,7 @@ def test_custom_local_destination_refuses_existing_folder(tmp_path):
                 db, folder_id, str(vireo_dir), local_base=str(local_parent)
             )
         assert (existing / "keep.txt").read_text() == "do not overwrite"
-        assert Path(db.get_folder(folder_id)["path"]) == _source
+        assert Path(db.folders.get(folder_id)["path"]) == _source
     finally:
         db.close()
 
@@ -184,7 +184,7 @@ def test_stage_refuses_copy_that_would_use_scaled_safety_reserve(
         # reserve would have allowed this 2 GiB copy with only 6 GiB free.
         with pytest.raises(LocalWorkspaceError, match="safety reserve"):
             stage_folder(db, folder_id, str(vireo_dir))
-        assert db.get_folder(folder_id)["path"] == str(source)
+        assert db.folders.get(folder_id)["path"] == str(source)
     finally:
         db.close()
 
@@ -245,7 +245,7 @@ def test_custom_local_destination_refuses_session_metadata_directory(tmp_path):
                 local_base=str(vireo_dir / "local-folders"),
             )
         assert not (vireo_dir / "local-folders" / "1").exists()
-        assert db.get_folder(folder_id)["path"] == str(source)
+        assert db.folders.get(folder_id)["path"] == str(source)
     finally:
         db.close()
 
@@ -272,7 +272,7 @@ def test_custom_local_cleanup_failure_preserves_copy_after_catalog_restore(
             discard_folder(db, folder_id, str(vireo_dir))
 
         assert local_root.is_dir()
-        assert Path(db.get_folder(folder_id)["path"]) == source
+        assert Path(db.folders.get(folder_id)["path"]) == source
         assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
         assert workspace_status(db, first, str(vireo_dir))["state"] == "remote"
         assert source.is_dir()
@@ -305,7 +305,7 @@ def test_catalog_restore_failure_keeps_local_copy_and_session(
 
         assert local_root.is_dir()
         assert (local_root / "bird.jpg").read_bytes() == b"edited locally"
-        assert Path(db.get_folder(folder_id)["path"]) == local_root
+        assert Path(db.folders.get(folder_id)["path"]) == local_root
         expected_state = "recovery" if operation == "sync" else "active"
         assert folder_status(db, folder_id, str(vireo_dir))["state"] == expected_state
         workspace = workspace_status(db, first, str(vireo_dir))
@@ -356,7 +356,7 @@ def test_shared_sync_refuses_source_conflict_and_preserves_local_copy(tmp_path):
     db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
     try:
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").write_bytes(b"local edit")
         (source / "bird.jpg").write_bytes(b"outside source edit")
 
@@ -375,7 +375,7 @@ def test_shared_sync_requires_count_bound_deletion_confirmation(tmp_path):
     db, vireo_dir, source, _first, _second, folder_id = _shared_environment(tmp_path)
     try:
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").unlink()
 
         with pytest.raises(LocalWorkspaceError, match="confirm deletions"):
@@ -399,13 +399,13 @@ def test_discard_restores_every_workspace_without_touching_source(tmp_path):
     db, vireo_dir, source, first, second, folder_id = _shared_environment(tmp_path)
     try:
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").write_bytes(b"throw this away")
 
         discard_folder(db, folder_id, str(vireo_dir))
 
         assert (source / "bird.jpg").read_bytes() == b"original"
-        assert db.get_folder(folder_id)["path"] == str(source)
+        assert db.folders.get(folder_id)["path"] == str(source)
         assert workspace_status(db, first, str(vireo_dir))["state"] == "remote"
         assert workspace_status(db, second, str(vireo_dir))["state"] == "remote"
     finally:
@@ -476,7 +476,7 @@ def test_folder_scoped_http_cycle_and_shared_status(tmp_path, monkeypatch):
         assert "last workspace" in last_link.get_json()["error"]
 
         check_db = Database(db_path)
-        Path(check_db.get_folder(folder_id)["path"], "bird.jpg").write_bytes(b"edited")
+        Path(check_db.folders.get(folder_id)["path"], "bird.jpg").write_bytes(b"edited")
         check_db.close()
         response = client.post(
             "/api/workspaces/active/local-folders/sync",
@@ -551,7 +551,7 @@ def test_folder_stage_endpoint_accepts_destination_and_uses_folder_name_in_job(t
 
     check_db = Database(db_path)
     try:
-        assert check_db.get_folder(folder_id)["path"] == str(destination / "104NCZ_8")
+        assert check_db.folders.get(folder_id)["path"] == str(destination / "104NCZ_8")
     finally:
         check_db.close()
 
@@ -1617,7 +1617,7 @@ def _stage_child_under_parent(tmp_path):
 
 def test_relocate_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch):
     """POST /api/folders/<ancestor>/relocate must refuse when a descendant
-    has a shared local copy. Without the guard, ``db.relocate_folder`` walks
+    has a shared local copy. Without the guard, ``db.folders.relocate`` walks
     the parent's ``folders.path`` subtree — which no longer includes the
     rebased child — and rewrites the parent while
     ``local_folder_mappings.source_path`` and the manifest keep pointing at
@@ -1799,7 +1799,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
         # A folder first cataloged after staging has only a local path,
         # with no original-source mapping of its own yet.
         local_new_id = db.add_folder(
-            str(Path(db.get_folder(descendant_id)["path"]) / "local-new"),
+            str(Path(db.folders.get(descendant_id)["path"]) / "local-new"),
             parent_id=descendant_id, workspace_root=False,
         )
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
@@ -1812,7 +1812,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
 
 def test_workspace_status_exposes_visible_ancestor_for_missing_local_root(tmp_path):
     """When a local session's rebased folders.path goes missing (managed local
-    directory unmounted or deleted, so check_folder_health marks it 'missing'
+    directory unmounted or deleted, so folders.check_health marks it 'missing'
     and /api/folders drops it), workspace_status must still hand the Browse
     folder tree an anchor to render the LOCAL ISSUE badge on. The nearest
     visible ancestor is that anchor; without it the badge disappears exactly
@@ -1830,8 +1830,8 @@ def test_workspace_status_exposes_visible_ancestor_for_missing_local_root(tmp_pa
     try:
         stage_folder(db, child_id, str(tmp_path / "vireo"))
 
-        # Simulate check_folder_health flipping the rebased child's status to
-        # 'missing' after its managed local dir disappears — get_folder_tree
+        # Simulate folders.check_health flipping the rebased child's status to
+        # 'missing' after its managed local dir disappears — folders.tree
         # then excludes the row (/api/folders no longer lists it).
         db.conn.execute(
             "UPDATE folders SET status='missing' WHERE id=?", (child_id,)
@@ -1839,7 +1839,7 @@ def test_workspace_status_exposes_visible_ancestor_for_missing_local_root(tmp_pa
         db.conn.commit()
 
         db.set_active_workspace(ws)
-        visible_ids = {row["id"] for row in db.get_folder_tree()}
+        visible_ids = {row["id"] for row in db.folders.tree()}
         assert child_id not in visible_ids, "test premise: missing row is dropped"
         assert parent_id in visible_ids, "test premise: ancestor still visible"
 
@@ -1915,7 +1915,7 @@ def test_workspace_status_counts_unanchored_descendant_session(tmp_path):
     db.add_workspace_folder(child_ws, child_id)
     try:
         stage_folder(db, child_id, str(tmp_path / "vireo"))
-        local_path = Path(db.get_folder(child_id)["path"])
+        local_path = Path(db.folders.get(child_id)["path"])
         (local_path / "bird.jpg").unlink()
         (local_path / "fox.jpg").unlink()
         local_path.rmdir()
@@ -1941,7 +1941,7 @@ def test_workspace_status_counts_unanchored_descendant_session(tmp_path):
 def test_future_ancestor_link_materializes_local_descendants(tmp_path):
     """Linking an ancestor root AFTER a descendant has been staged must still
     discover the rebased descendant. Once staging moves the child's
-    folders.path under local-folders/, ``_folder_subtree_ids_by_path`` and
+    folders.path under local-folders/, ``folders.subtree_ids_by_path`` and
     ``_materialize_workspace_descendants`` walking pure ``folders.path``
     prefixes would miss it, leaving the newly linked workspace without a
     workspace_folders row for the child and hiding it from
@@ -2029,7 +2029,7 @@ def test_ancestor_workspace_can_sync_descendant_local_session(tmp_path, monkeypa
 
         # Edit the local copy from the ancestor workspace's side and sync.
         check_db = Database(db_path)
-        local_path = check_db.get_folder(child_id)["path"]
+        local_path = check_db.folders.get(child_id)["path"]
         check_db.close()
         Path(local_path, "bird.jpg").write_bytes(b"edited from parent workspace")
 
@@ -2438,10 +2438,10 @@ def test_bulk_stage_skips_ancestor_of_descendant_local_session(tmp_path):
         # Sibling got staged; ancestor's user-facing path is unchanged.
         # ``create_app`` derives ``vireo_dir`` from the thumbnail cache's
         # parent, so the staged local-folders/ tree lives alongside it.
-        assert check_db.get_folder(other_id)["path"].startswith(
+        assert check_db.folders.get(other_id)["path"].startswith(
             str(tmp_path / "local-folders")
         )
-        assert check_db.get_folder(parent_id)["path"] == str(parent)
+        assert check_db.folders.get(parent_id)["path"] == str(parent)
     finally:
         check_db.close()
 
@@ -2858,7 +2858,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
     db.add_workspace_folder(workspace_id, folder_id)
     db.set_active_workspace(workspace_id)
     stage_folder(db, folder_id, str(vireo_dir))
-    local_path = Path(db.get_folder(folder_id)["path"])
+    local_path = Path(db.folders.get(folder_id)["path"])
     (local_path / "bird.jpg").write_bytes(b"edited")
     db.close()
 
@@ -3058,7 +3058,7 @@ def test_sync_reports_the_source_check_before_publishing(tmp_path):
         (source / "kept.jpg").write_bytes(b"kept")
         (source / "culled.jpg").write_bytes(b"culled")
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").write_bytes(b"local edit")
         (local_root / "culled.jpg").unlink()
 
@@ -3095,7 +3095,7 @@ def test_sync_scan_progress_counts_files_with_no_source_counterpart(tmp_path):
     db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
     try:
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "new.jpg").write_bytes(b"new")
 
         scanned = []
@@ -3145,7 +3145,7 @@ def test_sync_job_shows_the_source_check_as_its_own_step(tmp_path, monkeypatch):
         )["status"] == "completed"
 
         check_db = Database(db_path)
-        local_root = Path(check_db.get_folder(folder_id)["path"])
+        local_root = Path(check_db.folders.get(folder_id)["path"])
         check_db.close()
         (local_root / "bird.jpg").write_bytes(b"edited")
         (local_root / "culled.jpg").unlink()
@@ -3206,7 +3206,7 @@ def test_sync_conflict_marks_the_check_step_not_the_publish_step(tmp_path, monke
         )["status"] == "completed"
 
         check_db = Database(db_path)
-        local_root = Path(check_db.get_folder(folder_id)["path"])
+        local_root = Path(check_db.folders.get(folder_id)["path"])
         check_db.close()
         (local_root / "bird.jpg").write_bytes(b"local edit")
         (source / "bird.jpg").write_bytes(b"changed on the source since staging")
@@ -3238,7 +3238,7 @@ def test_scan_counter_waits_for_the_read_it_is_reporting(tmp_path, monkeypatch):
     db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
     try:
         stage_folder(db, folder_id, str(vireo_dir))
-        local_root = Path(db.get_folder(folder_id)["path"])
+        local_root = Path(db.folders.get(folder_id)["path"])
         (local_root / "bird.jpg").write_bytes(b"local edit")
 
         reports = []

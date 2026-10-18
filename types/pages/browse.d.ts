@@ -91,8 +91,6 @@ interface Window {
   closeReportModal?: () => void;
   doUndo?: () => Promise<void>;
   doRedo?: () => Promise<void>;
-  afterHistoryChange?: (change?: string) => void;
-  setWildlifeExcludedFor?: (id: number, excluded: boolean) => Promise<boolean | void>;
 }
 declare function matchesShortcut(event: KeyboardEvent, shortcut: string | undefined): boolean;
 declare function preferredScrollBehavior(): ScrollBehavior;

@@ -1,7 +1,10 @@
 """Importing sidecar and embedded keywords onto photos, and the embedded backfill."""
 
+from __future__ import annotations
+
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from db import KEYWORD_SOURCE_UNKNOWN
 from keyword_identity import (
@@ -13,10 +16,16 @@ from keyword_normalization import keyword_match_key
 from metadata import embedded_keywords
 from xmp import read_hierarchical_keywords, read_keywords
 
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from db import Database
+    from scanner.scan_types import ExifMetadata
+
 log = logging.getLogger(__name__)
 
 
-def _import_keywords_for_photo(db, photo_id, xmp_path_str):
+def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> None:
     """Read flat and hierarchical keywords from XMP and populate the database."""
     flat_keywords = read_keywords(xmp_path_str)
     hier_keywords = read_hierarchical_keywords(xmp_path_str)
@@ -29,8 +38,8 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
 
 
-def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
-                                        raise_on_conflict=False):
+def _import_embedded_keywords_for_photo(db: Database, photo_id: int, file_meta: ExifMetadata | None, *,
+                                        raise_on_conflict: bool = False) -> bool:
     """Import the keywords stored inside the image file (see ``embedded_keywords``).
 
     Additive, like the sidecar import, and run alongside it: a file can carry
@@ -75,7 +84,7 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
     # the entry to ``"Birds|Hawk"``, the path would already be in the
     # suppression set and every rescan would filter it out before the tag
     # writer ever saw it.
-    def _hier_path(parts):
+    def _hier_path(parts: list[str]) -> str | None:
         if not parts or any(not keyword_match_key(part) for part in parts):
             return None
         return "|".join(keyword_match_key(part) for part in parts)
@@ -122,7 +131,9 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
     return bool(fresh_flat or fresh_hier)
 
 
-def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
+def _import_keyword_lists(
+    db: Database, photo_id: int, flat_keywords: Collection[str], hier_keywords: Collection[str],
+) -> None:
     """Tag a photo with imported flat and hierarchical keywords (additive)."""
     pending_flat_removals = db.pending_changes.keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
@@ -196,7 +207,7 @@ def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
 EMBEDDED_KEYWORDS_BACKFILL_KEY = "embedded_keywords_backfill_v1"
 
 
-def backfill_embedded_keywords(db):
+def backfill_embedded_keywords(db: Database) -> int:
     """One-shot import of embedded keywords for photos scanned before scans read them.
 
     Scans only read keywords from ``.xmp`` sidecars until
@@ -235,5 +246,5 @@ def backfill_embedded_keywords(db):
     return imported
 
 
-def _photo_keyword_count(db, photo_id):
+def _photo_keyword_count(db: Database, photo_id: int) -> int:
     return db.scanning.keyword_count(photo_id)

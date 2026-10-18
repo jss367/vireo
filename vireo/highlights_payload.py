@@ -801,7 +801,7 @@ def build_highlights_payload(db, query=None):
     for the page defaults)."""
     if query is None:
         query = HighlightsQuery()
-    folders = db.get_folders_with_quality_data()
+    folders = db.folders.with_quality_data()
     folder_id = query.folder_id
     if query.scope == "workspace":
         folder_id = None

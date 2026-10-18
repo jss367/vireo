@@ -943,7 +943,7 @@ def create_highlights_blueprint(get_db, json_error):
     @blueprint.route("/api/highlights/bucket")
     def api_highlights_bucket():
         db = get_db()
-        folders = db.get_folders_with_quality_data()
+        folders = db.folders.with_quality_data()
         scope = request.args.get("scope", "folder")
         folder_id = request.args.get("folder_id", type=int)
         if scope == "workspace":

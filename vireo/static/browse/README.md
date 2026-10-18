@@ -1,7 +1,11 @@
 # Browse panel requests
 
 Browse loads classic scripts in the order declared by `browse.html`, with
-`boot.js` last. Existing page state is in `state.js`. Panel request ownership
+`boot.js` last. Existing page state is in `state.js`. Before it starts the
+page, `boot.js` registers the functions the shared navbar and lightbox call
+(the native menu's photo commands, the lightbox's rating/flag/label/export
+menu and Delete, undo/redo) with `Vireo.registerPageHooks`; see
+`vireo/static/vireo-page-hooks.js` and `types/page-hooks.d.ts`. Panel request ownership
 is private to `panel-requests.js`, exposed through `Vireo.browse.panelRequests`:
 
 | Lane | Owner |

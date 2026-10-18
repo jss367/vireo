@@ -174,3 +174,6 @@ interface Window {
   VireoReleaseOriginals: {release(scope: ReleaseScope, description: string): Promise<void>;
     storageButton(): string; isRunning(): boolean};
 }
+
+// _sync_panel.html's inline sync, registered as a page hook by sync-panel-page-hooks.js.
+declare function runSync(changeIds?: number[]): Promise<void>;

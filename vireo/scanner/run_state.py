@@ -7,12 +7,26 @@ reports through. ``_ScanTally`` owns the progress counter, the per-bucket
 one place.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING, cast
 
 from image_loader import ScanCancelled
 from resource_ledger import suspend_resource_wait_timing
 from scanner.status import _call_status_callback
+
+if TYPE_CHECKING:
+    from db import Database
+    from scanner.scan_types import (
+        CheckCallback,
+        PhotoCallback,
+        PhotoIdentity,
+        PhotoMergedCallback,
+        ProgressCallback,
+        StatusCallback,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -20,12 +34,15 @@ log = logging.getLogger(__name__)
 class _ScanSignals:
     """The caller's cancel probe and status callback."""
 
-    def __init__(self, cancel_check, status_callback, status_supports_phase):
+    def __init__(
+        self, cancel_check: CheckCallback | None, status_callback: StatusCallback | None,
+        status_supports_phase: bool,
+    ) -> None:
         self.cancel_check = cancel_check
         self.status_callback = status_callback
         self.status_supports_phase = status_supports_phase
 
-    def check_cancelled(self):
+    def check_cancelled(self) -> None:
         if self.cancel_check is None:
             return
         # ``check_cancelled`` is threaded into ``ResourceLedger.acquire``
@@ -46,7 +63,10 @@ class _ScanSignals:
         if cancelled:
             raise ScanCancelled("scan cancelled")
 
-    def emit_status(self, message, phase_current=None, phase_total=None, phase_label=None):
+    def emit_status(
+        self, message: str, phase_current: int | None = None, phase_total: int | None = None,
+        phase_label: str | None = None,
+    ) -> None:
         if not self.status_callback:
             return
         _call_status_callback(
@@ -76,9 +96,10 @@ class _ScanTally:
     """
 
     def __init__(
-        self, counts, *, progress_callback, photo_callback,
-        photo_merged_callback, reported_identities=None,
-    ):
+        self, counts: dict[str, int], *, progress_callback: ProgressCallback | None,
+        photo_callback: PhotoCallback | None, photo_merged_callback: PhotoMergedCallback | None,
+        reported_identities: dict[int, PhotoIdentity] | None = None,
+    ) -> None:
         self.counts = counts
         self.progress_callback = progress_callback
         self.photo_callback = photo_callback
@@ -97,14 +118,14 @@ class _ScanTally:
         # invocation counted (see ``_pair_raw_jpeg_companions``).
         self.indexed_photo_ids = set()
 
-    def start(self, total, excluded_frozen):
+    def start(self, total: int, excluded_frozen: int) -> None:
         """Open the tally on ``total`` files, ``excluded_frozen`` already vanished."""
         self.total = total
         self.processed_count = excluded_frozen
         self.counts["discovered"] = total
         self.counts["vanished"] = excluded_frozen
 
-    def discount_merged_companions(self, merged_ids):
+    def discount_merged_companions(self, merged_ids: dict[int, int]) -> None:
         """Move JPEGs the end-of-scan pairing merged from ``indexed`` to merged."""
         # Discount only companions THIS scan counted. The pairing pass
         # queries the whole photos table, so it also cleans up pairs left
@@ -116,17 +137,17 @@ class _ScanTally:
         self.counts["merged_companions"] += len(_mine)
         self.counts["indexed"] -= len(_mine)
 
-    def report_progress(self):
+    def report_progress(self) -> None:
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
 
-    def skip_file(self, bucket):
+    def skip_file(self, bucket: str) -> None:
         """Dispose of a file that will not be indexed, under ``bucket``."""
         self.processed_count += 1
         self.counts[bucket] += 1
         self.report_progress()
 
-    def credit_reused_row(self, photo_id, full_path_str, folder_id, filename):
+    def credit_reused_row(self, photo_id: int, full_path_str: str, folder_id: int, filename: str) -> None:
         self.processed_count += 1
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
@@ -136,8 +157,8 @@ class _ScanTally:
         self.report_progress()
 
     def credit_known_companion(
-        self, owner_id, full_path_str, owner_folder_id, owner_filename,
-    ):
+        self, owner_id: int, full_path_str: str, owner_folder_id: int, owner_filename: str,
+    ) -> None:
         """Dispose of a companion JPEG its RAW's row already holds.
 
         ``photo_callback`` gets the RAW's id: that row is where the file is
@@ -151,17 +172,17 @@ class _ScanTally:
             self.photo_callback(owner_id, full_path_str)
         self.report_progress()
 
-    def credit_indexed(self, photo_id):
+    def credit_indexed(self, photo_id: int) -> None:
         """Count a row this scan inserted or refreshed."""
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
 
-    def credit_merged_companion(self):
+    def credit_merged_companion(self) -> None:
         """Dispose of a JPEG recorded onto its RAW's row without a row of its own."""
         self.processed_count += 1
         self.counts["merged_companions"] += 1
 
-    def report_cataloged(self, photo_id, full_path_str, folder_id, filename):
+    def report_cataloged(self, photo_id: int, full_path_str: str, folder_id: int, filename: str) -> None:
         """Report a row ``credit_indexed`` counted, then advance progress."""
         self.reported_identities[photo_id] = (folder_id, filename)
         if self.photo_callback:
@@ -169,7 +190,7 @@ class _ScanTally:
         self.processed_count += 1
         self.report_progress()
 
-    def report_merged_photos(self, db, merged):
+    def report_merged_photos(self, db: Database, merged: dict[int, int]) -> None:
         """Tell ``photo_merged_callback`` which RAW absorbed each merged id."""
         if not merged or self.photo_merged_callback is None:
             return
@@ -210,10 +231,11 @@ class _ScanTally:
                         old_id, new_id, os.path.join(row[2], row[1]),
                     )
                     if reported_identity is not None:
-                        reported_identities[new_id] = expected
+                        # This branch matched the RAW row against ``expected``.
+                        reported_identities[new_id] = cast("PhotoIdentity", expected)
                 reported_identities.pop(old_id, None)
 
-    def log_summary(self):
+    def log_summary(self) -> None:
         counts = self.counts
         processed_count = self.processed_count
         # Every file the loop disposed of landed in exactly one bucket. If this

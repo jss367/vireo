@@ -369,7 +369,7 @@ def create_local_folder_blueprint(
         """Pre-stage source paths for ``root_ids`` (before rebase)."""
         paths = []
         for root_id in root_ids:
-            row = db.get_folder(int(root_id))
+            row = db.folders.get(int(root_id))
             if row and row["path"]:
                 paths.append(row["path"])
         return paths
@@ -519,7 +519,7 @@ def create_local_folder_blueprint(
         names = {}
         paths = {}
         for root_id in root_ids:
-            path = db.get_folder_source_path(root_id)
+            path = db.folders.source_path(root_id)
             if path is None:
                 path = ""
             paths[root_id] = path

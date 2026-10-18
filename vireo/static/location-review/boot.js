@@ -142,8 +142,11 @@ document.querySelectorAll(/** @type {'button'} */ ('[data-suggestion-mode]')).fo
 
 initialize();
 
-// Keep a partly completed assignment intact until it is retried or abandoned.
-window.beforeHistoryChange = function() {
-  return !state.isAssigning && !hasPartialAssignmentProgress();
-};
-window.afterHistoryChange = function() { return refreshLocationReview(); };
+// The navbar's undo/redo transport (vireo-page-hooks.js). Keep a partly
+// completed assignment intact until it is retried or abandoned.
+Vireo.registerPageHooks({
+  beforeHistoryChange: function() {
+    return !state.isAssigning && !hasPartialAssignmentProgress();
+  },
+  afterHistoryChange: function() { return refreshLocationReview(); },
+});

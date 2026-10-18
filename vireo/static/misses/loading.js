@@ -36,7 +36,7 @@ import { render } from './render.js';
 }
 
 /* ---------- Fetch + render ---------- */
-// The navbar's undo/redo hook; boot.js exposes it as window.afterHistoryChange.
+// The navbar's undo/redo page hook, which boot.js registers.
 export async function afterHistoryChange() {
   await loadMisses();
 }

@@ -38,3 +38,6 @@ declare function pruneResolvedHashesFromScan(hashes:Set<string>):void;
 declare function clearResults():void;
 declare function setEmptyVisible(visible:boolean):void;
 declare function hideRestoredBanner():void;
+// duplicates.html's inline scan, registered as a page hook by duplicates-page-hooks.js.
+declare function startScan(): Promise<void>;
+declare var Vireo: VireoPageHookRegistry;

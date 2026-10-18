@@ -1831,7 +1831,7 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
 
 def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing(tmp_path):
     """When a missing source folder is relocated onto a path already tracked
-    by another folder, ``_merge_into_existing`` deletes the source folder
+    by another folder, ``folders.merge_into_existing`` deletes the source folder
     row and frees its old path. Any destination photo still carrying that
     old path in ``last_move_source_folder_path`` must have that provenance
     cleared. Otherwise, a new unrelated folder scanned at that freed path
@@ -1890,12 +1890,12 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
         (original_fid,),
     )
     db.conn.commit()
-    # Delete the on-disk source directory so relocate_folder's
+    # Delete the on-disk source directory so folders.relocate's
     # revalidation doesn't refresh the source instead of merging.
     sibling_file.unlink()
     reusable_path.rmdir()
 
-    db.relocate_folder(original_fid, str(target_path))
+    db.folders.relocate(original_fid, str(target_path))
 
     # The original source folder row must be gone (merged into target).
     assert db.conn.execute(
@@ -1991,7 +1991,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     old_child.rmdir()
     old_root.rmdir()
 
-    cascaded = db.relocate_folder(old_root_id, str(new_root))
+    cascaded = db.folders.relocate(old_root_id, str(new_root))
 
     assert cascaded == [{
         "id": child_id,
@@ -2308,7 +2308,7 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
 
 
 def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
-    """Renaming a missing source folder via ``Database.relocate_folder`` (the
+    """Renaming a missing source folder via ``FolderRepository.relocate`` (the
     "remap missing folder to a new location" flow) frees the old path for
     reuse. Without cascading the rebase into
     ``photos.last_move_source_folder_path``, a later unrelated folder scanned
@@ -2339,7 +2339,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     )
     # Same-stem sibling that stays behind so the destination row keeps its
     # provenance after the move — otherwise ``move_photos`` correctly
-    # expires it immediately and the ``relocate_folder`` cascade has
+    # expires it immediately and the ``folders.relocate`` cascade has
     # nothing to rebase.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
@@ -2361,7 +2361,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     )
 
     # Mark the folder as missing (its on-disk path is gone) and remap it
-    # via ``relocate_folder`` to a fresh location. This is the flow used
+    # via ``folders.relocate`` to a fresh location. This is the flow used
     # when a user tells the app "this folder now lives here". The old
     # path is now free for reuse.
     relocated_path = tmp_path / "CARD_RELOCATED"
@@ -2371,7 +2371,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
         (original_fid,),
     )
     db.conn.commit()
-    db.relocate_folder(original_fid, str(relocated_path))
+    db.folders.relocate(original_fid, str(relocated_path))
 
     # The provenance must have been rebased onto the new path, not left
     # pointing at the freed one.
@@ -2408,7 +2408,7 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
 
 
 def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_path):
-    """When ``check_folder_health`` flips a folder to ``'missing'`` because
+    """When ``folders.check_health`` flips a folder to ``'missing'`` because
     its on-disk path is gone, the folder row is preserved so a later rescan
     can bring it back — but its stored path is now free for reuse by an
     unrelated mount. ``add_folder``'s ``INSERT OR IGNORE`` maps a fresh scan
@@ -2467,7 +2467,7 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     # The folder row and its remaining photo rows survive in case the
     # same card returns.
     shutil.rmtree(reusable_path)
-    changed = db.check_folder_health()
+    changed = db.folders.check_health()
     assert changed >= 1
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (original_fid,),
@@ -5780,7 +5780,7 @@ def test_move_folder_updates_counts(move_env):
 
     env = move_env
     move_folder(db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]))
-    env["db"].update_folder_counts()
+    env["db"].folders.update_counts()
     row = env["db"].conn.execute(
         "SELECT photo_count FROM folders WHERE path = ?",
         (str(env["dst"] / "src"),),

@@ -9,7 +9,7 @@
 (function(global) {
   'use strict';
 
-  var Vireo = global.Vireo = global.Vireo || {};
+  var Vireo = global.Vireo = global.Vireo || /** @type {VireoNamespace} */ ({});
   var nativeFetch = global.fetch.bind(global);
   /** @type {Record<string, boolean>} */
   var SAFE_METHODS = {GET: true, HEAD: true, OPTIONS: true};

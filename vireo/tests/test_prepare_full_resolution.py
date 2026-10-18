@@ -436,6 +436,7 @@ def test_preparation_skips_concurrently_deleted_photos(
     import offline_cache
     from db import Database
     from preview_cache import cleanup_cached_files_for_deleted_photos
+    from repositories.folders import FolderRepository
 
     app, db, photo_id = client_with_photo
     photo = db.photos.get(photo_id)
@@ -478,7 +479,7 @@ def test_preparation_skips_concurrently_deleted_photos(
 
     monkeypatch.setattr(offline_cache, "cache_photo_original", cache_with_deletion)
     if deletion_stage == "before_turn":
-        original_tree = Database.get_folder_tree
+        original_tree = FolderRepository.tree
 
         def folder_tree_with_deletion(self, *args, **kwargs):
             result = original_tree(self, *args, **kwargs)
@@ -486,7 +487,7 @@ def test_preparation_skips_concurrently_deleted_photos(
                 delete_selected()
             return result
 
-        monkeypatch.setattr(Database, "get_folder_tree", folder_tree_with_deletion)
+        monkeypatch.setattr(FolderRepository, "tree", folder_tree_with_deletion)
     elif deletion_stage == "after_copy":
         original_copy = offline_cache._copy_atomic
 
@@ -587,6 +588,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     import offline_cache
     from db import Database
     from preview_cache import cleanup_cached_files_for_deleted_photos
+    from repositories.folders import FolderRepository
 
     app, db, photo_id = client_with_photo
     selected = db.photos.get(photo_id)
@@ -642,7 +644,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
             other_db.close()
 
     if stage == "before_turn":
-        original_tree = Database.get_folder_tree
+        original_tree = FolderRepository.tree
 
         def replace_before_turn(self, *args, **kwargs):
             result = original_tree(self, *args, **kwargs)
@@ -650,7 +652,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
                 replace_photo()
             return result
 
-        monkeypatch.setattr(Database, "get_folder_tree", replace_before_turn)
+        monkeypatch.setattr(FolderRepository, "tree", replace_before_turn)
     elif stage == "after_copy":
         original_copy = offline_cache._copy_atomic
 
@@ -1309,7 +1311,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
                     writer = Database(db._db_path)
                     try:
                         folder_id = writer.photos.get(photo_id)["folder_id"]
-                        writer.relocate_folder(folder_id, str(relocated))
+                        writer.folders.relocate(folder_id, str(relocated))
                         assert writer.photos.get(photo_id)["folder_id"] == folder_id
                     finally:
                         writer.close()

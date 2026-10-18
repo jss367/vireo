@@ -499,7 +499,7 @@ def utc_iso_now() -> str:
 
 def metadata_repair_count(db: Database, workspace_id: int, root_paths: Sequence[str] | None = None) -> int:
     # Don't filter by ``folders.status``: that column is only refreshed
-    # by ``check_folder_health`` (10-minute loop or the manual
+    # by ``folders.check_health`` (10-minute loop or the manual
     # "check missing folders" flow), so a workspace whose drive was
     # unplugged and is now reconnected still reads as ``status='missing'``
     # until then. The readiness endpoint fires as soon as the Import

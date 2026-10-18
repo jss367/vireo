@@ -13,7 +13,7 @@ from wait import wait_for_job_via_client
 def cache_fixture(fixture, *, sidecars=False):
     app, db, pid = fixture
     photo = db.photos.get(pid)
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     source = Path(folder["path"]) / photo["filename"]
     if sidecars:
         source.with_suffix(".xmp").write_text("source metadata")

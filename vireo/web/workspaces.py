@@ -631,7 +631,7 @@ def create_workspace_blueprint(
             return json_error("folder_ids must be a list of integers")
         unknown = [
             fid for fid in dict.fromkeys(folder_ids)
-            if db.get_folder(fid) is None
+            if db.folders.get(fid) is None
         ]
         if unknown:
             return json_error(f"Unknown folder ids: {unknown}", 404)
@@ -846,7 +846,7 @@ def create_workspace_blueprint(
         # hit the workspace_folders FK and 500.
         if not db.workspaces.get(ws_id):
             return json_error("Workspace not found", 404)
-        if not db.get_folder(folder_id):
+        if not db.folders.get(folder_id):
             return json_error("Folder not found", 404)
         # A workspace with active local state has folder paths rebased into
         # the managed copy and a manifest covering those paths. Silently

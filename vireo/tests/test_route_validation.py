@@ -371,7 +371,7 @@ def test_report_issue_app_state_reports_the_active_workspace_and_counts(app_and_
     )
     state = resp.get_json()["diagnostics"]["app_state"]
     assert state["workspace"] == db.workspaces.get(db.active_workspace_id)["name"]
-    assert state["folders"] == db.count_all_folders()
+    assert state["folders"] == db.folders.count_all()
     assert state["photos"] == db.photos.count_all()
     assert state["predictions"] == db.predictions.count_in_workspace()
     assert state["photos"] > 0

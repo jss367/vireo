@@ -35,7 +35,7 @@ def test_browse_init_reads_folder_health_from_single_snapshot(
         assert reached_photo_query.wait(timeout=5), "init never read its photo page"
 
         # Commit a health transition after the missing-id/photo reads but
-        # before the endpoint continues to get_folder_tree(). Without the
+        # before the endpoint continues to folders.tree(). Without the
         # explicit read transaction the response mixes five old-snapshot
         # photos and [] missing IDs with a post-transition one-folder tree.
         missing_id = live_server["data"]["folders"][0]
@@ -283,7 +283,7 @@ def test_check_health_dispatch_ignores_cross_workspace_flips(
 ):
     """A folder flip in another workspace must not reset the active Browse.
 
-    ``db.check_folder_health()`` scans every folder in the database and
+    ``db.folders.check_health()`` scans every folder in the database and
     returns a global change count, while ``data.missing`` and Browse are
     scoped to the active workspace. Dispatching on ``data.changed`` would
     then blow away the active selection whenever a folder in an
@@ -305,7 +305,7 @@ def test_check_health_dispatch_ignores_cross_workspace_flips(
     )
 
     # Add a folder linked only to Field Work whose disk path is already
-    # gone — the next check_folder_health() will flip its status to
+    # gone — the next folders.check_health() will flip its status to
     # ``missing`` and bump the global change count without affecting the
     # active Default workspace's missing set.
     field_ws = db.conn.execute(

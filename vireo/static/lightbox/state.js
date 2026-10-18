@@ -88,6 +88,22 @@ var _lbEditRecipeWriteSeq = 0;
 /** @type {Record<string, LightboxPhoto>} */ var _lbPhotoDataByPhoto = {};
 /** @type {Record<string, string>} */ var _lbRenderVersionByPhoto = {};
 
+/**
+ * Why the open page keeps Edit / Open in Browse disabled for a photo, from
+ * its getLightboxBrowseDisabledHint page hook (Pipeline Review), or null.
+ * @param {number | null} photoId
+ */
+function _lbPageBrowseDisabledHint(photoId) {
+  var hint = Vireo.pageHook('getLightboxBrowseDisabledHint');
+  return hint ? hint(photoId, true) : null;
+}
+
+/** The photo in the open page's detail panel (Browse), whose image edits refresh too. */
+function _lbPageDetailPhotoId() {
+  var detailPhotoId = Vireo.pageHook('getDetailPhotoId');
+  return detailPhotoId ? detailPhotoId() : null;
+}
+
 function _lbGuardReadOnly() {
   if (!_lbReadOnly) return false;
   if (typeof showToast === 'function') showToast(_lbReadOnlyMessage, 'warning');
@@ -123,9 +139,7 @@ function _lbApplyReadOnlyState() {
   if (editButton) {
     var editHint = _lbReadOnly
       ? _lbReadOnlyMessage
-      : (typeof window.getLightboxBrowseDisabledHint === 'function'
-        ? window.getLightboxBrowseDisabledHint(vireoLightboxSession.requestedPhotoId(), true)
-        : null);
+      : _lbPageBrowseDisabledHint(vireoLightboxSession.requestedPhotoId());
     editButton.disabled = !!editHint;
     editButton.title = editHint || 'Edit photo';
   }

@@ -44,9 +44,8 @@ function findSimilar(photoId) {
           card.className = 'similar-card';
           card.addEventListener('click', function() {
             closeSimilar();
-            var lightboxOptions = typeof window.getLightboxOpenOptions === 'function'
-              ? window.getLightboxOpenOptions(p.id)
-              : undefined;
+            var getLightboxOpenOptions = Vireo.pageHook('getLightboxOpenOptions');
+            var lightboxOptions = (getLightboxOpenOptions && getLightboxOpenOptions(p.id)) || undefined;
             openLightbox(p.id, p.filename || '', similarPhotoList, lightboxOptions);
           });
           var img = document.createElement('img');

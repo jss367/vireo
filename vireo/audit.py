@@ -31,7 +31,7 @@ def check_drift(db):
                  added_in_xmp, removed_in_xmp, direction}
     """
     photos = db.photos.list_page(per_page=999999)
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     drifts = []
 
     for photo in photos:
@@ -130,7 +130,7 @@ def check_untracked(db, root_paths):
     """
     # Build set of known file paths
     photos = db.photos.list_page(per_page=999999)
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     known_paths = set()
     for photo in photos:
         folder_path = folders.get(photo["folder_id"], "")
@@ -521,7 +521,7 @@ def accept_current_hash(db, photo_ids):
     """
     from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     accepted = 0
     for pid in photo_ids:
         photo = db.photos.get(pid)
@@ -580,7 +580,7 @@ def build_summary(db):
     """
     runs = db.audit.get_runs()
     stats = db.audit.get_integrity_stats()
-    missing_folders = db.get_missing_folders()
+    missing_folders = db.folders.missing()
 
     checks = {}
     for name in ("drift", "orphans", "untracked", "sidecars"):
@@ -653,7 +653,7 @@ def remove_orphans(db, photo_ids):
     """
     db.audit.remove_orphan_rows(photo_ids)
     db.commit()
-    db.update_folder_counts()
+    db.folders.update_counts()
     log.info("Removed %d orphan entries", len(photo_ids))
 
 

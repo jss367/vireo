@@ -16,7 +16,11 @@ document.addEventListener('lifelist:changed', function() {
   loadLifeList();
 });
 
-window.afterHistoryChange = function() { return loadLifeList(); };
+// The shared navbar's undo/redo and native Export command (vireo-page-hooks.js).
+Vireo.registerPageHooks({
+  afterHistoryChange: function() { return loadLifeList(); },
+  openExportModal: openExportModal,
+});
 
 restoreLifeListViewPreferences();
 loadLifeList();
