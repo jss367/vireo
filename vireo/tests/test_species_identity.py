@@ -1220,7 +1220,7 @@ def test_resolved_prediction_taxonomy_replaces_a_neighbours_guess(db):
 # ``resolved_prediction_taxonomy``) or gate on ``stored_taxonomy_evidence_sql``
 # before it shows, searches or submits the name — then list itself here.
 RAW_SCIENTIFIC_NAME_READERS = {
-    "culling.py": "identity via SpeciesResolver.prediction",
+    "repositories/culling.py": "identity via SpeciesResolver.prediction in culling._load_top_predictions",
     "pipeline.py": "identity via SpeciesResolver.prediction",
     "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
     "repositories/predictions.py": (

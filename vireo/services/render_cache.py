@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import preview_cache
+
+if TYPE_CHECKING:
+    from db import Database
 
 log = logging.getLogger(__name__)
 
 
-def queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
+def queue_edit_recipe_sync(
+    db: Database, photo_id: int, recipe_json: str | None, *, _commit: bool = True,
+) -> None:
     """Queue the current non-destructive edit recipe for XMP sync."""
     db.remove_pending_changes(
         photo_id, "edit_recipe", workspace_id=db.require_workspace_id(), _commit=False,
@@ -40,7 +47,7 @@ def queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
         db.commit()
 
 
-def _drop_stale_thumbnails(db, pid, thumb_dir):
+def _drop_stale_thumbnails(db: Database, pid: int, thumb_dir: str) -> None:
     """Unlink ``pid``'s thumbnail, paired-source variants and regen sidecars."""
     thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
     clear_thumb_path = True
@@ -86,7 +93,7 @@ def _drop_stale_thumbnails(db, pid, thumb_dir):
         db.caches.clear_thumbnail_path(pid)
 
 
-def _drop_stale_originals_and_external_edits(pid, originals_dir, external_edits_dir):
+def _drop_stale_originals_and_external_edits(pid: int, originals_dir: str, external_edits_dir: str) -> None:
     """Unlink ``pid``'s full-resolution renders and external-editor handoff."""
     original_paths = [
         os.path.join(originals_dir, f"{pid}.jpg"),
@@ -121,24 +128,25 @@ class RenderCache:
     every call so a test that repoints it after ``create_app`` is honored.
     """
 
-    def __init__(self, config):
+    # Any: the Flask app config holds heterogeneous settings values.
+    def __init__(self, config: Mapping[str, Any]) -> None:
         self._config = config
-        self.invalid_preview_cache_paths = set()
+        self.invalid_preview_cache_paths: set[str] = set()
 
     # Canonical marker definitions live in preview_cache so the recycled-rowid
     # purge (which runs in the scanner, outside the app factory) writes the
     # same marker web.media's _serve_preview lazy-adoption branch consults.
     @staticmethod
-    def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
+    def mark_preview_cache_invalid(db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None:
         preview_cache.mark_preview_cache_invalid(db, photo_id, size, commit=commit)
 
     @staticmethod
-    def clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
+    def clear_preview_cache_invalid(db: Database, photo_id: int, size: int | str, *, commit: bool = True) -> None:
         db.caches.clear_preview_invalidation(photo_id, size)
         if commit:
             db.commit()
 
-    def invalidate_photo_render_cache(self, db, photo_ids):
+    def invalidate_photo_render_cache(self, db: Database, photo_ids: Iterable[int]) -> None:
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(self._config["THUMB_CACHE_DIR"])
         thumb_dir = self._config["THUMB_CACHE_DIR"]
@@ -153,10 +161,10 @@ class RenderCache:
             )
         db.commit()
 
-    def _drop_stale_previews(self, db, pid, preview_dir):
+    def _drop_stale_previews(self, db: Database, pid: int, preview_dir: str) -> None:
         """Unlink ``pid``'s sized previews, marking any that can't be removed."""
-        tracked_sizes = set()
-        removed_preview_rows = []
+        tracked_sizes: set[str] = set()
+        removed_preview_rows: list[tuple[int, int]] = []
         for row in db.caches.preview_sizes(pid):
             size_value = row["size"]
             tracked_sizes.add(str(size_value))

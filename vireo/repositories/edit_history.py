@@ -801,6 +801,24 @@ class EditHistoryRepository:
         return {"grouping_snapshots_retired": before[0] - after[0],
                 "grouping_snapshot_bytes_removed": before[1] - after[1]}
 
+    def item_values_with_local_adjustments(self) -> list[str | None]:
+        """Every history item ``old_value``, then ``new_value``, that may hold a local adjustment.
+
+        Catalog-wide (an undo in any workspace can restore a recipe), with the
+        same ``LIKE '%"local"%'`` prefilter as
+        ``EditsRepository.recipes_with_local_adjustments``, for the edit-mask
+        snapshot sweep (``local_masks.gc_edit_masks``).
+        """
+        values: list[str | None] = []
+        for query in (
+            "SELECT old_value AS v FROM edit_history_items "
+            "WHERE old_value LIKE '%\"local\"%'",
+            "SELECT new_value AS v FROM edit_history_items "
+            "WHERE new_value LIKE '%\"local\"%'",
+        ):
+            values.extend(row["v"] for row in self.conn.execute(query).fetchall())
+        return values
+
     def store_grouping_payload(self, edit_id: int, payload: str) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO edit_history_payloads (edit_id, payload, bytes) VALUES (?, ?, ?)",

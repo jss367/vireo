@@ -21,12 +21,57 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+
+if TYPE_CHECKING:
+    from db import Database
+    from services.service_types import JsonDict
 
 log = logging.getLogger(__name__)
 
+# A photo row's ``(folder_id, filename, folder_path, companion_path)`` when
+# its files were resolved; the catalog step deletes the row only if it still
+# matches.
+PhotoIdentity = tuple[int, str, str, str | None]
 
-def reraise_fatal_cleanup_error(exc):
+# ``(moved, successful paths, failures)`` from moving files to the Trash or
+# deleting them; each failure is a ``{"path", "error"}`` dict.
+PathOutcome = tuple[int, set[str], list["JsonDict"]]
+
+# A ``run_batch_delete`` progress event (``phase``, counts, ``detail``, ...).
+DeleteProgress = Callable[["JsonDict"], None]
+
+
+class TrashPaths(Protocol):
+    """``app._trash_paths``, as the delete calls it."""
+
+    def __call__(
+        self, filepaths: Sequence[str], progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> PathOutcome: ...
+
+
+class BatchDeleteResult(TypedDict):
+    """What ``run_batch_delete`` returns to the routes and the delete job."""
+
+    ok: bool
+    deleted: int
+    trashed: int
+    trash_failed: list[JsonDict]
+    failed_photo_ids: list[int]
+
+
+class CatalogRemoval(TypedDict):
+    """What ``_BatchDeleteRun.remove_catalog_rows`` removed (or skipped)."""
+
+    deleted: int
+    ids: list[int]
+    files: list[JsonDict]
+    skipped_ids: list[int]
+
+
+def reraise_fatal_cleanup_error(exc: BaseException) -> None:
     """Re-raise interrupts that best-effort cleanup must never swallow."""
     if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
         raise exc
@@ -39,17 +84,21 @@ class PhotoDeletion:
     every call, as it was when this lived in ``create_app``.
     """
 
+    # Any: the Flask app config holds heterogeneous settings values.
     def __init__(
-        self, config, *, chunked, trash_paths, snapshot_parent_device,
-        path_confirmed_gone,
-    ):
+        self, config: Mapping[str, Any], *, chunked: Callable[[Sequence[int]], Iterable[list[int]]],
+        trash_paths: TrashPaths, snapshot_parent_device: Callable[[str], int | None],
+        path_confirmed_gone: Callable[[str, int | None], bool],
+    ) -> None:
         self._config = config
         self._chunked = chunked
         self._trash_paths = trash_paths
         self._snapshot_parent_device = snapshot_parent_device
         self._path_confirmed_gone = path_confirmed_gone
 
-    def cleanup_cached_files_for_deleted_photos(self, files, progress_callback=None):
+    def cleanup_cached_files_for_deleted_photos(
+        self, files: Sequence[JsonDict], progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> None:
         try:
             # Imported lazily: a broken ``preview_cache`` import (e.g. a moved
             # packaged executable) must be logged, not fail the delete.
@@ -64,9 +113,9 @@ class PhotoDeletion:
             log.exception("Failed to clean cached files after delete")
 
     def run_batch_delete(
-        self, db, photo_ids, mode="vireo", include_companions=False,
-        progress_callback=None,
-    ):
+        self, db: Database, photo_ids: object, mode: str = "vireo", include_companions: bool = False,
+        progress_callback: DeleteProgress | None = None,
+    ) -> BatchDeleteResult:
         """Delete photos using the same phases for sync and job endpoints.
 
         Only photos visible in ``db``'s active workspace are acted on: photos
@@ -114,7 +163,7 @@ class PhotoDeletion:
         return run.delete_from_disk(photo_ids, include_companions)
 
 
-def _catalog_only_result(deleted):
+def _catalog_only_result(deleted: int) -> BatchDeleteResult:
     """The result of a run that touched no file on disk."""
     return {
         "ok": True,
@@ -129,10 +178,10 @@ def _catalog_only_result(deleted):
 class _DiskTargets:
     """What a disk-mode delete resolved, before any file is touched."""
 
-    ids: list
-    primary_paths: dict
-    identity: dict
-    extra_companions: dict
+    ids: list[int]
+    primary_paths: dict[int, str]
+    identity: dict[int, PhotoIdentity]
+    extra_companions: dict[int, set[str]]
 
 
 @dataclass
@@ -140,32 +189,34 @@ class _DiskOutcome:
     """Which files and photos reached the requested end state on disk."""
 
     trashed: int
-    companion_success: set
-    companion_failures: list
-    primary_success: set
-    primary_failures: list
-    successful_ids: list
-    failed_ids: list
+    companion_success: set[str]
+    companion_failures: list[JsonDict]
+    primary_success: set[str]
+    primary_failures: list[JsonDict]
+    successful_ids: list[int]
+    failed_ids: list[int]
 
 
 class _BatchDeleteRun:
     """One ``run_batch_delete`` call: its progress events and disk tally."""
 
-    def __init__(self, deletion, db, mode, progress_callback):
+    def __init__(
+        self, deletion: PhotoDeletion, db: Database, mode: str, progress_callback: DeleteProgress | None,
+    ) -> None:
         self._deletion = deletion
         self.db = db
         self.mode = mode
         self.progress_callback = progress_callback
-        self.disk_phase = None
+        self.disk_phase: str | None = None
         self.disk_total = 0
         self.disk_paths_finished = 0
 
     def emit(
-        self, phase, current=0, total=0, current_file="", detail="", failed=0,
-        stage_failures=None,
-    ):
+        self, phase: str | None, current: int = 0, total: int = 0, current_file: str = "", detail: str = "",
+        failed: int = 0, stage_failures: Mapping[str, int] | None = None,
+    ) -> None:
         if self.progress_callback:
-            payload = {
+            payload: JsonDict = {
                 "phase": phase,
                 "current": current,
                 "total": total,
@@ -183,7 +234,10 @@ class _BatchDeleteRun:
                 payload["stage_failures"] = dict(stage_failures)
             self.progress_callback(payload)
 
-    def remove_catalog_rows(self, ids, *, expand_companions, revalidate_identity=None):
+    def remove_catalog_rows(
+        self, ids: Sequence[int], *, expand_companions: bool,
+        revalidate_identity: Mapping[int, PhotoIdentity] | None = None,
+    ) -> CatalogRemoval:
         """Atomically remove resolved catalog rows, then clean caches.
 
         ``revalidate_identity`` is an optional ``{photo_id: (folder_id,
@@ -201,10 +255,10 @@ class _BatchDeleteRun:
         the caller can surface them alongside filesystem failures.
         """
         db = self.db
-        result = {
+        result: CatalogRemoval = {
             "deleted": 0, "ids": [], "files": [], "skipped_ids": [],
         }
-        skipped_ids = []
+        skipped_ids: list[int] = []
         total = len(ids)
         prepared = 0
         self.emit(
@@ -257,13 +311,15 @@ class _BatchDeleteRun:
         self._clean_up_after_catalog_removal(result)
         return result
 
-    def _revalidated_ids(self, ids, revalidate_identity, skipped_ids):
+    def _revalidated_ids(
+        self, ids: Sequence[int], revalidate_identity: Mapping[int, PhotoIdentity], skipped_ids: list[int],
+    ) -> list[int]:
         """The ids whose row still matches ``revalidate_identity``.
 
         Runs inside ``remove_catalog_rows``'s write transaction; ids whose
         identity changed are appended to ``skipped_ids``.
         """
-        verified_ids = []
+        verified_ids: list[int] = []
         for chunk in self._deletion._chunked(ids):
             current = {
                 row["id"]: (
@@ -293,7 +349,7 @@ class _BatchDeleteRun:
                     skipped_ids.append(photo_id)
         return verified_ids
 
-    def _clean_up_after_catalog_removal(self, result):
+    def _clean_up_after_catalog_removal(self, result: CatalogRemoval) -> None:
         """Prune the pipeline cache and sweep cached files for removed rows."""
         self.emit("Pruning pipeline cache", 0, 1)
         try:
@@ -303,7 +359,7 @@ class _BatchDeleteRun:
             log.exception("Failed to prune pipeline cache after delete")
         self.emit("Pruning pipeline cache", 1, 1)
 
-        def cache_progress(current, total_files, filename):
+        def cache_progress(current: int, total_files: int, filename: str) -> None:
             self.emit("Cleaning cached files", current, total_files, filename)
 
         self.emit("Cleaning cached files", 0, len(result["files"]))
@@ -311,7 +367,7 @@ class _BatchDeleteRun:
             result["files"], progress_callback=cache_progress,
         )
 
-    def delete_from_disk(self, photo_ids, include_companions):
+    def delete_from_disk(self, photo_ids: Sequence[int], include_companions: bool) -> BatchDeleteResult:
         """Disk modes: change the files, then remove the rows that made it."""
         targets = self._resolve_disk_targets(photo_ids, include_companions)
 
@@ -374,7 +430,7 @@ class _BatchDeleteRun:
             "failed_photo_ids": failed_ids,
         }
 
-    def _resolve_disk_targets(self, photo_ids, include_companions):
+    def _resolve_disk_targets(self, photo_ids: Sequence[int], include_companions: bool) -> _DiskTargets:
         """Resolve each photo's files and identity for a disk-mode delete.
 
         Disk modes resolve paths without changing SQLite. A photo's catalog
@@ -416,7 +472,7 @@ class _BatchDeleteRun:
             for f in files
         }
         catalog_primary_paths = set(primary_paths.values())
-        extra_companions = {}
+        extra_companions: dict[int, set[str]] = {}
         if include_companions:
             for f in files:
                 companion_path = f.get("companion_path")
@@ -441,7 +497,7 @@ class _BatchDeleteRun:
             extra_companions=extra_companions,
         )
 
-    def _change_files(self, targets):
+    def _change_files(self, targets: _DiskTargets) -> _DiskOutcome:
         """Change the companions, then the primaries whose companions made it."""
         extra_companions = targets.extra_companions
         primary_paths = targets.primary_paths
@@ -484,7 +540,7 @@ class _BatchDeleteRun:
             failed_ids=failed_ids,
         )
 
-    def _operate(self, paths_to_change):
+    def _operate(self, paths_to_change: Sequence[str]) -> PathOutcome:
         """Move ``paths_to_change`` to the Trash or delete them permanently."""
         if not paths_to_change:
             return 0, set(), []
@@ -492,10 +548,10 @@ class _BatchDeleteRun:
             return self._trash(paths_to_change)
         return self._delete_permanently(paths_to_change)
 
-    def _trash(self, paths_to_change):
+    def _trash(self, paths_to_change: Sequence[str]) -> PathOutcome:
         progress_offset = self.disk_paths_finished
 
-        def trash_progress(current, _total, filename):
+        def trash_progress(current: int, _total: int, filename: str) -> None:
             self.emit(
                 self.disk_phase, progress_offset + current,
                 self.disk_total, filename,
@@ -507,9 +563,9 @@ class _BatchDeleteRun:
         self.disk_paths_finished += len(paths_to_change)
         return result
 
-    def _delete_permanently(self, paths_to_change):
-        successful = set()
-        failures = []
+    def _delete_permanently(self, paths_to_change: Sequence[str]) -> PathOutcome:
+        successful: set[str] = set()
+        failures: list[JsonDict] = []
         removed = 0
         # Snapshot each parent's st_dev before deletion so a mount that
         # vanishes mid-batch can be detected even when the mount point
@@ -555,20 +611,20 @@ class _BatchDeleteRun:
             self._finish_disk_path(filepath)
         return removed, successful, failures
 
-    def _finish_disk_path(self, filepath):
+    def _finish_disk_path(self, filepath: str) -> None:
         self.disk_paths_finished += 1
         self.emit(
             self.disk_phase, self.disk_paths_finished,
             self.disk_total, os.path.basename(filepath),
         )
 
-    def _filesystem_failures(self, targets, outcome):
+    def _filesystem_failures(self, targets: _DiskTargets, outcome: _DiskOutcome) -> list[JsonDict]:
         """One ``trash_failed`` entry per file a retained photo still has."""
         failure_by_path = {
             failure["path"]: failure
             for failure in outcome.companion_failures + outcome.primary_failures
         }
-        trash_failed = []
+        trash_failed: list[JsonDict] = []
         for photo_id in outcome.failed_ids:
             failed_paths = [
                 path for path in targets.extra_companions.get(photo_id, set())
@@ -576,9 +632,11 @@ class _BatchDeleteRun:
             ]
             primary = targets.primary_paths.get(photo_id)
             if not failed_paths and primary not in outcome.primary_success:
-                failed_paths.append(primary)
+                # Every resolved id has a primary path: ``ids`` and ``files``
+                # come from the same rows in ``resolve_photos_for_delete``.
+                failed_paths.append(cast(str, primary))
             for filepath in failed_paths:
-                detail = dict(failure_by_path.get(filepath) or {
+                detail: JsonDict = dict(failure_by_path.get(filepath) or {
                     "path": filepath,
                     "error": "A companion file could not be removed",
                 })
@@ -587,8 +645,9 @@ class _BatchDeleteRun:
         return trash_failed
 
     def _retain_moved_photos(
-        self, skipped_ids, failed_ids, trash_failed, targets, result,
-    ):
+        self, skipped_ids: Sequence[int], failed_ids: list[int], trash_failed: list[JsonDict],
+        targets: _DiskTargets, result: CatalogRemoval,
+    ) -> list[int]:
         """Report the rows the catalog step skipped; return the failed ids.
 
         Appends one ``trash_failed`` entry per skipped id.
