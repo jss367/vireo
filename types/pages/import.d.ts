@@ -34,7 +34,7 @@ interface ImportLocationSuggestion { kind: 'keyword' | 'google'; source: 'your_p
 interface ImportLocationGroup { key: string; suggestion: ImportLocationSuggestion | null; cells: string[]; file_count: number; latitude: number; longitude: number; sample_paths: string[]; unresolved_reasons?: Record<string, number>; }
 interface ImportLocationOption { id: number; name: string; label: string; }
 interface ImportLocationSuggestions { groups: ImportLocationGroup[]; file_cells: Record<string, string>; no_gps_paths: string[]; location_options: ImportLocationOption[]; }
-interface ImportLocationFrame extends Partial<ImportLocationSuggestions> { done?: boolean; error?: string; reading?: number; total?: number; }
+interface ImportLocationFrame extends Partial<ImportLocationSuggestions> { done?: boolean; error?: string; reading?: number; naming?: number; total?: number; }
 type ImportLocationTarget = { kind: 'skip'; reason: string } | { kind: 'keyword'; keyword_id?: number; name: string } | { kind: 'google'; place_id?: string; name: string } | { kind: 'new'; name: string; latitude: number; longitude: number };
 type ImportLocationChoice = Exclude<ImportLocationTarget, { kind: 'skip' }> & { cells: string[] };
-interface ImportLocationState { signature: string | null; pending: boolean; error: string; reading: number; total: number; data: ImportLocationSuggestions | null; choices: Map<string, {enabled: boolean; value: string}>; abort: AbortController | null; }
+interface ImportLocationState { signature: string | null; pending: boolean; error: string; reading: number; naming: number; total: number; data: ImportLocationSuggestions | null; choices: Map<string, {enabled: boolean; value: string}>; abort: AbortController | null; }

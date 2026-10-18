@@ -358,6 +358,58 @@ def _finish_group(db: Database, group: JsonDict) -> JsonDict | None:
     }
 
 
+class ImportLocationSuggester:
+    """Names an import's GPS cells one at a time, then groups them.
+
+    ``cell_keys`` lists the cells; :meth:`name_cell` suggests one (the only
+    step that may call Google), so a caller can stop between cells;
+    :meth:`result` returns what :func:`suggest_import_locations` documents.
+    """
+
+    def __init__(
+        self, db: Database, gps_by_path: Mapping[str, tuple[float, float]], *,
+        api_key: str, language: str | None,
+    ) -> None:
+        self._db = db
+        self._api_key = api_key
+        self._language = language
+        self._cells = _cells_of(gps_by_path)
+        self._nearby = _NearbyPlaces(
+            db, ((c["lat"], c["lng"]) for c in self._cells.values()))
+        self._grid_cache: dict = {}
+        self._groups: dict[str, JsonDict] = {}
+        self.cell_keys = list(self._cells)
+
+    def name_cell(self, key: str) -> None:
+        cell = self._cells[key]
+        suggestion = self._nearby.suggest(cell["lat"], cell["lng"])
+        reason = None
+        if suggestion is None:
+            suggestion, reason = _google_suggestion(
+                self._db, cell["lat"], cell["lng"], self._api_key, self._language,
+                self._grid_cache,
+            )
+        group_key = _group_key(suggestion)
+        group = self._groups.setdefault(group_key, _new_group(group_key, suggestion))
+        _add_cell(group, key, cell, suggestion, reason)
+
+    def result(self) -> JsonDict:
+        finished = []
+        for group in self._groups.values():
+            done = _finish_group(self._db, group)
+            if done is None:
+                # The suggested keyword vanished mid-request; offer the cells unnamed.
+                done = _finish_group(self._db, {**group, "key": "none", "suggestion": None})
+            finished.append(done)
+        finished.sort(key=lambda g: (g["suggestion"] is None, -g["file_count"]))
+        return {
+            "groups": finished,
+            "file_cells": {
+                path: key for key, cell in self._cells.items() for path in cell["paths"]
+            },
+        }
+
+
 def suggest_import_locations(
     db: Database, gps_by_path: Mapping[str, tuple[float, float]], *,
     api_key: str, language: str | None,
@@ -371,36 +423,13 @@ def suggest_import_locations(
     (``"keyword"`` with ``keyword_id``, ``name`` and ``parents``, or
     ``"google"`` with ``place_id``, ``name`` and ``summary``) and ``source``.
     """
-    cells = _cells_of(gps_by_path)
-    nearby = _NearbyPlaces(db, ((c["lat"], c["lng"]) for c in cells.values()))
-    grid_cache: dict = {}
-    groups: dict[str, JsonDict] = {}
-    for key, cell in cells.items():
+    suggester = ImportLocationSuggester(
+        db, gps_by_path, api_key=api_key, language=language)
+    for key in suggester.cell_keys:
         if cancel_check is not None and cancel_check():
             return None
-        suggestion = nearby.suggest(cell["lat"], cell["lng"])
-        reason = None
-        if suggestion is None:
-            suggestion, reason = _google_suggestion(
-                db, cell["lat"], cell["lng"], api_key, language, grid_cache,
-            )
-        group_key = _group_key(suggestion)
-        group = groups.setdefault(group_key, _new_group(group_key, suggestion))
-        _add_cell(group, key, cell, suggestion, reason)
-    finished = []
-    for group in groups.values():
-        done = _finish_group(db, group)
-        if done is None:
-            # The suggested keyword vanished mid-request; offer the cells unnamed.
-            done = _finish_group(db, {**group, "key": "none", "suggestion": None})
-        finished.append(done)
-    finished.sort(key=lambda g: (g["suggestion"] is None, -g["file_count"]))
-    return {
-        "groups": finished,
-        "file_cells": {
-            path: key for key, cell in cells.items() for path in cell["paths"]
-        },
-    }
+        suggester.name_cell(key)
+    return suggester.result()
 
 
 class LocationChoiceError(ValueError):
@@ -429,9 +458,15 @@ def _parse_choice_target(item: Mapping[str, Any]) -> JsonDict:
             raise LocationChoiceError("a Google location needs a place_id")
         return {"kind": "google", "place_id": place_id.strip(), "name": name}
     if kind == "new":
-        # Kept in the request's own shape, so a retry can send it back.
-        point = _finite_point(item.get("latitude"), item.get("longitude"))
-        lat, lng = point if point is not None else (None, None)
+        # Kept in the request's own shape, so a retry can send it back. The
+        # map point is optional, but only as a pair, and never malformed.
+        lat, lng = item.get("latitude"), item.get("longitude")
+        if lat is not None or lng is not None:
+            point = _finite_point(lat, lng)
+            if point is None:
+                raise LocationChoiceError(
+                    "a new location's latitude and longitude must both be valid")
+            lat, lng = point
         return {"kind": "new", "name": name, "latitude": lat, "longitude": lng}
     raise LocationChoiceError("location choice kind must be keyword, google or new")
 
@@ -468,9 +503,26 @@ def parse_location_choices(raw: object) -> list[JsonDict]:
     return choices
 
 
-def _choice_leaf(
+def _google_details(
     db: Database, choice: JsonDict, api_key: str, language: str | None,
-) -> tuple[int, str]:
+) -> JsonDict | None:
+    """Fetch a Google choice's place details unless the catalog has it.
+
+    The network call happens here, before the choice's write transaction,
+    so no lookup holds the catalog's write lock.
+    """
+    if choice["kind"] != "google" or db.locations.find_place_keyword(choice["place_id"]):
+        return None
+    if not api_key:
+        raise LocationChoiceError(
+            f'Add a Google Maps API key in Settings to add "{choice["name"]}"')
+    details = places.place_details_for_language(choice["place_id"], api_key, language)
+    if details is None:
+        raise LocationChoiceError(f'Could not look up "{choice["name"]}" on Google Maps')
+    return details
+
+
+def _choice_leaf(db: Database, choice: JsonDict, details: JsonDict | None) -> tuple[int, str]:
     """The location keyword a choice names, created if needed: (id, name)."""
     if choice["kind"] == "keyword":
         row = db.get_keyword_place_row(choice["keyword_id"])
@@ -483,18 +535,55 @@ def _choice_leaf(
         if existing is not None:
             row = db.get_keyword_place_row(existing["id"])
             return existing["id"], row["name"] if row else choice["name"]
-        if not api_key:
-            raise LocationChoiceError(
-                f'Add a Google Maps API key in Settings to add "{choice["name"]}"')
-        details = places.place_details_for_language(choice["place_id"], api_key, language)
         if details is None:
-            raise LocationChoiceError(
-                f'Could not look up "{choice["name"]}" on Google Maps')
+            # Added between the lookup and this transaction, then removed.
+            raise LocationChoiceError(f'Could not look up "{choice["name"]}" on Google Maps')
         return db.upsert_place_chain(details), details.get("name") or choice["name"]
     leaf_id = db.get_or_create_text_location(choice["name"])
     if choice.get("latitude") is not None:
         db.fill_missing_location_coordinates(leaf_id, choice["latitude"], choice["longitude"])
     return leaf_id, choice["name"]
+
+
+class _ChoiceCancelled(Exception):
+    """Raised inside a choice's transaction so it rolls back whole."""
+
+
+def _apply_choice(
+    db: Database, choice: JsonDict, details: JsonDict | None, pids: Sequence[int],
+    cancel_check: Callable[..., bool],
+) -> tuple[int, int]:
+    """Create the choice's keyword and assign it in one transaction.
+
+    Returns ``(added, kept)``. Every write here, including a new keyword
+    and its Google parent chain, commits together or not at all: a
+    cancellation raises :class:`_ChoiceCancelled` and rolls back.
+    """
+    from services.edit_history import change_photo_location
+
+    with db._commits_held():
+        if not db.in_transaction:
+            db.begin_immediate()
+        leaf_id, name = _choice_leaf(db, choice, details)
+        # Re-read under the write lock: another tab may have placed a photo
+        # since the plan was made, and imports keep existing locations.
+        located = location_keyword_photo_ids(db, pids)
+        items = []
+        for pid in pids:
+            if pid in located:
+                continue
+            if cancel_check(pause_safe=False):
+                raise _ChoiceCancelled
+            item = change_photo_location(db, pid, leaf_id)
+            if item is not None:
+                items.append(item)
+        if items:
+            db.record_edit(
+                "photo_location",
+                f'Added location "{name}" during import to {len(items)} photos',
+                str(leaf_id), items, is_batch=True, _commit=False,
+            )
+    return len(items), len(located)
 
 
 def _plan_location_choices(
@@ -531,13 +620,13 @@ def apply_location_choices(
     """Give each imported photo the location chosen for its GPS cell.
 
     Photos that already carry a location keep it, and photos in no chosen
-    cell are left alone. Each choice is one edit-history step. Counts land
-    on ``summary``: ``locations_added``, ``locations_kept``,
-    ``locations_unchosen``, ``locations_no_gps``, ``locations_unresolved``,
-    plus ``errors``; ``cancelled`` when ``cancel_check`` stopped it.
+    cell are left alone. Each choice is one transaction and one edit-history
+    step. Counts land on ``summary``: ``locations_added``,
+    ``locations_kept``, ``locations_unchosen``, ``locations_no_gps``,
+    ``locations_unresolved``, plus ``errors``; ``cancelled`` when
+    ``cancel_check`` stopped it, in which case the choice in progress left
+    nothing behind.
     """
-    from services.edit_history import change_photo_location
-
     for counter in ("locations_added", "locations_kept", "locations_unchosen",
                     "locations_no_gps", "locations_unresolved"):
         summary.setdefault(counter, 0)
@@ -549,35 +638,23 @@ def apply_location_choices(
         if cancel_check():
             summary["cancelled"] = True
             return
+        choice = choices[index]
         try:
-            leaf_id, name = _choice_leaf(db, choices[index], api_key, language)
+            details = _google_details(db, choice, api_key, language)
+            added, kept = _apply_choice(db, choice, details, pids, cancel_check)
+        except _ChoiceCancelled:
+            summary["cancelled"] = True
+            return
         except (ValueError, sqlite3.Error) as exc:
-            # LocationChoiceError is a ValueError; the rest are catalog writes.
+            # LocationChoiceError is a ValueError; the rest are catalog writes,
+            # already rolled back by the choice's transaction.
             db.rollback()
             log.warning("Import location choice failed: %s", exc, exc_info=True)
             summary["errors"].append(f"{exc}; {len(pids)} photos were left untagged")
             summary["locations_unresolved"] += len(pids)
             continue
-        with db._commits_held():
-            items = []
-            for pid in pids:
-                if cancel_check(pause_safe=False):
-                    summary["cancelled"] = True
-                    break
-                item = change_photo_location(db, pid, leaf_id)
-                if item is not None:
-                    items.append(item)
-            if items and not summary.get("cancelled"):
-                db.record_edit(
-                    "photo_location",
-                    f'Added location "{name}" during import to {len(items)} photos',
-                    str(leaf_id), items, is_batch=True, _commit=False,
-                )
-        if summary.get("cancelled"):
-            db.rollback()
-            return
-        db.commit()
-        summary["locations_added"] += len(items)
+        summary["locations_added"] += added
+        summary["locations_kept"] += kept
 
 
 # Files per GPS read between progress frames: a few ExifTool batches, so the
@@ -590,7 +667,8 @@ def stream_location_suggestions(
 ) -> Iterator[str]:
     """SSE frames for ``/api/import/location-suggestions``.
 
-    ``{"reading": n, "total": N}`` while the files' GPS is read, then one
+    ``{"reading": n, "total": N}`` while the files' GPS is read,
+    ``{"naming": n, "total": N}`` per GPS cell while places are named, then one
     ``{"done": true, "groups": [...], "file_cells": {...}, "no_gps_paths":
     [...], "location_options": [...]}`` (see :func:`suggest_import_locations`
     and :func:`location_options`), or ``{"done": true, "error": "..."}``.
@@ -615,11 +693,18 @@ def stream_location_suggestions(
         yield frame({"reading": min(start + _GPS_READ_CHUNK, total), "total": total})
     db = Database(db_path)
     try:
-        result = suggest_import_locations(
+        suggester = ImportLocationSuggester(
             db, gps,
             api_key=(maps_config.get("google_maps_api_key", "") or "").strip(),
             language=places.result_language(maps_config),
-        ) or {"groups": [], "file_cells": {}}
+        )
+        cells = len(suggester.cell_keys)
+        # One frame per cell: naming may call Google, and a frame is where a
+        # closed page stops the stream before the next paid lookup.
+        for done, key in enumerate(suggester.cell_keys, start=1):
+            suggester.name_cell(key)
+            yield frame({"naming": done, "total": cells})
+        result = suggester.result()
         options = location_options(db)
     except sqlite3.Error as exc:
         log.warning("Could not build import location suggestions", exc_info=True)

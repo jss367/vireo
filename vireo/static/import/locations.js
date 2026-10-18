@@ -1,11 +1,11 @@
 // Location suggestions: once the preview settles, read the files' GPS, show
 // one suggested place per spot, and turn the user's choices into the
-// request's location_choices. Nothing is tagged that is not on screen.
+// request's location_choices. The import applies exactly what is on screen.
 // Classic page script; load boot.js after all definitions.
 
 /** @type {ImportLocationState} */
 let importLocations = {
-  signature: null, pending: false, error: '', reading: 0, total: 0,
+  signature: null, pending: false, error: '', reading: 0, naming: 0, total: 0,
   data: null, choices: new Map(), abort: null,
 };
 
@@ -40,7 +40,7 @@ function importLocationCandidatePaths() {
 function cancelImportLocations() {
   if (importLocations.abort) importLocations.abort.abort();
   importLocations = {
-    signature: null, pending: false, error: '', reading: 0, total: 0,
+    signature: null, pending: false, error: '', reading: 0, naming: 0, total: 0,
     data: null, choices: new Map(), abort: null,
   };
 }
@@ -107,7 +107,9 @@ async function fetchImportLocations(signature) {
           if (frame.error) importLocations.error = frame.error;
           else importLocations.data = /** @type {ImportLocationSuggestions} */ (frame);
         } else {
-          importLocations.reading = Number(frame.reading) || 0;
+          // GPS reading, then naming one GPS cell at a time.
+          if (frame.naming != null) importLocations.naming = Number(frame.naming) || 0;
+          else importLocations.reading = Number(frame.reading) || 0;
           importLocations.total = Number(frame.total) || importLocations.total;
           renderImportLocationStatus();
         }
@@ -228,8 +230,11 @@ function renderImportLocationStatus() {
   }
   const data = importLocations.data;
   if (!data) {
-    status.textContent = 'Reading GPS… ' + importLocations.reading.toLocaleString()
-      + ' of ' + importLocations.total.toLocaleString() + ' files';
+    status.textContent = importLocations.naming
+      ? 'Naming spots… ' + importLocations.naming.toLocaleString() + ' of '
+        + importLocations.total.toLocaleString()
+      : 'Reading GPS… ' + importLocations.reading.toLocaleString()
+        + ' of ' + importLocations.total.toLocaleString() + ' files';
     return;
   }
   const candidates = importLocationCandidatePaths();
@@ -247,7 +252,8 @@ function renderImportLocationStatus() {
   }
   status.textContent = withGps.toLocaleString() + ' photo' + (withGps === 1 ? '' : 's')
     + ' to import ' + (withGps === 1 ? 'has' : 'have') + ' GPS, in ' + spots + ' group'
-    + (spots === 1 ? '' : 's') + '. Choose a location for each; nothing is tagged until you import.'
+    + (spots === 1 ? '' : 's') + '. Each checked group gets the location shown when you import;'
+    + ' change a name or uncheck a group to skip it.'
     + (missing ? ' ' + missing.toLocaleString() + ' without GPS won’t get one.' : '')
     + ' Photos that already have a location keep it.';
 }

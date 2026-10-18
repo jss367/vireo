@@ -76,7 +76,7 @@ async function initImportPage() {
   if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
     // Suggestions from the user's own tagged places need no key.
     gpsHint.textContent = 'Without a Google Maps API key (Settings), suggestions come only from'
-      + ' places you have tagged before. Nothing is tagged until you choose.';
+      + ' places you have tagged before. You review every location before importing.';
   }
 
   const recents = Array.isArray(ingestCfg.recent_destinations)

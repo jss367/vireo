@@ -240,7 +240,7 @@ def test_parse_location_choices_keeps_the_request_shape():
         {"cells": ["32755,-117240", "32755,-117240"], "kind": "keyword", "keyword_id": 7},
         {"cells": ["1,1"], "kind": "google", "place_id": " robb ", "name": " Robb Field "},
         {"cells": ["2,2"], "kind": "new", "name": "Dog Beach", "latitude": 32.75, "longitude": -117.25},
-        {"cells": ["3,3"], "kind": "new", "name": "Somewhere", "latitude": "x"},
+        {"cells": ["3,3"], "kind": "new", "name": "Somewhere", "latitude": None, "longitude": None},
     ]
     parsed = parse_location_choices(raw)
     assert parsed == [
@@ -255,6 +255,9 @@ def test_parse_location_choices_keeps_the_request_shape():
 
 @pytest.mark.parametrize("raw", [
     "x",
+    [{"cells": ["1,1"], "kind": "new", "name": "A", "latitude": "x", "longitude": 2}],
+    [{"cells": ["1,1"], "kind": "new", "name": "A", "latitude": 1.5}],
+    [{"cells": ["1,1"], "kind": "new", "name": "A", "latitude": 95, "longitude": 2}],
     [{"cells": [], "kind": "new", "name": "A"}],
     [{"cells": ["1,1"], "kind": "keyword", "keyword_id": True}],
     [{"cells": ["1,1"], "kind": "new", "name": "x" * 201}],
@@ -359,6 +362,58 @@ def test_a_failed_choice_leaves_its_photos_untagged_and_says_so(db, fid, monkeyp
     assert _location(db, kept) == "Central Park"
 
 
+def test_cancelling_mid_choice_leaves_nothing_behind(db, fid):
+    """A new keyword, its assignments and their sync rows commit together or
+    not at all, so a Stop partway through leaves no orphan location."""
+    pids = [_photo(db, fid, f"new{i}.jpg", RIVER[0]) for i in range(3)]
+    choices = parse_location_choices([{
+        "cells": [cell_key(*RIVER[0])], "kind": "new", "name": "Dog Beach",
+        "latitude": 32.7545, "longitude": -117.25,
+    }])
+    calls = []
+
+    def cancel_after_first_photo(**kwargs):
+        calls.append(kwargs)
+        return len(calls) > 2  # the loop's check, then one photo, then Stop
+
+    summary = _summary()
+    apply_location_choices(db, pids, choices, api_key="", language="en",
+                           summary=summary, cancel_check=cancel_after_first_photo)
+
+    assert summary["cancelled"] is True
+    assert summary["locations_added"] == 0
+    assert [_location(db, pid) for pid in pids] == [None, None, None]
+    assert db.conn.execute("SELECT 1 FROM keywords WHERE name = 'Dog Beach'").fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM edit_history WHERE description LIKE '%Dog Beach%'").fetchone() is None
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM pending_changes WHERE change_type = 'location'").fetchone()[0] == 0
+
+
+def test_a_location_set_elsewhere_during_the_import_is_kept(db, fid, monkeypatch):
+    """The keep-existing check is repeated inside the write transaction."""
+    river = _kw(db, "San Diego River")
+    elsewhere = _kw(db, "Elsewhere")
+    raced, plain = _photo(db, fid, "raced.jpg", RIVER[0]), _photo(db, fid, "plain.jpg", RIVER[0])
+    real_details = import_locations._google_details
+
+    def another_tab_places_a_photo(*args):
+        _tag(db, raced, elsewhere)
+        return real_details(*args)
+
+    monkeypatch.setattr(import_locations, "_google_details", another_tab_places_a_photo)
+    summary = _summary()
+    apply_location_choices(
+        db, [raced, plain],
+        parse_location_choices([{"cells": [cell_key(*RIVER[0])], "kind": "keyword", "keyword_id": river}]),
+        api_key="", language="en", summary=summary, cancel_check=_never,
+    )
+
+    assert _location(db, raced) == "Elsewhere"
+    assert _location(db, plain) == "San Diego River"
+    assert (summary["locations_added"], summary["locations_kept"]) == (1, 1)
+
+
 def test_a_deleted_keyword_choice_is_reported_not_applied(db, fid):
     pid = _photo(db, fid, "new.jpg", RIVER[0])
     summary = _summary()
@@ -390,8 +445,8 @@ def test_stream_reports_progress_then_the_suggestions(db, monkeypatch, exiftool_
     frames = [json.loads(f[len("data: "):]) for f in
               import_locations.stream_location_suggestions(db._db_path, paths, {})]
 
-    assert frames[:3] == [{"reading": 0, "total": 3}, {"reading": 2, "total": 3},
-                          {"reading": 3, "total": 3}]
+    assert frames[:4] == [{"reading": 0, "total": 3}, {"reading": 2, "total": 3},
+                          {"reading": 3, "total": 3}, {"naming": 1, "total": 1}]
     done = frames[-1]
     assert done["done"] is True
     assert done["no_gps_paths"] == ["/card/nogps.NEF"]
@@ -399,6 +454,28 @@ def test_stream_reports_progress_then_the_suggestions(db, monkeypatch, exiftool_
                                   "/card/b.NEF": cell_key(*RIVER[0])}
     assert done["groups"][0]["unresolved_reasons"] == {"no_api_key": 1}
     assert "location_options" in done
+
+
+def test_closing_the_stream_stops_google_lookups_between_cells(db, monkeypatch, exiftool_present):
+    """A superseded preview must not keep spending Google quota."""
+    points = [RIVER[0], FAR_AWAY, (51.5, -0.12)]
+    monkeypatch.setattr(import_locations, "read_source_gps",
+                        lambda paths: {p: points[i] for i, p in enumerate(paths)})
+    lookups = []
+
+    def fake_reverse_geocode(lat, lng, api_key, *, language="en"):
+        lookups.append((lat, lng))
+
+    monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
+    stream = import_locations.stream_location_suggestions(
+        db._db_path, ["/card/a.NEF", "/card/b.NEF", "/card/c.NEF"],
+        {"google_maps_api_key": "KEY"})
+    for line in stream:
+        if json.loads(line[len("data: "):]).get("naming") == 1:
+            break
+    stream.close()
+
+    assert len(lookups) == 1
 
 
 def test_stream_says_when_exiftool_is_missing(db, monkeypatch):
