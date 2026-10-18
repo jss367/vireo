@@ -195,6 +195,24 @@
                     "lineCount": 1
                 }
             }
+        ],
+        "./vireo/scanner/keywords.py": [
+            {
+                "code": "reportArgumentType",
+                "range": {
+                    "startColumn": 49,
+                    "endColumn": 71,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportArgumentType",
+                "range": {
+                    "startColumn": 43,
+                    "endColumn": 65,
+                    "lineCount": 1
+                }
+            }
         ]
     }
 }

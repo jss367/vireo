@@ -33,6 +33,10 @@ import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+# A candidate row as the extraction pass hands it back: the ``sqlite3.Row``
+# ``candidate_rows`` returned, or a dict snapshot of one (the post-loop trim).
+CandidateRow = sqlite3.Row | Mapping[str, Any]
+
 # Every catalog write for a candidate row carries the snapshot's full source
 # identity, so a row whose id was reused, or whose companion or folder changed
 # while extraction ran, is never stamped with this batch's result. Parameters:
@@ -47,7 +51,7 @@ ROW_IDENTITY_WHERE = (
 )
 
 
-def row_identity_params(row: Mapping[str, Any]) -> tuple:
+def row_identity_params(row: CandidateRow) -> tuple:
     """Parameters for ``ROW_IDENTITY_WHERE``."""
     return (
         row["id"], row["folder_id"], row["filename"],
@@ -173,7 +177,7 @@ class WorkingCopyRepository:
     # -- per-row results -----------------------------------------------------
 
     def set_working_copy(
-        self, row: Mapping[str, Any], wc_rel: str, *, raw_failed_then_companion: bool,
+        self, row: CandidateRow, wc_rel: str, *, raw_failed_then_companion: bool,
     ) -> sqlite3.Cursor:
         """Point the snapshot's row at ``wc_rel``; returns the UPDATE cursor."""
         if raw_failed_then_companion:
@@ -208,7 +212,7 @@ class WorkingCopyRepository:
             (wc_rel,),
         ).fetchone() is not None
 
-    def mark_failed(self, row: Mapping[str, Any], failure_source: str) -> None:
+    def mark_failed(self, row: CandidateRow, failure_source: str) -> None:
         """Stamp the snapshot's row with a failure marker for its current mtime."""
         self.conn.execute(
             "UPDATE photos SET working_copy_failed_at=datetime('now'),"
@@ -287,7 +291,7 @@ class WorkingCopyRepository:
 
     # -- capacity deferral ---------------------------------------------------
 
-    def defer(self, rows: Iterable[Mapping[str, Any]]) -> None:
+    def defer(self, rows: Iterable[CandidateRow]) -> None:
         """Mark the snapshots' rows capacity-deferred at their snapshot mtime."""
         self.conn.executemany(
             "UPDATE photos SET"
@@ -296,7 +300,7 @@ class WorkingCopyRepository:
             [(row["file_mtime"], *row_identity_params(row)) for row in rows],
         )
 
-    def undo_deferral(self, rows: Iterable[Mapping[str, Any]]) -> None:
+    def undo_deferral(self, rows: Iterable[CandidateRow]) -> None:
         """Clear the deferred markers ``defer`` wrote for these snapshots."""
         deferred_marker_rows = [
             (
