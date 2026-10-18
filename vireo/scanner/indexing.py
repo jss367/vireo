@@ -9,11 +9,14 @@ keeps a just-inserted photo out of collections that still list a deleted
 photo's recycled id.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from image_loader import RAW_EXTENSIONS
 from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns
@@ -29,6 +32,13 @@ from scanner.exif_fields import _extract_dimensions, _extract_timestamp
 from scanner.hashing import EMPTY_FILE_SHA256
 from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
 
+if TYPE_CHECKING:
+    from db import Database
+    from scanner.companion_keep import _CompanionFills, _KnownCompanionKeeper
+    from scanner.folders import _ScanFolders
+    from scanner.run_state import _ScanTally
+    from scanner.scan_types import ExifMetadata, StrPath
+
 log = logging.getLogger(__name__)
 
 
@@ -36,7 +46,7 @@ log = logging.getLogger(__name__)
 class _FileMetadata:
     """What the main loop reads from one file's ExifTool payload."""
 
-    file_meta: dict
+    file_meta: ExifMetadata
     width: int | None
     height: int | None
     timestamp: str | None
@@ -65,7 +75,7 @@ class _IndexedFile:
 class _CollectionMembership:
     """Which photo ids static collections name, cached across inserts."""
 
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         """Track collection edits on this connection, including rolled-back ones.
 
         data_version detects other connections' commits only. TEMP triggers
@@ -79,7 +89,7 @@ class _CollectionMembership:
         self._collection_named_ids = None
         self._collection_named_ids_version = None
 
-    def drop_inherited_collection_membership(self, photo_id):
+    def drop_inherited_collection_membership(self, photo_id: int) -> None:
         """Take a just-inserted photo out of collections it never joined.
 
         A static collection can still list the id of a photo that no longer
@@ -128,10 +138,11 @@ class _FileIndexer:
     """Catalogs each hashed file; owns the caches it invalidated."""
 
     def __init__(
-        self, db, metadata_map, *, tally, folders, keeper, fills,
-        collections, allow_photo_inserts, extract_full_metadata,
-        vireo_dir, thumb_cache_dir,
-    ):
+        self, db: Database, metadata_map: dict[str, ExifMetadata], *, tally: _ScanTally,
+        folders: _ScanFolders, keeper: _KnownCompanionKeeper, fills: _CompanionFills,
+        collections: _CollectionMembership, allow_photo_inserts: bool, extract_full_metadata: bool,
+        vireo_dir: StrPath | None, thumb_cache_dir: StrPath | None,
+    ) -> None:
         self.db = db
         self.metadata_map = metadata_map
         self.tally = tally
@@ -159,7 +170,7 @@ class _FileIndexer:
             masks_dir=catalog_masks_directory(db._db_path),
         )
 
-    def index_file(self, image_path, phash, file_hash):
+    def index_file(self, image_path: Path, phash: str | None, file_hash: str | None) -> _IndexedFile | None:
         """Catalog one hashed file: row, metadata, caches, keywords.
 
         Returns the ``_IndexedFile`` when it is an uncataloged JPEG that
@@ -244,7 +255,7 @@ class _FileIndexer:
         self.catalog_file(item)
         return None
 
-    def catalog_file(self, item):
+    def catalog_file(self, item: _IndexedFile) -> None:
         """Insert or refresh ``item``'s row, then its keywords and callback."""
         db = self.db
         image_path = item.image_path
@@ -276,7 +287,7 @@ class _FileIndexer:
             photo_id, str(image_path), item.folder_id, item.image_path.name,
         )
 
-    def _read_file_metadata(self, image_path):
+    def _read_file_metadata(self, image_path: Path) -> _FileMetadata:
         # Get pre-extracted metadata for this file
         file_meta = self.metadata_map.get(str(image_path), {})
         file_group = file_meta.get("File", {})
@@ -331,7 +342,7 @@ class _FileIndexer:
             latitude=latitude, longitude=longitude,
         )
 
-    def _add_photo(self, item):
+    def _add_photo(self, item: _IndexedFile) -> int:
         """Insert (or find) the row and credit it; returns the photo id."""
         vireo_dir = self.vireo_dir
         # Keep insertion and inherited-membership cleanup under the same
@@ -380,7 +391,7 @@ class _FileIndexer:
             self.invalidated_photo_ids.add(photo_id)
         return photo_id
 
-    def _write_photo_columns(self, photo_id, item):
+    def _write_photo_columns(self, photo_id: int, item: _IndexedFile) -> None:
         # Update metadata columns (also fixes existing photos that were
         # inserted before ExifTool metadata was available)
         meta = item.meta
@@ -466,7 +477,7 @@ class _FileIndexer:
                 self.db.companion_pairing.clear_identity_mtime(photo_id)
             self.db.commit_with_retry()
 
-    def _identity_column_updates(self, item):
+    def _identity_column_updates(self, item: _IndexedFile) -> tuple[list[str], list[object]]:
         """SET clauses for the file's metadata and content-hash columns."""
         meta = item.meta
         file_hash = item.file_hash
@@ -522,7 +533,7 @@ class _FileIndexer:
             # manual review.
         return updates, update_params
 
-    def _heal_changed_content(self, photo_id, item):
+    def _heal_changed_content(self, photo_id: int, item: _IndexedFile) -> None:
         """Content-change self-heal.
 
         When the computed hash differs from what was stored before this

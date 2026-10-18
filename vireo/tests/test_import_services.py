@@ -211,8 +211,8 @@ def test_restart_in_place_serializes_two_tabs_before_child_is_persisted(
         return {"ok": True}
 
     monkeypatch.setattr(_InPlaceImportJob, "work", blocked_work)
-    monkeypatch.setattr(runner, "_record_job_started", lambda _job: None)
-    monkeypatch.setattr(runner, "_ensure_checkpoint_thread", lambda: None)
+    monkeypatch.setattr(runner._history, "record_job_started", lambda _job: None)
+    monkeypatch.setattr(runner._checkpoints, "ensure_thread", lambda: None)
     workspace_id = db.active_workspace_id
 
     def restart():

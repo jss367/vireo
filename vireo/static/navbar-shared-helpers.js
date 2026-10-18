@@ -130,23 +130,20 @@ function nativeMenuActivePhotoIds() {
     }
     return [Number(vireoLightboxSession.requestedPhotoId())];
   }
-  if (
-    typeof grmState !== 'undefined' &&
-    /** @type {HTMLElement} */ (document.getElementById('grmOverlay')) &&
-    /** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')
-  ) {
-    if (grmState.selectedIds && grmState.selectedIds.size) {
-      return Array.from(grmState.selectedIds);
-    }
-    if (grmState.selected != null) return [grmState.selected];
+  var groupModalSelection = Vireo.pageHook('getGroupModalSelection');
+  var groupOverlay = document.getElementById('grmOverlay');
+  if (groupModalSelection && groupOverlay && groupOverlay.classList.contains('open')) {
+    var groupIds = groupModalSelection();
+    if (groupIds.length) return groupIds;
   }
-  if (typeof getActiveSelection === 'function') {
+  var getActiveSelection = Vireo.pageHook('getActiveSelection');
+  if (getActiveSelection) {
     var ids = getActiveSelection();
     if (ids && ids.length) return ids;
   }
-  if (typeof selectedPhotoId !== 'undefined' && selectedPhotoId != null) {
-    return [selectedPhotoId];
-  }
+  var getSelectedPhotoId = Vireo.pageHook('getSelectedPhotoId');
+  var selectedPhotoId = getSelectedPhotoId ? getSelectedPhotoId() : null;
+  if (selectedPhotoId != null) return [selectedPhotoId];
   return [];
 }
 
@@ -171,14 +168,18 @@ async function nativeMenuBatch(endpoint, payload, success) {
 }
 
 function nativeMenuOpenLightbox() {
-  if (typeof openBrowseShortcutPhoto === 'function' && openBrowseShortcutPhoto(false)) return;
+  var openBrowseShortcutPhoto = Vireo.pageHook('openBrowseShortcutPhoto');
+  if (openBrowseShortcutPhoto && openBrowseShortcutPhoto(false)) return;
   const ids = nativeMenuRequirePhotos('Open in Lightbox');
   if (!ids) return;
-  if (typeof window.openPipelineLightbox === 'function') {
-    window.openPipelineLightbox(ids[0]);
+  var openPipelineLightbox = Vireo.pageHook('openPipelineLightbox');
+  if (openPipelineLightbox) {
+    openPipelineLightbox(ids[0]);
     return;
   }
-  if (typeof openLightbox === 'function' && typeof photos !== 'undefined') {
+  var getPhotos = Vireo.pageHook('getPhotos');
+  if (typeof openLightbox === 'function' && getPhotos) {
+    var photos = /** @type {NavPhoto[]} */ (getPhotos());
     var p = photos.find(function(x) { return x.id === ids[0]; });
     if (p) {
       openLightbox(p.id, p.filename, photos);
@@ -195,9 +196,8 @@ function nativeMenuOpenBrowse() {
     nativeMenuError('Open in Browse needs one selected photo.');
     return;
   }
-  var disabledHint = typeof window.getLightboxBrowseDisabledHint === 'function'
-    ? window.getLightboxBrowseDisabledHint(ids[0], true)
-    : null;
+  var browseDisabledHint = Vireo.pageHook('getLightboxBrowseDisabledHint');
+  var disabledHint = browseDisabledHint ? browseDisabledHint(ids[0], true) : null;
   if (disabledHint) {
     nativeMenuError(disabledHint);
     return false;
@@ -228,75 +228,65 @@ function nativeMenuCloseLightboxForModal() {
 async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
+  var setRatingFor = Vireo.pageHook('setRatingFor');
+  var setReviewRating = Vireo.pageHook('setReviewRating');
+  var batchSetRating = Vireo.pageHook('batchSetRating');
   if (ids.length === 1 && nativeMenuLightboxOpen()) {
-    if (typeof setRatingFor === 'function') {
+    if (setRatingFor) {
       await setRatingFor(ids[0], rating);
       return;
     }
-    if (typeof setReviewRating === 'function') {
+    if (setReviewRating) {
       await setReviewRating(ids[0], rating);
       return;
     }
   }
-  if (typeof batchSetRating === 'function') {
+  if (batchSetRating) {
     await batchSetRating(rating);
     return;
   }
-  if (ids.length === 1 && typeof setReviewRating === 'function') {
+  if (ids.length === 1 && setReviewRating) {
     await setReviewRating(ids[0], rating);
     return;
   }
   await nativeMenuBatch('/api/batch/rating', {photo_ids: ids, rating: rating}, 'Rating updated');
 }
 
-/** @param {string} flag */
+/** @param {VireoHookFlag} flag */
 async function nativeMenuSetFlag(flag) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
+  var setReviewFlag = Vireo.pageHook('setReviewFlag');
+  var batchSetFlag = Vireo.pageHook('batchSetFlag');
   if (ids.length === 1 && nativeMenuLightboxOpen()) {
     if (typeof _lbApplyFlag === 'function' && ids[0] === vireoLightboxSession.requestedPhotoId()) {
       _lbApplyFlag(ids[0], flag);
       return;
     }
-    if (typeof setReviewFlag === 'function') {
+    if (setReviewFlag) {
       await setReviewFlag(ids[0], flag);
       return;
     }
   }
-  if (typeof batchSetFlag === 'function') {
+  if (batchSetFlag) {
     await batchSetFlag(flag);
     return;
   }
-  if (ids.length === 1 && typeof setReviewFlag === 'function') {
+  if (ids.length === 1 && setReviewFlag) {
     await setReviewFlag(ids[0], flag);
     return;
   }
   await nativeMenuBatch('/api/batch/flag', {photo_ids: ids, flag: flag}, 'Flag updated');
 }
 
-/** @param {number[]} ids @param {boolean} excluded */
-function nativeMenuRefreshWildlifeExcludedState(ids, excluded) {
-  if (typeof photos !== 'undefined' && Array.isArray(photos)) {
-    ids.forEach(function(id) {
-      var p = photos.find(function(x) { return x.id === id; });
-      if (p) p.wildlife_excluded = excluded ? 1 : 0;
-    });
-    if (typeof refreshGridCards === 'function') refreshGridCards(ids);
-    else if (typeof renderGrid === 'function') renderGrid();
-    if (typeof selectedPhotoId !== 'undefined' && ids.indexOf(selectedPhotoId ?? -1) !== -1 && typeof loadDetail === 'function') {
-      loadDetail(selectedPhotoId);
-    }
-  }
-}
-
 /** @param {boolean} excluded */
 async function nativeMenuSetWildlifeExcluded(excluded) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
-  var usePageHelper = typeof window.setWildlifeExcludedFor === 'function';
+  var setWildlifeExcludedFor = Vireo.pageHook('setWildlifeExcludedFor');
   var results = await Promise.all(ids.map(function(id) {
-    if (usePageHelper) {
-      return window.setWildlifeExcludedFor?.(id, excluded);
+    if (setWildlifeExcludedFor) {
+      return setWildlifeExcludedFor(id, excluded);
     }
     return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
       method: 'POST',
@@ -304,10 +294,9 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
       body: JSON.stringify({excluded: excluded}),
     }, {toast: false});
   }));
-  if (usePageHelper && results.some(function(result) { return result === false; })) {
+  if (setWildlifeExcludedFor && results.some(function(result) { return result === false; })) {
     return false;
   }
-  if (!usePageHelper) nativeMenuRefreshWildlifeExcludedState(ids, excluded);
   if (typeof vireoLightboxSession !== 'undefined' && ids.indexOf(vireoLightboxSession.requestedPhotoId() ?? -1) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
   }
@@ -315,8 +304,9 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
 }
 
 function nativeMenuPendingPredictions() {
-  if (typeof predictions === 'undefined') return [];
-  return predictions.filter(function(p) { return p.status === 'pending'; });
+  var getPredictions = Vireo.pageHook('getPredictions');
+  if (!getPredictions) return [];
+  return getPredictions().filter(function(p) { return p.status === 'pending'; });
 }
 
 /** @param {string} endpoint @param {Record<string,unknown>} body @param {string} [label] */
@@ -414,6 +404,189 @@ async function nativeMenuCopyDiagnostics() {
   nativeMenuInfo('Diagnostics copied');
 }
 
+/** The Photo menu's open/reveal/organize/delete commands. Rating and flag
+ * commands stay in handleNativeMenuCommand.
+ * @param {string} command @returns {Promise<boolean>} whether it was one */
+async function nativeMenuPhotoCommand(command) {
+  switch (command) {
+    case 'photo_open_lightbox':
+      nativeMenuOpenLightbox();
+      break;
+    case 'photo_open_browse':
+      nativeMenuOpenBrowse();
+      break;
+    case 'photo_reveal': {
+      var revealIds = nativeMenuRequirePhotos(window.VIREO_REVEAL_LABEL);
+      if (!revealIds) break;
+      var revealPhoto = Vireo.pageHook('revealPhoto');
+      var revealReviewPhoto = Vireo.pageHook('revealReviewPhoto');
+      if (revealPhoto) revealPhoto(revealIds[0]);
+      else if (revealReviewPhoto) revealReviewPhoto(revealIds[0]);
+      else await nativeMenuBatch('/api/files/reveal', {photo_id: revealIds[0]});
+      break;
+    }
+    case 'photo_open_editor': {
+      var editorIds = nativeMenuRequirePhotos('Open in External Editor');
+      if (!editorIds) break;
+      if (typeof openInEditor === 'function') await openInEditor(editorIds);
+      else nativeMenuError('No external editor command is available here.');
+      break;
+    }
+    case 'photo_copy_paths': {
+      var copyIds = nativeMenuRequirePhotos('Copy Path');
+      if (!copyIds) break;
+      var copyPhotoPaths = Vireo.pageHook('copyPhotoPaths');
+      if (copyPhotoPaths) await copyPhotoPaths(copyIds);
+      else nativeMenuError('Copy Path is available from Browse.');
+      break;
+    }
+    case 'photo_find_similar': {
+      var similarIds = nativeMenuRequirePhotos('Find Similar');
+      if (!similarIds) break;
+      if (similarIds.length !== 1) nativeMenuError('Find Similar needs one selected photo.');
+      else if (typeof findSimilar === 'function') findSimilar(similarIds[0]);
+      else nativeMenuError('Find Similar is available from Browse and Lightbox.');
+      break;
+    }
+    case 'photo_compare':
+      var openBrowseCompare = Vireo.pageHook('openBrowseCompare');
+      if (openBrowseCompare) openBrowseCompare();
+      else nativeMenuRoute('/id-conflicts');
+      break;
+    case 'photo_add_keyword':
+      var batchAddKeyword = Vireo.pageHook('batchAddKeyword');
+      if (batchAddKeyword) {
+        var keywordIds = nativeMenuRequirePhotos('Add Keyword');
+        if (!keywordIds) break;
+        nativeMenuSetPhotoIdsOverride(keywordIds);
+        nativeMenuCloseLightboxForModal();
+        batchAddKeyword();
+      } else {
+        nativeMenuError('Add Keyword is available from Browse after selecting photos.');
+      }
+      break;
+    case 'photo_add_collection':
+      var addToCollection = Vireo.pageHook('addToCollection');
+      if (addToCollection) {
+        var collectionIds = nativeMenuRequirePhotos('Add to Collection');
+        if (!collectionIds) break;
+        nativeMenuSetPhotoIdsOverride(collectionIds);
+        nativeMenuCloseLightboxForModal();
+        addToCollection();
+      } else {
+        nativeMenuError('Add to Collection is available from Browse after selecting photos.');
+      }
+      break;
+    case 'photo_adjust_capture_time':
+      var openCaptureTimeModal = Vireo.pageHook('openCaptureTimeModal');
+      if (openCaptureTimeModal) {
+        var captureTimeIds = nativeMenuRequirePhotos('Adjust Capture Time');
+        if (!captureTimeIds) break;
+        nativeMenuSetPhotoIdsOverride(captureTimeIds);
+        nativeMenuCloseLightboxForModal();
+        openCaptureTimeModal();
+      } else {
+        nativeMenuError('Adjust Capture Time is available from Browse after selecting photos.');
+      }
+      break;
+    case 'photo_delete':
+      var batchDelete = Vireo.pageHook('batchDelete');
+      if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') {
+        lightboxDelete();
+      } else if (batchDelete) {
+        batchDelete();
+      } else {
+        nativeMenuError('Delete is available from Browse or an open Lightbox.');
+      }
+      break;
+    default:
+      return false;
+  }
+  return true;
+}
+
+/** The Review, Tools and Help menu commands.
+ * @param {string} command @returns {Promise<boolean>} whether it was one */
+async function nativeMenuReviewOrToolCommand(command) {
+  switch (command) {
+    case 'review_accept': {
+      var acceptPending = nativeMenuPendingPredictions()[0];
+      var acceptPrediction = Vireo.pageHook('acceptPrediction');
+      if (acceptPending && acceptPrediction) await acceptPrediction(acceptPending.id);
+      else nativeMenuError('No pending prediction to accept.');
+      break;
+    }
+    case 'review_reject': {
+      var rejectPending = nativeMenuPendingPredictions()[0];
+      var rejectPrediction = Vireo.pageHook('rejectPrediction');
+      if (rejectPending && rejectPrediction) await rejectPrediction(rejectPending.id);
+      else nativeMenuError('No pending prediction to reject.');
+      break;
+    }
+    case 'review_accept_all':
+      var acceptAllPending = Vireo.pageHook('acceptAllPending');
+      if (acceptAllPending) await acceptAllPending();
+      else nativeMenuRoute('/review');
+      break;
+    case 'review_previous':
+    case 'review_next':
+      var step = command === 'review_previous' ? -1 : 1;
+      var moveBrowseSelection = Vireo.pageHook('moveBrowseSelection');
+      if (typeof lightboxNav === 'function' && typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession.requestedPhotoId() != null) lightboxNav(step);
+      else if (moveBrowseSelection) moveBrowseSelection(step);
+      break;
+    case 'review_mark_wildlife':
+      await nativeMenuSetWildlifeExcluded(false);
+      break;
+    case 'review_exclude_wildlife':
+      await nativeMenuSetWildlifeExcluded(true);
+      break;
+    case 'tools_run_pipeline':
+      var startPipeline = Vireo.pageHook('startPipeline');
+      if (startPipeline) await startPipeline();
+      else nativeMenuRoute('/pipeline');
+      break;
+    case 'tools_scan_library':
+      nativeMenuRoute('/workspace');
+      nativeMenuInfo('Choose a folder or workspace root to scan.');
+      break;
+    case 'tools_rescan':
+      if (typeof openRescanModal === 'function') openRescanModal();
+      else nativeMenuRoute('/workspace');
+      break;
+    case 'tools_find_duplicates':
+      var startScan = Vireo.pageHook('startScan');
+      if (startScan) await startScan();
+      else nativeMenuRoute('/duplicates');
+      break;
+    case 'tools_build_previews':
+      await nativeMenuJob('/api/jobs/previews', {}, 'Preview job started');
+      break;
+    case 'tools_sync_metadata':
+      var runSync = Vireo.pageHook('runSync');
+      if (runSync) await runSync();
+      else await nativeMenuJob('/api/jobs/sync', {}, 'Metadata sync started');
+      break;
+    case 'tools_verify_models':
+      var verifyAllModels = Vireo.pageHook('verifyAllModels');
+      if (verifyAllModels) await verifyAllModels();
+      else await nativeMenuJob('/api/jobs/verify-all-models', {}, 'Model verification started');
+      break;
+    case 'tools_cancel_job':
+      await nativeMenuCancelCurrentJob();
+      break;
+    case 'help_open_help':
+      if (typeof openHelpModal === 'function') openHelpModal();
+      break;
+    case 'help_copy_diagnostics':
+      await nativeMenuCopyDiagnostics();
+      break;
+    default:
+      return false;
+  }
+  return true;
+}
+
 window.handleNativeMenuCommand = async function(command) {
   try {
     switch (command) {
@@ -439,90 +612,9 @@ window.handleNativeMenuCommand = async function(command) {
         nativeMenuRoute('/import?mode=copy&pick=source');
         break;
       case 'export_selected':
-        if (typeof openExportModal === 'function') openExportModal();
+        var openExportModal = Vireo.pageHook('openExportModal');
+        if (openExportModal) openExportModal();
         else nativeMenuError('Export is available from Browse after selecting photos.');
-        break;
-      case 'photo_open_lightbox':
-        nativeMenuOpenLightbox();
-        break;
-      case 'photo_open_browse':
-        nativeMenuOpenBrowse();
-        break;
-      case 'photo_reveal': {
-        var revealIds = nativeMenuRequirePhotos(window.VIREO_REVEAL_LABEL);
-        if (!revealIds) break;
-        if (typeof revealPhoto === 'function') revealPhoto(revealIds[0]);
-        else if (typeof revealReviewPhoto === 'function') revealReviewPhoto(revealIds[0]);
-        else await nativeMenuBatch('/api/files/reveal', {photo_id: revealIds[0]});
-        break;
-      }
-      case 'photo_open_editor': {
-        var editorIds = nativeMenuRequirePhotos('Open in External Editor');
-        if (!editorIds) break;
-        if (typeof openInEditor === 'function') await openInEditor(editorIds);
-        else nativeMenuError('No external editor command is available here.');
-        break;
-      }
-      case 'photo_copy_paths': {
-        var copyIds = nativeMenuRequirePhotos('Copy Path');
-        if (!copyIds) break;
-        if (typeof copyPhotoPaths === 'function') await copyPhotoPaths(copyIds);
-        else nativeMenuError('Copy Path is available from Browse.');
-        break;
-      }
-      case 'photo_find_similar': {
-        var similarIds = nativeMenuRequirePhotos('Find Similar');
-        if (!similarIds) break;
-        if (similarIds.length !== 1) nativeMenuError('Find Similar needs one selected photo.');
-        else if (typeof findSimilar === 'function') findSimilar(similarIds[0]);
-        else nativeMenuError('Find Similar is available from Browse and Lightbox.');
-        break;
-      }
-      case 'photo_compare':
-        if (typeof openBrowseCompare === 'function') openBrowseCompare();
-        else nativeMenuRoute('/id-conflicts');
-        break;
-      case 'photo_add_keyword':
-        if (typeof batchAddKeyword === 'function') {
-          var keywordIds = nativeMenuRequirePhotos('Add Keyword');
-          if (!keywordIds) break;
-          nativeMenuSetPhotoIdsOverride(keywordIds);
-          nativeMenuCloseLightboxForModal();
-          batchAddKeyword();
-        } else {
-          nativeMenuError('Add Keyword is available from Browse after selecting photos.');
-        }
-        break;
-      case 'photo_add_collection':
-        if (typeof addToCollection === 'function') {
-          var collectionIds = nativeMenuRequirePhotos('Add to Collection');
-          if (!collectionIds) break;
-          nativeMenuSetPhotoIdsOverride(collectionIds);
-          nativeMenuCloseLightboxForModal();
-          addToCollection();
-        } else {
-          nativeMenuError('Add to Collection is available from Browse after selecting photos.');
-        }
-        break;
-      case 'photo_adjust_capture_time':
-        if (typeof openCaptureTimeModal === 'function') {
-          var captureTimeIds = nativeMenuRequirePhotos('Adjust Capture Time');
-          if (!captureTimeIds) break;
-          nativeMenuSetPhotoIdsOverride(captureTimeIds);
-          nativeMenuCloseLightboxForModal();
-          openCaptureTimeModal();
-        } else {
-          nativeMenuError('Adjust Capture Time is available from Browse after selecting photos.');
-        }
-        break;
-      case 'photo_delete':
-        if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') {
-          lightboxDelete();
-        } else if (typeof batchDelete === 'function') {
-          batchDelete();
-        } else {
-          nativeMenuError('Delete is available from Browse or an open Lightbox.');
-        }
         break;
       case 'photo_rate_0': await nativeMenuSetRating(0); break;
       case 'photo_rate_1': await nativeMenuSetRating(1); break;
@@ -533,73 +625,9 @@ window.handleNativeMenuCommand = async function(command) {
       case 'photo_flag_pick': await nativeMenuSetFlag('flagged'); break;
       case 'photo_flag_reject': await nativeMenuSetFlag('rejected'); break;
       case 'photo_flag_clear': await nativeMenuSetFlag('none'); break;
-      case 'review_accept': {
-        var acceptPending = nativeMenuPendingPredictions()[0];
-        if (acceptPending && typeof acceptPrediction === 'function') await acceptPrediction(acceptPending.id);
-        else nativeMenuError('No pending prediction to accept.');
-        break;
-      }
-      case 'review_reject': {
-        var rejectPending = nativeMenuPendingPredictions()[0];
-        if (rejectPending && typeof rejectPrediction === 'function') await rejectPrediction(rejectPending.id);
-        else nativeMenuError('No pending prediction to reject.');
-        break;
-      }
-      case 'review_accept_all':
-        if (typeof acceptAllPending === 'function') await acceptAllPending();
-        else nativeMenuRoute('/review');
-        break;
-      case 'review_previous':
-        if (typeof lightboxNav === 'function' && typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession.requestedPhotoId() != null) lightboxNav(-1);
-        else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(-1, {});
-        break;
-      case 'review_next':
-        if (typeof lightboxNav === 'function' && typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession.requestedPhotoId() != null) lightboxNav(1);
-        else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(1, {});
-        break;
-      case 'review_mark_wildlife':
-        await nativeMenuSetWildlifeExcluded(false);
-        break;
-      case 'review_exclude_wildlife':
-        await nativeMenuSetWildlifeExcluded(true);
-        break;
-      case 'tools_run_pipeline':
-        if (typeof startPipeline === 'function') await startPipeline();
-        else nativeMenuRoute('/pipeline');
-        break;
-      case 'tools_scan_library':
-        nativeMenuRoute('/workspace');
-        nativeMenuInfo('Choose a folder or workspace root to scan.');
-        break;
-      case 'tools_rescan':
-        if (typeof openRescanModal === 'function') openRescanModal();
-        else nativeMenuRoute('/workspace');
-        break;
-      case 'tools_find_duplicates':
-        if (typeof startScan === 'function') await startScan();
-        else nativeMenuRoute('/duplicates');
-        break;
-      case 'tools_build_previews':
-        await nativeMenuJob('/api/jobs/previews', {}, 'Preview job started');
-        break;
-      case 'tools_sync_metadata':
-        if (typeof runSync === 'function') await runSync();
-        else await nativeMenuJob('/api/jobs/sync', {}, 'Metadata sync started');
-        break;
-      case 'tools_verify_models':
-        if (typeof verifyAllModels === 'function') await verifyAllModels();
-        else await nativeMenuJob('/api/jobs/verify-all-models', {}, 'Model verification started');
-        break;
-      case 'tools_cancel_job':
-        await nativeMenuCancelCurrentJob();
-        break;
-      case 'help_open_help':
-        if (typeof openHelpModal === 'function') openHelpModal();
-        break;
-      case 'help_copy_diagnostics':
-        await nativeMenuCopyDiagnostics();
-        break;
       default:
+        if (await nativeMenuPhotoCommand(command)) break;
+        if (await nativeMenuReviewOrToolCommand(command)) break;
         console.warn('Unknown native menu command:', command);
     }
   } catch (e) {
@@ -682,9 +710,8 @@ function photoExternalEditDisabledHint() {
       nativeMenuLightboxOpen()) {
     return _lbReadOnlyMessage;
   }
-  return typeof window.getPhotoExternalEditDisabledHint === 'function'
-    ? window.getPhotoExternalEditDisabledHint()
-    : null;
+  var pageHint = Vireo.pageHook('getPhotoExternalEditDisabledHint');
+  return pageHint ? pageHint() : null;
 }
 
 /** @param {number[]} photoIds @param {number} [editorIndex] */
@@ -1198,11 +1225,17 @@ function formatDuration(seconds) {
   var historyStatusSeq = 0;
   /** @type {{undo: NavHistoryStatus; redo: NavHistoryStatus}} */ var historyStatus = {undo: {available: false}, redo: {available: false}};
 
+  /** @param {VireoHistoryOperation} operation @returns {NavHistoryStatus | null} */
+  function localHistoryStatus(operation) {
+    var pageStatus = Vireo.pageHook('localHistoryStatus');
+    return pageStatus ? pageStatus(operation) : null;
+  }
+
   function renderHistoryControls() {
     var blocked = historyBusy || historyPendingWrites > 0;
-    ['undo', 'redo'].forEach(function(operation) {
+    /** @type {VireoHistoryOperation[]} */ (['undo', 'redo']).forEach(function(operation) {
       var button = /** @type {HTMLButtonElement} */ (document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn'));
-      var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus(operation)) || historyStatus[operation === 'undo' ? 'undo' : 'redo'];
+      var status = localHistoryStatus(operation) || historyStatus[operation === 'undo' ? 'undo' : 'redo'];
       button.disabled = blocked || !status.available;
       var label = operation === 'undo' ? 'Undo' : 'Redo';
       button.title = status.available ? label + ': ' + status.description : 'Nothing to ' + operation;
@@ -1211,7 +1244,7 @@ function formatDuration(seconds) {
       button.setAttribute('aria-label', button.title);
       button.setAttribute('aria-keyshortcuts', operation === 'undo' ? 'Control+z Meta+z' : 'Control+Shift+z Meta+Shift+z');
     });
-    var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus('undo')) || historyStatus.undo;
+    var status = localHistoryStatus('undo') || historyStatus.undo;
     /** @type {HTMLElement} */ (document.getElementById('undoMsg')).textContent = historyBusy ? 'Updating…' : (status.description || '');
     /** @type {HTMLElement} */ (document.getElementById('undoToast')).setAttribute('aria-busy', String(blocked));
   }
@@ -1236,14 +1269,16 @@ function formatDuration(seconds) {
   window.addEventListener('focus', refreshHistoryControls);
   window.vireoHistoryBusy = function() { return historyBusy; };
 
-  /** @param {string} operation @param {HTMLButtonElement} [btn] */
+  /** @param {VireoHistoryOperation} operation @param {HTMLButtonElement} [btn] */
   async function changeHistory(operation, btn) {
     if (historyBusy || historyPendingWrites) return false;
-    if (typeof window.changeLocalHistory === 'function') {
-      var localResult = window.changeLocalHistory(operation);
+    var changeLocalHistory = Vireo.pageHook('changeLocalHistory');
+    if (changeLocalHistory) {
+      var localResult = changeLocalHistory(operation);
       if (localResult !== null) return localResult;
     }
-    if (typeof window.beforeHistoryChange === 'function' && window.beforeHistoryChange() === false) return false;
+    var beforeHistoryChange = Vireo.pageHook('beforeHistoryChange');
+    if (beforeHistoryChange && beforeHistoryChange() === false) return false;
     historyBusy = true;
     document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: true}}));
     if (btn) btn.disabled = true;
@@ -1262,8 +1297,9 @@ function formatDuration(seconds) {
       document.dispatchEvent(new CustomEvent('vireo:edit-history-changed', {
         detail: { operation: operation, result: data }
       }));
-      if (typeof window.afterHistoryChange === 'function') {
-        try { await window.afterHistoryChange(data); }
+      var afterHistoryChange = Vireo.pageHook('afterHistoryChange');
+      if (afterHistoryChange) {
+        try { await afterHistoryChange(data); }
         catch (e) { showToast('The edit was saved, but the view could not refresh. Reload to see the current state.', 'error'); }
       }
       await refreshHistoryLightbox();
@@ -1307,7 +1343,7 @@ function formatDuration(seconds) {
   Keymap.register('global', {name: 'redo_history', key: 'ctrl+shift+z', action: function(e) {
     return historyShortcut(e, 'redo');
   }});
-  /** @param {Event} e @param {string} operation */
+  /** @param {Event} e @param {VireoHistoryOperation} operation */
   function historyShortcut(e, operation) {
     if (location.pathname === '/browse' || location.pathname.indexOf('/edit') === 0) return false;
     if (/** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open'))) return false;

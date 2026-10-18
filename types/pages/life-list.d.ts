@@ -23,6 +23,8 @@ declare function pickDirectory(title:string,options:{defaultPath?:string}):Promi
 declare const VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
 declare const VireoTextSearch:{readOptions(prefix:string):{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean};matchesFields(fields:string[],query:string,options:ReturnType<typeof VireoTextSearch.readOptions>):boolean};
 declare class VireoFolderBrowser {constructor(options:{overlayId:string;defaultMode:string;modes:Record<string,{title:string;multiple:boolean;showCounts:boolean;startPath:()=>string;onSelect:(path:string)=>void}>});sequence:number;open(mode:string,options?:{skipInitialBrowse:boolean}):void}
-interface Window {afterHistoryChange():void;vireoThumbnailUrl?(photo:LifePhoto):string;openLightbox?:typeof openLightbox;vireoLightboxSession:{requestedPhotoId():number|null}}
+interface Window {vireoThumbnailUrl?(photo:LifePhoto):string;openLightbox?:typeof openLightbox;vireoLightboxSession:{requestedPhotoId():number|null}}
 interface HTMLElement {_llSummaryWired?:boolean}
 interface DocumentEventMap {'lightbox:photochanged':CustomEvent<{photoId?:number}>;'lightbox:navigationboundary':CustomEvent<{delta?:number;photoId?:number}>;'lightbox:flagchanged':CustomEvent<{previousFlag?:string;flag?:string}>;'lightbox:closed':CustomEvent<void>;'lifelist:changed':CustomEvent<unknown>}
+// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;

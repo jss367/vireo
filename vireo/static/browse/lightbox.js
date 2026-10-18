@@ -51,6 +51,23 @@
 
 /** @type {BrowsePhoto[]} */ var browseAvailableLightboxPhotos = [];
 
+/* Page hook for the lightbox's Delete: drop the deleted photo from the grid
+   before the lightbox moves on to the next one. Returns true when the grid's
+   list is the lightbox's own list, so the lightbox does not remove it twice. */
+function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @type {readonly unknown[]} */ lightboxPhotos) {
+  var removedFromLightboxList = false;
+  var index = photos.findIndex(function(photo) { return photo.id === photoId; });
+  if (index >= 0) {
+    removedFromLightboxList = photos === lightboxPhotos;
+    photos.splice(index, 1);
+  }
+  selectedPhotos.delete(photoId);
+  if (selectedPhotoId === photoId) selectedPhotoId = null;
+  renderGrid();
+  refreshBrowseSidebarCounts();
+  return removedFromLightboxList;
+}
+
 function browsePhotoIsAvailable(/** @type {BrowsePhoto} */ photo) {
   return !photo.folder_status ||
     photo.folder_status === 'ok' || photo.folder_status === 'partial';

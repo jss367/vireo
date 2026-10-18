@@ -192,10 +192,8 @@ function lightboxSetFlagAction(/** @type {LightboxFlag} */ flag) {
   var target = (current === flag) ? 'none' : flag;
   // Same dispatch order as the keyboard shortcuts: the misses page intercepts
   // flag writes to keep its local model in sync.
-  if (
-    typeof window.handleMissesLightboxFlagShortcut === 'function' &&
-    window.handleMissesLightboxFlagShortcut(pid, target) === true
-  ) return;
+  var missesFlagShortcut = Vireo.pageHook('handleMissesLightboxFlagShortcut');
+  if (missesFlagShortcut && missesFlagShortcut(pid, target) === true) return;
   _lbApplyFlag(pid, target);
 }
 

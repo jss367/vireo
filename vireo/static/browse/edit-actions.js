@@ -88,7 +88,6 @@ async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** @type {
   if (selectedPhotoId === photoId) loadDetail(photoId);
   showUndoToast();
 }
-window.setWildlifeExcludedFor = setWildlifeExcludedFor;
 
 async function toggleDetailWildlifeExcluded() {
   if (!selectedPhotoId) return;

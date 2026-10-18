@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/photo-editor.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/photo-editor/adjustments.js",
     "../vireo/static/photo-editor/auto-tone.js",
     "../vireo/static/photo-editor/boot.js",

@@ -5,19 +5,29 @@ restricted scan, and the scan scope the ``'partial'`` / ``'ok'`` status
 stamps apply to.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from image_loader import is_excluded_scan_path
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from db import Database
+    from scanner.scan_types import CatalogFolderPath, FolderAliases, StrPath
 
 
 class _ScanFolders:
     """Folder rows for the scan: create, link to the workspace, stamp status."""
 
     def __init__(
-        self, db, root_path, *, restrict_dirs, effective_restrict_dirs,
-        register_restrict_dirs_as_roots, catalog_folder_path, folder_aliases,
-    ):
+        self, db: Database, root_path: Path, *, restrict_dirs: Iterable[StrPath] | None,
+        effective_restrict_dirs: Iterable[StrPath], register_restrict_dirs_as_roots: bool,
+        catalog_folder_path: CatalogFolderPath, folder_aliases: FolderAliases,
+    ) -> None:
         self.db = db
         self.root_path = root_path
         self.restrict_dirs = restrict_dirs
@@ -61,7 +71,7 @@ class _ScanFolders:
         if restrict_dirs is not None:
             self.scoped_paths.update(str(d) for d in restrict_dirs)
 
-    def ensure_folder(self, folder_path):
+    def ensure_folder(self, folder_path: Path) -> int:
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
         db = self.db
         root_path = self.root_path
@@ -122,13 +132,13 @@ class _ScanFolders:
         self.folder_cache[folder_str] = folder_id
         return folder_id
 
-    def touch_folder(self, folder_path):
+    def touch_folder(self, folder_path: Path) -> int:
         """``ensure_folder``, recording it as reached by the per-file loop."""
         folder_id = self.ensure_folder(folder_path)
         self.touched_folder_ids.add(folder_id)
         return folder_id
 
-    def update_folder_status(self, new_status, only_from_partial):
+    def update_folder_status(self, new_status: str, only_from_partial: bool) -> None:
         """Stamp folders in the scan scope with ``new_status``.
 
         Applies to every folder matched by ``scoped_paths`` (outer roots)
@@ -146,7 +156,7 @@ class _ScanFolders:
         )
         db.commit_with_retry()
 
-    def register_scan_targets(self):
+    def register_scan_targets(self) -> None:
         # Eagerly register the explicit scan targets so they end up linked
         # to the active workspace even when zero photos are inserted (e.g.
         # every file is in skip_paths because the photos are already in

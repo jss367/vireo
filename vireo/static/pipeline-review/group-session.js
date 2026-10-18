@@ -92,6 +92,19 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
   applying: false
 };
 
+/**
+ * The Group Review selection the shared navbar's native menu acts on while
+ * the modal is open (the getGroupModalSelection page hook).
+ * @returns {number[]}
+ */
+function grmNativeMenuSelection() {
+  if (grmState.selectedIds && grmState.selectedIds.size) {
+    return /** @type {number[]} */ (Array.from(grmState.selectedIds));
+  }
+  if (grmState.selected != null) return [/** @type {number} */ (grmState.selected)];
+  return [];
+}
+
 /** @param {number} photoId */
 function findBurstForPhoto(photoId) {
   if (!pipelineResults) return null;

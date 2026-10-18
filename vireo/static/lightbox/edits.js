@@ -159,7 +159,7 @@ window.vireoUpdatePairSourceControls = function(photoId) {
     if (_lbAdjustmentSourceHint()) _lbClearAdjustmentPreview();
   }
   var detailControl = /** @type {HTMLButtonElement | null} */ (document.getElementById('detailSourceControl'));
-  if (detailControl && String(window._detailPhotoId) === key) {
+  if (detailControl && String(_lbPageDetailPhotoId()) === key) {
     detailControl.style.display = paired ? 'block' : 'none';
     detailControl.textContent = paired
       ? 'RAW + JPEG pair · ' + text
@@ -189,7 +189,7 @@ function _vireoPairAnchorImage(/** @type {LightboxPhotoId | null} */ photoId) {
   if (String(vireoLightboxSession.requestedPhotoId()) === key) {
     return /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
   }
-  if (String(window._detailPhotoId) === key) {
+  if (String(_lbPageDetailPhotoId()) === key) {
     return /** @type {HTMLImageElement | null} */ (document.getElementById('detailImg'));
   }
   return /** @type {HTMLImageElement | null} */ (document.querySelector('.grid-card[data-id="' + key + '"] img'));
@@ -199,7 +199,7 @@ function _vireoPairAnchorStillCurrent(/** @type {HTMLImageElement | null} */ anc
   if (!anchor) return false;
   var key = String(photoId);
   if (anchor.id === 'lightboxImg') return String(vireoLightboxSession.requestedPhotoId()) === key;
-  if (anchor.id === 'detailImg') return String(window._detailPhotoId) === key;
+  if (anchor.id === 'detailImg') return String(_lbPageDetailPhotoId()) === key;
   if (anchor.hasAttribute('data-thumbnail-src')) {
     // A source probe can finish after the user scrolls away. The queue will
     // not load that offscreen anchor, so do not wait for its load event while
@@ -1532,7 +1532,7 @@ function _lbRefreshVisiblePhotoImages(/** @type {LightboxPhotoId | null} */ phot
   });
 
   var detailImg = /** @type {HTMLImageElement | null} */ (document.getElementById('detailImg'));
-  if (detailImg && window._detailPhotoId === photoId) {
+  if (detailImg && _lbPageDetailPhotoId() === photoId) {
     refreshImg(detailImg);
   }
 }

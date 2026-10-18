@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/location-review.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/location-review/assignment.js",
     "../vireo/static/location-review/boot.js",
     "../vireo/static/location-review/candidates.js",

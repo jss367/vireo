@@ -20,7 +20,7 @@ import pytest
 VIREO = Path(__file__).resolve().parents[1]
 
 # Directories under vireo/ whose functions must be fully annotated.
-COVERED_ROOTS = ("services", "pipeline_stages", "classify_job", "import_job")
+COVERED_ROOTS = ("services", "pipeline_stages", "scanner", "classify_job", "import_job")
 
 
 def _first_param_is_implicit(node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool) -> bool:

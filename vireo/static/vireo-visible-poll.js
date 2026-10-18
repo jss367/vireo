@@ -23,7 +23,7 @@
 (function(global) {
   'use strict';
 
-  var Vireo = global.Vireo = global.Vireo || {};
+  var Vireo = global.Vireo = global.Vireo || /** @type {VireoNamespace} */ ({});
 
   /** @type {VisiblePoll} */
   Vireo.pollWhileVisible = function(fn, intervalMs, opts) {

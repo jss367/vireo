@@ -320,12 +320,12 @@ async function membershipRefreshReconcilesTheOpenLightbox() {
 }
 
 function arrowNavigationUsesPerPhotoReadOnly() {
-  // The lightbox's arrow-navigation re-evaluates window.getLightboxOpenOptions
-  // for each new photo (not just the first one Find Similar opens). Verify
-  // that pipeline-review installs that hook and that it computes readOnly
-  // per-photo, since the lightbox-level test lives in e2e.
+  // The lightbox's arrow-navigation re-evaluates the getLightboxOpenOptions
+  // page hook for each new photo (not just the first one Find Similar opens).
+  // Verify that the function pipeline-review registers as that hook computes
+  // readOnly per-photo, since the lightbox-level test lives in e2e.
   const {ctx} = makePage();
-  // boot.js registers the hook; the harness skips boot.js so register inline.
+  // boot.js registers the hook; the harness skips boot.js so expose it here.
   run(ctx, 'window.getLightboxOpenOptions = pipelineReviewLightboxOptions;');
   run(ctx, `reviewScopeMode = 'folder'; reviewScopeFolderId = 'f1';
             reviewScopePhotoIds = new Set([${IN_SCOPE}]); reviewScopeRegrouped = false;`);

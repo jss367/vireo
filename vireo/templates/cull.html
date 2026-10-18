@@ -751,7 +751,7 @@ async function runCulling() {
   return recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', !cullSourceResults);
 }
 
-window.beforeHistoryChange = function() {
+Vireo.registerPageHooks({beforeHistoryChange: function() {
   if (cullOperationPending()) {
     showToast('Wait for culling to finish updating before undoing saved edits.', 'info');
     return false;
@@ -761,9 +761,7 @@ window.beforeHistoryChange = function() {
     return false;
   }
   return true;
-};
-
-window.afterHistoryChange = async function(result) {
+}, afterHistoryChange: async function(result) {
   cullBusy = true;
   document.getElementById('applyBtn').disabled = true;
   try {
@@ -796,7 +794,7 @@ window.afterHistoryChange = async function(result) {
     cullBusy = false;
     updateCullApplyButton();
   }
-};
+}});
 
 async function loadCullingResults() {
   try {
