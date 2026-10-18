@@ -128,43 +128,63 @@ def _is_broad_suppress(node, bindings) -> bool:
         return False
     func = node.func
     resolved = (
-        isinstance(func, ast.Name) and bindings.get(func.id) == "suppress"
+        isinstance(func, ast.Name) and "suppress" in _binding_options(bindings.get(func.id))
         or isinstance(func, ast.Attribute) and func.attr == "suppress"
-        and isinstance(func.value, ast.Name) and bindings.get(func.value.id) == "contextlib"
+        and isinstance(func.value, ast.Name) and "contextlib" in _binding_options(bindings.get(func.value.id))
     )
     return bool(resolved) and any(_is_broad_type(arg) for arg in node.args)
 
 
-def broad_handlers(tree):
-    """Direct broad except types and syntactically resolved contextlib suppress.
+def _binding_options(value):
+    return value if isinstance(value, frozenset) else frozenset({value})
 
-    Canonical contextlib is recognized without an import in AST snippets.
-    Other aliases require explicit imports; local definitions/parameters and
-    assignments shadow them. Module/class statements advance bindings in
-    source order; functions conservatively resolve their whole local scope.
-    Branch outcomes, dynamic values and exception-type aliases are not inferred.
+
+def _join_bindings(*states):
+    """Retain aliases possible on any incoming path; no dynamic value inference."""
+    return {
+        name: frozenset().union(*(_binding_options(state.get(name)) for state in states))
+        for name in set().union(*(state.keys() for state in states))
+    }
+
+
+def _irrefutable_pattern(pattern):
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None or _irrefutable_pattern(pattern.pattern)
+    return isinstance(pattern, ast.MatchOr) and any(
+        _irrefutable_pattern(item) for item in pattern.patterns
+    )
+
+
+def broad_handlers(tree):
+    """Direct broad types and contextlib aliases on bounded possible paths.
+
+    Module/class statements advance in source order. If/loop joins retain an
+    alias possible on either path (even a statically false branch is inspected
+    for the syntax ratchet). Match captures propagate across guards: an
+    irrefutable capture binds before its guard regardless of the guard result.
+    Functions retain conservative whole-local-scope shadowing. This is not a
+    general Python control-flow, exception-flow or dynamic-value analyzer.
     """
     found = []
     def body(statements, bindings, lexical, function_lexical, ordered):
         current = dict(bindings)
         for child in statements:
-            visit(child, current, current if lexical is None else lexical,
-                  function_lexical, ordered)
+            updated = visit(child, current, current if lexical is None else lexical,
+                            function_lexical, ordered)
             if ordered:
-                current = _scope_bindings([child], current)
+                current = updated if updated is not None else _scope_bindings([child], current)
+        return current
 
     def visit(node, bindings, lexical, function_lexical, ordered):
+        # Module bindings flow into nested class bodies; class namespaces do not.
+        nested_lexical = None if lexical is bindings else lexical
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # Function assignments/parameters are local for the whole body;
-            # do not treat an earlier unbound local as the outer import.
             local = _scope_bindings(node.body, function_lexical, node.args)
             body(node.body, local, local, local, False)
-            return
+            return None
         if isinstance(node, ast.ClassDef):
-            # Neither methods nor nested classes inherit class namespaces.
-            # Class statements themselves execute in order.
             body(node.body, lexical, lexical, function_lexical, True)
-            return
+            return None
         if isinstance(node, ast.ExceptHandler):
             if _is_broad_type(node.type):
                 found.append(("except", node))
@@ -178,26 +198,42 @@ def broad_handlers(tree):
                 visit(item.context_expr, current, lexical, function_lexical, ordered)
                 if item.optional_vars is not None:
                     current = _scope_bindings([item.optional_vars], current)
-            body(node.body, current, current if lexical is bindings else lexical,
-                 function_lexical, ordered)
-            return
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            # The iterable sees the incoming binding, the body sees its target.
-            visit(node.iter, bindings, lexical, function_lexical, ordered)
-            current = _scope_bindings([node.target], bindings)
-            nested_lexical = current if lexical is bindings else lexical
-            body(node.body, current, nested_lexical, function_lexical, ordered)
-            body(node.orelse, current, nested_lexical, function_lexical, ordered)
-            return
+            return body(node.body, current, nested_lexical, function_lexical, ordered)
+        elif isinstance(node, ast.If):
+            visit(node.test, bindings, lexical, function_lexical, ordered)
+            return _join_bindings(
+                body(node.body, bindings, nested_lexical, function_lexical, ordered),
+                body(node.orelse, bindings, nested_lexical, function_lexical, ordered),
+            )
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            is_for = isinstance(node, (ast.For, ast.AsyncFor))
+            visit(node.iter if is_for else node.test, bindings, lexical, function_lexical, ordered)
+            current = _scope_bindings([node.target], bindings) if is_for else bindings
+            after_body = body(node.body, current, nested_lexical, function_lexical, ordered)
+            # Else may run after zero iterations; break may bypass else.
+            after_else = body(node.orelse, _join_bindings(bindings, after_body),
+                              nested_lexical, function_lexical, ordered)
+            return _join_bindings(bindings, after_body, after_else)
         elif isinstance(node, ast.Match):
             visit(node.subject, bindings, lexical, function_lexical, ordered)
+            fallthrough = bindings
+            outcomes = []
             for case in node.cases:
-                current = _scope_bindings([case.pattern], bindings)
-                nested_lexical = current if lexical is bindings else lexical
+                current = _scope_bindings([case.pattern], fallthrough)
                 if case.guard is not None:
-                    visit(case.guard, current, nested_lexical, function_lexical, ordered)
-                body(case.body, current, nested_lexical, function_lexical, ordered)
-            return
+                    visit(case.guard, current, lexical, function_lexical, ordered)
+                after_body = body(case.body, current, nested_lexical, function_lexical, ordered)
+                guard = case.guard.value if isinstance(case.guard, ast.Constant) else None
+                if case.guard is None or guard is not False:
+                    outcomes.append(after_body)
+                if _irrefutable_pattern(case.pattern):
+                    if case.guard is None or guard is True:
+                        return _join_bindings(*outcomes)
+                    fallthrough = current
+                else:
+                    # A failed partial pattern may leave captures bound.
+                    fallthrough = _join_bindings(fallthrough, current)
+            return _join_bindings(fallthrough, *outcomes)
         for _field, value in ast.iter_fields(node):
             if isinstance(value, list) and value and all(isinstance(n, ast.stmt) for n in value):
                 body(value, bindings, lexical, function_lexical, ordered)
@@ -207,6 +243,7 @@ def broad_handlers(tree):
                         visit(child, bindings, lexical, function_lexical, ordered)
             elif isinstance(value, ast.AST):
                 visit(value, bindings, lexical, function_lexical, ordered)
+        return None
 
     initial = {"contextlib": "contextlib"}
     function_lexical = _scope_bindings(tree.body, initial)
@@ -551,3 +588,23 @@ def test_compound_unrelated_targets_preserve_suppress_alias():
               "with factory() as other:\n    with quiet(Exception): pass\n"
               "match value:\n    case other:\n        with quiet(Exception): pass\n")
     assert len(broad_handlers(ast.parse(source))) == 3
+
+
+@pytest.mark.parametrize("compound, count", [
+    ("if False:\n    quiet = replacement\nwith quiet(Exception): pass\n", 1),
+    ("if condition:\n    quiet = replacement\nwith quiet(Exception): pass\n", 1),
+    ("if condition:\n    quiet = a\nelse:\n    quiet = b\nwith quiet(Exception): pass\n", 0),
+    ("for quiet in []:\n    pass\nelse:\n    with quiet(Exception): pass\n", 1),
+    ("for quiet in values:\n    with quiet(Exception): pass\nelse:\n    with quiet(Exception): pass\n", 1),
+    ("while condition:\n    quiet = replacement\nelse:\n    with quiet(Exception): pass\n", 1),
+    ("match value:\n    case quiet if False:\n        pass\n    case _:\n        with quiet(Exception): pass\n", 0),
+    ("match value:\n    case _ as quiet if False:\n        pass\n    case _:\n        with quiet(Exception): pass\n", 0),
+    ("match value:\n    case quiet if condition:\n        pass\n    case _:\n        with quiet(Exception): pass\n", 0),
+    ("match value:\n    case quiet if False:\n        pass\nwith quiet(Exception): pass\n", 0),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_possible_branch_bindings(compound, count, scope):
+    source = "from contextlib import suppress as quiet\n" + compound
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
