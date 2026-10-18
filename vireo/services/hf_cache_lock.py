@@ -1,5 +1,7 @@
 """Serialize all Vireo cache producers and cleanup across threads/processes."""
 
+from __future__ import annotations
+
 import functools
 import os
 import threading
@@ -9,12 +11,12 @@ from collections.abc import Callable
 class SharedDownloadLock:
     """Reentrant thread lock plus a lazily opened process lock outside the cache."""
 
-    def __init__(self, lock_path=None):
+    def __init__(self, lock_path: str | None = None) -> None:
         self.lock_path = lock_path
         self.thread_lock = threading.RLock()
         self.local = threading.local()
 
-    def acquire(self, blocking=True):
+    def acquire(self, blocking: bool = True) -> bool:
         if not self.thread_lock.acquire(blocking=blocking):
             return False
         depth = getattr(self.local, "depth", 0)
@@ -39,7 +41,7 @@ class SharedDownloadLock:
             self.thread_lock.release()
             raise
 
-    def release(self):
+    def release(self) -> None:
         self.local.depth -= 1
         try:
             if not self.local.depth:
@@ -48,11 +50,11 @@ class SharedDownloadLock:
         finally:
             self.thread_lock.release()
 
-    def __enter__(self):
+    def __enter__(self) -> SharedDownloadLock:
         self.acquire()
         return self
 
-    def __exit__(self, *_args):
+    def __exit__(self, *_args: object) -> None:
         self.release()
 
 

@@ -211,6 +211,35 @@ def test_set_working_copy_requires_the_snapshot_identity(db, tmp_path):
     assert db.working_copies.count_with_working_copy() == 1
 
 
+def test_quota_eviction_writes_only_touch_rows_still_on_the_expected_path(db, tmp_path):
+    fid = db.add_folder(str(tmp_path), name="p")
+    stale = _photo(db, fid, "a.nef", working_copy_path="working/a.jpg")
+    replaced = _photo(db, fid, "b.nef", working_copy_path="working/b2.jpg")
+    evicted = _photo(db, fid, "c.nef", file_mtime=4.0, working_copy_path="working/c.jpg")
+    untouched = _photo(db, fid, "d.nef", file_mtime=None)
+    assert {r["id"]: r["working_copy_path"] for r in db.working_copies.eviction_rows()} == {
+        stale: "working/a.jpg", replaced: "working/b2.jpg",
+        evicted: "working/c.jpg", untouched: None,
+    }
+    db.working_copies.clear_missing_tracked(
+        [(stale, "working/a.jpg"), (replaced, "working/b.jpg")],
+    )
+    db.working_copies.record_eviction(evicted, "working/c.jpg")
+    db.working_copies.record_eviction(replaced, "working/b.jpg")
+    db.working_copies.record_eviction(untouched, "working/d.jpg")
+    assert db.in_transaction
+    db.commit()
+    rows = _committed(
+        db, "SELECT id, working_copy_path, working_copy_evicted_mtime FROM photos ORDER BY id",
+    )
+    assert rows == [
+        (stale, None, None),
+        (replaced, "working/b2.jpg", None),
+        (evicted, None, 4.0),
+        (untouched, None, -1),
+    ]
+
+
 def test_defer_and_undo_deferral_round_trip(db, tmp_path):
     fid = db.add_folder(str(tmp_path), name="p")
     pid = _photo(db, fid, "a.nef", file_mtime=None)
@@ -234,6 +263,24 @@ def test_load_scope_commits_only_the_transaction_it_opened(db, tmp_path):
     db.working_copies.load_scope([(str(tmp_path), "exact", None)])
     assert db.in_transaction
     db.rollback()
+
+
+def test_mark_raw_decode_failed_stamps_the_source_marker_uncommitted(db, tmp_path):
+    fid = db.add_folder(str(tmp_path), name="p")
+    pid = _photo(db, fid, "a.nef", file_mtime=7.5)
+    db.working_copies.mark_raw_decode_failed(pid, 7.5)
+    assert db.in_transaction
+    assert _committed(
+        db, "SELECT working_copy_failed_source FROM photos WHERE id=?", (pid,),
+    )[0] == (None,)
+    db.commit()
+    row = _committed(
+        db,
+        "SELECT working_copy_failed_at IS NOT NULL, working_copy_failed_mtime,"
+        " working_copy_failed_source FROM photos WHERE id=?",
+        (pid,),
+    )[0]
+    assert row == (1, 7.5, "source")
 
 
 # -- structure -------------------------------------------------------------------

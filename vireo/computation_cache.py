@@ -461,10 +461,7 @@ def classifier_runtime_for_detection(
     db, detection_id, model_identity, labels_fingerprint_full,
     taxonomy_identity="no-tax",
 ):
-    row = db.conn.execute(
-        "SELECT runtime_fingerprint FROM detections WHERE id = ?",
-        (detection_id,),
-    ).fetchone()
+    row = db.computation_cache.detection_runtime(detection_id)
     if row is None:
         return None
     return classifier_runtime_fingerprint(
@@ -522,14 +519,9 @@ def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
     including a wall-clock timestamp would change the content-addressed digest
     of an otherwise identical run.
     """
-    row = db.conn.execute(
-        """SELECT max_match_score, match_margin, top_species,
-                  label_count, score_kind
-           FROM classifier_match_scores
-           WHERE detection_id = ? AND classifier_model = ?
-             AND labels_fingerprint = ?""",
-        (detection_id, classifier_model, labels_fingerprint),
-    ).fetchone()
+    row = db.computation_cache.match_summary(
+        detection_id, classifier_model, labels_fingerprint,
+    )
     if row is None or row["max_match_score"] is None:
         return None
     match = {"max_match_score": row["max_match_score"]}
@@ -547,15 +539,7 @@ def _promotable_detection_row(db, detection_id, source_is_original):
     # backed inference into an artifact advertised as original-backed.
     if source_is_original is False:
         return None
-    row = db.conn.execute(
-        """SELECT d.photo_id, d.detector_model, d.runtime_fingerprint,
-                  d.box_x, d.box_y, d.box_w, d.box_h, d.category,
-                  p.file_hash, p.companion_path, p.working_copy_path
-           FROM detections d
-           JOIN photos p ON p.id = d.photo_id
-           WHERE d.id = ?""",
-        (detection_id,),
-    ).fetchone()
+    row = db.computation_cache.promotable_detection(detection_id)
     # Working-copy-backed photos also stay local-only: ``_prepare_image``
     # feeds the extracted working-copy JPEG (a specific rendition/recipe
     # of the original) to the classifier when ``vireo_dir`` is set, but
@@ -593,29 +577,13 @@ def _record_portable_run_identity(
 ):
     """Stamp the run's portable identity on its catalog rows and commit."""
     try:
-        db.conn.execute(
-            """UPDATE classifier_runs
-               SET labels_fingerprint_full = ?, runtime_fingerprint = ?,
-                   input_fingerprint = ?
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                labels_fingerprint_full, classifier_runtime, input_fp,
-                detection_id, classifier_model, labels_fingerprint,
-            ),
+        db.computation_cache.stamp_portable_run_identity(
+            detection_id, classifier_model, labels_fingerprint,
+            labels_fingerprint_full, classifier_runtime, input_fp,
         )
-        db.conn.execute(
-            """UPDATE predictions SET labels_fingerprint_full = ?
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                labels_fingerprint_full, detection_id,
-                classifier_model, labels_fingerprint,
-            ),
-        )
-        db.conn.commit()
+        db.commit()
     except Exception:
-        db.conn.rollback()
+        db.rollback()
         raise
 
 
@@ -646,17 +614,9 @@ def promote_and_publish_classifier_run(
     input_block, input_fp = classification_input(
         row["file_hash"], row["runtime_fingerprint"], [subject],
     )
-    predictions = db.conn.execute(
-        """SELECT species, confidence, scientific_name, source_taxon_id,
-                  taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                  taxonomy_order, taxonomy_family, taxonomy_genus,
-                  match_score
-           FROM predictions
-           WHERE detection_id = ? AND classifier_model = ?
-             AND labels_fingerprint = ?
-           ORDER BY confidence DESC, species COLLATE NOCASE""",
-        (detection_id, classifier_model, labels_fingerprint),
-    ).fetchall()
+    predictions = db.computation_cache.run_predictions(
+        detection_id, classifier_model, labels_fingerprint,
+    )
     # The run-level summary: best raw score over the WHOLE label list, which
     # no per-candidate row can reconstruct because the labels that lost never
     # became prediction rows. Without it a cache-materialized detection is
@@ -683,11 +643,7 @@ def promote_and_publish_classifier_run(
     subject["candidates"] = candidates
     if match is not None:
         subject["match"] = match
-    label_meta = db.conn.execute(
-        """SELECT display_name, label_count FROM labels_fingerprints
-           WHERE fingerprint = ?""",
-        (labels_fingerprint,),
-    ).fetchone()
+    label_meta = db.computation_cache.labels_metadata(labels_fingerprint)
     artifact = {
         "artifact_schema": ARTIFACT_SCHEMA,
         "type": "classification",
@@ -1592,16 +1548,9 @@ def _export_detection_artifacts(db, detection_rows, artifacts, summary):
         if row["input_fingerprint"] != expected_input:
             summary["skipped_incompatible_input"] += 1
             continue
-        detections = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h,
-                      detector_confidence, category
-               FROM detections
-               WHERE photo_id = ? AND detector_model = ?
-                 AND runtime_fingerprint = ?
-               ORDER BY detector_confidence DESC, id ASC""",
-            (row["photo_id"], row["detector_model"],
-             row["runtime_fingerprint"]),
-        ).fetchall()
+        detections = db.computation_cache.run_detection_boxes(
+            row["photo_id"], row["detector_model"], row["runtime_fingerprint"],
+        )
         subjects = [{
             "key": f"d{index}",
             "kind": "box",
@@ -1656,43 +1605,13 @@ def _prediction_candidate(prediction):
 
 def _classification_subjects(db, row):
     """Return the portable subjects for one classifier run row."""
-    classified = db.conn.execute(
-        """SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h,
-                  d.detector_model, d.category
-           FROM detections d
-           JOIN classifier_runs cr ON cr.detection_id = d.id
-           WHERE d.photo_id = ? AND d.detector_model = ?
-             AND d.runtime_fingerprint = ?
-             AND cr.classifier_model = ?
-             AND cr.labels_fingerprint = ?
-             AND cr.labels_fingerprint_full = ?
-             AND cr.runtime_fingerprint = ?
-             AND cr.input_fingerprint = ?
-           ORDER BY d.detector_confidence DESC, d.id ASC""",
-        (
-            row["photo_id"], row["detector_model"],
-            row["detector_runtime"], row["classifier_model"],
-            row["labels_fingerprint"],
-            row["labels_fingerprint_full"],
-            row["runtime_fingerprint"], row["input_fingerprint"],
-        ),
-    ).fetchall()
+    classified = db.computation_cache.classified_detections(row)
     subjects = []
     for index, detection in enumerate(classified):
         subject = _subject_for_detection(f"d{index}", detection)
-        predictions = db.conn.execute(
-            """SELECT species, confidence, scientific_name, source_taxon_id,
-                      taxonomy_kingdom, taxonomy_phylum,
-                      taxonomy_class, taxonomy_order,
-                      taxonomy_family, taxonomy_genus,
-                      match_score
-               FROM predictions
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?
-               ORDER BY confidence DESC, species COLLATE NOCASE""",
-            (detection["id"], row["classifier_model"],
-             row["labels_fingerprint"]),
-        ).fetchall()
+        predictions = db.computation_cache.run_predictions(
+            detection["id"], row["classifier_model"], row["labels_fingerprint"],
+        )
         candidates = []
         for prediction in predictions:
             candidates.append(_prediction_candidate(prediction))
@@ -1709,18 +1628,7 @@ def _classification_subjects(db, row):
 
 def _export_classification_artifacts(db, artifacts, summary):
     """Append a portable artifact per fully identified classifier run."""
-    classifier_rows = db.conn.execute(
-        """SELECT DISTINCT
-                  p.id AS photo_id, p.file_hash,
-                  d.detector_model, d.runtime_fingerprint AS detector_runtime,
-                  cr.classifier_model, cr.labels_fingerprint,
-                  cr.labels_fingerprint_full, cr.runtime_fingerprint,
-                  cr.input_fingerprint, cr.input_recipe
-           FROM classifier_runs cr
-           JOIN detections d ON d.id = cr.detection_id
-           JOIN photos p ON p.id = d.photo_id
-           ORDER BY p.id, cr.classifier_model, cr.labels_fingerprint"""
-    ).fetchall()
+    classifier_rows = db.computation_cache.portable_classifier_runs()
     for row in classifier_rows:
         if not _is_sha256(row["file_hash"]):
             summary["skipped_missing_hash"] += 1
@@ -1739,11 +1647,9 @@ def _export_classification_artifacts(db, artifacts, summary):
         if row["input_fingerprint"] != expected_input:
             summary["skipped_incompatible_input"] += 1
             continue
-        label_meta = db.conn.execute(
-            """SELECT display_name, label_count
-               FROM labels_fingerprints WHERE fingerprint = ?""",
-            (row["labels_fingerprint"],),
-        ).fetchone()
+        label_meta = db.computation_cache.labels_metadata(
+            row["labels_fingerprint"],
+        )
         artifacts.append({
             "artifact_schema": ARTIFACT_SCHEMA,
             "type": "classification",
@@ -1794,13 +1700,7 @@ def exportable_artifacts(db, artifact_types=None):
         "skipped_incompatible_input": 0,
     }
 
-    detection_rows = db.conn.execute(
-        """SELECT p.id AS photo_id, p.file_hash, dr.detector_model,
-                  dr.runtime_fingerprint, dr.input_fingerprint
-           FROM detector_runs dr
-           JOIN photos p ON p.id = dr.photo_id
-           ORDER BY p.id, dr.detector_model"""
-    ).fetchall()
+    detection_rows = db.computation_cache.portable_detector_runs()
     if "detection" in artifact_types:
         _export_detection_artifacts(db, detection_rows, artifacts, summary)
 
@@ -1811,35 +1711,8 @@ def exportable_artifacts(db, artifact_types=None):
 
 def exportable_run_counts(db):
     """Cheap Settings-page counts without synthesizing every payload."""
-    detector = db.conn.execute(
-        """SELECT
-             SUM(CASE WHEN length(p.file_hash) = 64
-                           AND length(dr.runtime_fingerprint) = 64
-                           AND length(dr.input_fingerprint) = 64
-                      THEN 1 ELSE 0 END) AS portable,
-             SUM(CASE WHEN p.file_hash IS NULL OR length(p.file_hash) != 64
-                      THEN 1 ELSE 0 END) AS missing_hash,
-             SUM(CASE WHEN dr.runtime_fingerprint = 'legacy'
-                      THEN 1 ELSE 0 END) AS legacy
-           FROM detector_runs dr JOIN photos p ON p.id = dr.photo_id"""
-    ).fetchone()
-    classifier = db.conn.execute(
-        """SELECT
-             SUM(CASE WHEN length(p.file_hash) = 64
-                           AND length(cr.runtime_fingerprint) = 64
-                           AND length(cr.input_fingerprint) = 64
-                           AND length(cr.labels_fingerprint_full) = 64
-                           AND length(d.runtime_fingerprint) = 64
-                      THEN 1 ELSE 0 END) AS portable,
-             SUM(CASE WHEN p.file_hash IS NULL OR length(p.file_hash) != 64
-                      THEN 1 ELSE 0 END) AS missing_hash,
-             SUM(CASE WHEN cr.runtime_fingerprint = 'legacy'
-                           OR cr.labels_fingerprint_full IS NULL
-                      THEN 1 ELSE 0 END) AS legacy
-           FROM classifier_runs cr
-           JOIN detections d ON d.id = cr.detection_id
-           JOIN photos p ON p.id = d.photo_id"""
-    ).fetchone()
+    detector = db.computation_cache.exportable_detector_counts()
+    classifier = db.computation_cache.exportable_classifier_counts()
     return {
         "detector_runs": detector["portable"] or 0,
         "classifier_runs": classifier["portable"] or 0,
@@ -1850,21 +1723,6 @@ def exportable_run_counts(db):
         ),
         "skipped_incompatible_input": 0,
     }
-
-
-def _manual_review_exists(conn, detection_id, classifier_model, labels_short):
-    row = conn.execute(
-        """SELECT 1
-           FROM predictions p
-           JOIN prediction_review pr ON pr.prediction_id = p.id
-           WHERE p.detection_id = ? AND p.classifier_model = ?
-             AND p.labels_fingerprint = ?
-             AND pr.status IN ('accepted', 'rejected')
-             AND COALESCE(pr.individual, '') != '__vireo_auto_match__'
-           LIMIT 1""",
-        (detection_id, classifier_model, labels_short),
-    ).fetchone()
-    return row is not None
 
 
 def _is_recognized_detector_runtime(detector_model, runtime, extra=None):
@@ -1999,7 +1857,7 @@ def _is_recognized_classifier_runtime(
 
 
 def _backfill_classification_enrichment(
-    conn, detection_id, classifier_model, labels_short, subject,
+    db, detection_id, classifier_model, labels_short, subject,
 ):
     """Fill in match-strength enrichment missing from an already-materialized run.
 
@@ -2030,42 +1888,22 @@ def _backfill_classification_enrichment(
         species = normalize_keyword_display(candidate.get("species", ""))
         if not species:
             continue
-        cursor = conn.execute(
-            """UPDATE predictions
-                 SET match_score = ?
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ? AND species = ?
-                 AND match_score IS NULL""",
-            (
-                raw_score, detection_id, classifier_model,
-                labels_short, species,
-            ),
-        )
-        if cursor.rowcount:
+        if db.computation_cache.fill_missing_match_score(
+            raw_score, detection_id, classifier_model, labels_short, species,
+        ):
             filled = True
     match = subject.get("match")
-    if match and match.get("max_match_score") is not None:
-        existing = conn.execute(
-            """SELECT 1 FROM classifier_match_scores
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (detection_id, classifier_model, labels_short),
-        ).fetchone()
-        if existing is None:
-            conn.execute(
-                """INSERT INTO classifier_match_scores
-                     (detection_id, classifier_model, labels_fingerprint,
-                      max_match_score, match_margin, top_species,
-                      label_count, score_kind)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    detection_id, classifier_model, labels_short,
-                    match["max_match_score"], match.get("match_margin"),
-                    match.get("top_species"), match.get("label_count"),
-                    match.get("score_kind"),
-                ),
-            )
-            filled = True
+    if (
+        match
+        and match.get("max_match_score") is not None
+        and not db.model_runs.has_classifier_match_score(
+            detection_id, classifier_model, labels_short,
+        )
+    ):
+        db.computation_cache.insert_match_summary(
+            detection_id, classifier_model, labels_short, match,
+        )
+        filled = True
     return filled
 
 
@@ -2211,17 +2049,9 @@ class _ArtifactMaterialization:
             if len(candidates) == 1:
                 chosen_detections.append(candidates[0])
                 continue
-            existing = self.db.conn.execute(
-                """SELECT dr.runtime_fingerprint
-                   FROM detector_runs dr
-                   JOIN photos p ON p.id = dr.photo_id
-                   WHERE p.file_hash = ? AND dr.detector_model = ?
-                     AND p.companion_path IS NULL
-                     AND p.working_copy_path IS NULL
-                     AND (p.flag IS NULL OR p.flag != 'rejected')
-                   LIMIT 1""",
-                (photo_sha256, detector_model),
-            ).fetchone()
+            existing = self.db.computation_cache.installed_detector_runtime(
+                photo_sha256, detector_model,
+            )
             existing_runtime = (
                 existing["runtime_fingerprint"] if existing else None
             )
@@ -2282,25 +2112,11 @@ class _ArtifactMaterialization:
             photo_sha256, classifier_model, detector_model,
             _labels, _det_rt, input_fingerprint,
         ) = key
-        existing = self.db.conn.execute(
-            """SELECT cr.runtime_fingerprint
-               FROM classifier_runs cr
-               JOIN detections d ON d.id = cr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               WHERE p.file_hash = ? AND cr.classifier_model = ?
-                 AND cr.labels_fingerprint = ?
-                 AND cr.input_fingerprint = ?
-                 AND d.detector_model IN (?, 'full-image')
-                 AND p.companion_path IS NULL
-                 AND p.working_copy_path IS NULL
-                 AND (p.flag IS NULL OR p.flag != 'rejected')
-               LIMIT 1""",
-            (
-                photo_sha256, classifier_model,
-                candidates[0]["labels"]["short_fingerprint"],
-                input_fingerprint, detector_model,
-            ),
-        ).fetchone()
+        existing = self.db.computation_cache.installed_classifier_runtime(
+            photo_sha256, classifier_model,
+            candidates[0]["labels"]["short_fingerprint"],
+            input_fingerprint, detector_model,
+        )
         match = None
         if existing is not None:
             # Only prefer the existing-runtime match when this install
@@ -2341,14 +2157,9 @@ class _ArtifactMaterialization:
         companion or working-copy identity, skip catalog rows backed by
         either alternate rendition.
         """
-        return self.db.conn.execute(
-            """SELECT id FROM photos
-               WHERE file_hash = ? AND companion_path IS NULL
-                 AND working_copy_path IS NULL
-                 AND (flag IS NULL OR flag != 'rejected')
-               ORDER BY id""",
-            (artifact["photo_sha256"],),
-        ).fetchall()
+        return self.db.computation_cache.original_backed_photos(
+            artifact["photo_sha256"],
+        )
 
     def apply_detection(self, artifact, photos):
         db = self.db
@@ -2369,12 +2180,9 @@ class _ArtifactMaterialization:
         } for subject in artifact["subjects"]]
         for photo in photos:
             photo_id = photo["id"]
-            existing = db.conn.execute(
-                """SELECT runtime_fingerprint, input_fingerprint
-                   FROM detector_runs
-                   WHERE photo_id = ? AND detector_model = ?""",
-                (photo_id, artifact["detector_model"]),
-            ).fetchone()
+            existing = db.computation_cache.detector_run_identity(
+                photo_id, artifact["detector_model"],
+            )
             if existing is not None and (
                 existing["runtime_fingerprint"] == artifact["runtime_fingerprint"]
                 and existing["input_fingerprint"] == artifact["input_fingerprint"]
@@ -2388,12 +2196,9 @@ class _ArtifactMaterialization:
                 runtime_fingerprint=artifact["runtime_fingerprint"],
                 input_fingerprint=artifact["input_fingerprint"],
             )
-            current = db.conn.execute(
-                """SELECT runtime_fingerprint, input_fingerprint
-                   FROM detector_runs
-                   WHERE photo_id = ? AND detector_model = ?""",
-                (photo_id, artifact["detector_model"]),
-            ).fetchone()
+            current = db.computation_cache.detector_run_identity(
+                photo_id, artifact["detector_model"],
+            )
             if (
                 current is None
                 or current["runtime_fingerprint"] != artifact["runtime_fingerprint"]
@@ -2407,12 +2212,9 @@ class _ArtifactMaterialization:
         db = self.db
         result = self.result
         labels = artifact["labels"]
-        collision = db.conn.execute(
-            """SELECT 1 FROM labels_fingerprints
-               WHERE fingerprint = ? AND full_fingerprint IS NOT NULL
-                 AND full_fingerprint != ?""",
-            (labels["short_fingerprint"], labels["fingerprint"]),
-        ).fetchone()
+        collision = db.computation_cache.labels_fingerprint_collision(
+            labels["short_fingerprint"], labels["fingerprint"],
+        )
         if collision and labels["short_fingerprint"] != "tol":
             result["label_collisions"] += 1
             return
@@ -2430,15 +2232,12 @@ class _ArtifactMaterialization:
 
         for photo in photos:
             photo_id = photo["id"]
-            detector_run = db.conn.execute(
-                """SELECT runtime_fingerprint FROM detector_runs
-                   WHERE photo_id = ? AND detector_model = ?""",
-                (photo_id, artifact["detector_model"]),
-            ).fetchone()
+            detector_runtime = db.model_runs.detector_runtime_fingerprint(
+                photo_id, artifact["detector_model"],
+            )
             if (
-                detector_run is None
-                or detector_run["runtime_fingerprint"]
-                != artifact["detector_runtime_fingerprint"]
+                detector_runtime is None
+                or detector_runtime != artifact["detector_runtime_fingerprint"]
             ):
                 # Detector dependency not yet available on this install.
                 # A follow-up materialize call after detection runs (or
@@ -2450,22 +2249,9 @@ class _ArtifactMaterialization:
             from keyword_normalization import normalize_keyword_display
 
             try:
-                db.conn.execute(
-                    """INSERT INTO labels_fingerprints
-                         (fingerprint, full_fingerprint, display_name,
-                          sources_json, label_count)
-                       VALUES (?, ?, ?, '[]', ?)
-                       ON CONFLICT(fingerprint) DO UPDATE SET
-                         full_fingerprint = COALESCE(
-                             excluded.full_fingerprint,
-                             labels_fingerprints.full_fingerprint
-                         ),
-                         display_name = COALESCE(excluded.display_name, display_name),
-                         label_count = COALESCE(excluded.label_count, label_count)""",
-                    (
-                        labels["short_fingerprint"], labels["fingerprint"],
-                        labels.get("display_name"), labels.get("count"),
-                    ),
+                db.computation_cache.upsert_imported_labels_fingerprint(
+                    labels["short_fingerprint"], labels["fingerprint"],
+                    labels.get("display_name"), labels.get("count"),
                 )
                 applied_subjects = 0
                 for subject in artifact["subjects"]:
@@ -2474,10 +2260,10 @@ class _ArtifactMaterialization:
                         compute_detection_id, normalize_keyword_display,
                     ):
                         applied_subjects += 1
-                db.conn.commit()
+                db.commit()
                 result["classifier_runs_applied"] += applied_subjects
             except Exception:
-                db.conn.rollback()
+                db.rollback()
                 raise
 
     def _apply_classification_subject(
@@ -2493,16 +2279,10 @@ class _ArtifactMaterialization:
         )
         if detection_id is None:
             return False
-        prior = db.conn.execute(
-            """SELECT runtime_fingerprint, input_fingerprint
-               FROM classifier_runs
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                detection_id, artifact["classifier_model"],
-                labels["short_fingerprint"],
-            ),
-        ).fetchone()
+        prior = db.computation_cache.classifier_run_identity(
+            detection_id, artifact["classifier_model"],
+            labels["short_fingerprint"],
+        )
         if prior is not None and (
             prior["runtime_fingerprint"] == artifact["runtime_fingerprint"]
             and prior["input_fingerprint"] == artifact["input_fingerprint"]
@@ -2513,15 +2293,15 @@ class _ArtifactMaterialization:
             # this same run was applied by an earlier import.
             # See ``_backfill_classification_enrichment``.
             if _backfill_classification_enrichment(
-                db.conn, detection_id,
+                db, detection_id,
                 artifact["classifier_model"],
                 labels["short_fingerprint"], subject,
             ):
                 result["enrichment_backfilled"] += 1
             result["already_materialized"] += 1
             return False
-        if _manual_review_exists(
-            db.conn, detection_id, artifact["classifier_model"],
+        if db.computation_cache.manual_review_exists(
+            detection_id, artifact["classifier_model"],
             labels["short_fingerprint"],
         ):
             result["pinned_older_runtime"] += 1
@@ -2536,12 +2316,7 @@ class _ArtifactMaterialization:
     ):
         db = self.db
         if subject["kind"] == "full_image":
-            detection = db.conn.execute(
-                """SELECT id FROM detections
-                   WHERE photo_id = ? AND detector_model = 'full-image'
-                   ORDER BY id LIMIT 1""",
-                (photo_id,),
-            ).fetchone()
+            detection = db.computation_cache.full_image_detection(photo_id)
             detection_id = detection["id"] if detection else None
         else:
             box = subject["box"]
@@ -2551,11 +2326,7 @@ class _ArtifactMaterialization:
                 (box["x"], box["y"], box["w"], box["h"]),
                 subject.get("category", "animal"),
             )
-            detection = db.conn.execute(
-                "SELECT 1 FROM detections WHERE id = ?",
-                (detection_id,),
-            ).fetchone()
-            if detection is None:
+            if not db.computation_cache.detection_exists(detection_id):
                 detection_id = None
         return detection_id
 
@@ -2566,66 +2337,23 @@ class _ArtifactMaterialization:
         labels = artifact["labels"]
         # Predictions can predate classifier_runs. Replace all
         # unreviewed candidates before certifying this artifact.
-        db.conn.execute(
-            """DELETE FROM predictions
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                detection_id, artifact["classifier_model"],
-                labels["short_fingerprint"],
-            ),
+        db.computation_cache.delete_run_predictions(
+            detection_id, artifact["classifier_model"],
+            labels["short_fingerprint"],
         )
         for candidate in subject["candidates"]:
-            taxonomy = candidate.get("taxonomy") or {}
-            species = normalize_keyword_display(candidate["species"])
-            db.conn.execute(
-                """INSERT OR IGNORE INTO predictions
-                     (detection_id, classifier_model,
-                      labels_fingerprint, labels_fingerprint_full,
-                      species, confidence, category, scientific_name,
-                      taxonomy_kingdom, taxonomy_phylum,
-                      taxonomy_class, taxonomy_order,
-                      taxonomy_family, taxonomy_genus, source_taxon_id,
-                      match_score)
-                   VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    detection_id, artifact["classifier_model"],
-                    labels["short_fingerprint"], labels["fingerprint"],
-                    species, candidate["confidence"],
-                    taxonomy.get("scientific_name"),
-                    taxonomy.get("kingdom"), taxonomy.get("phylum"),
-                    taxonomy.get("class"), taxonomy.get("order"),
-                    taxonomy.get("family"), taxonomy.get("genus"),
-                    taxonomy.get("taxon_id"),
-                    # Absent on artifacts published before the
-                    # field existed; NULL there means "not
-                    # recorded", never "matched badly".
-                    candidate.get("match_score"),
-                ),
-            )
-        self._replace_subject_match_score(artifact, detection_id, subject)
-        db.conn.execute(
-            """INSERT INTO classifier_runs
-                 (detection_id, classifier_model, labels_fingerprint,
-                  labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count, input_recipe)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(detection_id, classifier_model,
-                           labels_fingerprint)
-               DO UPDATE SET
-                 labels_fingerprint_full = excluded.labels_fingerprint_full,
-                 runtime_fingerprint = excluded.runtime_fingerprint,
-                 input_fingerprint = excluded.input_fingerprint,
-                 prediction_count = excluded.prediction_count,
-                 input_recipe = excluded.input_recipe,
-                 run_at = datetime('now')""",
-            (
+            db.computation_cache.insert_imported_prediction(
                 detection_id, artifact["classifier_model"],
                 labels["short_fingerprint"], labels["fingerprint"],
-                artifact["runtime_fingerprint"],
-                artifact["input_fingerprint"],
-                len(subject["candidates"]), artifact.get("input_recipe"),
-            ),
+                normalize_keyword_display(candidate["species"]), candidate,
+            )
+        self._replace_subject_match_score(artifact, detection_id, subject)
+        db.computation_cache.upsert_imported_classifier_run(
+            detection_id, artifact["classifier_model"],
+            labels["short_fingerprint"], labels["fingerprint"],
+            artifact["runtime_fingerprint"],
+            artifact["input_fingerprint"],
+            len(subject["candidates"]), artifact.get("input_recipe"),
         )
 
     def _replace_subject_match_score(self, artifact, detection_id, subject):
@@ -2650,33 +2378,15 @@ class _ArtifactMaterialization:
         # the previous runtime's score attached to the fresh
         # prediction rows, contradicting the "not recorded" state
         # the missing block is meant to express.
-        db.conn.execute(
-            """DELETE FROM classifier_match_scores
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                detection_id, artifact["classifier_model"],
-                labels["short_fingerprint"],
-            ),
+        db.computation_cache.delete_match_summary(
+            detection_id, artifact["classifier_model"],
+            labels["short_fingerprint"],
         )
         match = subject.get("match")
         if match and match.get("max_match_score") is not None:
-            db.conn.execute(
-                """INSERT INTO classifier_match_scores
-                     (detection_id, classifier_model,
-                      labels_fingerprint, max_match_score,
-                      match_margin, top_species, label_count,
-                      score_kind)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    detection_id, artifact["classifier_model"],
-                    labels["short_fingerprint"],
-                    match["max_match_score"],
-                    match.get("match_margin"),
-                    match.get("top_species"),
-                    match.get("label_count"),
-                    match.get("score_kind"),
-                ),
+            db.computation_cache.insert_match_summary(
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"], match,
             )
 
 

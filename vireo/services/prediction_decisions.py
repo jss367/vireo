@@ -36,6 +36,13 @@ caller only when they look it up here. No function here touches ``request``;
 from __future__ import annotations
 
 import sqlite3
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from db import Database
+    from services.service_types import ErrorResponse, JsonError
 
 # Every route that records a prediction decision, and therefore every route
 # that must take the writer lock below. Entries are *view function names*
@@ -78,7 +85,7 @@ PREDICTION_DECISION_ROUTES = frozenset({
 })
 
 
-def begin_prediction_decision(db, *, json_error):
+def begin_prediction_decision(db: Database, *, json_error: JsonError) -> ErrorResponse | None:
     """Hold SQLite's write lock across a decision's checks *and* its writes.
 
     Every route in ``PREDICTION_DECISION_ROUTES`` is check-then-write: it
@@ -128,7 +135,9 @@ def begin_prediction_decision(db, *, json_error):
     return None
 
 
-def under_prediction_decision_lock(db, work, *, json_error):
+def under_prediction_decision_lock[R](
+    db: Database, work: Callable[[], R], *, json_error: JsonError,
+) -> R | ErrorResponse:
     """Run ``work()`` as one serialized prediction decision.
 
     The wrapper form of ``begin_prediction_decision`` for routes whose
@@ -151,7 +160,7 @@ def under_prediction_decision_lock(db, work, *, json_error):
             db.rollback()
 
 
-def out_of_workspace_prediction_ids(db, pred_ids):
+def out_of_workspace_prediction_ids(db: Database, pred_ids: Sequence[int]) -> set[int]:
     """Which of ``pred_ids`` sit on a photo no longer in this workspace.
 
     The fourth precondition alongside decided / superseded / ambiguous, and

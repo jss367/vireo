@@ -148,7 +148,7 @@ def focus_candidate_ids(focus_photo_id, focus_photo_ids):
 def reject_visual_collection(db, collection_id, *, json_error):
     """Return a 400 response if the collection is visual, else None.
 
-    The consumers that call ``db.get_collection_photos`` /
+    The consumers that call ``db.collections.get_photos`` /
     ``collection_photo_ids`` (pipeline stages, sharpness/cull/classify/
     regroup/masks jobs, predictions-compare, the Misses legacy API, import
     preview) evaluate ``rules`` only. A visual-only collection would
