@@ -53,6 +53,13 @@ class EditsRepository:
             log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
             return None
 
+    def edited_photo_ids(self) -> list[int]:
+        """The id of every photo with a stored edit recipe (catalog-wide)."""
+        rows = self.conn.execute(
+            "SELECT photo_id FROM photo_edit_recipes"
+        ).fetchall()
+        return [row["photo_id"] for row in rows]
+
     def get_photo_recipes(self, photo_ids: Collection[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: normalized recipe dict} for the given photos."""
         if not photo_ids:

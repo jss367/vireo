@@ -9,7 +9,7 @@ import config as cfg
 from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
-from highlights_payload import build_highlights_payload, build_life_list_payload
+from highlights_payload import HighlightsQuery, build_highlights_payload, build_life_list_payload
 from web.background_jobs import make_background_job
 
 
@@ -511,12 +511,11 @@ def create_export_blueprint(
                 options["photos_per_species"],
             )
         if options["include_highlights"]:
-            highlights = build_highlights_payload(
-                db,
+            highlights = build_highlights_payload(db, HighlightsQuery(
                 scope="workspace",
                 min_quality=0.0,
                 limit_per_bucket=options["limit_per_bucket"],
-            )
+            ))
         else:
             highlights = _empty_published_highlights(
                 options["limit_per_bucket"],

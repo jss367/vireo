@@ -679,7 +679,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         )
         self._check_scan_catalogs_folder(own_root)
         if reported:
-            self.db.add_collection(
+            self.db.collections.add(
                 f"Scan {self.next_job}",
                 json.dumps([{"field": "photo_ids", "value": reported}]),
             )
@@ -698,7 +698,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         pairing merge can land on a collection member."""
         ids = [row["id"] for row in self._catalog_rows()]
         chosen = data.draw(st.lists(st.sampled_from(ids), min_size=1, max_size=4, unique=True))
-        self.db.add_collection(
+        self.db.collections.add(
             f"Picked {self.next_job}",
             json.dumps([{"field": "photo_ids", "value": chosen}]),
         )
