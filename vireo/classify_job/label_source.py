@@ -1,13 +1,36 @@
 """Naming the label source a classify run used, for the Jobs page."""
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING, Any, Protocol
 
 from classify_job.cache_coverage import _cache_run_filter
 from classify_job.common import log
 from labels import get_active_labels, get_saved_labels
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
 
-def _resolve_label_set_metas(params, db):
+    from classify_job.classify_types import LabelSetMeta
+    from db import Database
+
+
+class LabelSourceParams(Protocol):
+    """The label-file fields a classify request carries.
+
+    ``ClassifyParams`` (the classify job) and ``PipelineParams`` (the
+    pipeline's model loader) both name their label sources this way.
+    """
+
+    @property
+    def labels_file(self) -> str | None: ...
+
+    @property
+    def labels_files(self) -> list[str] | None: ...
+
+
+def _resolve_label_set_metas(params: LabelSourceParams, db: Database | None) -> list[LabelSetMeta]:
     """Return the label-set metadata dicts _load_labels would merge, in order.
 
     Mirrors the lookup order in _load_labels — explicit files first, then the
@@ -29,7 +52,7 @@ def _resolve_label_set_metas(params, db):
         if path:
             saved_by_file[path] = meta
 
-    def _metas(paths):
+    def _metas(paths: Iterable[str]) -> list[LabelSetMeta]:
         return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
 
     # ``os.path.exists`` mirrors ``_load_labels``, which reads through
@@ -49,21 +72,21 @@ def _resolve_label_set_metas(params, db):
     return list(get_active_labels() or [])
 
 
-def _sources_from_metas(label_metas):
+def _sources_from_metas(label_metas: Iterable[Mapping[str, Any]] | None) -> list[str]:
     """Extract ``labels_file`` source paths from a list of metadata dicts."""
     return [
-        meta.get("labels_file")
+        path
         for meta in (label_metas or [])
-        if meta.get("labels_file")
+        if (path := meta.get("labels_file"))
     ]
 
 
-def _resolve_label_sources(params, db):
+def _resolve_label_sources(params: LabelSourceParams, db: Database | None) -> list[str]:
     """Return list of source file paths used to build the active label set."""
     return _sources_from_metas(_resolve_label_set_metas(params, db))
 
 
-def _label_set_name(meta):
+def _label_set_name(meta: Mapping[str, Any]) -> str:
     """Display name for one label set — its saved name, else its filename."""
     name = (meta.get("name") or "").strip()
     if name:
@@ -72,9 +95,9 @@ def _label_set_name(meta):
 
 
 def _describe_cached_label_source(
-    db, photo_ids, *, classifier_model=None, labels_fingerprint=None,
-    detector_confidence=0.0,
-):
+    db: Database, photo_ids: Sequence[int], *, classifier_model: str | None = None,
+    labels_fingerprint: str | None = None, detector_confidence: float = 0.0,
+) -> str | None:
     """Name the label space of a reused-cache classify step when no peek loaded.
 
     Used only when ``_finalize_cached_only`` fires with ``peek_succeeded=False``
@@ -122,7 +145,10 @@ def _describe_cached_label_source(
         return None
 
 
-def _cached_labels_fingerprint(db, photo_ids, classifier_model, detector_confidence):
+def _cached_labels_fingerprint(
+    db: Database, photo_ids: Sequence[int], classifier_model: str | None,
+    detector_confidence: float,
+) -> str | None:
     """The labels_fingerprint of the runs the cache-coverage check counted.
 
     Reads the same rows as ``_all_photos_cache_satisfied``'s identity gate
@@ -149,7 +175,7 @@ def _cached_labels_fingerprint(db, photo_ids, classifier_model, detector_confide
     return None
 
 
-def _cached_label_sidecar_text(sidecar):
+def _cached_label_sidecar_text(sidecar: Mapping[str, Any]) -> str:
     """Describe a reused label set from its ``labels_fingerprints`` row."""
     sources = sidecar.get("sources") or []
     names = [os.path.basename(s) for s in sources if s]
@@ -176,9 +202,9 @@ def _cached_label_sidecar_text(sidecar):
 
 
 def describe_label_source(
-    params, db, *, labels, use_tol, model_type, class_count=None,
-    label_metas=None,
-):
+    params: LabelSourceParams, db: Database | None, *, labels: list[str] | None, use_tol: bool,
+    model_type: str, class_count: int | None = None, label_metas: list[LabelSetMeta] | None = None,
+) -> str:
     """One line naming the label space a classify run compares photos against.
 
     The Jobs page names the model on each classify row, but the same model

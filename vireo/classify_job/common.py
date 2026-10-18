@@ -6,9 +6,18 @@ imports with their fallbacks when a dependency is missing. The fallbacks live
 here once, so every module sees the same ``ClassificationCancelled`` class.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from classify_job.classify_types import PhotoRecord
+    from taxonomy import Taxonomy
 
 try:
     from detector import detect_animals, get_primary_detection
@@ -27,13 +36,26 @@ except ImportError:
     load_image = None
     load_working_image = None
 
+
+def _classification_cancelled_standin() -> Any:
+    """Stand-in for ``classifier.ClassificationCancelled`` without the classifier.
+
+    Typed ``Any`` because it takes the place of that class, which is not
+    importable here. It keeps the class's name for the checks that recognize
+    a cancelled classification by name.
+    """
+
+    class ClassificationCancelled(RuntimeError):
+        pass
+
+    return ClassificationCancelled
+
+
 try:
     from classifier import ClassificationCancelled, Classifier
 except ImportError:
     Classifier = None
-
-    class ClassificationCancelled(RuntimeError):
-        pass
+    ClassificationCancelled = _classification_cancelled_standin()
 
 try:
     from timm_classifier import TimmClassifier
@@ -63,7 +85,7 @@ class ClassifyParams:
 
     collection_id: str
     labels_file: str | None
-    labels_files: list | None
+    labels_files: list[str] | None
     model_id: str | None
     model_name: str | None
     grouping_window: int
@@ -71,7 +93,7 @@ class ClassifyParams:
     reclassify: bool
 
 
-def _load_taxonomy(taxonomy_path):
+def _load_taxonomy(taxonomy_path: str) -> Taxonomy | None:
     """Load taxonomy from JSON file. Returns Taxonomy instance or None."""
     if not os.path.exists(taxonomy_path):
         return None
@@ -86,7 +108,7 @@ def _load_taxonomy(taxonomy_path):
         return None
 
 
-def _photo_timestamp(photo):
+def _photo_timestamp(photo: PhotoRecord) -> datetime | None:
     """Parse a photo row's stored ISO timestamp, or ``None``.
 
     A malformed stored value only costs the prediction its capture time, so it

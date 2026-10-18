@@ -4,15 +4,31 @@ Used when every photo's classifier runs are already cached (a bundle import
 or an earlier run), so no model has to load.
 """
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING, cast
 
 from classify_job.cache_coverage import _cache_run_filter
 from classify_job.common import _photo_timestamp
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
 from classify_job.store_predictions import _cached_prediction_taxonomy, _store_grouped_predictions
 
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterable, Mapping, Sequence
 
-def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
+    from classify_job.classify_types import DetectionMap, LabelSetMeta, ModelSpec, RawResult
+    from classify_job.common import ClassifyParams
+    from db import Database
+    from jobs import JobRunner
+    from services.service_types import JobDict, JsonDict
+    from taxonomy import Taxonomy
+
+
+def _finalize_remaining_steps(
+    runner: JobRunner, job_id: str, step_ids: Iterable[str], status: str, summary: str,
+) -> None:
     """Flip not-yet-run step rows to a terminal status before an early return.
 
     _persist_job stores whatever statuses are in the step tree at job end;
@@ -24,7 +40,10 @@ def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
         runner.update_step(job_id, step_id, status=status, summary=summary)
 
 
-def _cached_only_reused_count(db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+def _cached_only_reused_count(
+    db: Database, photo_ids: Sequence[int], classifier_model: str | None,
+    labels_fingerprint: str | None, detector_confidence: float,
+) -> int:
     """Count covered cached work, including measured no-match outcomes.
 
     The caller's coverage/identity gate already proved these rows share the
@@ -42,12 +61,12 @@ def _cached_only_reused_count(db, photo_ids, classifier_model, labels_fingerprin
     )
 
 def _finalize_cached_only(
-    thread_db, runner, job, params, photos,
-    classifier_model, labels_fingerprint,
-    peek_model=None, peek_labels=None, peek_use_tol=False,
-    peek_label_metas=None, peek_succeeded=False,
-    detector_confidence=0.0,
-):
+    thread_db: Database, runner: JobRunner, job: JobDict, params: ClassifyParams, photos: list[sqlite3.Row],
+    classifier_model: str | None, labels_fingerprint: str | None,
+    peek_model: ModelSpec | None = None, peek_labels: list[str] | None = None, peek_use_tol: bool = False,
+    peek_label_metas: list[LabelSetMeta] | None = None, peek_succeeded: bool = False,
+    detector_confidence: float = 0.0,
+) -> JsonDict:
     """Reconcile imported classifier results without loading a model.
 
     ``_all_photos_cache_satisfied`` proves every detection already has a
@@ -137,9 +156,9 @@ def _finalize_cached_only(
 
 
 def _finalize_cached_results(
-    thread_db, runner, job, params, tax, total,
-    raw_results, resolved_model, resolved_fingerprint,
-):
+    thread_db: Database, runner: JobRunner, job: JobDict, params: ClassifyParams, tax: Taxonomy | None, total: int,
+    raw_results: list[RawResult], resolved_model: str | None, resolved_fingerprint: str | None,
+) -> dict[str, int]:
     """Run the finalize step over reused results; returns the group result."""
     runner.update_step(job["id"], "finalize", status="running")
     runner.push_event(
@@ -155,7 +174,9 @@ def _finalize_cached_results(
     group_result = _store_grouped_predictions(
         raw_results=raw_results,
         job_id=job["id"],
-        model_name=resolved_model,
+        # ``resolved_model`` is None only when no identity was resolved,
+        # which leaves ``raw_results`` empty and stores nothing.
+        model_name=cast("str", resolved_model),
         grouping_window=params.grouping_window,
         similarity_threshold=params.similarity_threshold,
         tax=tax,
@@ -170,10 +191,11 @@ def _finalize_cached_results(
 
 
 def _cached_only_label_source(
-    thread_db, params, photos, classifier_model, labels_fingerprint,
-    peek_model, peek_labels, peek_use_tol, peek_label_metas,
-    peek_succeeded, detector_confidence,
-):
+    thread_db: Database, params: ClassifyParams, photos: list[sqlite3.Row],
+    classifier_model: str | None, labels_fingerprint: str | None, peek_model: ModelSpec | None,
+    peek_labels: list[str] | None, peek_use_tol: bool, peek_label_metas: list[LabelSetMeta] | None,
+    peek_succeeded: bool, detector_confidence: float,
+) -> str | None:
     """The ``label_source`` line for a cached-only classify step, or None.
 
     ``class_count`` is unavailable here — no classifier is constructed — so
@@ -207,7 +229,7 @@ def _cached_only_label_source(
     )
 
 
-def _cached_only_detection_map(thread_db, photo_ids):
+def _cached_only_detection_map(thread_db: Database, photo_ids: list[int]) -> DetectionMap:
     """The classifiable detections a cached-only finalize reconciles.
 
     Returns ``{photo_id: [detection, ...]}``: animal detections at the
@@ -248,7 +270,10 @@ def _cached_only_detection_map(thread_db, photo_ids):
     return detection_map
 
 
-def _cached_only_identity(thread_db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+def _cached_only_identity(
+    thread_db: Database, photo_ids: Sequence[int], classifier_model: str | None,
+    labels_fingerprint: str | None, detector_confidence: float,
+) -> tuple[str, str] | None:
     """Resolve the single identity accepted by the caller's coverage gate.
 
     Predictions outside that gate (for example RAW recipes) cannot choose
@@ -274,9 +299,9 @@ def _cached_only_identity(thread_db, photo_ids, classifier_model, labels_fingerp
 
 
 def _cached_only_raw_results(
-    thread_db, photos, folders, detection_map,
-    classifier_model, labels_fingerprint, detector_confidence=0.0,
-):
+    thread_db: Database, photos: list[sqlite3.Row], folders: dict[int, str], detection_map: DetectionMap,
+    classifier_model: str | None, labels_fingerprint: str | None, detector_confidence: float = 0.0,
+) -> tuple[list[RawResult], str | None, str | None]:
     """Rebuild raw classifier results from each detection's cached top-1.
 
     Returns ``(raw_results, resolved_model, resolved_fingerprint)``; one
@@ -321,7 +346,7 @@ def _cached_only_raw_results(
     return raw_results, resolved_model, resolved_fingerprint
 
 
-def _finalize_summary(group_result):
+def _finalize_summary(group_result: Mapping[str, int]) -> str:
     """The finalize step's summary line for a grouped-store result."""
     finalize_parts = [f"{group_result['predictions_stored']} predictions"]
     if group_result["burst_groups"]:

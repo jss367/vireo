@@ -5,7 +5,10 @@ workspace's active sets, then the global ones), loads and merges them, reuses
 saved label embeddings, and records the label set's fingerprint row.
 """
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING, Any
 
 from classify_job.common import ClassificationCancelled, UnusableLabelsError, log
 from labels import (
@@ -16,8 +19,14 @@ from labels import (
     read_label_file,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
 
-def _any_present(label_sets):
+    from classify_job.classify_types import LabelSetMeta
+    from db import Database
+
+
+def _any_present(label_sets: Iterable[Mapping[str, Any]]) -> bool:
     """Does this selection still name a file on disk?
 
     A selection that names only deleted files is not a selection to
@@ -31,14 +40,16 @@ def _any_present(label_sets):
     )
 
 
-def _saved_label_metas(paths):
+def _saved_label_metas(paths: Iterable[str]) -> list[LabelSetMeta]:
     """The saved metadata for each label-file path, or a bare stand-in."""
     saved = get_saved_labels()
     saved_by_file = {s["labels_file"]: s for s in saved}
     return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
 
 
-def _select_labels(labels_file, labels_files, db):
+def _select_labels(
+    labels_file: str | None, labels_files: list[str] | None, db: Database | None,
+) -> tuple[list[str] | None, list[LabelSetMeta], bool]:
     """Load the label set the caller, the workspace or the globals chose.
 
     Returns ``(labels, label_metas, selected)``; ``selected`` says whether a
@@ -118,8 +129,9 @@ def _select_labels(labels_file, labels_files, db):
 
 
 def _load_labels(
-    model_type, model_str, labels_file, labels_files, db=None, model_dir=None,
-):
+    model_type: str, model_str: str, labels_file: str | None, labels_files: list[str] | None,
+    db: Database | None = None, model_dir: str | None = None,
+) -> tuple[list[str] | None, bool, list[LabelSetMeta]]:
     """Resolve labels for classification.
 
     ``model_dir`` — the on-disk directory of the active model. When given,
@@ -211,7 +223,10 @@ def _load_labels(
     return labels, use_tol, label_metas
 
 
-def _reuse_saved_label_embeddings(db, model_str, model_dir, labels, cancel_check=None):
+def _reuse_saved_label_embeddings(
+    db: Database | None, model_str: str, model_dir: str, labels: list[str] | None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> None:
     """Recover columns from older set caches using verified source lists.
 
     Older manifests omit the actual label order. Saved lists and run
@@ -259,8 +274,9 @@ def _reuse_saved_label_embeddings(db, model_str, model_dir, labels, cancel_check
 
 
 def _record_labels_fingerprint(
-    db, fingerprint, labels, sources, full_fingerprint=None,
-):
+    db: Database, fingerprint: str, labels: list[str] | None, sources: list[str] | None,
+    full_fingerprint: str | None = None,
+) -> None:
     """Populate the labels_fingerprints sidecar. Cosmetic — powers UX lookups."""
     display = ", ".join(os.path.basename(s) for s in (sources or [])) or None
     db.model_runs.upsert_labels_fingerprint(
