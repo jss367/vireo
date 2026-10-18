@@ -59,7 +59,7 @@ def test_collection_open_waits_for_filter_bar_initialization(live_server, page):
     """An early collection click is queued while filter fields are loading."""
     collection_id = next(
         collection["id"]
-        for collection in live_server["db"].get_collections()
+        for collection in live_server["db"].collections.list_all()
         if collection["name"] == "GPS Without Location Keyword"
     )
     held_routes = []
@@ -98,7 +98,7 @@ def test_queued_collection_open_yields_to_later_folder_click(live_server, page):
     """A queued early collection open must not clobber a later folder click."""
     collection_id = next(
         collection["id"]
-        for collection in live_server["db"].get_collections()
+        for collection in live_server["db"].collections.list_all()
         if collection["name"] == "GPS Without Location Keyword"
     )
     folder_id = live_server["data"]["folders"][1]
@@ -148,7 +148,7 @@ def test_queued_collection_open_yields_to_later_keyword_click(live_server, page)
     """
     collection_id = next(
         collection["id"]
-        for collection in live_server["db"].get_collections()
+        for collection in live_server["db"].collections.list_all()
         if collection["name"] == "GPS Without Location Keyword"
     )
     held_routes = []
@@ -209,7 +209,7 @@ def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
     queued open, so A opened over the user's real click (Codex review
     r3624637674).
     """
-    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].get_collections()}
+    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].collections.list_all()}
     # Both collections must return non-empty grids: All Photos matches the
     # 5 seeded photos, Untagged matches the 3 without a keyword. Empty
     # collections would leave #grid .grid-card missing and hang the page
@@ -264,7 +264,7 @@ def test_collection_count_and_optional_grid_keep_offline_members(live_server, pa
     )
     db.conn.commit()
     collection_id = next(
-        c["id"] for c in db.get_collections() if c["name"] == "All Photos"
+        c["id"] for c in db.collections.list_all() if c["name"] == "All Photos"
     )
 
     page.goto(live_server["url"] + "/browse")
@@ -305,7 +305,7 @@ def test_all_offline_collection_does_not_show_import_welcome(live_server, page):
     db.conn.commit()
     collection_id = next(
         collection["id"]
-        for collection in db.get_collections()
+        for collection in db.collections.list_all()
         if collection["name"] == "All Photos"
     )
 
@@ -336,7 +336,7 @@ def test_pending_keyword_click_supersedes_deep_link_collection(live_server, page
     behind the init promise and applies once fields load, replacing the
     collection scope with the user's later intent.
     """
-    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].get_collections()}
+    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].collections.list_all()}
     deep_link_id = collections_by_name["All Photos"]
     held_routes = []
     page.route(
@@ -541,7 +541,7 @@ def test_missing_tag_shortcuts_combine_and_distinguish_gps(live_server, page):
 def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut):
     db = live_server["db"]
     photos = live_server["data"]["photos"]
-    collection_id = db.add_collection("Two hawk photos", json.dumps({
+    collection_id = db.collections.add("Two hawk photos", json.dumps({
         "mode": "any",
         "rules": [
             {"field": "filename", "op": "is", "value": "hawk1.jpg"},
@@ -1082,7 +1082,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
     """The count includes untagged predictions; drilling down keeps other filters."""
     db = live_server["db"]
     # A collection omitting hawk3 makes losing collection scope observable.
-    cid = db.add_collection("First two hawks", json.dumps([
+    cid = db.collections.add("First two hawks", json.dumps([
         {"field": "photo_ids", "op": "in", "value": live_server["data"]["photos"][:2]}
     ]))
     folder_id = live_server["data"]["folders"][0]
@@ -1114,7 +1114,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
 
 
 def test_top_species_narrows_match_any_collection(live_server, page):
-    cid = live_server["db"].add_collection("Hawks or robins", json.dumps({
+    cid = live_server["db"].collections.add("Hawks or robins", json.dumps({
         "mode": "any", "rules": [
             {"field": "filename", "op": "contains", "value": "hawk"},
             {"field": "filename", "op": "contains", "value": "robin"},
@@ -1296,7 +1296,7 @@ def test_sidebar_highlights_follow_scope_switches(live_server, page):
     """
     all_photos_id = next(
         collection["id"]
-        for collection in live_server["db"].get_collections()
+        for collection in live_server["db"].collections.list_all()
         if collection["name"] == "All Photos"
     )
     folder_id = live_server["data"]["folders"][1]

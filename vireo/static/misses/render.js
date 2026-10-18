@@ -1,26 +1,32 @@
 // Rendering: the page root, each category section and its cards, and section
-// collapse.
-// Classic page script; load boot.js after all definitions.
+// collapse. Cards and section headers carry data attributes, not inline
+// handlers; card-events.js binds one delegated listener for them.
+// ES module.
 
-function render() {
+import { state, CATEGORY_ORDER, CATEGORY_LABELS } from './state.js';
+import { escapeAttr, escapeHtml } from './shared.js';
+import { parseDetectionBox, photoThumbnailUrl } from './helpers.js';
+import { updateSelectionBar } from './selection.js';
+
+export function render() {
   var root = /** @type {HTMLElement} */ (document.getElementById('missesRoot'));
-  var total = missesData.no_subject.length + missesData.clipped.length + missesData.oof.length;
+  var total = state.missesData.no_subject.length + state.missesData.clipped.length + state.missesData.oof.length;
   if (total === 0) {
     root.innerHTML =
       '<div class="misses-empty-page">' +
       '<p>No misses detected — either you nailed every shot, or detection hasn\'t run yet.</p>' +
       '<p><a href="/pipeline">Go to Process</a> to run miss detection on your folders.</p>' +
       '</div>';
-    focusedCategory = null;
-    focusedIndex = -1;
-    selection.clear();
+    state.focusedCategory = null;
+    state.focusedIndex = -1;
+    state.selection.clear();
     updateSelectionBar();
     return;
   }
 
   var html = '';
   CATEGORY_ORDER.forEach(function(cat) {
-    html += renderSection(cat, missesData[cat]);
+    html += renderSection(cat, state.missesData[cat]);
   });
   html +=
     '<div class="misses-hint">' +
@@ -52,7 +58,7 @@ function render() {
   }
   return (
     '<section class="misses-section" id="' + sectionId + '" data-cat="' + cat + '">' +
-      '<div class="misses-section-header" onclick="toggleSection(\'' + cat + '\', event)">' +
+      '<div class="misses-section-header" data-cat="' + cat + '">' +
         '<span class="caret">&#9662;</span>' +
         '<span class="misses-category-badge cat-' + cat + '"></span>' +
         '<span class="misses-section-title">' + escapeHtml(label) + '</span>' +
@@ -60,8 +66,8 @@ function render() {
         '<div class="misses-section-actions">' +
           '<button class="misses-reject-btn" ' +
             'data-testid="miss-reject-' + cat + '" ' +
-            'onclick="bulkReject(\'' + cat + '\', event)" ' +
-            ((count === 0 || previewActive) ? 'disabled' : '') + '>' +
+            'data-cat="' + cat + '" ' +
+            ((count === 0 || state.previewActive) ? 'disabled' : '') + '>' +
             'Reject all in ' + escapeHtml(label) +
           '</button>' +
         '</div>' +
@@ -79,10 +85,10 @@ function render() {
   if (!bbox && cat === 'no_subject') {
     var floor = p.detector_confidence_threshold != null
       ? Number(p.detector_confidence_threshold)
-      : (activeMissFloor != null
-          ? activeMissFloor
-          : (missConfig && missConfig.detector_confidence != null
-              ? Number(missConfig.detector_confidence) : 0.20));
+      : (state.activeMissFloor != null
+          ? state.activeMissFloor
+          : (state.missConfig && state.missConfig.detector_confidence != null
+              ? Number(state.missConfig.detector_confidence) : 0.20));
     bboxHtml = '<div class="no-subject-frame">No detection above ' +
       Math.round(floor * 100) + '%</div>';
   }
@@ -102,7 +108,7 @@ function render() {
     (CATEGORY_LABELS[cat] || cat) + ' miss: ' + (p.filename || ('photo ' + p.id))
   );
 
-  var selectedCls = selection.has(p.id) ? ' selected' : '';
+  var selectedCls = state.selection.has(p.id) ? ' selected' : '';
   return (
     '<div class="miss-card' + selectedCls + '" ' +
       'data-cat="' + cat + '" ' +
@@ -110,9 +116,7 @@ function render() {
       'data-photo-id="' + p.id + '" ' +
       'data-filename="' + escapeAttr(p.filename || '') + '" ' +
       'data-testid="miss-card-' + cat + '-' + p.id + '" ' +
-      'aria-label="' + ariaLabel + '" ' +
-      'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)" ' +
-      'ondblclick="onCardDoubleClick(\'' + cat + '\', ' + idx + ', event)">' +
+      'aria-label="' + ariaLabel + '">' +
       '<div class="miss-card-img-wrap">' +
         '<img src="' + escapeAttr(photoThumbnailUrl(p)) + '" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
@@ -124,8 +128,7 @@ function render() {
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
-          (previewActive ? 'disabled ' : '') +
-          'onclick="unflagMiss(\'' + cat + '\', ' + p.id + ', event)">&times;</button>' +
+          (state.previewActive ? 'disabled' : '') + '>&times;</button>' +
       '</div>' +
       '<div class="miss-card-info">' +
         '<span class="miss-card-filename">' + escapeHtml(p.filename || '') + '</span>' +
@@ -136,7 +139,7 @@ function render() {
 }
 
 /* ---------- Section collapse ---------- */
-/** @param {MissCategory} cat @param {MouseEvent=} e */ function toggleSection(cat, e) {
+/** @param {MissCategory} cat @param {MouseEvent=} e */ export function toggleSection(cat, e) {
   if (e && e.target instanceof Element && e.target.closest('button')) return;
   var sec = document.getElementById('missesSection-' + cat);
   if (sec) sec.classList.toggle('collapsed');

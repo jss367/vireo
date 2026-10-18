@@ -13,6 +13,8 @@ The method bodies were moved verbatim from ``Database``. The only edits are
 parameter order and commit placement are unchanged. Browse and the
 ``/api/v1/collections`` API depend on that query text.
 
+Callers reach this repository through the ``db.collections`` accessor
+(``db.collections.get_photos(...)``), which builds a fresh one per access.
 ``Database`` keeps the active-workspace state and composition. The active
 workspace is resolved lazily through ``Database._ws_id`` at exactly the
 points the original code called it, so a malformed rule tree still raises
@@ -23,7 +25,10 @@ monkeypatches of ``Database`` keep reaching this code. Methods with no SQL of
 their own (``rules_resolvable``, ``query_photo_position``,
 ``query_browse_stack_position``, ``count_browse_stacks``, the ``*_stacked``
 id lists, ``create_default_collections_for_all_workspaces``) stay on
-``Database`` and call back through it.
+``Database`` and call through the accessor. ``_build_query_from_rules`` and
+``_top_prediction_confidence_params`` keep one-line ``Database`` forwarders
+because ``PredictionRepository`` binds them from the façade by name
+(``repositories.predictions.FACADE_METHODS``).
 """
 
 import json

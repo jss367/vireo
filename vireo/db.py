@@ -21,6 +21,7 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
+    from repositories.card_cleanup import CardCleanupRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
     from repositories.computation_cache import ComputationCacheRepository
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
+    from repositories.source_cleanup import SourceCleanupRepository
     from repositories.stats import StatsRepository
     from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
@@ -1935,6 +1937,26 @@ class Database:
         """
         return self._workspace_folder_repository()
 
+    # -- Move source cleanup (``move_cleanup`` owns the transaction) --
+
+    def _source_cleanup_repository(self):
+        """Build the (catalog-wide) move-source-cleanup repository on this connection."""
+        from repositories.source_cleanup import SourceCleanupRepository
+
+        return SourceCleanupRepository(self.conn)
+
+    @property
+    def source_cleanup(self) -> SourceCleanupRepository:
+        """Move-source cleanup SQL: ``db.source_cleanup.folder_has_photos(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_source_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to the active workspace, so accessing it never needs one, and
+        nothing in it commits: ``move_cleanup`` opens and ends the transaction.
+        """
+        return self._source_cleanup_repository()
+
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
         """Link a folder + descendants to a workspace WITHOUT committing.
@@ -2451,6 +2473,26 @@ class Database:
         works by photo id with none active.
         """
         return self._audit_repository()
+
+    # -- Card cleanup (``card_cleanup`` owns the gates and the commits) --
+
+    def _card_cleanup_repository(self):
+        """Build the (catalog-wide) card-cleanup repository on this connection."""
+        from repositories.card_cleanup import CardCleanupRepository
+
+        return CardCleanupRepository(self.conn)
+
+    @property
+    def card_cleanup(self) -> CardCleanupRepository:
+        """Card cleanup's catalog SQL: ``db.card_cleanup.rows_by_hash(hash)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_card_cleanup_repository``, exactly as a
+        forwarding wrapper called at that moment would. Nothing in it is
+        scoped to a workspace, and its verdict write runs in the caller's
+        transaction (``card_cleanup`` commits through ``db.commit()``).
+        """
+        return self._card_cleanup_repository()
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
@@ -3852,7 +3894,7 @@ class Database:
             # ``f.status IN ('ok', 'partial')`` join. Callers that need the
             # accessible-only view apply that filter in their outer query
             # (e.g. get_coverage_stats), so it's fine to be permissive here.
-            parts = self._build_collection_query(
+            parts = self.collections._build_collection_query(
                 collection_id, include_offline_folders=True,
             )
             if parts is None:
@@ -4571,7 +4613,7 @@ class Database:
             collection_id=collection_id,
             rules=rules,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
+            build_collection_query=self.collections._build_collection_query,
             build_query_from_rules=self._build_query_from_rules,
         )
 
@@ -4609,9 +4651,9 @@ class Database:
             flag=flag,
             location_status=location_status,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
+            build_collection_query=self.collections._build_collection_query,
             append_location_status_filter=self._append_location_status_filter,
-            photo_sort_clause=self._photo_sort_clause,
+            photo_sort_clause=self.collections._photo_sort_clause,
         )
 
     def get_photo_ids(
@@ -4644,9 +4686,9 @@ class Database:
             flag=flag,
             location_status=location_status,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
+            build_collection_query=self.collections._build_collection_query,
             append_location_status_filter=self._append_location_status_filter,
-            photo_sort_clause=self._photo_sort_clause,
+            photo_sort_clause=self.collections._photo_sort_clause,
         )
 
     def get_photo_position(
@@ -4663,8 +4705,8 @@ class Database:
             collection_id=collection_id,
             sort=sort,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
-            photo_sort_clause=self._photo_sort_clause,
+            build_collection_query=self.collections._build_collection_query,
+            photo_sort_clause=self.collections._photo_sort_clause,
         )
 
     def count_filtered_photos(
@@ -4695,7 +4737,7 @@ class Database:
             flag=flag,
             location_status=location_status,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
+            build_collection_query=self.collections._build_collection_query,
             append_location_status_filter=self._append_location_status_filter,
         )
 
@@ -4723,7 +4765,7 @@ class Database:
             collection_id=collection_id,
             rules=rules,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self._build_collection_query,
+            build_collection_query=self.collections._build_collection_query,
             build_query_from_rules=self._build_query_from_rules,
             detector_confidence=detector_confidence,
         )
@@ -7769,7 +7811,7 @@ class Database:
                 if key in leaf_photo_sets:
                     return
                 try:
-                    leaf_photo_sets[key] = set(self.query_photo_ids([node]))
+                    leaf_photo_sets[key] = set(self.collections.query_photo_ids([node]))
                 except (ValueError, sqlite3.Error):
                     # Malformed / unresolvable leaf: fall back to matching
                     # every photo the SQL subquery kept. Never hide rows
@@ -9694,10 +9736,13 @@ class Database:
 
     @property
     def collections(self) -> CollectionRepository:
-        """Fresh domain API; scoped methods resolve the workspace at use.
+        """Collections and the rule-driven photo queries: ``db.collections.get_photos(...)``.
 
-        Existing coordinated façade methods and their bound callbacks stay
-        in place. Do not retain this repository across a workspace switch.
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped methods resolve the workspace at use.
+        Do not retain one across a workspace switch. Coordinated façade
+        methods (``rules_resolvable``, ``query_photo_position``, the
+        ``*_stacked`` id lists, ...) stay on ``Database`` and call through it.
         """
         return self._collection_repository()
 
@@ -9744,53 +9789,6 @@ class Database:
             suggest_value_exprs=self._SUGGEST_VALUE_EXPRS,
         )
 
-    def add_collection(self, name, rules_json, visual_json=None):
-        """Insert a smart collection. Returns the collection id.
-
-        ``visual_json`` stores the universal filter's visual clause
-        (``{prompt, strength}`` JSON) when the saved expression has one, so
-        save → reopen reproduces the same result set instead of silently
-        dropping to metadata-only.
-        """
-        return self._collection_repository().add(
-            name,
-            rules_json,
-            visual_json=visual_json,
-        )
-
-    def get_collections(self):
-        """Return all collections for the active workspace."""
-        return self._collection_repository().list_all()
-
-    def get_collections_for_picker(self):
-        """The workspace's collections ordered by name case-insensitively, then id.
-
-        Rows carry ``id``, ``name``, ``rules`` and ``visual_json``.
-        """
-        return self._collection_repository().list_for_picker()
-
-    def get_collection(self, collection_id):
-        """One collection row (``id``, ``name``, ``rules``, ``visual_json``), or None.
-
-        None when the id is unknown or belongs to another workspace.
-        """
-        return self._collection_repository().get(collection_id)
-
-    def update_collection(self, collection_id, *, name=_UNSET, rules_json=_UNSET,
-                          visual_json=_UNSET):
-        """Set the given columns of a workspace collection, and commit.
-
-        Returns whether a row was updated. Only the arguments passed are
-        written; with none passed nothing runs and returns None.
-        """
-        return self._collection_repository().update(
-            collection_id, name=name, rules_json=rules_json, visual_json=visual_json,
-        )
-
-    def delete_collection(self, collection_id):
-        """Delete a collection."""
-        self._collection_repository().delete(collection_id)
-
     def remap_collection_photo_ids(self, mapping):
         """Point every workspace's ``photo_ids`` rules at surviving photos; no commit."""
         from repositories.collections import remap_collection_photo_ids
@@ -9806,27 +9804,6 @@ class Database:
         from repositories.collections import prune_collection_ids_of_missing_photos
         return prune_collection_ids_of_missing_photos(self.conn, commit=commit_with_retry)
 
-    def rename_collection(self, collection_id, new_name):
-        """Rename a collection within the active workspace.
-
-        Raises ``ValueError`` if the collection isn't in the active workspace.
-        """
-        self._collection_repository().rename(collection_id, new_name)
-
-    def duplicate_collection(self, collection_id):
-        """Copy a collection (name + rules + visual clause) within the active workspace.
-
-        The new collection's name is ``"{original} (copy)"``; if that name is
-        already taken, append an incrementing counter like ``"(copy 2)"``.
-        Rules and ``visual_json`` are copied verbatim, which means static
-        collections (photo_ids rules) keep their memberships and visual
-        collections keep their visual clause.
-
-        Returns the new collection id. Raises ``ValueError`` if the source
-        collection isn't in the active workspace.
-        """
-        return self._collection_repository().duplicate(collection_id)
-
     def get_new_images_snapshot(self, snapshot_id):
         """Return snapshot metadata + file paths, or None if not found / cross-workspace.
 
@@ -9840,18 +9817,6 @@ class Database:
         if not -(1 << 63) <= snapshot_id <= (1 << 63) - 1:
             return None
         return self._workspace_repository().get_new_images_snapshot(snapshot_id)
-
-    def _build_collection_query(self, collection_id, include_offline_folders=False):
-        """Build SQL clauses from collection rules.
-
-        Returns (folder_join, join_clause, where, params) or None if collection
-        not found. Pass ``include_offline_folders=True`` for metadata-only
-        callers (Dashboard scope) that keep offline photos in their totals.
-        """
-        return self._collection_repository()._build_collection_query(
-            collection_id,
-            include_offline_folders=include_offline_folders,
-        )
 
     def _build_query_from_rules(self, rules, include_offline_folders=False,
                                 row_scoped=False):
@@ -9902,83 +9867,6 @@ class Database:
         """
         return self._collection_repository()._top_prediction_confidence_params()
 
-    def _photo_sort_clause(self, sort):
-        """Return ``(order_by_sql, params)`` for a photo-list sort key.
-
-        One definition for every unstacked photo list — the legacy
-        ``/api/photos`` reads, the universal-filter reads, the collection
-        reads, and the position probes that must rank the same order those
-        page through. They used to carry six copies of the same dict; a sort
-        added to one of them and missed in another silently degrades to
-        capture-date in whichever query the caller happened to hit.
-
-        Unknown keys fall back to capture-date ascending, matching the
-        previous ``.get(sort, _PHOTO_DATE_ASC_ORDER)`` behaviour.
-
-        Callers must splice ``params`` in at the ORDER BY's *textual*
-        position: after the WHERE parameters for an ordinary
-        ``... WHERE ... ORDER BY ...`` query, but before them when the
-        clause sits inside a ``ROW_NUMBER() OVER (ORDER BY ...)`` in the
-        select list.
-        """
-        return self._collection_repository()._photo_sort_clause(sort)
-
-    def get_collection_photos(
-        self,
-        collection_id,
-        page=1,
-        per_page=50,
-        photo_ids=None,
-        sort="date",
-        include_offline_folders=False,
-    ):
-        """Build SQL from collection rules and return matching photos.
-
-        ``photo_ids`` optionally narrows the collection query to a small set.
-        ID Conflicts uses this after a decision so it can refresh only the
-        photos the write touched instead of rebuilding the whole collection.
-        The collection rules still apply, which also lets the client detect a
-        photo that left the collection because its species keywords changed.
-        """
-        return self._collection_repository().get_photos(
-            collection_id,
-            page=page,
-            per_page=per_page,
-            photo_ids=photo_ids,
-            sort=sort,
-            include_offline_folders=include_offline_folders,
-        )
-
-    def get_collection_photo_ids(self, collection_id, sort="date"):
-        """Return all photo IDs matching a collection in display order.
-
-        ``sort`` mirrors ``get_collection_photos`` so the ``/photo-ids``
-        endpoint that drives ``selectedPhotos`` insertion order for
-        Select-all-matching stays aligned with the grid the user sees —
-        without this, Best Batch seed, burst-review order, and export
-        preview would start from the date-ordered first photo even when
-        the grid is sorted by name, rating, sharpness, or quality.
-        """
-        return self._collection_repository().get_photo_ids(collection_id, sort=sort)
-
-    def count_collection_photos(
-        self, collection_id, include_offline_folders=False,
-    ):
-        """Return the count of photos matching collection rules.
-
-        The default is the actionable count from accessible folders. Pass
-        ``include_offline_folders=True`` for stable collection membership:
-        photos remain members while their storage is temporarily missing.
-        """
-        return self._collection_repository().count_photos(
-            collection_id,
-            include_offline_folders=include_offline_folders,
-        )
-
-    def count_collection_photo_availability(self, collection_id):
-        """Return stable membership and actionable counts for a collection."""
-        return self._collection_repository().count_photo_availability(collection_id)
-
     def rules_resolvable(self, rules):
         """Return True if a rule tree can be resolved to SQL clauses without
         executing them.
@@ -9994,92 +9882,6 @@ class Database:
         except ValueError:
             return False
         return True
-
-    def count_photos_for_rules(
-        self,
-        rules,
-        collection_id=None,
-        folder_id=None,
-        include_offline_folders=False,
-    ):
-        """Return the number of photos in the active workspace that match
-        an unsaved rules list. Used by the smart-collection modal preview
-        and /api/photos/query totals.
-
-        Raises ValueError on malformed input (propagated from
-        ``_build_query_from_rules``).
-        """
-        return self._collection_repository().count_photos_for_rules(
-            rules,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
-
-    def _append_folder_restriction(self, folder_id, where, params):
-        """AND a folder-subtree restriction onto built rule clauses, matching
-        get_photos' folder_id semantics (the folder and its descendants).
-
-        Wraps the existing WHERE body in parentheses before ANDing so a
-        top-level ``any`` rule tree (``WHERE (A) OR (B)``) doesn't have the
-        folder restriction bind only to the last OR branch — AND binds
-        tighter than OR in SQL, and without wrapping photos outside the
-        selected folder would leak through the earlier branches.
-        """
-        return self._collection_repository()._append_folder_restriction(
-            folder_id,
-            where,
-            params,
-        )
-
-    def _append_collection_restriction(
-        self,
-        collection_id,
-        where,
-        params,
-        include_offline_folders=False,
-    ):
-        """AND a collection-membership subquery onto built rule clauses.
-
-        Lets /api/photos/query serve Browse's dashboard-scoped collection
-        view (collection as a restriction on the filtered grid) without the
-        rule tree needing to reference collections. Raises ValueError for a
-        collection missing from the active workspace. Wraps the existing
-        WHERE body in parentheses before ANDing for the same OR-precedence
-        reason as ``_append_folder_restriction``.
-        """
-        return self._collection_repository()._append_collection_restriction(
-            collection_id,
-            where,
-            params,
-            include_offline_folders=include_offline_folders,
-        )
-
-    def query_photos(
-        self,
-        rules,
-        sort="date",
-        page=1,
-        per_page=50,
-        collection_id=None,
-        folder_id=None,
-        include_offline_folders=False,
-    ):
-        """Return paginated photos matching a universal-filter rule tree.
-
-        The rules format is the smart-collection tree (see
-        ``_build_query_from_rules``); ``count_photos_for_rules`` gives the
-        matching total. Raises ValueError on malformed rules.
-        """
-        return self._collection_repository().query_photos(
-            rules,
-            sort=sort,
-            page=page,
-            per_page=per_page,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
 
     # Species / location keyword sets, folded to one stable string per photo
     # so two frames compare equal exactly when they carry the same keywords
@@ -10139,94 +9941,6 @@ class Database:
     # Ordering that defines "consecutive frames" for burst detection. Bursts
     # never span folders, so the sequence restarts per folder.
     _STACK_RUN_WINDOW = "PARTITION BY folder_id ORDER BY timestamp, id"
-
-    def _burst_run_ctes(self, settings):
-        """Return the CTE chain that turns a ``burst_candidates`` CTE into one
-        ``_burst_key`` per photo plus a ``burst_sizes`` tally, and the params
-        it consumes.
-
-        Shared verbatim by the stacked Browse SQL and by the visual-search
-        collapse path, so the metadata grid and a relevance-ordered result
-        can never disagree about where a burst starts and ends. The caller
-        supplies a ``burst_candidates`` CTE exposing ``id``, ``folder_id``,
-        ``timestamp``, ``_stack_species`` and ``_stack_location``, left open
-        (this fragment closes it).
-        """
-        return self._collection_repository()._burst_run_ctes(settings)
-
-    def _browse_stack_query_parts(self, rules, collection_id=None, folder_id=None,
-                                  include_offline_folders=False,
-                                  stack_config=None, sort=None):
-        """Build the scoped CTE shared by stacked Browse list/count queries.
-
-        ``sort`` is the sort the caller will order by. It only matters for
-        the prediction-confidence sorts, which rank on a value that is not a
-        ``photos`` column: for those the per-photo score is projected into
-        ``scoped`` as ``_prediction_confidence`` so the window functions
-        downstream can read it. Every other sort (and ``count_browse_stacks``,
-        which does not sort at all) leaves the column — and its correlated
-        subquery — out entirely.
-
-        Stacks are a presentation of the current result set, not durable
-        catalog state: filters apply to members first, then exact duplicates
-        and camera bursts collapse only when at least two matching photos
-        remain. Exact duplicates claim their members before bursts so one
-        photo can never appear in two Browse items. Because the burst run is
-        computed over the *matching* photos, a filter that removes the middle
-        of a run can split it — that is the same "stacks describe what you
-        are looking at" rule, applied to time instead of membership.
-
-        A burst is a run of frames from one folder whose consecutive capture
-        times are no more than ``browse_stack_time_gap`` seconds apart and
-        which carry the same species and location keywords. Frames without a
-        capture time never join a burst — there is nothing to measure them
-        against — and offline frames are excluded as described below.
-
-        Keyword agreement is part of the burst identity on purpose. An
-        untagged frame sitting inside an otherwise-tagged run breaks out as
-        its own item rather than hiding behind a tagged cover, which is what
-        makes the remaining tagging work visible while culling; as those
-        frames are tagged they rejoin the run. ``browse_stack_split_mode``
-        chooses how a mid-run change is resolved: ``break`` (the default)
-        starts a new stack at every change, so a run tagged A, B, A yields
-        three stacks in shooting order, while ``partition`` groups the run by
-        keyword set and yields two.
-
-        Earlier versions keyed bursts on ``photos.burst_id`` (EXIF
-        ImageUniqueID, the only value the scanner writes there). That is not
-        a burst identifier: the cameras that write it at all reuse the value
-        across the life of the body, so it produced a handful of enormous
-        false stacks spanning years while every real burst — from cameras
-        that omit the tag entirely, which is most of them — stayed unstacked.
-        The column is still filterable; it is no longer a stacking signal.
-
-        ``include_offline_folders`` is the opt-in offline collection view
-        (PR #1563). Photos whose folder is offline are *shown* — they render
-        as read-only placeholders — but they never join a stack: each one
-        keeps its own ``photo:<id>`` key and is left out of every duplicate /
-        burst tally. They are also left out of the run sequence entirely, so
-        an offline frame in the middle of a burst neither splits it nor
-        contributes its keywords to it. Three reasons, all about not lying to
-        the user:
-
-        * A stack's cover is its only interactive card, and
-          ``_STACK_COVER_ORDER`` ranks on quality alone. An offline member
-          could win the cover and turn a stack holding perfectly reachable
-          frames into a dead placeholder.
-        * The stack badge reads as "N photos here to cull". Counting frames
-          the user cannot rate, flag, or delete would make that count a
-          proxy rather than an answer (CORE_PHILOSOPHY, "no black boxes").
-        * A frame that is not shown as part of the stack must not silently
-          decide where the stack ends.
-        """
-        return self._collection_repository()._browse_stack_query_parts(
-            rules,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-            sort=sort,
-        )
 
     _STACK_COVER_ORDER = """
         CASE COALESCE(flag, 'none')
@@ -10349,81 +10063,14 @@ class Database:
         },
     }
 
-    def _stack_sort_spec(self, sort):
-        return self._collection_repository()._stack_sort_spec(sort)
-
-    def _stack_sort_clause(self, sort):
-        return self._collection_repository()._stack_sort_clause(sort)
-
-    def _ranked_stack_query(self, rules, sort="date", collection_id=None,
-                            folder_id=None, include_offline_folders=False,
-                            stack_config=None):
-        """Return the CTE + ``ranked`` window-function block shared by every
-        stack-projected query. Callers append their own outer SELECT (with
-        ORDER BY and optional LIMIT/OFFSET).
-
-        ``sort`` selects which member each stack's ``_stack_lead_*`` columns
-        are read from, so it must match the ``_stack_sort_clause(sort)`` the
-        caller orders by.
-        """
-        return self._collection_repository()._ranked_stack_query(
-            rules,
-            sort=sort,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )
-
-    def query_browse_stacks(self, rules, sort="date", page=1, per_page=50,
-                            collection_id=None, folder_id=None,
-                            include_offline_folders=False, stack_config=None):
-        """Return one representative row per exact-duplicate or burst stack.
-
-        The returned rows have three private columns consumed by the HTTP
-        layer: ``_browse_stack_kind``, ``_browse_stack_count``, and
-        ``_browse_stack_member_ids``. Singles carry a null kind and otherwise
-        retain the ordinary photo-list shape.
-
-        Under a prediction-confidence sort they carry a fourth,
-        ``_stack_lead_prediction_confidence``: the score that actually
-        positioned the item. A stack is placed by its *leading member* (see
-        ``_STACK_SORT_SPECS``) while its cover is chosen on quality, so those
-        are often different frames — and a badge showing the cover's own
-        score would then name a number that did not decide where the card
-        sits. The HTTP layer prefers this value for the card's
-        ``prediction_confidence`` (Codex P2 on PR #1670).
-        """
-        return self._collection_repository().query_browse_stacks(
-            rules,
-            sort=sort,
-            page=page,
-            per_page=per_page,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )
-
     def count_browse_stacks(self, rules, collection_id=None, folder_id=None,
                             include_offline_folders=False, stack_config=None):
         """Count logical Browse items after stack projection."""
-        return self.browse_stack_totals(
+        return self.collections.browse_stack_totals(
             rules, collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline_folders,
             stack_config=stack_config,
         )["total"]
-
-    def browse_stack_totals(self, rules, collection_id=None, folder_id=None,
-                           include_offline_folders=False, stack_config=None):
-        """Count all items and multi-photo stacks in one scoped projection."""
-        return self._collection_repository().browse_stack_totals(
-            rules,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )
 
     def query_browse_stack_position(self, rules, photo_id, sort="date",
                                     collection_id=None, folder_id=None,
@@ -10447,7 +10094,7 @@ class Database:
 
         Raises ValueError on malformed rules.
         """
-        found = self.query_browse_stack_position_first(
+        found = self.collections.query_browse_stack_position_first(
             rules, [photo_id], sort=sort, collection_id=collection_id,
             folder_id=folder_id,
             include_offline_folders=include_offline_folders,
@@ -10471,53 +10118,6 @@ class Database:
 
         return CollectionRepository._candidate_preference_case(column, ids)
 
-    def query_browse_stack_position_first(self, rules, photo_ids, sort="date",
-                                          collection_id=None, folder_id=None,
-                                          include_offline_folders=False,
-                                          stack_config=None):
-        """The earliest-placed of ``photo_ids`` once stacks are projected.
-
-        Returns ``(photo_id, position)`` for whichever candidate the grid
-        shows first, or ``None`` when the result set contains none of them.
-
-        Browse asks with a list when the card it wants to keep is a stack:
-        the reload it is about to paint can drop any individual frame — a
-        saved expression that matches only part of a burst, an undo that
-        moves frames out of the filter — and any surviving frame the user
-        picked identifies the same card. One ranking answers for all of
-        them, so the fallback costs one query rather than one page request
-        per frame. Ties (frames of one stack share their cover's position)
-        resolve by ID so the answer is stable.
-
-        Raises ValueError on malformed rules.
-        """
-        return self._collection_repository().query_browse_stack_position_first(
-            rules,
-            photo_ids,
-            sort=sort,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )
-
-    def _stacked_photo_ids(self, rules, sort="date",
-                           collection_id=None, folder_id=None,
-                           stack_config=None):
-        """Shared cover-first stacked ID projection used by every select-all
-        endpoint that honors Stacks. For each stack (in the same order
-        ``query_browse_stacks`` places covers) emits the cover ID first, then
-        the remaining member IDs in the intra-stack order the projection
-        exposes as ``browse_stack.photo_ids``. Singles carry themselves.
-        """
-        return self._collection_repository()._stacked_photo_ids(
-            rules,
-            sort=sort,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            stack_config=stack_config,
-        )
-
     def get_collection_photo_ids_stacked(self, collection_id, sort="date",
                                          stack_config=None):
         """Return every photo ID matching a collection, in stack-projected
@@ -10528,7 +10128,7 @@ class Database:
         hidden member whenever a stack's quality-ranked cover isn't its
         earliest member under the selected sort (Codex P2 on PR #1561).
         """
-        return self._stacked_photo_ids(
+        return self.collections._stacked_photo_ids(
             [], sort=sort, collection_id=collection_id,
             stack_config=stack_config,
         )
@@ -10546,47 +10146,8 @@ class Database:
         from a hidden member whenever a stack's quality-ranked cover isn't
         its earliest member under the selected sort (Codex P2 on PR #1561).
         """
-        return self._stacked_photo_ids(
+        return self.collections._stacked_photo_ids(
             rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
-            stack_config=stack_config,
-        )
-
-    def _burst_keys_for_ids(self, photo_ids, stack_config=None):
-        """Return ``{photo_id: burst_key}`` for the ids that land in a burst
-        of two or more, using the same CTE chain as the stacked Browse SQL.
-
-        The candidate ids go through a TEMP table rather than an ``IN (...)``
-        list: the burst key depends on each frame's neighbours in capture
-        order, so chunking the ids would invent a run boundary wherever a
-        real burst happened to straddle a chunk.
-        """
-        return self._collection_repository()._burst_keys_for_ids(
-            photo_ids,
-            stack_config=stack_config,
-        )
-
-    def collapse_browse_stack_photo_ids(self, photo_ids, standalone_ids=None,
-                                        stack_config=None):
-        """Collapse an already ordered ID result, preserving group order.
-
-        Visual search has already materialized its relevance-ordered IDs, so
-        re-running the metadata SQL would lose that order. This bounded helper
-        applies the same duplicate-first overlap rule, then selects a
-        quality-ranked cover for each logical item. Group *identity* comes
-        from the shared projection (exact-duplicate hash, then
-        ``_burst_keys_for_ids``) so a relevance-ordered result and the
-        metadata grid always draw the same stack boundaries; only group
-        *order* follows the relevance ranking, by first appearance.
-
-        ``standalone_ids`` are photos that must never join a stack — the
-        offline members of the opt-in offline collection view. They keep
-        their place in the relevance order as their own single-photo item,
-        and are left out of every duplicate / burst tally, matching the SQL
-        projection in ``_browse_stack_query_parts``.
-        """
-        return self._collection_repository().collapse_browse_stack_photo_ids(
-            photo_ids,
-            standalone_ids=standalone_ids,
             stack_config=stack_config,
         )
 
@@ -10598,25 +10159,6 @@ class Database:
     # match both photos. ``display_expr`` is what the picker shows; using
     # ``MIN(col)`` picks a stable representative spelling within each
     # case-insensitive bucket instead of always lower-casing the label.
-    def query_photo_ids(
-        self,
-        rules,
-        sort="date",
-        collection_id=None,
-        folder_id=None,
-        include_offline_folders=False,
-    ):
-        """Return every photo id matching a universal-filter rule tree, in
-        display order — the rules analog of ``get_photo_ids`` (select-all,
-        visual-search candidate scope). Raises ValueError on malformed rules.
-        """
-        return self._collection_repository().query_photo_ids(
-            rules,
-            sort=sort,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
 
     def query_photo_position(
         self,
@@ -10632,112 +10174,18 @@ class Database:
         ``get_photo_position``. One-ID shorthand for
         ``query_photo_position_first``.
         """
-        found = self.query_photo_position_first(
+        found = self.collections.query_photo_position_first(
             rules, [photo_id], sort=sort, collection_id=collection_id,
             folder_id=folder_id,
             include_offline_folders=include_offline_folders,
         )
         return found[1] if found is not None else None
 
-    def query_photo_position_first(
-        self,
-        rules,
-        photo_ids,
-        sort="date",
-        collection_id=None,
-        folder_id=None,
-        include_offline_folders=False,
-    ):
-        """The earliest-placed of ``photo_ids`` in a universal-filter result
-        set, as ``(photo_id, position)``, or ``None`` when the result set
-        contains none of them.
-
-        Browse asks with a list when the card it is holding onto stands for
-        several photos: any frame of a selected stack identifies the same
-        card, so a reload that dropped some of them can still be placed by
-        the ones it kept. Ranking once answers for every candidate; ties
-        resolve by ID so the answer is stable.
-
-        Browse calls this (through ``focus_photo_id`` /
-        ``focus_photo_ids`` on ``/api/photos/query`` and the collection
-        photos endpoint) when a re-sort has to hold onto the card the user
-        has selected. Materializing the ordered ID list and indexing it
-        client-side would move O(result set) IDs over the wire on every sort
-        change; probing serial pages until the photo appears would issue
-        O(position / per_page) filtered queries. A ROW_NUMBER window over the
-        same scoped rows the grid pages through answers it in one read.
-
-        Raises ValueError on malformed rules.
-        """
-        return self._collection_repository().query_photo_position_first(
-            rules,
-            photo_ids,
-            sort=sort,
-            collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
-
     _SUGGEST_VALUE_EXPRS = {
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
         "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
     }
-
-    def get_filter_field_values(self, field, rules=None, q=None, limit=20,
-                                 folder_id=None, collection_id=None):
-        """Distinct values (with photo counts) for a suggest-capable field.
-
-        Counts respect the supplied rule tree, so the caller can pass the
-        active expression minus the rule being edited and get live facet
-        counts (design requirement: counts answer "how many results would I
-        get", never a global COUNT(*)). ``folder_id``/``collection_id`` AND
-        the same page-scope restrictions Browse applies to
-        ``/api/photos/query``; without them the typeahead advertises counts
-        computed over the whole workspace while the visible grid is
-        folder/collection-scoped, so picking a suggestion can yield fewer
-        (or zero) grid results than the badge promised. Raises ValueError
-        for fields without value suggestions or malformed rules.
-        """
-        return self._collection_repository().get_filter_field_values(
-            field,
-            rules=rules,
-            q=q,
-            limit=limit,
-            folder_id=folder_id,
-            collection_id=collection_id,
-        )
-
-    def _folder_filter_values(self, folder_join, join_clause, where, params, q, limit):
-        """Folder suggestions with subtree-aware counts.
-
-        The ``folder`` field's engine operators are ``under``/``not_under``,
-        which match a folder and every descendant. A count grouped by each
-        photo's immediate ``f.path`` therefore misreports what selecting a
-        suggested folder would return — a parent with no direct photos but
-        matching descendants would be omitted entirely, and any folder with
-        both direct and nested photos would undercount. Aggregate over each
-        workspace folder's subtree so the facet answers "how many photos
-        would ``folder under=<path>`` return" (design requirement: counts
-        never lie about the rule they preview).
-        """
-        return self._collection_repository()._folder_filter_values(
-            folder_join,
-            join_clause,
-            where,
-            params,
-            q,
-            limit,
-        )
-
-    def collection_photo_ids(self, collection_id):
-        """Return the set of photo IDs in the collection, workspace-scoped.
-
-        Returns an empty set for a missing collection. Used by stages
-        that need to restrict writes to the current pipeline-run scope
-        without paging through full photo rows.
-        """
-        return self._collection_repository().photo_ids(collection_id)
 
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""
@@ -10793,20 +10241,10 @@ class Database:
         """
         return self._keyword_repository().mark_species(taxonomy)
 
-    def create_default_collections(self, workspace_id=None):
-        """Create default smart collections, skipping any that already exist by name.
-
-        Workspace defaults to the active one. Pass ``workspace_id`` to seed a
-        specific workspace without needing it to be active — used by
-        ``api_create_workspace`` so brand-new workspaces get the defaults at
-        creation time instead of relying on a future startup pass.
-        """
-        self._collection_repository().create_defaults(workspace_id=workspace_id)
-
     def create_default_collections_for_all_workspaces(self):
         """Create missing default smart collections in every workspace."""
         for ws in self.workspaces.list_all():
-            self.create_default_collections(workspace_id=ws["id"])
+            self.collections.create_defaults(workspace_id=ws["id"])
 
     # ------ iNaturalist submissions ------
 

@@ -26,9 +26,68 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, fields
 from typing import Any
 
 from repositories import UNSET
+
+
+@dataclass(frozen=True)
+class MaskQuality:
+    """The subject measurements stored on a ``photo_masks`` row.
+
+    Each field is the column of the same name; None stores NULL (not yet
+    measured). ``subject_size`` is the fraction of the frame the mask
+    covers; the rest are the ``quality.compute_*`` features of the masked
+    subject and ``quality_input_recipe`` names the pixels they were read
+    from.
+    """
+
+    subject_size: float | None = None
+    subject_tenengrad: float | None = None
+    bg_tenengrad: float | None = None
+    crop_complete: float | None = None
+    quality_input_recipe: str | None = None
+    subject_clip_high: float | None = None
+    subject_clip_low: float | None = None
+    subject_y_median: float | None = None
+    bg_separation: float | None = None
+    phash_crop: str | None = None
+    noise_estimate: float | None = None
+
+
+@dataclass(frozen=True)
+class PipelineFeatures:
+    """A patch of the pipeline feature columns on one ``photos`` row.
+
+    Each field is the column of the same name. A field left at ``UNSET`` is
+    not written; an explicit None clears the column.
+    """
+
+    mask_path: Any = UNSET
+    subject_tenengrad: Any = UNSET
+    bg_tenengrad: Any = UNSET
+    crop_complete: Any = UNSET
+    bg_separation: Any = UNSET
+    subject_clip_high: Any = UNSET
+    subject_clip_low: Any = UNSET
+    subject_y_median: Any = UNSET
+    phash_crop: Any = UNSET
+    noise_estimate: Any = UNSET
+    eye_x: Any = UNSET
+    eye_y: Any = UNSET
+    eye_conf: Any = UNSET
+    eye_tenengrad: Any = UNSET
+    eye_kp_fingerprint: Any = UNSET
+    quality_input_recipe: Any = UNSET
+
+    def columns(self) -> dict[str, Any]:
+        """The columns this patch writes, in field order."""
+        return {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if getattr(self, f.name) is not UNSET
+        }
 
 
 def _first_eye_stage_row_per_photo(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -536,20 +595,21 @@ class MasksFeaturesRepository:
 
     def upsert_mask(
         self, photo_id: int, variant: str, path: str,
-        detector_model: str | None, prompt_x: float | None, prompt_y: float | None,
-        prompt_w: float | None, prompt_h: float | None,
-        subject_size: float | None = None, subject_tenengrad: float | None = None,
-        bg_tenengrad: float | None = None, crop_complete: float | None = None, _commit: bool = True,
-        quality_input_recipe: str | None = None,
-        subject_clip_high: float | None = None, subject_clip_low: float | None = None,
-        subject_y_median: float | None = None,
-        bg_separation: float | None = None, phash_crop: str | None = None, noise_estimate: float | None = None,
+        detector_model: str | None,
+        prompt: Sequence[float | None],
+        quality: MaskQuality | None = None,
+        *,
+        _commit: bool = True,
     ) -> None:
         """Insert or replace a mask row for (photo_id, variant).
 
+        ``prompt`` is the ``(x, y, w, h)`` box SAM was prompted with and
+        ``quality`` the subject measurements (all NULL when None).
         ``_commit=False`` lets a caller include the row in a larger atomic
         per-photo persistence transaction.
         """
+        prompt_x, prompt_y, prompt_w, prompt_h = prompt
+        q = MaskQuality() if quality is None else quality
         self.conn.execute(
             """
             INSERT INTO photo_masks (
@@ -581,8 +641,9 @@ class MasksFeaturesRepository:
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
-             subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate),
+             q.subject_size, q.subject_tenengrad, q.bg_tenengrad, q.crop_complete, q.quality_input_recipe,
+             q.subject_clip_high, q.subject_clip_low, q.subject_y_median, q.bg_separation, q.phash_crop,
+             q.noise_estimate),
         )
         if _commit:
             self.commit_with_retry(self.conn)
@@ -599,53 +660,15 @@ class MasksFeaturesRepository:
             self.commit_with_retry(self.conn)
 
     def update_pipeline_features(
-        self,
-        photo_id: int,
-        mask_path: Any = UNSET,
-        subject_tenengrad: Any = UNSET,
-        bg_tenengrad: Any = UNSET,
-        crop_complete: Any = UNSET,
-        bg_separation: Any = UNSET,
-        subject_clip_high: Any = UNSET,
-        subject_clip_low: Any = UNSET,
-        subject_y_median: Any = UNSET,
-        phash_crop: Any = UNSET,
-        noise_estimate: Any = UNSET,
-        eye_x: Any = UNSET,
-        eye_y: Any = UNSET,
-        eye_conf: Any = UNSET,
-        eye_tenengrad: Any = UNSET,
-        eye_kp_fingerprint: Any = UNSET,
-        quality_input_recipe: Any = UNSET,
-        _commit: bool = True,
+        self, photo_id: int, features: PipelineFeatures, *, _commit: bool = True,
     ) -> None:
-        """Update pipeline feature columns for a photo.
+        """Write ``features``' set columns to the photo's row.
 
-        Only updates columns whose values are explicitly provided (not
-        ``UNSET``; an explicit ``None`` clears the column). ``_commit=False``
-        lets a caller include the update in a larger atomic per-photo
-        persistence transaction.
+        Only the columns the patch sets are updated (an explicit None
+        clears one). ``_commit=False`` lets a caller include the update in
+        a larger atomic per-photo persistence transaction.
         """
-        cols = {
-            "mask_path": mask_path,
-            "subject_tenengrad": subject_tenengrad,
-            "bg_tenengrad": bg_tenengrad,
-            "crop_complete": crop_complete,
-            "bg_separation": bg_separation,
-            "subject_clip_high": subject_clip_high,
-            "subject_clip_low": subject_clip_low,
-            "subject_y_median": subject_y_median,
-            "phash_crop": phash_crop,
-            "noise_estimate": noise_estimate,
-            "eye_x": eye_x,
-            "eye_y": eye_y,
-            "eye_conf": eye_conf,
-            "eye_tenengrad": eye_tenengrad,
-            "eye_kp_fingerprint": eye_kp_fingerprint,
-            "quality_input_recipe": quality_input_recipe,
-        }
-        # Filter to only provided values
-        updates = {k: v for k, v in cols.items() if v is not UNSET}
+        updates = features.columns()
         if not updates:
             return
         set_clause = ", ".join(f"{k}=?" for k in updates)

@@ -1606,7 +1606,7 @@ def create_photos_blueprint(
         candidate_photo_ids = None
         if scope_rules is not None:
             try:
-                candidate_photo_ids = db.query_photo_ids(
+                candidate_photo_ids = db.collections.query_photo_ids(
                     scope_rules,
                     collection_id=collection_id,
                     folder_id=folder_id,
@@ -1614,7 +1614,7 @@ def create_photos_blueprint(
             except ValueError as e:
                 return json_error(str(e), 400)
         elif collection_id is not None:
-            candidate_photo_ids = db.get_collection_photo_ids(collection_id)
+            candidate_photo_ids = db.collections.get_photo_ids(collection_id)
         elif folder_id is not None:
             # Candidate scope arrives as rules / a collection / a folder —
             # the legacy per-field scope params were removed in Phase 5
@@ -1954,7 +1954,7 @@ class _PhotosQuery:
             # and export preview start from the visible first
             # card rather than a hidden burst frame (Codex
             # P2 on PR #1561).
-            stack_items = db.collapse_browse_stack_photo_ids(
+            stack_items = db.collections.collapse_browse_stack_photo_ids(
                 ordered_ids,
                 stack_config=db.browse_stack_settings(cfg.load()),
             )
@@ -1991,7 +1991,7 @@ class _PhotosQuery:
             else None
         )
         return (
-            db.collapse_browse_stack_photo_ids(
+            db.collections.collapse_browse_stack_photo_ids(
                 ordered_ids, standalone_ids=offline_ids,
                 stack_config=db.browse_stack_settings(cfg.load()),
             )
@@ -2082,7 +2082,7 @@ class _PhotosQuery:
                     stack_config=db.browse_stack_settings(cfg.load()),
                 )
             else:
-                ids = db.query_photo_ids(self.rules, sort=self.sort,
+                ids = db.collections.query_photo_ids(self.rules, sort=self.sort,
                                          collection_id=self.collection_id,
                                          folder_id=self.folder_id)
         except ValueError as exc:
@@ -2147,14 +2147,14 @@ class _PhotosQuery:
             # Stacked Browse pages logical items, so a hidden member
             # resolves to the page its cover sits on.
             found = (
-                db.query_browse_stack_position_first(
+                db.collections.query_browse_stack_position_first(
                     rules, self.focus_candidates, sort=sort,
                     collection_id=collection_id, folder_id=folder_id,
                     include_offline_folders=include_offline,
                     stack_config=stack_cfg,
                 )
                 if self.stacks
-                else db.query_photo_position_first(
+                else db.collections.query_photo_position_first(
                     rules, self.focus_candidates, sort=sort,
                     collection_id=collection_id, folder_id=folder_id,
                     include_offline_folders=include_offline,
@@ -2163,20 +2163,20 @@ class _PhotosQuery:
             if found is not None:
                 focus_resolved_id, focus_index = found
                 self.page = focus_index // self.per_page + 1
-        underlying_total = db.count_photos_for_rules(
+        underlying_total = db.collections.count_photos_for_rules(
             rules,
             collection_id=collection_id,
             folder_id=folder_id,
             include_offline_folders=include_offline,
         )
         if self.stacks:
-            photos = db.query_browse_stacks(
+            photos = db.collections.query_browse_stacks(
                 rules, sort=sort, page=self.page, per_page=self.per_page,
                 collection_id=collection_id, folder_id=folder_id,
                 include_offline_folders=include_offline,
                 stack_config=stack_cfg,
             )
-            stack_totals = db.browse_stack_totals(
+            stack_totals = db.collections.browse_stack_totals(
                 rules, collection_id=collection_id, folder_id=folder_id,
                 include_offline_folders=include_offline,
                 stack_config=stack_cfg,
@@ -2189,7 +2189,7 @@ class _PhotosQuery:
                 focus_index=focus_index,
                 focus_resolved_id=focus_resolved_id,
             )
-        photos = db.query_photos(
+        photos = db.collections.query_photos(
             rules, sort=sort, page=self.page, per_page=self.per_page,
             collection_id=collection_id, folder_id=folder_id,
             include_offline_folders=include_offline,
@@ -2212,7 +2212,7 @@ class _PhotosQuery:
         inventory_total = (
             underlying_total
             if self.include_offline
-            else db.count_photos_for_rules(
+            else db.collections.count_photos_for_rules(
                 self.rules,
                 collection_id=self.collection_id,
                 folder_id=self.folder_id,
@@ -2220,7 +2220,7 @@ class _PhotosQuery:
             )
         )
         available_total = (
-            db.count_photos_for_rules(
+            db.collections.count_photos_for_rules(
                 self.rules,
                 collection_id=self.collection_id,
                 folder_id=self.folder_id,

@@ -3,8 +3,8 @@ import json
 
 def _clear_default_collections(app, db):
     """Remove default collections so tests start from a clean slate."""
-    for c in db.get_collections():
-        db.delete_collection(c["id"])
+    for c in db.collections.list_all():
+        db.collections.delete(c["id"])
 
 
 def test_list_collections_empty(app_and_db):
@@ -179,7 +179,7 @@ def test_collection_photo_ids_returns_all_matching_ids(app_and_db):
     )
     assert resp.status_code == 200
     collection_id = resp.get_json()["id"]
-    expected = [p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)]
+    expected = [p["id"] for p in db.collections.get_photos(collection_id, per_page=999999)]
 
     resp = client.get(f"/api/collections/{collection_id}/photo-ids")
     assert resp.status_code == 200
@@ -210,7 +210,7 @@ def test_collection_photo_ids_honors_sort_query(app_and_db):
     for sort in ("date", "rating", "name", "name_desc"):
         grid = [
             p["id"]
-            for p in db.get_collection_photos(collection_id, per_page=999999, sort=sort)
+            for p in db.collections.get_photos(collection_id, per_page=999999, sort=sort)
         ]
         resp = client.get(
             f"/api/collections/{collection_id}/photo-ids?sort={sort}"
@@ -636,10 +636,10 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
     can't be AND-combined with a photo_ids rule and silently narrowed."""
     app, db = app_and_db
     # Ensure defaults exist (including All Photos)
-    db.create_default_collections()
+    db.collections.create_defaults()
     client = app.test_client()
 
-    all_photos = next(c for c in db.get_collections() if c["name"] == "All Photos")
+    all_photos = next(c for c in db.collections.list_all() if c["name"] == "All Photos")
     photos = db.get_photos()
     pid = photos[0]["id"]
 
@@ -787,7 +787,7 @@ def _make_visual_collection(db, name="Visual", rules=None, prompt="a bird"):
     Save-as-Collection flow persists for expressions with a visual clause."""
     if rules is None:
         rules = [{"field": "rating", "op": ">=", "value": 3}]
-    return db.add_collection(
+    return db.collections.add(
         name,
         json.dumps(rules),
         visual_json=json.dumps({"prompt": prompt, "strength": "balanced"}),
@@ -897,7 +897,7 @@ def test_visual_collection_not_advertised_as_manual_add_target(app_and_db):
     _clear_default_collections(app, db)
     client = app.test_client()
 
-    visual = db.add_collection(
+    visual = db.collections.add(
         "Visual",
         json.dumps([]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -941,14 +941,14 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
     client = app.test_client()
 
     # Healthy visual collection: valid rules JSON + resolvable field.
-    healthy = db.add_collection(
+    healthy = db.collections.add(
         "Healthy visual",
         json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )
     # Degraded visual collection: rules JSON references an unresolvable
     # field so ``rules_resolvable`` returns False.
-    degraded = db.add_collection(
+    degraded = db.collections.add(
         "Degraded visual",
         json.dumps([{"field": "not_a_real_field", "op": "=", "value": "x"}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -996,7 +996,7 @@ def test_browse_init_visual_collection_scope_returns_empty_first_paint(app_and_d
     assert baseline["total"] >= 1
     assert len(baseline["photos"]) >= 1
 
-    visual = db.add_collection(
+    visual = db.collections.add(
         "Visual only",
         json.dumps([]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -1028,7 +1028,7 @@ def test_browse_init_visual_collection_ignores_rules_scope(app_and_db):
 
     # Rules that would count every workspace photo — proving the fix
     # never widens/reveals them for a visual collection.
-    visual = db.add_collection(
+    visual = db.collections.add(
         "Visual widest",
         json.dumps([{"field": "all"}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
@@ -1055,7 +1055,7 @@ def test_browse_init_plain_collection_still_scopes_normally(app_and_db):
     ]
     assert len(photo_ids) >= 1
 
-    plain = db.add_collection(
+    plain = db.collections.add(
         "Plain",
         json.dumps([{"field": "photo_ids", "value": photo_ids[:1]}]),
     )
