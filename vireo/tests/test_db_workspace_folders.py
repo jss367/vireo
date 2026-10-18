@@ -1191,6 +1191,40 @@ def test_visible_folder_paths_reads_the_visible_view(db):
     assert db.workspace_folders.visible_folder_paths(other) == {}
 
 
+# -- new-images walk reads ------------------------------------------------------
+
+
+def test_linked_folder_rows_carry_root_flag_and_filter_missing(db, tree):
+    ws, p, a, b, q = tree
+    gone = _folder(db, "/gone", status="missing")
+    _link_raw(db, ws, p, 1)
+    _link_raw(db, ws, a, 0)
+    _link_raw(db, ws, gone, 1)
+    other = db.create_workspace("Other")
+    _link_raw(db, other, q, 1)
+
+    rows = db.workspace_folders.linked_folder_rows(ws, include_missing=False)
+    assert sorted(tuple(r) for r in rows) == sorted([
+        (p, "/p", None, 1), (a, "/p/a", p, 0)])
+    with_missing = db.workspace_folders.linked_folder_rows(ws, include_missing=True)
+    assert sorted(r["id"] for r in with_missing) == sorted([p, a, gone])
+
+
+def test_folder_parent_rows_cover_every_folder(db, tree):
+    ws, p, a, b, q = tree
+    parents = {r["id"]: r["parent_id"] for r in db.workspace_folders.folder_parent_rows()}
+    assert {fid: parents[fid] for fid in (p, a, b, q)} == {
+        p: None, a: p, b: a, q: None}
+
+
+def test_folder_ids_at_or_like_matches_exact_and_pattern(db, tree):
+    ws, p, a, b, q = tree
+    _folder(db, "/p2")
+    rows = db.workspace_folders.folder_ids_at_or_like("/p", "/p/%")
+    assert sorted(r["id"] for r in rows) == sorted([p, a, b])
+    assert db.workspace_folders.folder_ids_at_or_like("/none", "/none/%") == []
+
+
 # -- structure -------------------------------------------------------------------
 
 _REMOVED_WRAPPERS = (
@@ -1307,3 +1341,16 @@ def test_workspace_folders_has_no_forwarding_wrappers_on_database():
     }
     assert "_workspace_folder_repository" in attrs
     assert "conn" not in attrs
+
+
+def test_new_images_never_touches_the_connection():
+    """The new-images walk reaches its SQL through domain accessors."""
+    from pathlib import Path
+
+    import new_images
+
+    tree = ast.parse(Path(new_images.__file__).read_text(encoding="utf-8"))
+    assert not [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "conn"
+    ]

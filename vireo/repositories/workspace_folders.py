@@ -22,6 +22,12 @@ methods, so monkeypatches of those ``Database`` methods still apply. It also
 keeps the reads that default to the active workspace
 (``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) and the
 merge's ``root_ancestor_exists`` / ``root_descendant_exists`` callbacks.
+
+The new-images walk (``new_images.mapped_roots`` and the post-scan cache
+invalidation) reads the linked folders with their root flags, every folder's
+parent, and the folders under a scanned root here; the last two read
+``folders`` alone, since they decide which workspaces' links a walk or an
+invalidation reaches.
 """
 
 import sqlite3
@@ -460,6 +466,36 @@ class WorkspaceFolderRepository:
             "JOIN workspace_visible_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
             (workspace_id,),
         )}
+
+    def linked_folder_rows(
+        self, workspace_id: int, *, include_missing: bool,
+    ) -> list[sqlite3.Row]:
+        """``id``, ``path``, ``parent_id`` and ``is_root`` of every folder
+        linked to the workspace; ``'missing'`` folders only when
+        ``include_missing``."""
+        status_clause = "" if include_missing else (
+            " AND f.status IN ('ok', 'partial')"
+        )
+        return self.conn.execute(
+            """SELECT f.id, f.path, f.parent_id, wf.is_root
+           FROM folders f
+           JOIN workspace_folders wf ON wf.folder_id = f.id
+           WHERE wf.workspace_id = ?""" + status_clause,
+            (workspace_id,),
+        ).fetchall()
+
+    def folder_parent_rows(self) -> list[sqlite3.Row]:
+        """``id`` and ``parent_id`` of every folder in the catalog, for
+        walking a linked folder's ancestry past unlinked folders."""
+        return self.conn.execute("SELECT id, parent_id FROM folders").fetchall()
+
+    def folder_ids_at_or_like(self, path: str, like_pattern: str) -> list[sqlite3.Row]:
+        """Rows (``id``) of folders stored at ``path`` or matching
+        ``like_pattern`` (wildcards unescaped), whatever workspace links them."""
+        return self.conn.execute(
+            "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+            (path, like_pattern),
+        ).fetchall()
 
     def root_ids(self, workspace_id: int) -> list[int]:
         """Return the ids of the workspace's user-facing roots, by path."""

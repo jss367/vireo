@@ -197,16 +197,6 @@ COMPANION_RECOVERY_BATCH_SIZE = 25
 # hashing the same files over the same share again.
 _companion_recovery_lock = threading.Lock()
 
-_MISSING_COMPANION_IDENTITIES_SQL = (
-    "SELECT p.id, p.companion_path, f.path FROM photos p "
-    "JOIN folders f ON f.id=p.folder_id "
-    "LEFT JOIN companion_identities c "
-    "ON c.photo_id=p.id AND c.filename=p.companion_path "
-    "WHERE p.companion_path IS NOT NULL AND c.photo_id IS NULL "
-    "AND f.status IN ('ok', 'partial')"
-)
-
-
 def recover_companion_identities(db, batch_size=None):
     """Backfill missing ``companion_identities`` rows, one batch at a time.
 
@@ -228,9 +218,7 @@ def recover_companion_identities(db, batch_size=None):
     batch_size = batch_size or COMPANION_RECOVERY_BATCH_SIZE
     pending_ids = [
         row["id"]
-        for row in db.conn.execute(
-            _MISSING_COMPANION_IDENTITIES_SQL + " ORDER BY p.id"
-        ).fetchall()
+        for row in db.imports.missing_companion_identity_rows()
     ]
     if not pending_ids:
         return
@@ -240,11 +228,9 @@ def recover_companion_identities(db, batch_size=None):
         with _companion_recovery_lock:
             # Re-read under the lock: another caller may have recovered
             # rows past the cursor since the last batch.
-            rows = db.conn.execute(
-                _MISSING_COMPANION_IDENTITIES_SQL
-                + " AND p.id > ? ORDER BY p.id LIMIT ?",
-                (after_id, batch_size),
-            ).fetchall()
+            rows = db.imports.missing_companion_identity_batch(
+                after_id, batch_size,
+            )
             if not rows:
                 return
             after_id = rows[-1]["id"]
@@ -275,35 +261,27 @@ def _recover_companion_batch(db, rows):
             continue
     if not recovered:
         return
-    db.conn.execute("SAVEPOINT recover_companion_identities")
-    try:
-        # ``file_mtime`` stays NULL on recovered identities. Recovery hashes
-        # the current bytes but does not read their metadata, import
-        # embedded sidecar keywords, or invalidate the owner RAW's
-        # companion-derived caches. If the companion was edited between the
-        # original pairing and this recovery, the owner's EXIF columns are
-        # stale and the owner needs the normal re-merge the next scan would
-        # perform. Storing the current mtime here would stat-skip the
-        # companion forever on incremental scans and let a full scan accept
-        # the recovered hash as unchanged — the owner would never be
-        # re-synced. A NULL ``file_mtime`` fails the incremental stat check
-        # (``scanner._companion_stat_unchanged`` requires non-NULL mtime),
-        # forcing the scanner to re-read the companion. ``needs_sync``
-        # also prevents its freshly recovered hash from being accepted as
-        # already synchronized: NULL mtime alone is also used for trusted
-        # identities whose JPEG-only metadata refill needs a retry.
-        # The hash is kept so duplicate preview recognizes a second card.
-        db.conn.executemany(
-            "INSERT OR REPLACE INTO companion_identities "
-            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync)"
-            " VALUES (?, ?, ?, ?, ?, NULL, 1)",
-            recovered,
-        )
-    except BaseException:
-        db.conn.execute("ROLLBACK TO recover_companion_identities")
-        raise
-    finally:
-        db.conn.execute("RELEASE recover_companion_identities")
+    # Written inside ``SAVEPOINT recover_companion_identities`` (rolled back
+    # to on any exception, released either way), so the batch commits on its
+    # own when no outer transaction is open.
+    #
+    # ``file_mtime`` stays NULL on recovered identities. Recovery hashes
+    # the current bytes but does not read their metadata, import
+    # embedded sidecar keywords, or invalidate the owner RAW's
+    # companion-derived caches. If the companion was edited between the
+    # original pairing and this recovery, the owner's EXIF columns are
+    # stale and the owner needs the normal re-merge the next scan would
+    # perform. Storing the current mtime here would stat-skip the
+    # companion forever on incremental scans and let a full scan accept
+    # the recovered hash as unchanged — the owner would never be
+    # re-synced. A NULL ``file_mtime`` fails the incremental stat check
+    # (``scanner._companion_stat_unchanged`` requires non-NULL mtime),
+    # forcing the scanner to re-read the companion. ``needs_sync``
+    # also prevents its freshly recovered hash from being accepted as
+    # already synchronized: NULL mtime alone is also used for trusted
+    # identities whose JPEG-only metadata refill needs a retry.
+    # The hash is kept so duplicate preview recognizes a second card.
+    db.imports.record_recovered_companion_identities(recovered)
 
 
 class CatalogIndex:
@@ -358,12 +336,7 @@ class CatalogIndex:
         hash_sizes = set()
         unkeyed_hash_sizes = set()
         sizes_complete = True
-        rows = db.conn.execute(
-            "SELECT filename, file_size, timestamp, file_hash FROM photos "
-            "UNION ALL SELECT c.filename, c.file_size, c.timestamp, c.file_hash "
-            "FROM companion_identities c JOIN photos p ON p.id=c.photo_id "
-            "AND p.companion_path=c.filename"
-        ).fetchall()
+        rows = db.imports.catalog_identity_rows()
         for row in rows:
             key = stored_metadata_key(
                 row["filename"], row["file_size"], row["timestamp"],

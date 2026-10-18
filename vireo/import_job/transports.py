@@ -5,7 +5,7 @@ import os
 import posixpath
 
 from import_dedup import compute_file_hash
-from import_job.adoption import _WALK_CANCELLED, _WALK_HANDLED, _resolve_dest_collision
+from import_job.adoption import _WALK_CANCELLED, _WALK_HANDLED, _CardFile, _resolve_dest_collision
 from import_job.copy_verify import DestReadCancelled, copy_and_hash_verify
 from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
 from import_job.state import _counts, _fail, _LandedFile, _record_checker
@@ -145,10 +145,8 @@ class _LocalTransport:
             # filesystem itself is the reservation.
             verdict, dest_basename = _resolve_dest_collision(
                 state, batch_st, self._ctx,
-                source_file=source_file, rel=rel, checker=checker,
-                src_hash_fn=_src_hash_cached,
-                src_size=src_size, src_mtime_ns=src_mtime_ns,
-                claims=None, stop_requested=_stop_requested,
+                _CardFile(source_file, rel, _src_hash_cached, src_size, src_mtime_ns),
+                checker=checker, claims=None, stop_requested=_stop_requested,
             )
             if verdict is _WALK_HANDLED:
                 return _ENQ_HANDLED
@@ -413,10 +411,8 @@ class _RsyncTransport:
         try:
             verdict, dest_basename = _resolve_dest_collision(
                 state, batch_st, self._ctx,
-                source_file=source_file, rel=rel, checker=checker,
-                src_hash_fn=lambda: src_hash,
-                src_size=src_size, src_mtime_ns=src_mtime_ns,
-                claims=batch_st.claimed_basenames,
+                _CardFile(source_file, rel, lambda: src_hash, src_size, src_mtime_ns),
+                checker=checker, claims=batch_st.claimed_basenames,
                 stop_requested=_stop_requested,
             )
         except DestReadCancelled:
