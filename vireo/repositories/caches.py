@@ -330,7 +330,9 @@ class CachesRepository:
         ).fetchall()
 
     def set_thumbnail_paths(self, pairs: Iterable[tuple[str, int]]) -> None:
-        """Set ``thumb_path`` for ``(thumb_path, photo_id)`` pairs; the caller commits."""
+        """Set ``thumb_path`` for ``(thumb_path, photo_id)`` pairs; the caller
+        commits (the pipeline's thumbnail stage batches them, and the
+        thumb_path reconciliation stamps them in one transaction)."""
         self.conn.executemany(
             "UPDATE photos SET thumb_path=? WHERE id=?",
             pairs,
