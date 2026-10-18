@@ -362,7 +362,7 @@ def test_a_failed_choice_leaves_its_photos_untagged_and_says_so(db, fid, monkeyp
     assert _location(db, kept) == "Central Park"
 
 
-def test_cancelling_mid_choice_leaves_nothing_behind(db, fid):
+def test_cancelling_mid_choice_leaves_nothing_behind(db, fid, monkeypatch):
     """A new keyword, its assignments and their sync rows commit together or
     not at all, so a Stop partway through leaves no orphan location."""
     pids = [_photo(db, fid, f"new{i}.jpg", RIVER[0]) for i in range(3)]
@@ -370,16 +370,27 @@ def test_cancelling_mid_choice_leaves_nothing_behind(db, fid):
         "cells": [cell_key(*RIVER[0])], "kind": "new", "name": "Dog Beach",
         "latitude": 32.7545, "longitude": -117.25,
     }])
-    calls = []
+    from services import edit_history
+
+    assigned = []
+    change_location = edit_history.change_photo_location
+
+    def observed_assignment(*args, **kwargs):
+        item = change_location(*args, **kwargs)
+        if item is not None:
+            assigned.append(item["photo_id"])
+        return item
+
+    monkeypatch.setattr(edit_history, "change_photo_location", observed_assignment)
 
     def cancel_after_first_photo(**kwargs):
-        calls.append(kwargs)
-        return len(calls) > 2  # the loop's check, then one photo, then Stop
+        return bool(assigned)
 
     summary = _summary()
     apply_location_choices(db, pids, choices, api_key="", language="en",
                            summary=summary, cancel_check=cancel_after_first_photo)
 
+    assert assigned == [pids[0]]  # A write happened before Stop; rollback must undo it.
     assert summary["cancelled"] is True
     assert summary["locations_added"] == 0
     assert [_location(db, pid) for pid in pids] == [None, None, None]
