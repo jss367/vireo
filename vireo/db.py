@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
+    from repositories.pipeline_features import PipelineFeaturesRepository
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
@@ -8524,6 +8525,30 @@ class Database:
         re-sync). Call those, not the repository methods behind them.
         """
         return self._detections_repository()
+
+    def _pipeline_features_repository(self):
+        """Build the pipeline feature-load repository on this connection.
+
+        Its workspace-scoped reads take the workspace id from the caller,
+        which resolves it before reading config, so the repository takes no
+        workspace callable.
+        """
+        from repositories.pipeline_features import PipelineFeaturesRepository
+
+        return PipelineFeaturesRepository(self.conn)
+
+    @property
+    def pipeline_features(self) -> PipelineFeaturesRepository:
+        """Grouping-pipeline reads: ``db.pipeline_features.feature_rows(ws, scoped=False)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_pipeline_features_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it needs no
+        active workspace; the workspace-scoped reads take the workspace id as
+        an argument. The confidence floors, scopes and decisions stay in
+        ``pipeline``.
+        """
+        return self._pipeline_features_repository()
 
     def save_detections(
         self,
