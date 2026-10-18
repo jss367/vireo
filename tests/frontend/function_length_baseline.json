@@ -36,7 +36,7 @@
   "vireo/static/jobs/import-retry.js:importResumeTakeover": 180,
   "vireo/static/jobs/job-card.js:renderJobCard": 248,
   "vireo/static/jobs/steps.js:renderRichStep": 237,
-  "vireo/static/lightbox/controls.js:buildLightboxContextMenu": 134,
+  "vireo/static/lightbox/controls.js:buildLightboxContextMenu": 132,
   "vireo/static/lightbox/inat.js:exportInatQuickPhotos": 108,
   "vireo/static/lightbox/inat.js:openInatQuickModal": 125,
   "vireo/static/lightbox/keyboard.js:@call:[[\"member\",[\"identifier\",\"document\"],[\"property\",\"Identifier\",\"addEventListener\"],false],\"keydown\"]": 137,

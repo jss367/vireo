@@ -217,3 +217,109 @@ for (const [method, values, field] of [
     }
   });
 }
+
+const lightboxControls = readFileSync('vireo/static/lightbox/controls.js', 'utf8');
+
+function lightboxHookHarness() {
+  const calls = [], photo = {displayed: 11, requested: 11};
+  const noop = () => {};
+  const ctx = vm.createContext({
+    document: {getElementById: () => null},
+    _lbReadOnly: false, _lbReadOnlyMessage: 'Read only',
+    _lbBoxesVisible: false, _lbMasksVisible: false, _lbEyeVisible: false,
+    _lbTrackEyeEnabled: false, _lbInfoVisible: false, _lbChromeVisible: false,
+    _lbCurrentWildlifeExcluded: false,
+    toggleLightboxBoxes: noop, toggleLightboxMasks: noop, toggleLightboxEye: noop,
+    toggleLightboxTrackEye: noop, toggleLightboxInfo: noop, toggleLightboxChrome: noop,
+    lightboxToggleWildlifeExcluded: noop,
+    vireoLightboxSession: {
+      displayedPhotoId: () => photo.displayed,
+      requestedPhotoId: () => photo.requested,
+    },
+  });
+  ctx.window = ctx;
+  vm.runInContext(pageHooks + '\n' + lightboxControls, ctx);
+  const spy = name => (...args) => calls.push({name, args: JSON.parse(JSON.stringify(args))});
+  const register = hooks => ctx.Vireo.registerPageHooks(hooks);
+  const build = () => ctx.buildLightboxContextMenu(11);
+  const actions = items => ({
+    rating: items[0].chips[3].onClick,
+    color: items.find(item => item.chips?.some(chip => chip.color === 'red'))?.chips[1].onClick,
+    export: items.find(item => item.label === 'Export\u2026')?.onClick,
+    copy: items.find(item => item.label === 'Copy Path')?.onClick,
+  });
+  return {ctx, calls, photo, spy, register, build, actions};
+}
+
+test('open lightbox menu uses replacement hooks and current export photo', () => {
+  const h = lightboxHookHarness();
+  const names = ['setRatingFor', 'setColorLabelFor', 'openPhotoExportModal', 'copyPhotoPaths'];
+  h.register(Object.fromEntries(names.map(name => [name, h.spy('old:' + name)])));
+  const saved = h.actions(h.build());
+  h.register(Object.fromEntries(names.map(name => [name, h.spy('new:' + name)])));
+  h.photo.displayed = 22;
+  h.photo.requested = 33;
+  saved.rating(); saved.color(); saved.export(); saved.copy();
+  assert.deepEqual(h.calls, [
+    {name: 'new:setRatingFor', args: [11, 3]},
+    {name: 'new:setColorLabelFor', args: [11, 'red']},
+    {name: 'new:openPhotoExportModal', args: [[22]]},
+    {name: 'new:copyPhotoPaths', args: [[11]]},
+  ]);
+});
+
+test('saved rating chip rechecks replacement fallback and later primary precedence', () => {
+  const h = lightboxHookHarness();
+  h.register({setReviewRating: h.spy('old fallback')});
+  const saved = h.actions(h.build()).rating;
+  h.register({setReviewRating: h.spy('replacement fallback')});
+  saved();
+  h.register({setRatingFor: h.spy('later primary')});
+  saved();
+  h.register({setReviewRating: h.spy('latest fallback')});
+  saved();
+  assert.deepEqual(h.calls.map(call => call.name),
+    ['replacement fallback', 'later primary', 'later primary']);
+});
+
+test('rating chip built before registration uses hooks registered later', () => {
+  const h = lightboxHookHarness();
+  const saved = h.actions(h.build()).rating;
+  saved();
+  assert.equal(h.calls.length, 0);
+  h.register({setReviewRating: h.spy('late fallback')});
+  saved();
+  h.register({setRatingFor: h.spy('late primary')});
+  saved();
+  assert.deepEqual(h.calls.map(call => call.name), ['late fallback', 'late primary']);
+});
+
+test('color/export/copy visibility stays build-time and saved callbacks guard missing hooks', () => {
+  const h = lightboxHookHarness();
+  const absent = h.actions(h.build());
+  assert.equal(absent.color, undefined);
+  assert.equal(absent.export, undefined);
+  assert.equal(absent.copy, undefined);
+  h.register({setColorLabelFor: h.spy('color'), openPhotoExportModal: h.spy('export'),
+    copyPhotoPaths: h.spy('copy')});
+  assert.equal(absent.color, undefined);
+  const present = h.actions(h.build());
+  assert.equal(typeof present.color, 'function');
+  assert.equal(typeof present.export, 'function');
+  assert.equal(typeof present.copy, 'function');
+  h.ctx.Vireo.pageHook = () => null;
+  present.rating(); present.color(); present.export(); present.copy();
+  assert.deepEqual(h.calls, []);
+});
+
+test('saved export callback falls back to requested photo and skips absent identity', () => {
+  const h = lightboxHookHarness();
+  h.register({openPhotoExportModal: h.spy('export')});
+  const saved = h.actions(h.build()).export;
+  h.photo.displayed = null;
+  h.photo.requested = 44;
+  saved();
+  h.photo.requested = null;
+  saved();
+  assert.deepEqual(h.calls, [{name: 'export', args: [[44]]}]);
+});

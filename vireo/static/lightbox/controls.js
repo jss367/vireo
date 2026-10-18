@@ -63,10 +63,6 @@ function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
  * not registered.
  */
 function buildLightboxContextMenu(/** @type {number} */ pid) {
-  const setRating = Vireo.pageHook('setRatingFor') || Vireo.pageHook('setReviewRating');
-  const setColorLabelFor = Vireo.pageHook('setColorLabelFor');
-  const openPhotoExportModal = Vireo.pageHook('openPhotoExportModal');
-  const copyPhotoPaths = Vireo.pageHook('copyPhotoPaths');
   var readOnlyHint = _lbReadOnly ? _lbReadOnlyMessage : null;
 
   var rateChip = function(/** @type {number} */ n) {
@@ -76,6 +72,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
       disabled: !!readOnlyHint,
       disabledHint: readOnlyHint || undefined,
       onClick: function() {
+        const setRating = Vireo.pageHook('setRatingFor') || Vireo.pageHook('setReviewRating');
         if (setRating) setRating(pid, n);
       },
     };
@@ -90,7 +87,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
       colorBaseTitle: title,
       disabled: !!readOnlyHint,
       disabledHint: readOnlyHint || undefined,
-      onClick: function() { if (setColorLabelFor) setColorLabelFor(pid, c); },
+      onClick: function() { const hook = Vireo.pageHook('setColorLabelFor'); if (hook) hook(pid, c); },
     };
   };
   var flagChip = function(/** @type {LightboxFlag} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
@@ -115,7 +112,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
   /** @type {LightboxMenuItem[]} */ var items = [
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
   ];
-  if (setColorLabelFor) {
+  if (Vireo.pageHook('setColorLabelFor')) {
     items.push({ chips: [
       colorChip(null, '\u25CB', 'No color'),
       colorChip('red', '\u25CF', 'Red'),
@@ -171,7 +168,7 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
   if (typeof window.openInEditor === 'function') {
     items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
-  if (openPhotoExportModal) {
+  if (Vireo.pageHook('openPhotoExportModal')) {
     items.push({ label: 'Export\u2026',
       onClick: function() {
         // The lightbox can navigate while its context menu remains open.
@@ -180,14 +177,15 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
         var exportPid = vireoLightboxSession.displayedPhotoId() != null
           ? vireoLightboxSession.displayedPhotoId()
           : vireoLightboxSession.requestedPhotoId();
-        if (exportPid != null) openPhotoExportModal([exportPid]);
+        const hook = Vireo.pageHook('openPhotoExportModal');
+        if (exportPid != null && hook) hook([exportPid]);
       } });
   }
   items.push({ label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealLightboxPhoto(pid); } });
-  if (copyPhotoPaths) {
+  if (Vireo.pageHook('copyPhotoPaths')) {
     items.push({ label: 'Copy Path',
-      onClick: function() { copyPhotoPaths([pid]); } });
+      onClick: function() { const hook = Vireo.pageHook('copyPhotoPaths'); if (hook) hook([pid]); } });
   }
 
   items.push({ separator: true });
