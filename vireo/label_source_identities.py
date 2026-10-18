@@ -46,33 +46,20 @@ REPAIR_REASON = "label-list-source-identity"
 # list is newly matched, since its identities can settle more of them.
 LEGACY_MARKER = MARKER_PREFIX + "legacy"
 LEGACY_REPAIR_REASON = "label-list-consensus-identity"
-# The pre-fingerprint mode was not recorded. Only unenriched BioCLIP text
-# rows are eligible: a scientific name or rank may be fixed-head ToL output,
-# and must never be overwritten from a regional list's consensus.
-_UNSTAMPED_LEGACY_WHERE = (
-    "labels_fingerprint = 'legacy' AND classifier_model GLOB 'BioCLIP*' AND "
-    + " AND ".join(
-        f"COALESCE(trim({column}), '') = ''" for column in (
-            "scientific_name", "taxonomy_kingdom", "taxonomy_phylum", "taxonomy_class",
-            "taxonomy_order", "taxonomy_family", "taxonomy_genus",
-        )
-    )
-)
+# The pre-fingerprint mode was not recorded, so the legacy pass only touches
+# unenriched BioCLIP text rows (``repositories.species_identity_repairs.
+# UNSTAMPED_LEGACY_WHERE``): a scientific name or rank may be fixed-head ToL
+# output, and must never be overwritten from a regional list's consensus.
 
 
 def _identity(taxon_id, scientific_name):
     return {"source_taxon_id": taxon_id, "scientific_name": scientific_name.strip()}
 
 
-def _changes(conn, where, params, identities, reason):
-    """``apply_repairs`` changes for unstamped rows whose label is identified."""
+def _changes(rows, identities, reason):
+    """``apply_repairs`` changes for unstamped ``rows`` whose label is identified."""
     changes = []
-    for row in conn.execute(
-        "SELECT id, species, detection_id, classifier_model, labels_fingerprint, "
-        "scientific_name, source_taxon_id FROM predictions "
-        "WHERE source_taxon_id IS NULL AND " + where,
-        params,
-    ).fetchall():
+    for row in rows:
         identity = identities.get(row["species"])
         if identity is not None:
             changes.append({
@@ -141,19 +128,11 @@ def pending_label_sets(db, saved_metas=None):
     if saved_metas is None:
         saved_metas = get_saved_labels()
     pending = []
-    for row in db.conn.execute(
-        "SELECT fingerprint, sources_json FROM labels_fingerprints "
-        "WHERE fingerprint NOT IN (?, ?) ORDER BY fingerprint",
-        (TOL_SENTINEL, LEGACY_SENTINEL),
-    ).fetchall():
+    for row in db.species_identity_repairs.label_fingerprints(TOL_SENTINEL, LEGACY_SENTINEL):
         fingerprint = row["fingerprint"]
         if db.get_meta(MARKER_PREFIX + fingerprint) is not None:
             continue
-        if db.conn.execute(
-            "SELECT 1 FROM predictions WHERE labels_fingerprint = ? "
-            "AND source_taxon_id IS NULL LIMIT 1",
-            (fingerprint,),
-        ).fetchone() is None:
+        if not db.species_identity_repairs.has_unstamped_prediction_for_fingerprint(fingerprint):
             continue
         try:
             sources = json.loads(row["sources_json"] or "[]")
@@ -296,24 +275,22 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
     the triggers make a fresh run in this catalog write the same identities,
     so the cached output still matches what its fingerprint would produce.
     """
-    conn = db.conn
     marker = MARKER_PREFIX + fingerprint
-    with conn:
-        conn.execute("BEGIN IMMEDIATE")
+    with db.transaction():
+        db.begin_immediate()
         if db.get_meta(marker) is not None:
             return 0
         if label_set is not None and _source_snapshot(label_set["metas"]) != label_set["source_snapshot"]:
             raise RuntimeError("Label source files changed during identity lookup; retry required")
-        conn.executemany(
-            "INSERT OR REPLACE INTO label_source_identities "
-            "(labels_fingerprint, species, source_taxon_id, scientific_name) VALUES (?, ?, ?, ?)",
-            [
-                (fingerprint, species, identity["source_taxon_id"], identity["scientific_name"])
-                for species, identity in planned.items()
-            ],
+        repairs = db.species_identity_repairs
+        repairs.record_label_identities([
+            (fingerprint, species, identity["source_taxon_id"], identity["scientific_name"])
+            for species, identity in planned.items()
+        ])
+        changes = _changes(
+            repairs.unstamped_predictions_for_fingerprint(fingerprint), planned, REPAIR_REASON,
         )
-        changes = _changes(conn, "labels_fingerprint = ?", (fingerprint,), planned, REPAIR_REASON)
-        count = apply_repairs(conn, changes, retire_artifacts=False)
+        count = apply_repairs(db, changes, retire_artifacts=False)
         db.set_meta(marker, json.dumps({
             "labels": label_count,
             "identified": len(planned),
@@ -325,10 +302,10 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, l
 
 def legacy_pass_needed(db):
     """Whether pre-fingerprint predictions are waiting for the legacy pass."""
-    return db.get_meta(LEGACY_MARKER) is None and db.conn.execute(
-        "SELECT 1 FROM predictions WHERE source_taxon_id IS NULL AND "
-        + _UNSTAMPED_LEGACY_WHERE + " LIMIT 1",
-    ).fetchone() is not None
+    return (
+        db.get_meta(LEGACY_MARKER) is None
+        and db.species_identity_repairs.has_unstamped_legacy_prediction()
+    )
 
 
 def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None, source_snapshots=None, cancel_check=None):
@@ -359,15 +336,10 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
         spellings.add(species)
         votes.setdefault(keyword_match_key(species), {}).setdefault(taxon_id, identity)
 
-    for row in db.conn.execute(
-        "SELECT species, source_taxon_id, scientific_name FROM label_source_identities",
-    ).fetchall():
+    for row in db.species_identity_repairs.label_identities():
         vote(row["species"], row["source_taxon_id"],
              _identity(row["source_taxon_id"], row["scientific_name"]))
-    for (value,) in db.conn.execute(
-        "SELECT value FROM db_meta WHERE key LIKE ? AND key != ?",
-        (MARKER_PREFIX + "%", LEGACY_MARKER),
-    ).fetchall():
+    for value in db.species_identity_repairs.marker_values(MARKER_PREFIX, LEGACY_MARKER):
         try:
             vetoed.update(keyword_match_key(n) for n in json.loads(value).get("unidentified", []))
         except (ValueError, AttributeError):
@@ -401,10 +373,7 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
                      _identity(entry["taxon_id"], entry["scientific_name"]))
             else:
                 vetoed.add(keyword_match_key(species))
-    spellings.update(row["species"] for row in db.conn.execute(
-        "SELECT DISTINCT species FROM predictions WHERE species IS NOT NULL AND source_taxon_id IS NULL AND "
-        + _UNSTAMPED_LEGACY_WHERE,
-    ))
+    spellings.update(db.species_identity_repairs.unstamped_legacy_species())
     return {
         species: next(iter(votes[key].values()))
         for species in spellings
@@ -429,18 +398,20 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
         db, saved_metas, fetch=fetch, identities_by_file=identities_by_file,
         source_snapshots=source_snapshots, cancel_check=cancel_check,
     )
-    conn = db.conn
-    with conn:
-        conn.execute("BEGIN IMMEDIATE")
+    with db.transaction():
+        db.begin_immediate()
         for meta in saved_metas:
             snapshot = source_snapshots.get(meta.get("labels_file"))
             if snapshot is not None and _source_snapshot([meta]) != snapshot:
                 raise RuntimeError("Label source files changed before legacy commit; retry required")
         _check_cancelled(cancel_check)
-        changes = _changes(conn, _UNSTAMPED_LEGACY_WHERE, (), identities, LEGACY_REPAIR_REASON)
+        changes = _changes(
+            db.species_identity_repairs.unstamped_legacy_predictions(),
+            identities, LEGACY_REPAIR_REASON,
+        )
         # Nothing ever writes new rows under 'legacy', so these runs are
         # retired from export like any other corrected historical run.
-        count = apply_repairs(conn, changes)
+        count = apply_repairs(db, changes)
         db.set_meta(LEGACY_MARKER, json.dumps({"predictions_updated": count}), _commit=False)
     return count
 

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
     from repositories.computation_cache import ComputationCacheRepository
+    from repositories.culling import CullingRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
     from repositories.source_cleanup import SourceCleanupRepository
+    from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
     from repositories.stats import StatsRepository
     from repositories.subjects import SubjectsRepository
     from repositories.sync import SyncRepository
@@ -2334,6 +2336,27 @@ class Database:
         ``taxonomy.py`` loaders keep their own commit points.
         """
         return self._taxa_repository()
+
+    # -- Species identity repairs (callers own the transactions) --
+
+    def _species_identity_repair_repository(self):
+        """Build the (catalog-wide) species-identity repair repository on this connection."""
+        from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
+
+        return SpeciesIdentityRepairRepository(self.conn)
+
+    @property
+    def species_identity_repairs(self) -> SpeciesIdentityRepairRepository:
+        """The species-identity repair domain: ``db.species_identity_repairs.record_repair(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_species_identity_repair_repository``, exactly as
+        a forwarding wrapper called at that moment would, so the connection is
+        resolved per use. Nothing in it is workspace-scoped and nothing in it
+        commits or opens a transaction; ``species_identity_repair`` and
+        ``label_source_identities`` keep their own transaction boundaries.
+        """
+        return self._species_identity_repair_repository()
 
     # -- Folders --
 
@@ -5467,6 +5490,24 @@ class Database:
         points stay in ``subjects``.
         """
         return self._subjects_repository()
+
+    def _culling_repository(self):
+        """Build the (catalog-wide) culling-analysis repository on this connection."""
+        from repositories.culling import CullingRepository
+
+        return CullingRepository(self.conn)
+
+    @property
+    def culling(self) -> CullingRepository:
+        """The culling analysis's catalog reads: ``db.culling.top_prediction(pid)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_culling_repository``, exactly as a forwarding
+        wrapper called at that moment would. Its reads and the pHash write are
+        keyed by photo id, so accessing it never needs a workspace. Do not
+        hold the returned repository across a connection swap.
+        """
+        return self._culling_repository()
 
     def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its

@@ -4,7 +4,8 @@ Owns the SQL behind the iNaturalist taxonomy loaders: upserting ``taxa`` rows
 (from the iNat ``taxa.csv.gz`` export and from a DWCA ``taxonomy.json``),
 linking each row to its parent, pruning taxa that left the payload, the
 ``taxa_common_names`` index, the default ``informal_groups`` seed, and the
-parent-chain walk that routes a taxon to its keypoint model. Parsing the
+parent-chain walk that routes a taxon to its keypoint model, and the
+identity lookups ``species_identity.SpeciesResolver`` makes. Parsing the
 payloads, deciding what to keep, progress reporting and every commit stay in
 ``taxonomy.py``: nothing here commits, so each loader's transaction ends where
 it always did.
@@ -152,6 +153,51 @@ class TaxaRepository:
             "SELECT id, name, rank, parent_id FROM taxa WHERE id=?",
             (local_id,),
         ).fetchone()
+
+    # -- species-identity lookups (``species_identity.SpeciesResolver``) ---
+    #
+    # Each row carries ``taxon_id`` (the iNat id), ``scientific_name``,
+    # ``common_name`` and ``rank``.
+
+    def identity_by_inat_id(self, inat_id: int) -> sqlite3.Row | None:
+        """The identity row of the taxon with this iNat id, or None."""
+        return self.conn.execute(
+            "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
+            "FROM taxa WHERE inat_id = ?", (inat_id,),
+        ).fetchone()
+
+    def identities_by_scientific_name(self, name: str) -> list[sqlite3.Row]:
+        """Identity rows of every taxon with exactly this scientific name."""
+        return self.conn.execute(
+            "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
+            "FROM taxa WHERE name = ?", (name,),
+        ).fetchall()
+
+    def identities_by_any_name(self, name: str) -> list[sqlite3.Row]:
+        """Distinct identity rows whose scientific, preferred or indexed name is ``name``.
+
+        The scientific and preferred-name match is exact; the
+        ``taxa_common_names`` match ignores case.
+        """
+        return self.conn.execute(
+            "SELECT DISTINCT t.inat_id AS taxon_id, t.name AS scientific_name, "
+            "t.common_name, t.rank FROM taxa t WHERE t.name = ? OR t.common_name = ? "
+            "UNION SELECT t.inat_id, t.name, t.common_name, t.rank "
+            "FROM taxa_common_names cn JOIN taxa t ON t.id = cn.taxon_id "
+            "WHERE cn.name = ? COLLATE NOCASE",
+            (name, name, name),
+        ).fetchall()
+
+    def identities_by_preferred_common_name(self, name: str) -> list[sqlite3.Row]:
+        """Up to two distinct identity rows whose preferred common name is ``name``.
+
+        Case-insensitive; two rows is enough for a caller to tell the name is
+        shared.
+        """
+        return self.conn.execute(
+            "SELECT DISTINCT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
+            "FROM taxa WHERE lower(common_name) = lower(?) LIMIT 2", (name,),
+        ).fetchall()
 
     # -- taxa_common_names ------------------------------------------------
 

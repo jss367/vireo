@@ -51,7 +51,7 @@ def _application_version():
         return package_version("vireo")
     except PackageNotFoundError:
         pass
-    except Exception:
+    except Exception:  # broad: corrupt package metadata can raise anything; pyproject.toml still answers
         log.warning(
             "Reading installed 'vireo' package metadata failed; "
             "falling back to pyproject.toml",
@@ -162,7 +162,7 @@ def _issue_report_app_state(get_db):
         # the detection -> photo -> workspace_folders join.
         pred_count = db.count_workspace_predictions()
     except Exception:
-        # Issue reports are how users report a degraded catalog; collect
+        # broad: issue reports are how users report a degraded catalog; collect
         # what we can and keep going.
         log.warning("Could not read catalog state for issue report", exc_info=True)
         ws_name = "unknown"
@@ -284,14 +284,14 @@ def _issue_report_platform(private_paths):
             if (kind := filesystem_type(path))
         })
         support_info = _redact(platform_support_info(cfg.load()))
-    except Exception:
+    except Exception:  # broad: diagnostics only; a failed probe must not block the issue report
         log.warning("Could not collect platform support info for issue report", exc_info=True)
         filesystems = []
         support_info = {}
     execution_info = {}
     try:
         execution_info = runtime_execution_info()
-    except Exception:
+    except Exception:  # broad: inference runtimes raise undocumented errors; the report goes out without them
         log.warning("Could not collect inference runtime info for issue report", exc_info=True)
     return filesystems, support_info, execution_info
 
@@ -313,7 +313,7 @@ def _send_issue_report(report_url, bundle):
             return jsonify({"status": "sent"})
         else:
             return jsonify({"status": "download", "diagnostics": bundle})
-    except Exception:
+    except Exception:  # broad: network and HTTP errors vary; the user gets the bundle to download instead
         log.exception("Failed to send report to %s", report_url)
         return jsonify({"status": "download", "diagnostics": bundle})
 
@@ -562,7 +562,7 @@ def create_system_blueprint(
                 })
         except subprocess.TimeoutExpired:
             return jsonify({"success": False, "error": "Installation timed out after 5 minutes"})
-        except Exception as e:
+        except Exception as e:  # broad: install and probe failures are shown to the user as the error
             log.warning("ExifTool install via Homebrew failed", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
@@ -667,7 +667,7 @@ def create_system_blueprint(
                             ):
                                 label = buf.value or None
                         except Exception:
-                            # The label is cosmetic; the drive letter still lists.
+                            # broad: the label is cosmetic; the drive letter still lists.
                             log.debug("Could not read the volume label of %s", root, exc_info=True)
                             label = None
                         name = f"{label} ({letter}:)" if label else f"{letter}:"
@@ -712,7 +712,7 @@ def create_system_blueprint(
 
         try:
             effective = get_db().get_effective_config(cfg.load())
-        except Exception:
+        except Exception:  # broad: workspace overrides are optional here; the global config still answers
             log.warning(
                 "Could not apply workspace overrides for system info; using global config",
                 exc_info=True,
@@ -855,7 +855,7 @@ def create_system_blueprint(
         # --- Recent jobs ---
         try:
             recent_jobs = get_runner().get_history(db, limit=10)
-        except Exception:
+        except Exception:  # broad: the issue report collects what it can
             log.warning("Could not read job history for issue report", exc_info=True)
             recent_jobs = []
 
@@ -907,7 +907,7 @@ def create_system_blueprint(
         # reporting DB problems.
         try:
             effective = db.get_effective_config(cfg.load()) if db else cfg.load()
-        except Exception:
+        except Exception:  # broad: the issue report collects what it can
             log.exception("Failed to load effective config for issue report")
             effective = cfg.load()
         report_url = effective.get("report_url", "")

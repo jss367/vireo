@@ -447,17 +447,17 @@ def test_repair_preserves_review_state_and_is_idempotent(db, tmp_path):
     db.add_prediction(det, "Red-browed Parrot", .8, "iNat21", labels_fingerprint="tol",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
     before = [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")]
-    plan = plan_repairs(db.conn)
+    plan = plan_repairs(db)
     assert len(plan) == 1
     with db.conn:
-        assert apply_repairs(db.conn, plan) == 1
+        assert apply_repairs(db, plan) == 1
     row = db.conn.execute("SELECT * FROM predictions WHERE id = ?", (plan[0]["id"],)).fetchone()
     assert row["species"] == "Red-crowned Amazon"
     assert row["confidence"] == .91
     assert row["scientific_name"] == RED["scientific_name"]
     assert row["source_taxon_id"] == 18976
     assert [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")] == before
-    assert plan_repairs(db.conn) == []
+    assert plan_repairs(db) == []
     audit = db.conn.execute("SELECT * FROM species_identity_repairs").fetchone()
     assert json.loads(audit["before_json"])["scientific_name"] == BROWED["scientific_name"]
 
@@ -466,11 +466,11 @@ def test_stale_repair_plan_rolls_back(db, tmp_path):
     _, det = _photo(db, tmp_path)
     db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
-    plan = plan_repairs(db.conn)
+    plan = plan_repairs(db)
     db.conn.execute("UPDATE predictions SET scientific_name = 'changed'")
     db.conn.commit()
     with pytest.raises(ValueError, match="changed after"), db.conn:
-        apply_repairs(db.conn, plan)
+        apply_repairs(db, plan)
     assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == "changed"
 
 
@@ -683,12 +683,12 @@ def test_repair_rejects_changed_eligibility_and_run_key(db, tmp_path, field):
     _, other_det = _photo(db, tmp_path, "other.jpg")
     db.add_prediction(det, "Red-crowned Amazon", .9, "BioCLIP-2.5", labels_fingerprint="custom",
                       taxonomy={"scientific_name": BROWED["scientific_name"]})
-    plan = plan_repairs(db.conn)
+    plan = plan_repairs(db)
     value = other_det if field == "detection_id" else "changed"
     db.conn.execute(f"UPDATE predictions SET {field} = ?", (value,))
     db.conn.commit()
     with pytest.raises(ValueError, match="changed after"), db.conn:
-        apply_repairs(db.conn, plan)
+        apply_repairs(db, plan)
     assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == BROWED["scientific_name"]
     assert db.conn.execute("SELECT count(*) FROM species_identity_repairs").fetchone()[0] == 0
 
@@ -1220,7 +1220,7 @@ def test_resolved_prediction_taxonomy_replaces_a_neighbours_guess(db):
 # ``resolved_prediction_taxonomy``) or gate on ``stored_taxonomy_evidence_sql``
 # before it shows, searches or submits the name — then list itself here.
 RAW_SCIENTIFIC_NAME_READERS = {
-    "culling.py": "identity via SpeciesResolver.prediction",
+    "repositories/culling.py": "identity via SpeciesResolver.prediction in culling._load_top_predictions",
     "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
     "repositories/pipeline_features.py": "pipeline.py resolves identity via SpeciesResolver.prediction",
     "repositories/predictions.py": (
