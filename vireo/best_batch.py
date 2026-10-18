@@ -114,7 +114,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
     boundary when available. If a filename has no trailing number, fall back to
     neighboring capture-time rows in the folder.
     """
-    seed = db.get_photo(seed_photo_id, verify_workspace=True)
+    seed = db.photos.get(seed_photo_id, verify_workspace=True)
     if not seed:
         return None, "Photo not found"
 

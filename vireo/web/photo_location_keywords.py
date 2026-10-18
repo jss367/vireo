@@ -43,7 +43,7 @@ def create_photo_location_keywords_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
     def api_add_keyword(photo_id):
         db = get_db()
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -109,7 +109,7 @@ def create_photo_location_keywords_blueprint(
     )
     def api_remove_keyword(photo_id, keyword_id):
         db = get_db()
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
         keywords = db.get_photo_keywords(photo_id)
         kw_name = ""

@@ -89,7 +89,7 @@ def test_auto_tone_reports_resetting_previous_controls(live_server, page, dark_p
 def test_stale_auto_tone_response_does_not_edit_loaded_photo(live_server, page, dark_photo, reload_same_photo):
     """A response belongs to its photo and load, even when recipes are identical."""
     db = live_server['db']
-    photo = db.get_photo(dark_photo)
+    photo = db.photos.get(dark_photo)
     other = db.add_photo(
         folder_id=photo['folder_id'], filename='other.png', extension='.png',
         file_size=photo['file_size'], file_mtime=photo['file_mtime'], width=300, height=200,

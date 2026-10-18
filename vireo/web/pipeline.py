@@ -154,7 +154,9 @@ def create_pipeline_blueprint(
             ))
         return [
             r["id"]
-            for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+            for r in db.photos.in_workspace_folders(
+                list(subtree_ids), db.active_workspace_id,
+            )
         ], None
 
     def _expand_plan_process(body):
@@ -695,7 +697,7 @@ def create_pipeline_blueprint(
     def api_pipeline_page_init():
         """Combined endpoint for pipeline page initial load."""
         db = get_db()
-        total_photos = db.count_photos()
+        total_photos = db.photos.count()
 
         import config as cfg
         from pipeline import (
@@ -860,7 +862,9 @@ def create_pipeline_blueprint(
             ))
             photo_ids = [
                 r["id"]
-                for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+                for r in db.photos.in_workspace_folders(
+                    list(subtree_ids), db.active_workspace_id,
+                )
             ]
         else:
             collection_id = coerce_collection_id(raw_collection)
@@ -875,7 +879,7 @@ def create_pipeline_blueprint(
             if err is not None:
                 return err
             try:
-                photo_ids = db.get_photo_ids(collection_id=collection_id)
+                photo_ids = db.photos.get_ids(collection_id=collection_id)
             except ValueError:
                 return json_error("Collection not found in this workspace", 404)
         return jsonify({"photo_ids": photo_ids, "count": len(photo_ids)})
@@ -884,7 +888,7 @@ def create_pipeline_blueprint(
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
         species = db.get_species_keywords_for_photos(photo_ids)
-        live = db.get_photo_flags_ratings_and_eyes(photo_ids)
+        live = db.photos.flags_ratings_and_eyes(photo_ids)
         for photo in results.get("photos", []):
             row = live.get(photo["id"])
             if row is None:
@@ -929,7 +933,7 @@ def create_pipeline_blueprint(
         # Workspace gate before the raw lookup below, matching
         # /api/photos/<id>/pipeline: the response exposes sharpness
         # features and the edit recipe for any global photo id.
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("Photo not found", 404)
         row = db.masks_features.pipeline_feature_row(photo_id)
         if not row:
@@ -1364,7 +1368,7 @@ def create_pipeline_blueprint(
         for photo in results.get("photos", []):
             if photo["id"] not in photo_ids:
                 continue
-            row = db.get_photo(photo["id"])
+            row = db.photos.get(photo["id"])
             if row is not None:
                 flag = row["flag"] or "none"
                 photo["flag"] = flag
@@ -1472,7 +1476,7 @@ def create_pipeline_blueprint(
             # don't belong to the active workspace.
             if not db._photo_in_workspace(pid):
                 continue
-            row = db.get_photo(pid)
+            row = db.photos.get(pid)
             if not row:
                 continue
             has_kw = False
@@ -1553,7 +1557,7 @@ def create_pipeline_blueprint(
         """Each photo's flag after a group apply, for the client's card update."""
         result_photos = {}
         for pid in photo_ids:
-            row = db.get_photo(pid)
+            row = db.photos.get(pid)
             if not row:
                 continue
             result_photos[pid] = {
@@ -1605,7 +1609,7 @@ def create_pipeline_blueprint(
         # Capture current state for diffing + edit history.
         old_flags = {}
         for pid in picks + rejects + candidates:
-            row = db.get_photo(pid)
+            row = db.photos.get(pid)
             if row:
                 old_flags[pid] = row["flag"] or "none"
 
@@ -1722,9 +1726,9 @@ def create_pipeline_blueprint(
         db = get_db()
         # Workspace gate before the raw join below: the response exposes
         # folder_path and full photo metadata (mirrors serve_thumbnail).
-        if db.get_photo(photo_id, verify_workspace=True) is None:
+        if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("Photo not found", 404)
-        photo = db.get_photo_with_folder_path(photo_id)
+        photo = db.photos.get_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
 
@@ -1858,7 +1862,7 @@ def _overlay_live_photo_state(db, results):
     # Chunked in the repository: cached pipeline results can span the
     # whole workspace, exceeding SQLite's bound-parameter cap in one
     # IN clause.
-    live_photo_map = db.get_photo_flags_ratings_and_eyes(photo_ids)
+    live_photo_map = db.photos.flags_ratings_and_eyes(photo_ids)
     for p in results["photos"]:
         live = live_photo_map.get(p["id"])
         p["flag"] = live["flag"] if live else "none"
@@ -2370,7 +2374,9 @@ class _PipelineLaunch:
         # ad-hoc collection reflects exactly what the user asked to
         # process; ``_filter_excluded`` would drop them again later but
         # there is no reason to bake them into the collection membership.
-        for r in db.get_workspace_photos_in_folders(subtree_id_list):
+        for r in db.photos.in_workspace_folders(
+            subtree_id_list, db.active_workspace_id,
+        ):
             if r["id"] in excluded_photo_ids_set:
                 continue
             if excluded_paths_set:

@@ -1201,7 +1201,7 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
     preview_dir = os.path.join(os.path.dirname(db_path), "previews")
     db2 = Database(db_path)
     db2.set_active_workspace(ws_id)
-    photo_id = db2.get_photos(per_page=1)[0]["id"]
+    photo_id = db2.photos.list_page(per_page=1)[0]["id"]
     final_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
 
     # The final preview must exist and be a complete, openable JPEG (proves
@@ -12186,7 +12186,7 @@ def test_pipeline_scan_surfaces_permission_denied(tmp_path):
 
         db2 = Database(db_path)
         db2.set_active_workspace(ws_id)
-        photos = db2.get_photos(per_page=100)
+        photos = db2.photos.list_page(per_page=100)
         names = {p["filename"] for p in photos}
         assert "ok.jpg" in names, "accessible photo must still be scanned"
         assert "locked.jpg" not in names, "denied dir must not yield photos"
@@ -12529,7 +12529,7 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path):
 
     db2 = Database(db_path)
     db2.set_active_workspace(ws_id)
-    photo_id = db2.get_photos(per_page=1)[0]["id"]
+    photo_id = db2.photos.list_page(per_page=1)[0]["id"]
 
     served_path = custom_root / "previews" / f"{photo_id}_1920.jpg"
     assert served_path.is_file(), (

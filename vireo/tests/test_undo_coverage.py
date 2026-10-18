@@ -13,7 +13,7 @@ def _location_ids(db, pid):
 def test_location_history_restores_mixed_originals_and_provenance(app_and_db, route):
     app, db = app_and_db
     client = app.test_client()
-    pids = [p['id'] for p in db.get_photos()][:2]
+    pids = [p['id'] for p in db.photos.list_page()][:2]
     old_ids = [db.get_or_create_text_location(name) for name in ['Old place', 'Other place']]
     db.tag_photo(pids[0], old_ids[0], source=None)
     db.tag_photo(pids[0], old_ids[1], source='accept')
@@ -55,7 +55,7 @@ def test_location_history_restores_mixed_originals_and_provenance(app_and_db, ro
 def test_repeating_location_assignment_and_empty_clear_do_not_create_history(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     url = f'/api/photos/{pid}/location'
     assert client.delete(url).status_code == 200
     assert client.get('/api/undo/status').json['available'] is False
@@ -73,7 +73,7 @@ def test_repeating_location_assignment_and_empty_clear_do_not_create_history(app
 def test_batch_location_history_failure_rolls_back_all_writes(app_and_db, monkeypatch):
     app, db = app_and_db
     client = app.test_client()
-    pids = [p['id'] for p in db.get_photos()]
+    pids = [p['id'] for p in db.photos.list_page()]
     from db import Database
 
     def fail(self, *args, **kwargs):
@@ -105,7 +105,7 @@ def _predictions(db, pid, group=None):
 def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
     app, db = app_and_db
     client = app.test_client()
-    pids = [p['id'] for p in db.get_photos()][:2]
+    pids = [p['id'] for p in db.photos.list_page()][:2]
     group = 'burst' if mode == 'burst' else None
     ids = [_predictions(db, pid, group) for pid in pids]
     keywords_before = [db.get_photo_keywords(pid) for pid in pids]
@@ -132,7 +132,7 @@ def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
 
 def test_legacy_incomplete_audit_rows_stay_excluded(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     for action in ('location_set', 'location_clear', 'prediction_reject', 'prediction_reviewed'):
         db.record_edit(action, 'Legacy edit', '', [{'photo_id': pid, 'old_value': '', 'new_value': ''}])
     assert app.test_client().get('/api/undo/status').json['available'] is False
@@ -189,7 +189,7 @@ def test_later_location_group_conflict_preserves_successful_assignments(app_and_
     from services.edit_history import change_photo_location
 
     _, db = app_and_db
-    pids = [p['id'] for p in db.get_photos()]
+    pids = [p['id'] for p in db.photos.list_page()]
     good = db.get_or_create_text_location('Good place')
     country = db.get_or_create_text_location('Conflict country')
     db.conn.execute("INSERT INTO keywords(name, type, parent_id) VALUES ('Conflict state', 'general', ?)", (country,))
@@ -220,7 +220,7 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
     app, db = app_and_db
     cfg.save({**cfg.load(), 'write_assigned_location_to_xmp': True})
     client = app.test_client()
-    pids = [p['id'] for p in db.get_photos()][:2 if batch else 1]
+    pids = [p['id'] for p in db.photos.list_page()][:2 if batch else 1]
     keyword_id = db.get_or_create_text_location('Existing place')
     for pid in pids:
         db.set_photo_location(pid, keyword_id)
@@ -250,7 +250,7 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
 def test_prediction_status_history_does_not_change_reused_id(app_and_db, direction, changed):
     app, db = app_and_db
     client = app.test_client()
-    pids = [p['id'] for p in db.get_photos()][:2]
+    pids = [p['id'] for p in db.photos.list_page()][:2]
     did = db.save_detections(pids[0], [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
@@ -290,7 +290,7 @@ def test_id_only_prediction_status_history_cannot_change_a_current_prediction(ap
     import json
 
     app, db = app_and_db
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     pred_id, _, _ = _predictions(db, pid)
     db.record_edit('prediction_status', 'Old ID-only decision', 'rejected', [{
         'photo_id': pid, 'old_value': json.dumps({str(pred_id): 'rejected'}),
@@ -319,7 +319,7 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
 
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     did = db.save_detections(pid, [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
@@ -352,7 +352,7 @@ def test_prediction_instance_is_stable_on_repeated_reads_and_catalog_reopen(app_
     from db import Database
 
     _, db = app_and_db
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     pred_id, _, _ = _predictions(db, pid)
     db.edit_history.ensure_prediction_instances([pred_id])
     db.commit()
@@ -371,7 +371,7 @@ def test_prediction_instance_is_stable_on_repeated_reads_and_catalog_reopen(app_
 def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app_and_db, direction, enrichment):
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
     pred_id, _, _ = _predictions(db, pid)
     pred = db.get_prediction_decision_row(pred_id)
     assert client.post(f'/api/predictions/{pred_id}/reject').status_code == 200

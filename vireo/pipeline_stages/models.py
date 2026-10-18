@@ -711,7 +711,7 @@ def _skip_when_no_wildlife(
         thread_db.collections.get_photos(collection_id, per_page=999999)
     )
     photo_ids = [p["id"] for p in candidate_photos]
-    candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)
+    candidate_ids = thread_db.photos.filter_out_wildlife_excluded(photo_ids)
     if candidate_photos and not candidate_ids:
         run.stages["model_loader"]["status"] = "skipped"
         run.runner.update_step(

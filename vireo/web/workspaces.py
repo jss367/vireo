@@ -1586,7 +1586,7 @@ def create_workspace_blueprint(
             "workspace_name": ws["name"] if ws else None,
             "min_conf": min_conf,
             "total_real_detections": total_dets,
-            "total_photos": db.count_photos(),
+            "total_photos": db.photos.count(),
             "models": models_out,
             "stale": stale,
             # Saved sets that produce no usable prompt at all, so they have

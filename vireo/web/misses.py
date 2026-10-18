@@ -80,7 +80,7 @@ def _miss_legacy_photo_ids(db, values, collection_id):
     ))
     photo_ids = None
     if has_browse_filters:
-        photo_ids = set(db.get_photo_ids(
+        photo_ids = set(db.photos.get_ids(
             folder_id=folder_id,
             rating_min=rating_min,
             date_from=date_from,

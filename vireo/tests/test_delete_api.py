@@ -11,19 +11,19 @@ from wait import wait_for_job_via_client
 def test_delete_photos_removes_from_db(app_and_db):
     """Deleting photos removes them from the photos table."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     result = db.delete_photos([pid])
 
     assert result["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_delete_photos_removes_keywords(app_and_db):
     """Deleting a photo removes its keyword associations."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # bird1.jpg has keyword 'Cardinal' (from conftest)
     pid = photos[0]["id"]
     assert len(db.get_photo_keywords(pid)) > 0
@@ -39,7 +39,7 @@ def test_delete_photos_removes_keywords(app_and_db):
 def test_delete_photos_removes_predictions(app_and_db):
     """Deleting a photo removes its predictions."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
@@ -59,7 +59,7 @@ def test_delete_photos_removes_predictions(app_and_db):
 def test_delete_photos_removes_pending_changes(app_and_db):
     """Deleting a photo removes its pending changes."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
     db.queue_change(pid, "rating", "5")
 
@@ -74,7 +74,7 @@ def test_delete_photos_removes_pending_changes(app_and_db):
 def test_delete_photos_updates_folder_count(app_and_db):
     """Deleting photos decrements the folder's photo_count."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     fid = photos[0]["folder_id"]
     original_count = db.conn.execute(
         "SELECT photo_count FROM folders WHERE id = ?", (fid,)
@@ -92,7 +92,7 @@ def test_delete_photos_updates_folder_count(app_and_db):
 def test_delete_photos_cleans_collection_rules(app_and_db):
     """Deleting photos removes their IDs from static collection rules."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid1, pid2 = photos[0]["id"], photos[1]["id"]
 
     rules = [{"field": "photo_ids", "value": [pid1, pid2, 9999]}]
@@ -110,7 +110,7 @@ def test_delete_photos_cleans_collection_rules(app_and_db):
 def test_delete_photos_returns_file_info(app_and_db):
     """delete_photos returns folder paths and photo IDs for file cleanup."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     result = db.delete_photos([pid])
@@ -135,20 +135,20 @@ def test_delete_photos_skips_missing_ids(app_and_db):
 def test_delete_photos_batch(app_and_db):
     """Deleting multiple photos works in a single call."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     all_ids = [p["id"] for p in photos]
 
     result = db.delete_photos(all_ids)
 
     assert result["deleted"] == len(all_ids)
     for pid in all_ids:
-        assert db.get_photo(pid) is None
+        assert db.photos.get(pid) is None
 
 
 def test_delete_photos_resolves_companions(app_and_db):
     """When include_companions=True, companion photos are also deleted."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # Use photos[0] and photos[2] which are in the same folder (fid)
     pid1, pid2 = photos[0]["id"], photos[2]["id"]
 
@@ -162,8 +162,8 @@ def test_delete_photos_resolves_companions(app_and_db):
     result = db.delete_photos([pid1], include_companions=True)
 
     assert result["deleted"] == 2
-    assert db.get_photo(pid1) is None
-    assert db.get_photo(pid2) is None
+    assert db.photos.get(pid1) is None
+    assert db.photos.get(pid2) is None
 
 
 def test_delete_photos_empty_list(app_and_db):
@@ -179,7 +179,7 @@ def test_api_batch_delete_vireo_mode(app_and_db):
     """API endpoint removes photos from DB without touching disk."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     resp = client.post("/api/batch/delete", json={
@@ -191,14 +191,14 @@ def test_api_batch_delete_vireo_mode(app_and_db):
     data = resp.get_json()
     assert data["ok"] is True
     assert data["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_api_job_batch_delete_vireo_mode(app_and_db):
     """Background delete job removes photos and returns the normal result."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
 
     resp = client.post("/api/jobs/batch-delete", json={
         "photo_ids": [pid],
@@ -210,7 +210,7 @@ def test_api_job_batch_delete_vireo_mode(app_and_db):
     assert job["status"] == "completed"
     assert job["result"]["ok"] is True
     assert job["result"]["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_delete_modal_has_persistent_stage_progress(app_and_db):
@@ -282,7 +282,7 @@ def test_batch_delete_progress_reports_failed_count_on_trash_failure(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     folder_path = str(tmp_path / "trash_fail_progress")
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
@@ -467,7 +467,7 @@ def test_api_batch_delete_tolerates_pipeline_prune_system_exit(app_and_db, monke
 
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
 
     def fail_prune(self, ids):
         raise SystemExit("packaged executable was moved")
@@ -483,13 +483,13 @@ def test_api_batch_delete_tolerates_pipeline_prune_system_exit(app_and_db, monke
     data = resp.get_json()
     assert data["ok"] is True
     assert data["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_delete_photos_tolerates_pipeline_import_system_exit(app_and_db, monkeypatch):
     """Direct DB deletes should also treat pipeline cache pruning as optional."""
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
@@ -502,14 +502,14 @@ def test_delete_photos_tolerates_pipeline_import_system_exit(app_and_db, monkeyp
     result = db.delete_photos([pid])
 
     assert result["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_api_batch_delete_tolerates_cache_cleanup_system_exit(app_and_db, monkeypatch):
     """Preview/thumbnail cleanup failures should not prevent a delete response."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
@@ -528,7 +528,7 @@ def test_api_batch_delete_tolerates_cache_cleanup_system_exit(app_and_db, monkey
     data = resp.get_json()
     assert data["ok"] is True
     assert data["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_api_batch_delete_purges_sized_preview_variants(app_and_db):
@@ -539,7 +539,7 @@ def test_api_batch_delete_purges_sized_preview_variants(app_and_db):
     """
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
 
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     preview_dir = os.path.join(vireo_dir, "previews")
@@ -567,9 +567,9 @@ def test_api_batch_delete_disk_mode(app_and_db, tmp_path, isolated_trash):
     """API endpoint in disk mode moves files to trash (or deletes them)."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
 
     # Point folder to a writable tmp_path location and create a real file
     folder_path = str(tmp_path / "disk_photos")
@@ -591,7 +591,7 @@ def test_api_batch_delete_disk_mode(app_and_db, tmp_path, isolated_trash):
     data = resp.get_json()
     assert data["ok"] is True
     assert data["deleted"] == 1
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
     assert not os.path.exists(real_file)
     trashed = list(isolated_trash.rglob(photo["filename"]))
     assert len(trashed) == 1
@@ -607,7 +607,7 @@ def test_api_batch_delete_disk_failure_retains_catalog_row(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     folder_path = str(tmp_path / "disk_photos")
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
@@ -637,7 +637,7 @@ def test_api_batch_delete_disk_failure_retains_catalog_row(
     assert data["failed_photo_ids"] == [photo["id"]]
     assert data["trash_failed"][0]["photo_id"] == photo["id"]
     assert os.path.exists(real_file)
-    assert db.get_photo(photo["id"]) is not None
+    assert db.photos.get(photo["id"]) is not None
 
 
 def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
@@ -686,8 +686,8 @@ def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
     assert data["deleted"] == 1
     assert data["trashed"] == 1
     assert data["failed_photo_ids"] == [failed_id]
-    assert db.get_photo(success_id) is None
-    assert db.get_photo(failed_id) is not None
+    assert db.photos.get(success_id) is None
+    assert db.photos.get(failed_id) is not None
     assert not os.path.exists(success_path)
     assert os.path.exists(failed_path)
 
@@ -747,7 +747,7 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
     assert any(
         entry.get("photo_id") == pid for entry in data["trash_failed"]
     )
-    row = db.get_photo(pid)
+    row = db.photos.get(pid)
     assert row is not None, "moved row must survive a racing disk delete"
     assert row["folder_id"] == dst_fid
     assert os.path.exists(dest_file), "moved file must not be orphaned"
@@ -795,7 +795,7 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
         "row that was already deleted must not be reported as failed"
     )
     assert data["trash_failed"] == []
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_api_batch_delete_disk_targets_absolute_companion_path(
@@ -812,7 +812,7 @@ def test_api_batch_delete_disk_targets_absolute_companion_path(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     folder_path = str(tmp_path / "abs")
     sidecar_folder = str(tmp_path / "sidecars")
     db.conn.execute(
@@ -867,7 +867,7 @@ def test_api_batch_delete_disk_targets_absolute_companion_path(
     )
     assert not os.path.exists(absolute_companion)
     assert not os.path.exists(primary)
-    assert db.get_photo(photo["id"]) is None
+    assert db.photos.get(photo["id"]) is None
 
 
 def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
@@ -922,7 +922,7 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     assert any(
         entry.get("photo_id") == pid for entry in data["trash_failed"]
     )
-    row = db.get_photo(pid)
+    row = db.photos.get(pid)
     assert row is not None, "renamed-folder row must survive a racing disk delete"
     assert os.path.exists(moved_file), "moved file must not be orphaned"
 
@@ -984,7 +984,7 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
     assert any(
         entry.get("photo_id") == raw_id for entry in data["trash_failed"]
     )
-    row = db.get_photo(raw_id)
+    row = db.photos.get(raw_id)
     assert row is not None, (
         "newly-paired row must survive a racing disk delete"
     )
@@ -1002,7 +1002,7 @@ def test_api_batch_delete_companion_failure_does_not_move_primary(
 
     app, db = app_and_db
     client = app.test_client()
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     folder_path = str(tmp_path / "companions")
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
@@ -1040,14 +1040,14 @@ def test_api_batch_delete_companion_failure_does_not_move_primary(
     assert calls == [[companion]], "primary must not be attempted after dependency failure"
     assert os.path.exists(primary)
     assert os.path.exists(companion)
-    assert db.get_photo(photo["id"]) is not None
+    assert db.photos.get(photo["id"]) is not None
 
 
 def test_api_batch_delete_removes_thumbnails(app_and_db):
     """Deleting a photo removes its thumbnail file."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
     thumb_dir = app.config["THUMB_CACHE_DIR"]
     thumb_path = os.path.join(thumb_dir, f"{pid}.jpg")
@@ -1065,7 +1065,7 @@ def test_api_batch_delete_removes_working_copy(app_and_db):
     """Deleting a photo removes its working copy file."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Create a working copy file for this photo
@@ -1152,7 +1152,7 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
     assert len(chunks_seen) >= 3, f"expected chunked calls, got {chunks_seen}"
     assert all(len(c) <= 2 for c in chunks_seen)
     for pid in bulk_ids:
-        assert db.get_photo(pid) is None
+        assert db.photos.get(pid) is None
 
 
 def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypatch):
@@ -1205,7 +1205,7 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
     # along with the failed chunk's, restoring the all-or-nothing semantics
     # the single-call path had.
     for pid in bulk_ids:
-        assert db.get_photo(pid) is not None, f"photo {pid} was deleted despite rollback"
+        assert db.photos.get(pid) is not None, f"photo {pid} was deleted despite rollback"
 
 
 def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
@@ -1447,7 +1447,7 @@ def test_api_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_
         assert data["deleted"] == 0
         assert data["trashed"] == 0
 
-    assert db.get_photo(pid) is not None
+    assert db.photos.get(pid) is not None
     assert os.path.exists(path)
 
 
@@ -1455,7 +1455,7 @@ def test_job_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_
     app, db = app_and_db
     client = app.test_client()
     pid, path = _photo_only_in_other_workspace(db, tmp_path)
-    visible = db.get_photos()[0]["id"]
+    visible = db.photos.list_page()[0]["id"]
 
     resp = client.post("/api/jobs/batch-delete", json={
         "photo_ids": [pid, visible], "mode": "vireo",
@@ -1465,8 +1465,8 @@ def test_job_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_
     assert job["status"] == "completed"
     assert job["result"]["deleted"] == 1
 
-    assert db.get_photo(pid) is not None
-    assert db.get_photo(visible) is None
+    assert db.photos.get(pid) is not None
+    assert db.photos.get(visible) is None
     assert os.path.exists(path)
 
 
@@ -1486,7 +1486,7 @@ def test_api_batch_delete_rejects_fractional_ids(app_and_db):
     app, db = app_and_db
     client = app.test_client()
 
-    existing_ids = [p["id"] for p in db.get_photos()]
+    existing_ids = [p["id"] for p in db.photos.list_page()]
     assert 1 in existing_ids
 
     for mode in ("vireo", "disk", "disk_permanent"):
@@ -1494,7 +1494,7 @@ def test_api_batch_delete_rejects_fractional_ids(app_and_db):
             "photo_ids": [1.9], "mode": mode,
         })
         assert resp.status_code == 400
-        assert db.get_photo(1) is not None
+        assert db.photos.get(1) is not None
 
     resp = client.post("/api/jobs/batch-delete", json={
         "photo_ids": [1.9], "mode": "disk_permanent",
@@ -1503,7 +1503,7 @@ def test_api_batch_delete_rejects_fractional_ids(app_and_db):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "failed"
     assert any("integer" in err.lower() for err in (job.get("errors") or []))
-    assert db.get_photo(1) is not None
+    assert db.photos.get(1) is not None
 
 
 def test_batch_delete_with_null_photo_ids_reports_route_result(app_and_db):
@@ -1525,7 +1525,7 @@ def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
     """Disk mode deletes companion files when include_companions is true."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Set up companion_path on the photo
@@ -1566,7 +1566,7 @@ def test_api_batch_delete_disk_skips_companion_when_unchecked(app_and_db, tmp_pa
     """Disk mode leaves companion files when include_companions is false."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     db.conn.execute(
@@ -1603,7 +1603,7 @@ def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
     """disk_permanent mode with photo_ids permanently deletes files."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     folder_path = str(tmp_path / "disk_photos")
@@ -1628,14 +1628,14 @@ def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
     assert data["deleted"] == 1
     assert data["trashed"] == 1
     assert not os.path.exists(real_file)
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
 
 
 def test_delete_photos_prunes_pipeline_cache(app_and_db):
     """Deleting photos strips them from the pipeline review cache so
     they don't render as blank cards on the pipeline review page."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid_to_delete = photos[0]["id"]
     surviving_ids = [p["id"] for p in photos[1:]]
 
@@ -1684,7 +1684,7 @@ def test_delete_photos_prunes_pipeline_cache(app_and_db):
 def test_delete_photos_no_pipeline_cache_does_not_raise(app_and_db):
     """delete_photos succeeds even when no pipeline cache file exists."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
 
     cache_dir = os.path.dirname(db._db_path)
     cache_path = os.path.join(

@@ -38,11 +38,13 @@ if TYPE_CHECKING:
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
+    from repositories.locations import LocationRepository
     from repositories.masks_features import MasksFeaturesRepository
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
     from repositories.photo_labels import PhotoLabelRepository
+    from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
@@ -1761,12 +1763,6 @@ class Database:
         """
         return self._keyword_repository().filter_out_subject_tagged(photo_ids, subject_types)
 
-    def filter_out_wildlife_excluded(self, photo_ids):
-        """Return photo ids not explicitly excluded from wildlife classification."""
-        return self._photos_repository(scoped=False).filter_out_wildlife_excluded(
-            photo_ids, self._FILTER_SUBJECT_CHUNK,
-        )
-
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
         ws = self.workspaces.get(self._ws_id())
@@ -3327,44 +3323,48 @@ class Database:
 
     @property
     def photos(self) -> PhotoRepository:
-        """Workspace-scoped photo rows: ``db.photos.best_batch_rows_by_ids(ids)`` and friends.
+        """Photo rows: ``db.photos.get(photo_id)``, ``db.photos.list_page(...)`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a
-        fresh repository through ``_photos_repository`` for the active
-        workspace (raising when none is active), so never hold one across
-        ``set_active_workspace``. Serves the simple reads that need no
-        coordination: the Best Batch scope rows (``best_batch_rows_by_ids``,
-        ``best_batch_sequence_rows``, ``best_batch_folder_rows``,
-        ``count_folder_photos``) and ``analysis_evidence_rows``. The older
-        photo methods still reach the repository through forwarding
-        wrappers (``get_photo``, ``get_photos`` ...); composition such as
-        ``add_photo`` stays on ``Database``.
+        fresh repository through ``_photos_repository``. Catalog-wide
+        methods (``get``, ``get_by_ids``, ``update_quality`` ...) never read
+        the workspace; the workspace-scoped reads (``list_page``,
+        ``get_ids``, ``count``, the Best Batch rows ...) resolve the active
+        one before any SQL and raise when none is active, so never hold one
+        across ``set_active_workspace``. Composition such as ``add_photo``,
+        ``delete_photos`` and ``get_browse_summary`` stays on ``Database``.
         """
         return self._photos_repository()
 
-    def _photos_repository(self, *, scoped=True):
+    def _photos_repository(self):
         """Build the core photo-row repository on this connection.
 
-        Photo rows are global, so ``scoped=False`` builds it without a
-        workspace for the catalog-wide methods; ``scoped=True`` passes the
-        active workspace id (raising if none is active) for the reads that
-        go through ``workspace_folders``. The column lists and the ``db``
-        module helpers are passed in, the helpers read at call time so tests
-        that patch ``db.commit_with_retry`` / ``db.execute_with_retry`` still
-        apply.
+        Photo rows are global, so the workspace is passed as
+        ``Database._ws_id`` itself, uncalled: the reads that go through
+        ``workspace_folders`` resolve it (raising if none is active) before
+        any SQL, and the catalog-wide methods never do. The column lists and
+        the ``db`` module helpers are passed in, the helpers read at call
+        time so tests that patch ``db.commit_with_retry`` /
+        ``db.execute_with_retry`` still apply. The façade methods the
+        listing reads consult (``repositories.photos.FACADE_METHODS``: folder
+        subtrees, the rules engine, the location-status filter, the
+        collection repository factory) are bound from this instance, so
+        patches of those ``Database`` methods still reach them.
         """
         from repositories.photos import PhotoRepository
 
         return PhotoRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
             photo_cols=self.PHOTO_COLS,
             photo_detail_cols=self.PHOTO_DETAIL_COLS,
             execute_with_retry=execute_with_retry,
             commit_with_retry=commit_with_retry,
             inclusive_date_to=_inclusive_date_to,
             keyword_token_clause=_keyword_token_clause,
+            facade=self,
         )
 
     def add_photo(
@@ -3396,7 +3396,7 @@ class Database:
         than on their own pre-check SELECT, which cannot see a concurrent
         insert.
         """
-        photo_id, inserted = self._photos_repository(scoped=False).add(
+        photo_id, inserted = self._photos_repository().add(
             folder_id,
             filename,
             extension,
@@ -3674,104 +3674,6 @@ class Database:
         + " working_copy_failed_source"
     )
 
-    def get_photo(self, photo_id, verify_workspace=False):
-        """Return a single photo by id, including full metadata.
-
-        Args:
-            photo_id: the photo's primary key.
-            verify_workspace: if True, only return the photo when it belongs
-                to a folder visible in the active workspace.  Callers in
-                route handlers should pass True; background jobs that already
-                scope their photo lists can leave it False.
-        """
-        return self._photos_repository(scoped=verify_workspace).get(
-            photo_id, verify_workspace,
-        )
-
-    def get_photo_filenames(self, photo_ids):
-        """Return {photo_id: (folder_id, filename)} for the ids that exist.
-
-        Path resolution needs two columns; selecting whole photo rows for
-        thousands of photos drags along ``exif_data`` and every measurement
-        column for nothing. Ids with no photo row are simply absent, which is
-        how callers detect a deleted photo.
-        """
-        return self._photos_repository(scoped=False).get_filenames(photo_ids)
-
-    def get_existing_photo_ids(self, photo_ids):
-        """Which of ``photo_ids`` have a photo row, in any workspace."""
-        return self._photos_repository(scoped=False).existing_ids(photo_ids)
-
-    def get_photos_by_ids(self, photo_ids, *, include_exif=False):
-        """Return photos for a list of IDs.
-
-        Returns a dict mapping photo_id -> Row for efficient lookup. Large
-        id lists are chunked so the IN-clause stays under SQLite's
-        bound-parameter cap (999 on legacy builds, 32766 modern).
-        """
-        return self._photos_repository(scoped=False).get_by_ids(
-            photo_ids, include_exif=include_exif,
-        )
-
-    def get_photo_folder_statuses(self, photo_ids):
-        """Return ``{photo_id: folder_status}`` for the requested photos."""
-        return self._photos_repository(scoped=False).get_folder_statuses(photo_ids)
-
-    def get_photo_with_folder_path(self, photo_id):
-        """One photo's whole row (``p.*``, BLOBs included) plus ``folder_path``, or None.
-
-        Not workspace-scoped: check the photo against the workspace first.
-        """
-        return self._photos_repository(scoped=False).get_with_folder_path(photo_id)
-
-    def get_photo_file_in_workspace(self, photo_id, workspace_id):
-        """``filename`` and ``folder_path`` of one photo ``workspace_id`` can see, or None.
-
-        ``workspace_id`` is explicit (not the active one), so ``None`` finds
-        nothing instead of raising.
-        """
-        return self._photos_repository(scoped=False).file_in_workspace(photo_id, workspace_id)
-
-    def get_photo_flags_ratings_and_eyes(self, photo_ids):
-        """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""
-        return self._photos_repository(scoped=False).flags_ratings_and_eyes(photo_ids)
-
-    def get_workspace_photos_in_folders(self, folder_ids):
-        """Rows (``id``, ``folder_id``, ``filename``) of the active workspace's photos in ``folder_ids``.
-
-        With no active workspace the list is empty.
-        """
-        return self._photos_repository(scoped=False).in_workspace_folders(
-            folder_ids, self._active_workspace_id,
-        )
-
-    def count_photos(self):
-        """Return photo count for the active workspace.
-
-        Filters out photos whose folder is flagged ``'missing'`` so callers
-        like browse/cull/move see only photos they can actually act on. For
-        a total inventory that survives an unmounted drive (e.g. the
-        dashboard's headline number), use ``count_photos_in_workspace``.
-        """
-        return self._photos_repository().count()
-
-    def count_photos_in_workspace(self):
-        """Return total photo count for the active workspace, including
-        photos in folders flagged ``'missing'``.
-
-        The dashboard wants this number — when a drive unmounts, the photos
-        are still part of the workspace's inventory, just temporarily
-        inaccessible. Falling back to ``count_photos`` (which filters out
-        missing folders) makes the dashboard say "0 photos" for an
-        established workspace, hiding the fact that the data is fine and
-        only the volume is offline.
-        """
-        return self._photos_repository().count_in_workspace()
-
-    def count_catalog_photos(self):
-        """Return the number of photos in the catalog, across every workspace."""
-        return self._photos_repository(scoped=False).count_all()
-
     def count_folders(self):
         """Return folder count for the active workspace."""
         return self._folder_repository().count()
@@ -4001,29 +3903,6 @@ class Database:
             photo_scope_params, subtree, self._coverage_select_fragment(),
         )
 
-    def photos_by_paths(self, paths):
-        """Return {abs_path: photo_id} for any of ``paths`` already in DB.
-
-        Photos are global (not workspace-scoped), so the import-mode plan
-        can ask "do these files already exist in Vireo?" without caring
-        which workspace owns the folder. Paths missing from the result are
-        genuinely new and the next pipeline run will create photo rows for
-        them — that's what makes "Will run (N)" honest in import mode.
-
-        Splits the input by directory so the SQL stays a single
-        ``WHERE f.path = ? AND p.filename IN (...)`` per directory and
-        respects SQLite's parameter cap.
-        """
-        return self._photos_repository(scoped=False).by_paths(paths)
-
-    def get_photo_ids_at_paths(self, paths):
-        """Ids of the photos stored at ``paths`` (one per listed path), in any workspace.
-
-        Leaves the connection's temp-table transaction open; the caller's
-        next commit ends it.
-        """
-        return self._photos_repository(scoped=False).ids_at_paths(paths)
-
     def get_photo_ids_under_path(self, path):
         """Ids of the photos in the folder stored at ``path`` and below it, in any workspace.
 
@@ -4032,10 +3911,6 @@ class Database:
         stored-path prefix with ``\\`` folded to ``/``.
         """
         return self._folder_repository(scoped=False).photo_ids_under(path)
-
-    def get_photo_ids_in_folders(self, folder_ids):
-        """Ids of every photo in the given folders, in any workspace."""
-        return self._photos_repository(scoped=False).ids_in_folders(folder_ids)
 
     def workspace_unlinked_folder_count(self, folder_paths):
         """Count distinct paths in ``folder_paths`` whose folders are not
@@ -4613,156 +4488,21 @@ class Database:
             photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
         )
 
+    @property
+    def locations(self) -> LocationRepository:
+        """The locations domain: ``db.locations.gps_discrepancy_rows(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_location_repository``, exactly as a forwarding
+        wrapper called at that moment would. Accessing it never needs a
+        workspace; the few scoped methods resolve the active one when called.
+        Do not hold the returned repository across ``set_active_workspace``.
+        """
+        return self._location_repository()
+
     def get_photo_location_statuses(self, photo_ids):
         """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
         return self._location_repository().get_photo_statuses(photo_ids)
-
-    def get_calendar_data(
-        self,
-        year,
-        folder_id=None,
-        collection_id=None,
-        rules=None,
-    ):
-        """Return daily photo counts for a given year, scoped to active workspace.
-
-        Metadata filtering arrives exclusively as a universal-filter ``rules``
-        tree (the legacy per-field params were removed in Phase 5 once the
-        filter bar became the only caller).
-        """
-        return self._photos_repository().get_calendar_data(
-            year,
-            folder_id=folder_id,
-            collection_id=collection_id,
-            rules=rules,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            build_query_from_rules=self._build_query_from_rules,
-        )
-
-    def get_photos(
-        self,
-        folder_id=None,
-        collection_id=None,
-        page=1,
-        per_page=50,
-        sort="date",
-        rating_min=None,
-        date_from=None,
-        date_to=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
-        color_label=None,
-        flag=None,
-        location_status=None,
-    ):
-        """Return paginated, filtered photo list scoped to active workspace."""
-        return self._photos_repository().list_page(
-            folder_id=folder_id,
-            collection_id=collection_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            append_location_status_filter=self._append_location_status_filter,
-            photo_sort_clause=self.collections._photo_sort_clause,
-        )
-
-    def get_photo_ids(
-        self,
-        folder_id=None,
-        collection_id=None,
-        sort="date",
-        rating_min=None,
-        date_from=None,
-        date_to=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
-        color_label=None,
-        flag=None,
-        location_status=None,
-    ):
-        """Return all filtered photo IDs scoped to active workspace."""
-        return self._photos_repository().get_ids(
-            folder_id=folder_id,
-            collection_id=collection_id,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            append_location_status_filter=self._append_location_status_filter,
-            photo_sort_clause=self.collections._photo_sort_clause,
-        )
-
-    def get_photo_position(
-        self,
-        photo_id,
-        folder_id=None,
-        collection_id=None,
-        sort="date",
-    ):
-        """Return a photo's zero-based position without materializing all IDs."""
-        return self._photos_repository().get_position(
-            photo_id,
-            folder_id=folder_id,
-            collection_id=collection_id,
-            sort=sort,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            photo_sort_clause=self.collections._photo_sort_clause,
-        )
-
-    def count_filtered_photos(
-        self,
-        folder_id=None,
-        collection_id=None,
-        rating_min=None,
-        date_from=None,
-        date_to=None,
-        keyword=None,
-        keyword_match_case=False,
-        keyword_whole_word=False,
-        color_label=None,
-        flag=None,
-        location_status=None,
-    ):
-        """Return count of photos matching the given filters, scoped to active workspace."""
-        return self._photos_repository().count_filtered(
-            folder_id=folder_id,
-            collection_id=collection_id,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            append_location_status_filter=self._append_location_status_filter,
-        )
 
     def get_browse_summary(
         self,
@@ -4787,9 +4527,6 @@ class Database:
             folder_id=folder_id,
             collection_id=collection_id,
             rules=rules,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_collection_query=self.collections._build_collection_query,
-            build_query_from_rules=self._build_query_from_rules,
             detector_confidence=detector_confidence,
         )
 
@@ -5152,42 +4889,6 @@ class Database:
                 raise
             log.exception("Failed to prune pipeline cache after delete")
 
-    def count_photos_with_companions(self, photo_ids):
-        """How many of ``photo_ids`` carry a companion file in the active
-        workspace.
-
-        The delete dialog offers "Also delete N companion files" off this
-        number, and the browser cannot compute it: a Browse selection can
-        hold photos it has never loaded — every frame of a collapsed stack,
-        or a Select-all that reaches past the loaded page — and a count taken
-        over only the loaded ones hides the checkbox, so a disk delete leaves
-        the companions of the rest behind. Counted here, where every row is
-        known. Chunked for the same reason as ``resolve_photos_for_delete``:
-        callers pass whole selections.
-
-        Ids whose folder is not visible in the active workspace do not count:
-        this endpoint sits next to ``/api/photos/by-ids``, which explicitly
-        scopes its ids to the caller's workspace, and metadata about other
-        workspaces' photos must not leak here either.
-        """
-        return self._photos_repository().count_with_companions(photo_ids)
-
-    def resolve_photos_for_delete(self, photo_ids, include_companions=False):
-        """Resolve photo ids to the rows and paths a delete would remove.
-
-        This is intentionally read-only. Disk-delete callers use it to move
-        originals to Trash *before* deleting their catalog rows, so a failed
-        filesystem operation leaves the photo visible and retryable in Vireo.
-
-        Returns a dict with ``ids``, ``files``, and the private ``_rows`` used
-        by :meth:`delete_photos`. ``files`` retains the long-standing cleanup
-        shape and additionally includes ``folder_id`` for callers that need to
-        group related paths.
-        """
-        return self._photos_repository(scoped=False).resolve_for_delete(
-            photo_ids, include_companions=include_companions,
-        )
-
     def delete_photos(self, photo_ids, include_companions=False, commit=True):
         """Delete photos and all associated data.
 
@@ -5203,7 +4904,7 @@ class Database:
         for invoking ``prune_pipeline_cache_for_ids`` with the union of
         returned ``ids`` after the outer commit succeeds.
         """
-        resolved = self.resolve_photos_for_delete(
+        resolved = self.photos.resolve_for_delete(
             photo_ids, include_companions=include_companions,
         )
         rows = resolved.pop("_rows")
@@ -5232,7 +4933,7 @@ class Database:
         affected_folder_ids = list(folder_counts.keys())
 
         try:
-            self._photos_repository(scoped=False).delete(
+            self._photos_repository().delete(
                 all_ids,
                 folder_counts,
                 deleted_stems_by_folder,
@@ -5348,66 +5049,6 @@ class Database:
         returned repository across a connection swap.
         """
         return self._working_copy_repository()
-
-    def update_photo_sharpness(self, photo_id, sharpness):
-        """Set photo sharpness score."""
-        self._photos_repository(scoped=False).update_sharpness(photo_id, sharpness)
-
-    def update_photo_quality(
-        self,
-        photo_id,
-        subject_sharpness=None,
-        subject_size=None,
-        quality_score=None,
-        sharpness=None,
-    ):
-        """Update all quality-related scores for a photo."""
-        self._photos_repository(scoped=False).update_quality(
-            photo_id,
-            subject_sharpness=subject_sharpness,
-            subject_size=subject_size,
-            quality_score=quality_score,
-            sharpness=sharpness,
-        )
-
-    def get_photo_working_copy_path(self, photo_id):
-        """The photo's ``working_copy_path``, or None (unset or unknown id)."""
-        return self._photos_repository(scoped=False).working_copy_path(photo_id)
-
-    def record_generated_original(self, photo_id, working_copy_path, *,
-                                  tracked, dimensions=None):
-        """Record an on-demand full-resolution render on the photo row and commit.
-
-        ``tracked`` stores ``working_copy_path`` and clears
-        ``working_copy_evicted_mtime``; untracked clears the path and marks it
-        evicted at ``COALESCE(file_mtime, -1)``. ``dimensions`` (``(width,
-        height)``) also sets the photo's size. A plain ``commit()``: it ends
-        any transaction the caller holds.
-        """
-        self._photos_repository(scoped=False).record_generated_original(
-            photo_id, working_copy_path, tracked=tracked, dimensions=dimensions,
-        )
-
-    def clear_working_copy_evictions(self):
-        """Make every evicted working copy eligible for backfill again, and commit.
-
-        Clears ``working_copy_evicted_mtime`` and, for a photo with a
-        companion JPEG, a working-copy failure recorded against its RAW
-        source. The commit retries while SQLite reports locked or busy.
-        """
-        self._photos_repository(scoped=False).clear_working_copy_evictions()
-
-    def set_photo_thumb_path(self, photo_id, thumb_path):
-        """Store the photo's thumbnail filename (``photos.thumb_path``) and commit."""
-        self._photos_repository(scoped=False).set_thumb_path(photo_id, thumb_path)
-
-    def clear_all_photo_thumb_paths(self):
-        """Set every photo's ``thumb_path`` to NULL and commit."""
-        self._photos_repository(scoped=False).clear_all_thumb_paths()
-
-    def clear_photo_thumb_paths(self, photo_ids):
-        """Set ``thumb_path`` to NULL for ``photo_ids`` and commit once."""
-        self._photos_repository(scoped=False).clear_thumb_paths(photo_ids)
 
     def _masks_features_repository(self):
         """Build the masks/features repository on this connection.
@@ -6709,6 +6350,23 @@ class Database:
         catalog-wide, so it needs no active workspace.
         """
         return self._exif_search_repository()
+
+    def _photo_metadata_repository(self):
+        """Build the (catalog-wide) photo camera-metadata reads on this connection."""
+        from repositories.photo_metadata import PhotoMetadataRepository
+
+        return PhotoMetadataRepository(self.conn)
+
+    @property
+    def photo_metadata(self) -> PhotoMetadataRepository:
+        """Export's camera-metadata reads: ``db.photo_metadata.exif_data_by_ids(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_metadata_repository``, so the connection
+        is resolved per use. The reads are catalog-wide, so unlike
+        ``db.photos`` it never needs an active workspace.
+        """
+        return self._photo_metadata_repository()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.

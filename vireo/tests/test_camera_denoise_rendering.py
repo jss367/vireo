@@ -30,7 +30,7 @@ def test_camera_metadata_reaches_all_render_paths(app_and_db, tmp_path):
     metadata = {'EXIF': {'Make': 'NIKON CORPORATION', 'Model': 'NIKON Z 8', 'ISO': 25600}}
     db.conn.execute('UPDATE photos SET exif_data=? WHERE id=?', (json.dumps(metadata), pid))
     db.conn.commit()
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
     client = app.test_client()
     assert client.put(f'/api/photos/{pid}/edit-recipe', json={'recipe': recipe}).status_code == 200
@@ -112,7 +112,7 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     before = renders()
     assert renders() == before
     original_stat = source.stat()
-    paired_before = _paired_render_state_hash(db.get_photo(pid), 1920, 'raw', str(source), recipe)
+    paired_before = _paired_render_state_hash(db.photos.get(pid), 1920, 'raw', str(source), recipe)
     if metadata_source == 'promoted_columns':
         db.conn.execute('UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?',
                         ('NIKON CORPORATION', 'NIKON Z 8', 100, pid))
@@ -122,7 +122,7 @@ def test_cached_renders_refresh_after_camera_metadata_changes(app_and_db, tmp_pa
     db.conn.commit()
     assert source.stat().st_mtime_ns == original_stat.st_mtime_ns
     assert source.stat().st_size == original_stat.st_size
-    paired_after = _paired_render_state_hash(db.get_photo(pid), 1920, 'raw', str(source), recipe)
+    paired_after = _paired_render_state_hash(db.photos.get(pid), 1920, 'raw', str(source), recipe)
     assert paired_before != paired_after
     after = renders()
     for old, new in zip(before, after, strict=True):
@@ -181,8 +181,8 @@ def test_exports_use_promoted_camera_fields_without_full_exif_or_metadata_embedd
     db.conn.commit()
     recipe = {'adjustments': {'denoise_mode': 'camera', 'noise_reduction': 85}}
     db.set_photo_edit_recipe(pid, recipe)
-    detail_photo = db.get_photo(pid)
-    bulk_photo = db.get_photos_by_ids([pid])[pid]
+    detail_photo = db.photos.get(pid)
+    bulk_photo = db.photos.get_by_ids([pid])[pid]
     assert resolve_profile(bulk_photo)['source'] == 'camera'
     assert resolve_profile(bulk_photo) == resolve_profile(detail_photo)
     expected = apply_recipe_to_loaded_image(Image.fromarray(pixels), recipe, camera_metadata=detail_photo)

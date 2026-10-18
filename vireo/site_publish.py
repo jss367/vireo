@@ -218,7 +218,7 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
 
     refs = _photo_refs(published_life_list, published_highlights)
     photo_ids = sorted(refs)
-    photos_map = db.get_photos_by_ids(photo_ids) if photo_ids else {}
+    photos_map = db.photos.get_by_ids(photo_ids) if photo_ids else {}
     recipes = db.edits.get_photo_recipes(photo_ids)
     exif_data = _get_photo_exif_data(db, photo_ids)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}

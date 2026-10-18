@@ -26,7 +26,7 @@ def _total(page):
 
 def test_map_page_uses_filter_bar(live_server, page):
     db = live_server["db"]
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?)",
@@ -153,7 +153,7 @@ def test_browse_picker_hides_review_only_fields(live_server, page):
 
 def test_duplicates_page_filters_members(live_server, page):
     db = live_server["db"]
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET file_hash='dupehash' WHERE id IN (?, ?)",
@@ -188,7 +188,7 @@ def test_duplicates_page_filters_members(live_server, page):
 
 def test_handoff_carries_expression_to_map(live_server, page):
     db = live_server["db"]
-    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id = ?",

@@ -349,7 +349,7 @@ def test_job_sync_accepts_selected_change_ids(app_and_db):
     """POST /api/jobs/sync accepts a checked pending-change subset."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.queue_change(pid, "rating", "4")
     change_id = db.pending_changes.list_all()[0]["id"]
 
@@ -487,7 +487,7 @@ def test_sync_job_publishes_checkpoint_and_outcome_counts(app_and_db, tmp_path, 
     import sync
 
     app, db = app_and_db
-    photos = db.get_photos()[:2]
+    photos = db.photos.list_page()[:2]
     for folder in db.get_folder_tree():
         path = tmp_path / f"sync-folder-{folder['id']}"
         path.mkdir()

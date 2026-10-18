@@ -33,5 +33,5 @@ def test_detail_panel_shows_the_reviewer_note_until_the_user_reflags(live_server
     expect(note).to_be_hidden()
     expect(page.locator(".detail-flag-btn").nth(1)).to_have_class("detail-flag-btn active-flag")
     filename = page.locator("#detailFilename").text_content()
-    pid = next(p["id"] for p in db.get_photos() if p["filename"] == filename)
-    assert db.get_photo(pid)["flag"] == "flagged"
+    pid = next(p["id"] for p in db.photos.list_page() if p["filename"] == filename)
+    assert db.photos.get(pid)["flag"] == "flagged"

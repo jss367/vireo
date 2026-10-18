@@ -50,7 +50,7 @@ def _wait_status(runner, job_id, status):
 
 
 def _second_photo(db, photo_id):
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -69,7 +69,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
 
     app, db, first = client_with_photo
     second = _second_photo(db, first)
-    source_id = db.get_photo(first)["folder_id"]
+    source_id = db.photos.get(first)["folder_id"]
     db.update_folder_counts()
     destination = tmp_path / "moved"
     entered, release = threading.Event(), threading.Event()
@@ -95,7 +95,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         release.set()
         _wait_status(runner, job_id, "paused")
         assert len(copies) == 1
-        moved_folder = db.get_photo(first)["folder_id"]
+        moved_folder = db.photos.get(first)["folder_id"]
         tree = {f["id"]: f for f in db.get_folder_tree()}
         assert tree[source_id]["photo_count"] == 1
         assert tree[moved_folder]["photo_count"] == 1
@@ -174,7 +174,7 @@ def test_lightroom_import_pauses_during_catalog_read(client_with_photo, monkeypa
     from test_importer import _create_test_catalog
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     source = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -269,7 +269,7 @@ def test_full_import_pauses_between_phases(client_with_photo, monkeypatch, phase
     import thumbnails
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     source = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -641,7 +641,7 @@ def test_final_file_write_pauses_after_completion(
         _wait_status(runner, job_id, "paused")
         assert not writing.is_set()
         if endpoint == "capture-time":
-            assert db.get_photo(photo_id)["rating"] == 2
+            assert db.photos.get(photo_id)["rating"] == 2
         else:
             assert output.exists()
         db.conn.execute("UPDATE photos SET rating=3 WHERE id=?", (photo_id,))
@@ -844,8 +844,8 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
         release.set()
         _wait_status(runner, job_id, "paused")
         assert flagged == [first]
-        assert db.get_photo(first)["flag"] == "flagged"
-        assert db.get_photo(second)["flag"] == "none"
+        assert db.photos.get(first)["flag"] == "flagged"
+        assert db.photos.get(second)["flag"] == "none"
         # The first flag's transaction must finish before the next checkpoint.
         db.conn.execute("UPDATE photos SET rating=3 WHERE id=?", (second,))
         db.conn.commit()
@@ -858,7 +858,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
         else:
             assert finished["status"] == "cancelled", finished
             assert flagged == [first]
-            assert db.get_photo(second)["flag"] == "none"
+            assert db.photos.get(second)["flag"] == "none"
     finally:
         release.set()
         runner.cancel_job(job_id)

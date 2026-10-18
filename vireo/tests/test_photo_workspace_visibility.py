@@ -33,7 +33,7 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
         db.set_active_workspace(b)
         expected = [moved, unselected] if keep_visible else [unselected]
         assert db.photo_visibility.visible_photo_ids([moved, unselected, unrelated]) == expected
-        assert bool(db.get_photo(moved, verify_workspace=True)) == keep_visible
+        assert bool(db.photos.get(moved, verify_workspace=True)) == keep_visible
         visible_folders = {row["id"] for row in db.get_folder_tree()}
         assert (destination in visible_folders) == keep_visible
         if keep_visible:
@@ -79,7 +79,7 @@ def test_visibility_write_failure_keeps_original_catalog_and_bytes(tmp_path, mon
         monkeypatch.setattr(PhotoVisibilityRepository, "preserve_for_move", fail)
         with pytest.raises(RuntimeError, match="visibility write failed"):
             move_photos(db, [photo], str(tmp_path / "destination"))
-        assert db.get_photo(photo)["folder_id"] == source
+        assert db.photos.get(photo)["folder_id"] == source
         assert (tmp_path / "source" / "photo.jpg").read_bytes() == b"photo"
         assert not db.conn.execute("SELECT 1 FROM workspace_photos").fetchone()
 
@@ -211,7 +211,7 @@ def test_deleting_folder_does_not_delete_another_workspaces_granted_photo(tmp_pa
         db.photo_visibility.grant(a, [photo])
         db.conn.commit()
         db.delete_folder(folder)
-        assert db.get_photo(photo) is not None
+        assert db.photos.get(photo) is not None
         assert not db.photo_visibility.visible_photo_ids([photo])
         db.set_active_workspace(b)
         assert db.photo_visibility.visible_photo_ids([photo]) == [photo]
@@ -379,7 +379,7 @@ def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
         db.conn.commit()
         _pair_raw_jpeg_companions(db)
         db.conn.commit()
-        assert db.get_photo(jpeg) is None
+        assert db.photos.get(jpeg) is None
         db.set_active_workspace(b)
         assert db.photo_visibility.visible_photo_ids([raw, sibling]) == [raw]
         assert not db.conn.execute('SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?', (b, folder)).fetchone()
@@ -625,7 +625,7 @@ def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_a
     assert untracked.read_bytes() == b"untracked"
     assert not list(destination.iterdir())
     assert db.get_folder(folder)["path"] == str(source)
-    assert db.get_photo(sibling) is not None
+    assert db.photos.get(sibling) is not None
     assert client.post(f"/api/workspaces/{owner}/activate").status_code == 200
     assert client.post("/api/move-folder/preflight", json=body).status_code == 200
 
@@ -675,8 +675,8 @@ def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp
     assert response.status_code == 404
     with pytest.raises(ValueError, match="not linked"):
         db.delete_folder(folder)
-    assert db.get_photo(shared) is not None
-    assert db.get_photo(sibling) is not None
+    assert db.photos.get(shared) is not None
+    assert db.photos.get(sibling) is not None
     assert db.photo_visibility.visible_photo_ids([shared, sibling]) == [shared]
     assert (tmp_path / "missing-root" / "private.jpg").read_bytes() == b"private"
 
@@ -704,7 +704,7 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
             move_photos(db, [photo], str(tmp_path / "destination"))
         assert [tuple(row) for row in db.conn.execute("SELECT * FROM workspace_folders ORDER BY workspace_id,folder_id")] == before
         assert db.photo_visibility.visible_photo_ids([photo, sibling, nested]) == before_visible
-        assert db.get_photo(photo)["folder_id"] == source
+        assert db.photos.get(photo)["folder_id"] == source
         assert (tmp_path / "source" / "moving.jpg").read_bytes() == b"photo"
         assert db.workspace_has_folder_link(destination) == already_linked
         assert db.workspace_has_folder_link(child) == already_linked
@@ -749,10 +749,10 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         assert tree[day]["parent_id"] == parent
         assert gap not in tree
         assert set(db.get_folder_subtree_ids(parent)) == {parent, day}
-        assert set(db.get_photo_ids(folder_id=parent)) == {root_photo, shared}
-        assert {row["id"] for row in db.get_photos(folder_id=parent)} == {root_photo, shared}
+        assert set(db.photos.get_ids(folder_id=parent)) == {root_photo, shared}
+        assert {row["id"] for row in db.photos.list_page(folder_id=parent)} == {root_photo, shared}
         assert db.get_browse_summary(folder_id=parent)["filtered_total"] == 2
-        assert db.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
+        assert db.photos.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
         assert [row["id"] for row in db.get_highlights_candidates(parent, min_quality=.1)] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
         assert counts[parent] == counts[day] == 1

@@ -8,7 +8,7 @@ species keyword on picks while skipping photos that already have it.
 
 
 def _photo_ids(db):
-    return [p['id'] for p in db.get_photos()]
+    return [p['id'] for p in db.photos.list_page()]
 
 
 def test_apply_flags_picks_rejects_and_ignores_species(app_and_db):
@@ -29,8 +29,8 @@ def test_apply_flags_picks_rejects_and_ignores_species(app_and_db):
     data = resp.get_json()
     assert data['ok'] is True
 
-    assert db.get_photo(pick_id)['flag'] == 'flagged'
-    assert db.get_photo(reject_id)['flag'] == 'rejected'
+    assert db.photos.get(pick_id)['flag'] == 'flagged'
+    assert db.photos.get(reject_id)['flag'] == 'rejected'
 
     # No species keyword is tagged on the pick.
     pick_kws = {k['name'] for k in db.get_photo_keywords(pick_id)}
@@ -89,7 +89,7 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
         'species': '',
     })
     assert resp.status_code == 200
-    assert db.get_photo(pid)['flag'] == 'none'
+    assert db.photos.get(pid)['flag'] == 'none'
 
 
 def test_apply_is_idempotent_when_state_unchanged(app_and_db):

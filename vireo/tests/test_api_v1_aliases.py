@@ -14,7 +14,7 @@ def test_api_v1_photo_by_id(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     # pick any existing photo
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
     resp = client.get(f"/api/v1/photos/{pid}", headers=_auth(app))
     assert resp.status_code == 200
@@ -41,7 +41,7 @@ def test_api_v1_collection_photos(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     cid = db.collections.add(
         "Picked", json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     )

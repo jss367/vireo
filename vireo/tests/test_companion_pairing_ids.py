@@ -303,7 +303,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     published = []
 
     def report(old_id, new_id, path):
-        assert writer.get_photo(new_id)["companion_path"] == "IMG_001.jpg"
+        assert writer.photos.get(new_id)["companion_path"] == "IMG_001.jpg"
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             writer.conn.execute("DELETE FROM photos WHERE id=?", (new_id,))
         writer.conn.rollback()
@@ -317,7 +317,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
         tally.report_merged_photos(db, merged)
         assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
         writer.delete_photos([raw_id])
-        assert db.get_photo(raw_id) is None
+        assert db.photos.get(raw_id) is None
     finally:
         writer.close()
         db.close()
@@ -1181,7 +1181,7 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
                     other_folder, "OTHER.jpg", ".jpg", 0, None,
                 )
                 assert replacement == raw_id
-            row = db.get_photo(photo_id)
+            row = db.photos.get(photo_id)
             assert row["filename"] == raw.name
             assert row["companion_path"] == jpeg.name
             published.append((photo_id, path))
@@ -1319,7 +1319,7 @@ def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "shoot"))
 
-    repo = db._photos_repository(scoped=False)
+    repo = db._photos_repository()
     first_id, first_inserted = repo.add(
         folder_id=folder_id, filename="owl.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,

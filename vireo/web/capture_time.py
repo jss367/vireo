@@ -48,7 +48,7 @@ def create_capture_time_blueprint(get_db, json_error):
 
         photos = []
         for pid in photo_ids[:20]:
-            photo = db.get_photo(pid, verify_workspace=True)
+            photo = db.photos.get(pid, verify_workspace=True)
             if photo:
                 photos.append(photo)
         if not photos:

@@ -28,7 +28,7 @@ def test_large_scope_releases_its_read_transaction(db, tmp_path):
         assert not db.conn.in_transaction
         other.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
         other.conn.commit()
-        assert db.get_photo(pid)["rating"] == 4
+        assert db.photos.get(pid)["rating"] == 4
         db.conn.execute("UPDATE photos SET rating=5 WHERE id=?", (pid,))
     finally:
         db.conn.rollback()
@@ -42,7 +42,7 @@ def test_remove_orphans_retains_existing_photo(app_and_db, tmp_path):
     assert response.status_code == 200
     assert response.json["removed"] == 0
     assert (tmp_path / "present/bird.jpg").exists()
-    assert db.get_photo(pid) is not None
+    assert db.photos.get(pid) is not None
 
 
 @pytest.mark.parametrize("network", [False, True])
@@ -57,7 +57,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     canonical_fid = db.add_folder(str(dst), name="destination")
     result = move_photos(db, [pid], str(dst) + "/")
     assert result["moved"] == 1
-    assert db.get_photo(pid)["folder_id"] == canonical_fid
+    assert db.photos.get(pid)["folder_id"] == canonical_fid
     scan(str(dst), db, options=ScanOptions(incremental=True, skip_working_copies=True))
     rows = db.conn.execute("SELECT p.id, f.path FROM photos p JOIN folders f ON p.folder_id=f.id WHERE filename='bird.jpg'").fetchall()
     assert len(rows) == 1
@@ -81,8 +81,8 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     assert response.status_code == 200, response.json
     assert requested == []
     assert response.json["skipped"]
-    assert db.get_photo(alias_pid) is not None
-    assert db.get_photo(winner) is not None
+    assert db.photos.get(alias_pid) is not None
+    assert db.photos.get(winner) is not None
 
 
 def test_refresh_capture_metadata_updates_file_identity(db, tmp_path, monkeypatch):
@@ -116,13 +116,13 @@ def test_batch_metadata_preserves_orientation(db, tmp_path):
     _, pid = seed(db, tmp_path / "photos")
     db.conn.execute("UPDATE photos SET width=6000,height=4000,exif_data=? WHERE id=?", (json.dumps({"EXIF": {"Orientation": 6}}), pid))
     db.conn.commit()
-    assert recipe_source_dimensions(db.get_photo(pid)) == (4000, 6000)
-    assert recipe_source_dimensions(db.get_photos_by_ids([pid], include_exif=True)[pid]) == (4000, 6000)
+    assert recipe_source_dimensions(db.photos.get(pid)) == (4000, 6000)
+    assert recipe_source_dimensions(db.photos.get_by_ids([pid], include_exif=True)[pid]) == (4000, 6000)
 
 
 def test_remove_absent_keyword_has_no_history(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Absent tag")
     response = app.test_client().delete(f"/api/photos/{pid}/keywords/{kid}")
     assert response.status_code == 200
@@ -134,7 +134,7 @@ def test_remove_absent_keyword_has_no_history(app_and_db):
 
 def test_deleted_keyword_does_not_block_undo(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     kid = db.add_keyword("Removed then deleted")
     db.tag_photo(pid, kid)
     client = app.test_client()
@@ -146,7 +146,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
 
 def test_batch_keyword_validates_all_ids_before_mutation(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     before = db.conn.execute("SELECT count(*) FROM edit_history").fetchone()[0]
     response = app.test_client().post("/api/batch/keyword", json={"photo_ids": [pid, 99999999], "name": "Partial batch"})
     assert response.status_code == 403
@@ -190,7 +190,7 @@ def test_paired_jpeg_remains_in_dedup_index(db, tmp_path):
     db.conn.commit()
     assert DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=True).match(source)
     _pair_raw_jpeg_companions(db)
-    assert db.get_photo(raw_id)["companion_path"] == "bird.jpg"
+    assert db.photos.get(raw_id)["companion_path"] == "bird.jpg"
     assert DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=True).match(source) is not None
     import shutil
 
@@ -310,7 +310,7 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (det_id,)).fetchone()[0]
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id=? AND folder_id=?", (ws, fid))
     db.conn.commit()
-    assert db.get_photo(pid, verify_workspace=True) is None
+    assert db.photos.get(pid, verify_workspace=True) is None
     response = app.test_client().post(f"/api/predictions/{pred_id}/{action}", json={})
     assert response.status_code == 404, response.json
     assert db.get_review_status(pred_id, ws) != status
@@ -357,7 +357,7 @@ def test_large_scope_preserves_caller_transaction(db, tmp_path):
     db._scope_clause(range(1, 802))
     assert db.conn.in_transaction
     db.conn.rollback()
-    assert db.get_photo(pid)["rating"] != 4
+    assert db.photos.get(pid)["rating"] != 4
 
 
 @pytest.mark.parametrize("offline", [False, True])
@@ -371,7 +371,7 @@ def test_orphan_removal_requires_accessible_parent(app_and_db, tmp_path, offline
     response = app.test_client().post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
     assert response.status_code == 200
     assert response.json["removed"] == (0 if offline else 1)
-    assert (db.get_photo(pid) is not None) == offline
+    assert (db.photos.get(pid) is not None) == offline
 
 
 @pytest.mark.parametrize("method, suffix, body", [
@@ -440,7 +440,7 @@ def test_detach_preserves_confirmation_without_promoting_mixed_overrides(app_and
     from pathlib import Path
 
     app, db = app_and_db
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
     results = {
         "encounters": [{
             "species": ["Robin", .9], "species_confirmed": True,
@@ -496,7 +496,7 @@ def test_batch_keyword_rolls_back_failed_write(app_and_db, monkeypatch):
     from db import Database
 
     app, db = app_and_db
-    ids = [p["id"] for p in db.get_photos()]
+    ids = [p["id"] for p in db.photos.list_page()]
     kid = db.add_keyword("Atomic batch")
     original = Database.tag_photo
 

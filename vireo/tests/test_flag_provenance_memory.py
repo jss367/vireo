@@ -38,7 +38,7 @@ def history():
 def test_no_matching_batch_ids_preserves_redo_and_avoids_writes():
     ns = load("services/photo_review.py", {"flag_description"}, {"PhotoReviewService"})
     writes = []
-    db = types.SimpleNamespace(get_photos_by_ids=lambda ids: {},
+    db = types.SimpleNamespace(photos=types.SimpleNamespace(get_by_ids=lambda ids: {}),
         photo_review=types.SimpleNamespace(set_flags=lambda *a: writes.append("flags"),
                                           flag_write=lambda: contextlib.nullcontext(False)),
         queue_flag_change_if_enabled=lambda *a, **kw: writes.append("queue"),
@@ -115,7 +115,10 @@ def durable_fixture():
         @property
         def photo_review(self):
             return review_cls(conn, ws[0])
-        def get_photos_by_ids(self, ids):
+        @property
+        def photos(self):
+            return types.SimpleNamespace(get_by_ids=self._photos_by_ids)
+        def _photos_by_ids(self, ids):
             return {r["id"]: dict(r) for r in conn.execute(
                 "SELECT p.id,p.flag FROM photos p JOIN photo_workspace_visibility v "
                 "ON v.photo_id=p.id WHERE v.workspace_id=?", (ws[0],)) if r["id"] in ids}

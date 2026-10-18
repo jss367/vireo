@@ -24,7 +24,7 @@ def _keyword(db, name, *, kind="location", parent=None, lat=None, lng=None,
 
 def test_selective_discard_blocks_row_replacement(app_and_db, monkeypatch):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     db.queue_change(pid, "flag", "flagged")
     change = db.pending_changes.list_all()[0]
     original = SyncRepository.get_by_ids
@@ -57,7 +57,7 @@ def test_selective_discard_blocks_row_replacement(app_and_db, monkeypatch):
 
 def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     ws2 = db.create_workspace("Sibling")
     db.queue_change(pid, "keyword_remove_flat", "Wildlife")
     db.queue_change(pid, "keyword_remove_flat", "Wildlife", workspace_id=ws2)
@@ -77,7 +77,7 @@ def test_selective_discard_counts_repeated_ids_once(app_and_db):
     from db import _SQLITE_PARAM_CHUNK_SIZE
 
     app, db = app_and_db
-    db.queue_change(db.get_photos()[0]["id"], "rating", "4")
+    db.queue_change(db.photos.list_page()[0]["id"], "rating", "4")
     cid = db.pending_changes.list_all()[0]["id"]
     response = app.test_client().post(
         "/api/sync/discard", json={"change_ids": [cid] * (_SQLITE_PARAM_CHUNK_SIZE + 1)},
@@ -94,14 +94,14 @@ def test_sync_and_culling_reject_malformed_ids(app_and_db, endpoint, field, valu
     app, db = app_and_db
     response = app.test_client().post(endpoint, json={field: [value]})
     assert response.status_code == 400
-    assert all(row["flag"] == "none" for row in db.get_photos())
+    assert all(row["flag"] == "none" for row in db.photos.list_page())
     assert db.pending_changes.list_all() == []
     assert db.edit_history.list_recent() == []
 
 
 def test_culling_repeated_ids_produce_one_history_item(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     response = app.test_client().post("/api/culling/apply", json={"keepers": [pid, pid]})
     assert response.status_code == 200
     assert response.get_json()["keepers"] == 1
@@ -114,10 +114,10 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
 
     app, db = app_and_db
     cfg.save({"sync_flags_to_xmp": True})
-    pids = [row["id"] for row in db.get_photos()[:3]]
+    pids = [row["id"] for row in db.photos.list_page()[:3]]
     db.photo_review.set_flag(pids[2], "rejected")
     db.queue_flag_change_if_enabled(pids[2], "rejected")
-    before_flags = {pid: db.get_photo(pid)["flag"] for pid in pids}
+    before_flags = {pid: db.photos.get(pid)["flag"] for pid in pids}
     before_queue = [dict(row) for row in db.pending_changes.list_all()]
     owner, method = {"flag": (PhotoReviewRepository, "set_flag"),
                      "queue": (Database, "queue_flag_change_if_enabled"),
@@ -136,7 +136,7 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
         "/api/culling/apply", json={"keepers": [pids[0]], "rejects": [pids[1]], "unflag": [pids[2]]},
     )
     assert response.status_code == 500
-    assert {pid: db.get_photo(pid)["flag"] for pid in pids} == before_flags
+    assert {pid: db.photos.get(pid)["flag"] for pid in pids} == before_flags
     assert [dict(row) for row in db.pending_changes.list_all()] == before_queue
     assert db.edit_history.list_recent() == []
 
@@ -146,8 +146,8 @@ def test_culling_flags_are_not_committed_before_queueing(app_and_db, monkeypatch
 
     app, db = app_and_db
     cfg.save({"sync_flags_to_xmp": True})
-    pid = db.get_photos()[0]["id"]
-    before = db.get_photo(pid)["flag"]
+    pid = db.photos.list_page()[0]["id"]
+    before = db.photos.get(pid)["flag"]
     original = Database.queue_flag_change_if_enabled
     observed = []
 
@@ -160,7 +160,7 @@ def test_culling_flags_are_not_committed_before_queueing(app_and_db, monkeypatch
     response = app.test_client().post("/api/culling/apply", json={"keepers": [pid]})
     assert response.status_code == 200
     assert observed == [before]
-    assert db.get_photo(pid)["flag"] == "flagged"
+    assert db.photos.get(pid)["flag"] == "flagged"
     assert [(row["change_type"], row["value"]) for row in db.pending_changes.list_all()] == [("flag", "flagged")]
     assert db.edit_history.list_recent()[0]["item_count"] == 1
 
@@ -186,7 +186,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
 
 def test_location_breadcrumb_stops_at_general_parent(app_and_db):
     _, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     general = _keyword(db, "Trips", kind="general")
     country = _keyword(db, "France", parent=general)
     city = _keyword(db, "Paris", parent=country)
@@ -204,7 +204,7 @@ def test_deleting_unknown_keyword_returns_not_found(app_and_db):
 
 def test_duplicate_keyword_suggestion_keeps_earliest_variant(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     first = _keyword(db, "Woodland", kind="general", keyword_id=31)
     later = _keyword(db, "woodland", kind="general", keyword_id=32)
     db.tag_photo(pid, later)
@@ -233,17 +233,17 @@ def test_collection_update_reports_concurrent_deletion(app_and_db, monkeypatch):
 @pytest.mark.parametrize("endpoint", ["remove", "delete-sidecars"])
 def test_missing_originals_requires_active_workspace(app_and_db, monkeypatch, endpoint):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     monkeypatch.setattr(Database, "active_workspace_id", property(lambda self: None))
     response = app.test_client().post(f"/api/photos/missing/{endpoint}", json={"photo_ids": [pid]})
     assert response.status_code == 400
     assert "workspace" in response.get_json()["error"].lower()
-    assert db.get_photo(pid) is not None
+    assert db.photos.get(pid) is not None
 
 
 def test_prediction_suggestions_count_all_keywords_for_same_identity(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     taxon = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank, inat_id) VALUES ('Haliaeetus leucocephalus', 'Bald Eagle', 'species', 5305)"
     ).lastrowid

@@ -1,7 +1,6 @@
 {
   "classify_job/cached_only.py:_finalize_cached_only": 13,
   "db.py:Database.add_prediction": 17,
-  "db.py:Database.get_photos": 14,
   "import_job/batch_loop.py:_ImportBatchLoop.__init__": 13,
   "ingest.py:ingest": 13,
   "move.py:_FolderMove.__init__": 13,
@@ -13,9 +12,7 @@
   "repositories/keyword_provenance.py:_strip_replaced_species": 13,
   "repositories/moves_merge.py:MovesMergeRepository.merge_staged_tree_into_archive": 17,
   "repositories/moves_merge.py:_StagedTreeMerge.__init__": 16,
-  "repositories/photos.py:PhotoRepository.count_filtered": 14,
-  "repositories/photos.py:PhotoRepository.get_ids": 16,
-  "repositories/photos.py:PhotoRepository.list_page": 18,
+  "repositories/photos.py:PhotoRepository.list_page": 14,
   "repositories/predictions.py:PredictionRepository.add": 17,
   "web/export.py:_photo_export_work": 14,
   "web/imports.py:_DuplicateCheckStream.__init__": 13,

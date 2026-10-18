@@ -50,7 +50,7 @@ def test_rollback_does_not_prune_shared_results(db, tmp_path):
     original = path.read_bytes()
     db.delete_photos([photo], commit=False)
     db.rollback()
-    assert db.get_photo(photo)
+    assert db.photos.get(photo)
     assert path.read_bytes() == original
 
 
@@ -151,7 +151,7 @@ def test_legacy_orphan_result_id_is_reserved(db, tmp_path):
 
 def test_delete_cleans_catalog_masks_with_separate_thumbnail_root(app_and_db, tmp_path):
     app, db = app_and_db
-    photo = db.get_photos()[0]["id"]
+    photo = db.photos.list_page()[0]["id"]
     thumbs = tmp_path / "separate-volume" / "thumbs"
     thumbs.mkdir(parents=True)
     app.config["THUMB_CACHE_DIR"] = str(thumbs)
@@ -347,7 +347,7 @@ def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_p
         assert resume.wait(synchronization_timeout(5))
         return str(render)
     monkeypatch.setattr(media, "_prepared_full_resolution_render", prepared)
-    photo = db.get_photos()[0]["id"]
+    photo = db.photos.list_page()[0]["id"]
     def read():
         with app.test_client() as client:
             response = client.get(f'/photos/{photo}/original')
@@ -809,7 +809,7 @@ def test_split_layout_accounts_for_owned_paths_and_configured_huggingface_cache(
 
 def test_storage_measures_exact_external_local_copy_without_its_siblings(app_and_db, tmp_path, tmp_path_factory):
     app, db = app_and_db
-    folder = db.get_photos()[0]["folder_id"]
+    folder = db.photos.list_page()[0]["folder_id"]
     copy = tmp_path_factory.mktemp("external-volume") / "managed-copy"
     app.config["THUMB_CACHE_DIR"] = str(tmp_path / "other" / "thumbs")
     db.conn.execute("INSERT INTO local_folders (root_folder_id, state) VALUES (?, 'active')", (folder,))

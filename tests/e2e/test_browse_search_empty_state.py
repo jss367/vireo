@@ -10,11 +10,11 @@ def test_browse_init_reads_folder_health_from_single_snapshot(
     live_server, monkeypatch
 ):
     """Every health-sensitive init read must share one SQLite snapshot."""
-    from db import Database
+    from repositories.photos import PhotoRepository
 
     reached_photo_query = threading.Event()
     release_photo_query = threading.Event()
-    original_get_photos = Database.get_photos
+    original_get_photos = PhotoRepository.list_page
 
     def _hold_after_photos_read(self, *args, **kwargs):
         rows = original_get_photos(self, *args, **kwargs)
@@ -22,7 +22,7 @@ def test_browse_init_reads_folder_health_from_single_snapshot(
         assert release_photo_query.wait(timeout=5)
         return rows
 
-    monkeypatch.setattr(Database, "get_photos", _hold_after_photos_read)
+    monkeypatch.setattr(PhotoRepository, "list_page", _hold_after_photos_read)
 
     def _request_init():
         with urlopen(
@@ -2125,7 +2125,7 @@ def test_flag_quick_filters_show_picks_and_rejects(live_server, page):
     """Browse offers one-click filters for picked and rejected photos."""
     url = live_server["url"]
     db = live_server["db"]
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pick_id = photos[0]["id"]
     reject_id = photos[1]["id"]
     db.photo_review.set_flag(pick_id, "flagged")

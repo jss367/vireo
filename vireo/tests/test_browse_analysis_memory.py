@@ -60,15 +60,15 @@ def catalog(photo_source=None):
     """)
     repo = cls()
     repo.conn, repo.workspace_id = c, 1
+    repo.get_folder_subtree_ids = lambda fid: [fid]
+    repo._build_collection_query = lambda cid: ("", "", "WHERE p.id=?", [2]) if cid == 1 else None
+    repo._build_query_from_rules = lambda rules: ("", "", "WHERE p.id=?", [rules["id"]])
     return c, repo
 
 
 def summary(repo, floor=0.2, **kwargs):
     return repo.get_browse_summary(
         **kwargs,
-        get_folder_subtree_ids=lambda fid: [fid],
-        build_collection_query=lambda cid: ("", "", "WHERE p.id=?", [2]) if cid == 1 else None,
-        build_query_from_rules=lambda rules: ("", "", "WHERE p.id=?", [rules["id"]]),
         detector_confidence=lambda: floor,
     )
 

@@ -262,7 +262,7 @@ def release_photo_original(
     """
     freed = 0
     with original_preparation_guard(vireo_dir, photo_id):
-        photo = db.get_photo(photo_id, verify_workspace=verify_workspace)
+        photo = db.photos.get(photo_id, verify_workspace=verify_workspace)
         row = db.caches.offline_original_get(photo_id)
         if photo is None or row is None:
             return {"status": "not_cached", "bytes": 0}
@@ -288,7 +288,7 @@ def release_photo_original(
         try:
             db.begin_immediate()
             with db.transaction():
-                current = db.get_photo(photo_id, verify_workspace=verify_workspace)
+                current = db.photos.get(photo_id, verify_workspace=verify_workspace)
                 cached = db.caches.offline_original_get(photo_id)
                 current_folder = db.get_folder(photo["folder_id"])
                 if (not photo_source_matches(photo, current)

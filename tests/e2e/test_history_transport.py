@@ -41,10 +41,10 @@ def test_pending_browser_writes_guard_history_and_refresh_after_save(live_server
     _held_route(page, held).continue_()
     page.evaluate('window.historyTestWrite')
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
-    assert live_server['db'].get_photo(photo_id)['flag'] == 'rejected'
+    assert live_server['db'].photos.get(photo_id)['flag'] == 'rejected'
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    assert live_server['db'].get_photo(photo_id)['flag'] == 'flagged'
+    assert live_server['db'].photos.get(photo_id)['flag'] == 'flagged'
 
 
 def test_failed_native_write_releases_history_guard(live_server, page):
@@ -69,7 +69,7 @@ def test_failed_native_write_releases_history_guard(live_server, page):
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    assert live_server['db'].get_photo(photo_id)['flag'] == 'none'
+    assert live_server['db'].photos.get(photo_id)['flag'] == 'none'
 
 
 def test_first_lightbox_adjustment_enables_undo(live_server, page):
@@ -108,7 +108,7 @@ def test_pending_cache_save_blocks_undo(live_server, page):
     }''')
     expect(page.locator('#historyUndoBtn')).to_be_disabled()
     page.evaluate('doUndo()')
-    assert live_server['db'].get_photo(photo_id)['flag'] == 'rejected'
+    assert live_server['db'].photos.get(photo_id)['flag'] == 'rejected'
     _held_route(page, held).abort()
     page.evaluate('window.pendingCacheSave')
     expect(page.locator('#historyUndoBtn')).to_be_enabled()

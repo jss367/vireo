@@ -283,7 +283,7 @@ def test_remove_orphans(tmp_path):
 
     remove_orphans(db, [pid])
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo is None
 
 
@@ -1043,7 +1043,7 @@ def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     assert body["removed"] == 1
 
     # The DB row is gone …
-    assert db.get_photo(pid) is None
+    assert db.photos.get(pid) is None
     # … and so is the cached thumbnail. A future photo that inherits
     # this ID will get a fresh thumbnail from its own source.
     assert not thumb_file.exists(), (

@@ -2790,7 +2790,7 @@ def test_grouping_and_photo_edit_undo_in_order_in_browser(live_server, page):
     expect(page.locator('#undoMsg')).to_have_text('Set flag to flagged')
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#undoMsg')).to_have_text('Burst detached from encounter')
-    assert db.get_photo(ids[0])['flag'] == 'none'
+    assert db.photos.get(ids[0])['flag'] == 'none'
     expect(page.get_by_test_id('reject-encounter')).to_have_count(2)
     page.locator('#historyUndoBtn').click()
     expect(page.get_by_test_id('reject-encounter')).to_have_count(1)
@@ -2914,7 +2914,7 @@ def test_undo_refreshes_open_lightbox_flag(live_server, page):
     expect(page.locator('#lightboxFlagBtn')).to_have_attribute('aria-pressed', 'true')
     page.keyboard.press('Meta+z')
     expect(page.locator('#lightboxFlagBtn')).to_have_attribute('aria-pressed', 'false')
-    assert db.get_photo(ids[0])['flag'] == 'none'
+    assert db.photos.get(ids[0])['flag'] == 'none'
 
 
 def test_group_review_removal_is_undoable_without_a_flag_change(live_server, page):
@@ -2958,7 +2958,7 @@ def test_rapid_review_refreshes_saved_decisions_after_history(live_server, page)
     # Staged local choices must not undo saved database edits behind the page.
     page.evaluate("decideCurrent('pick')")
     page.evaluate('doUndo()')
-    assert live_server['db'].get_photo(rejected)['flag'] == 'rejected'
+    assert live_server['db'].photos.get(rejected)['flag'] == 'rejected'
 
 
 @pytest.mark.parametrize('scoped', [False, True])
@@ -3020,7 +3020,7 @@ def test_rapid_review_can_retry_a_failed_history_refresh(live_server, page):
     expect(retry).to_be_visible()
     page.evaluate('doRedo()')
     expect(page.get_by_text('Rapid Review could not load. Use Retry before undoing or redoing saved edits.', exact=True)).to_be_visible()
-    assert live_server['db'].get_photo(rejected)['flag'] == 'none'
+    assert live_server['db'].photos.get(rejected)['flag'] == 'none'
     page.unroute('**/api/pipeline/results')
     retry.click()
     page.wait_for_function('rapid.seeded && !rapid.applying && !rapid.loadError')
@@ -3085,7 +3085,7 @@ def test_cull_pending_analysis_blocks_history_until_response(live_server, page, 
     }''', analysis)
     expect(page.locator('#applyBtn')).to_be_disabled()
     assert page.evaluate('doUndo()') is False
-    assert live_server['db'].get_photo(ids[0])['flag'] == 'flagged'
+    assert live_server['db'].photos.get(ids[0])['flag'] == 'flagged'
     for _ in range(100):
         if held:
             break
@@ -3099,7 +3099,7 @@ def test_cull_pending_analysis_blocks_history_until_response(live_server, page, 
     page.wait_for_function('cullAnalysisPending === 0 && _reflowTimer == null && _regroupTimer == null')
     expect(page.locator('#applyBtn')).to_be_enabled()
     assert page.evaluate('doUndo()') is True
-    assert live_server['db'].get_photo(ids[0])['flag'] == 'none'
+    assert live_server['db'].photos.get(ids[0])['flag'] == 'none'
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\breview\b'))
 
 
@@ -3128,7 +3128,7 @@ def test_stale_undo_refreshes_the_advertised_action_without_undoing_another(live
     button.click()
     expect(button).to_be_enabled()
     expect(button).to_have_attribute('title', re.compile('flag', re.I))
-    assert db.get_photo(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
     button.click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    assert db.get_photo(ids[0])['flag'] == 'none'
+    assert db.photos.get(ids[0])['flag'] == 'none'

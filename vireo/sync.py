@@ -76,7 +76,7 @@ def _resolve_xmp_paths(db, photo_ids, folder_paths=None):
         # folder resolve to a valid sidecar path on the next sync.
         granted_paths = db.get_sync_only_photo_paths()
     paths = {}
-    for photo_id, (folder_id, filename) in db.get_photo_filenames(photo_ids).items():
+    for photo_id, (folder_id, filename) in db.photos.get_filenames(photo_ids).items():
         base = os.path.splitext(filename)[0]
         folder_path = folders.get(folder_id) or granted_paths.get(photo_id, "")
         paths[photo_id] = os.path.join(folder_path, base + ".xmp")
@@ -1139,7 +1139,7 @@ def sync_from_xmp(db, photo_ids):
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
     for photo_id in photo_ids:
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         if not photo:
             continue
 

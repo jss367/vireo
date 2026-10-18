@@ -59,7 +59,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
     """
     import cv2
 
-    photos = db.get_photos_by_ids(photo_ids)
+    photos = db.photos.get_by_ids(photo_ids)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     if any(pid not in photos or photos[pid]["folder_id"] not in folders for pid in photo_ids):
         raise ValueError("A selected photo is no longer available in this workspace")
