@@ -213,7 +213,7 @@ def create_moves_blueprint(get_db, json_error):
             return json_error(str(exc))
 
         request_db = get_db()
-        folder = request_db.get_folder(folder_id)
+        folder = request_db.folders.get(folder_id)
         if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 

@@ -39,7 +39,7 @@ def test_restart_in_place_reuses_catalog_and_restores_settings(import_service, t
     workspace_count = len(db.workspaces.list_all())
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "recursive": False, "tags": ["Birding"],
-        "location_from_gps": False, "after_import": None,
+        "location_choices": [], "after_import": None,
         "created_workspace": {"id": db.active_workspace_id, "name": "Original"},
     })
 
@@ -340,7 +340,6 @@ def import_service(tmp_path, monkeypatch):
         invalidate_missing_originals=Mock(),
         enqueue_process_job=Mock(),
         chain_after_move=Mock(),
-        bulk_gps_location_payload=Mock(),
     )
     yield service, db, runner
     assert runner.shutdown(timeout=30)

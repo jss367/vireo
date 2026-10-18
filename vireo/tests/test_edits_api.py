@@ -2337,7 +2337,7 @@ def test_sync_preview_reports_a_location_keyword_already_in_xmp(client_with_phot
     db.queue_change(photo_id, "location", "effective")
 
     photo = db.photos.get(photo_id)
-    folder = db.get_folder(photo["folder_id"])["path"]
+    folder = db.folders.get(photo["folder_id"])["path"]
     editor = SidecarEditor(os.path.join(folder, "test.xmp"))
     editor.set_location_keywords(["France", "Pont de Gau"])
     editor.commit()
@@ -2372,7 +2372,7 @@ def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
     db.queue_change(photo_id, "location", "effective")
 
     photo = db.photos.get(photo_id)
-    folder = db.get_folder(photo["folder_id"])["path"]
+    folder = db.folders.get(photo["folder_id"])["path"]
     xmp_path = os.path.join(folder, "test.xmp")
     # Simulate a sidecar where Vireo previously wrote the location but the
     # user (or Lightroom) later rewrote the hierarchy in a different case.
@@ -2408,7 +2408,7 @@ def test_sync_preview_reports_removing_location_keywords_when_disabled(
     db.queue_change(photo_id, "location", "effective")
 
     photo = db.photos.get(photo_id)
-    folder = db.get_folder(photo["folder_id"])["path"]
+    folder = db.folders.get(photo["folder_id"])["path"]
     editor = SidecarEditor(os.path.join(folder, "test.xmp"))
     editor.set_location_keywords(["France", "Pont de Gau"])
     editor.commit()
@@ -2639,7 +2639,7 @@ def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
     db.queue_change(photo_id, "location", "effective")
 
     photo = db.photos.get(photo_id)
-    folder = db.get_folder(photo["folder_id"])["path"]
+    folder = db.folders.get(photo["folder_id"])["path"]
     xmp_path = os.path.join(folder, "test.xmp")
     editor = SidecarEditor(xmp_path)
     editor.set_location_keywords(["France", "Pont de Gau"])

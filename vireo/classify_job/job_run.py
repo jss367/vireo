@@ -434,7 +434,7 @@ class _ClassifyJobRun:
         self.model_type = active_model.get("model_type", "bioclip")
         self.model_name = params.model_name or self.effective_name
 
-        self.folders = {f["id"]: f["path"] for f in self.db.get_folder_tree()}
+        self.folders = {f["id"]: f["path"] for f in self.db.folders.tree()}
 
     def load_taxonomy_and_labels(self) -> None:
         """Phase 2: Load taxonomy. Phase 3: Load labels and fingerprint them."""

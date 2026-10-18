@@ -676,7 +676,7 @@ def _still_offline_folder_ids_of(thread_db, folder_ids) -> set:
     ids = [int(fid) for fid in folder_ids]
     probe_cache: dict = {}
     still_offline: set = set()
-    for fid, path in thread_db.get_folder_paths(ids).items():
+    for fid, path in thread_db.folders.paths_by_id(ids).items():
         if not path:
             still_offline.add(fid)
             continue

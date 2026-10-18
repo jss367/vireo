@@ -312,10 +312,10 @@ class _ThumbPass:
             filename = photo["filename"]
         except (KeyError, IndexError):
             return False
-        folder = self.thread_db.get_folder(folder_id)
+        folder = self.thread_db.folders.get(folder_id)
         if folder is None:
             return False
-        # ``Database.get_folder`` returns a ``sqlite3.Row`` whose
+        # ``FolderRepository.get`` returns a ``sqlite3.Row`` whose
         # columns are the SELECT list; use subscript access (``Row``
         # supports ``__getitem__`` but not ``dict.get``). A missing or
         # NULL path column — unusual, but survivable — leaves the
@@ -377,7 +377,7 @@ class _ThumbPass:
         if thumb.recipe or self._is_raw(canonical_path):
             thumb.detail_photo = self.thread_db.photos.get(thumb.photo_id)
             if thumb.detail_photo:
-                folder_row = self.thread_db.get_folder(thumb.detail_photo["folder_id"])
+                folder_row = self.thread_db.folders.get(thumb.detail_photo["folder_id"])
                 thumb.folders = (
                     {folder_row["id"]: folder_row["path"]}
                     if folder_row else {}
@@ -433,7 +433,7 @@ class _ThumbPass:
         coll_photos = self.filter_excluded(
             self.thread_db.collections.get_photos(run.collection_id, per_page=999999)
         )
-        folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in self.thread_db.folders.tree()}
         total = len(coll_photos)
         for photo in coll_photos:
             if run.control.should_abort(run.abort):
@@ -724,7 +724,7 @@ def previews_stage(
         else:
             photos = thread_db.photos.list_page(per_page=999999)
 
-        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
         total = len(photos)
         generated, skipped, failed = _generate_previews(
             run, thread_db, photos, folders,

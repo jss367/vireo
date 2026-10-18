@@ -3732,7 +3732,7 @@ def test_relocate_developed_dir_merges_into_existing_target(tmp_path):
     """When target exists, merge source files in; don't strand them at old key.
 
     Regression: relocate_developed_dir used to bail out when the target
-    subdir existed, but `db._merge_into_existing` (hit by
+    subdir existed, but `db.folders.merge_into_existing` (hit by
     /api/folders/<id>/relocate when the new path is already tracked)
     reassigns source photos to the target folder — their developed files
     belong under the target's key after the merge. The previous behaviour

@@ -424,8 +424,8 @@
     verify_by_hash: !!cfg.verify_by_hash,
     trust_likely_duplicates: !!cfg.trust_likely_duplicates,
     after_import: cfg.after_import == null ? null : cfg.after_import,
-    tags: Array.isArray(cfg.tags) ? cfg.tags.slice() : [],
-    location_from_gps: !!cfg.location_from_gps,
+    tags: Array.isArray(cfg.tags) ? cfg.tags.slice() : [], location_from_gps: !!cfg.location_from_gps,
+    location_choices: Array.isArray(cfg.location_choices) ? cfg.location_choices.slice() : [],
     allow_missing_exiftool: !!cfg.allow_missing_exiftool,
     parent_import_job_id: job.id,
   };

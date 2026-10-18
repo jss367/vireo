@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import services.local_workspace as local_workspace
 from db import Database
+from repositories.folders import FolderRepository
 from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
@@ -1131,7 +1132,7 @@ def test_restore_catalog_is_atomic_across_merge_and_state_cleanup(local_workspac
     # _restore_catalog performs a self-healing merge, a two-phase rename to
     # avoid folders.path UNIQUE trips, a stray-row rebase, and drops the
     # local-workspace state — all inside a single BEGIN IMMEDIATE. If
-    # _merge_into_existing were to commit mid-flow, a later failure would
+    # folders.merge_into_existing were to commit mid-flow, a later failure would
     # leave a partially-restored catalog with local-workspace state still
     # present. Simulate a failure after the first merge and assert the
     # rollback undoes the merge too.
@@ -1145,21 +1146,21 @@ def test_restore_catalog_is_atomic_across_merge_and_state_cleanup(local_workspac
     assert interloper_id != env["child_id"]
     env["db"].add_photo(interloper_id, "imported.jpg", ".jpg", 8, 0.0)
 
-    # Fail _relink_parents_by_path, which runs AFTER the self-heal merge
-    # (and after every rebase). If _merge_into_existing had committed
+    # Fail folders.relink_parents_by_path, which runs AFTER the self-heal merge
+    # (and after every rebase). If folders.merge_into_existing had committed
     # mid-flow, the interloper row would be gone after rollback and the
     # catalog would be inconsistent with the still-present local-workspace
     # state. Because it now runs inside the caller's transaction, rollback
     # unwinds the merge too.
-    original_relink = env["db"]._relink_parents_by_path
+    original_relink = FolderRepository.relink_parents_by_path
 
     def failing_relink(*args, **kwargs):
         raise RuntimeError("simulated failure after merge")
 
-    monkeypatch.setattr(env["db"], "_relink_parents_by_path", failing_relink)
+    monkeypatch.setattr(FolderRepository, "relink_parents_by_path", failing_relink)
     with pytest.raises(RuntimeError, match="simulated failure"):
         discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
-    monkeypatch.setattr(env["db"], "_relink_parents_by_path", original_relink)
+    monkeypatch.setattr(FolderRepository, "relink_parents_by_path", original_relink)
 
     # The interloper row survived the rollback: the self-heal merge did
     # NOT commit ahead of the rest of the restore.
@@ -2391,7 +2392,7 @@ def test_workspace_sync_proceeds_while_observational_job_runs(
     folder_id = db.add_folder(str(source), name="photos")
     workspace_id = db._active_workspace_id
     stage_workspace(db, workspace_id, str(vireo_dir))
-    local_path = Path(db.get_folder(folder_id)["path"])
+    local_path = Path(db.folders.get(folder_id)["path"])
     (local_path / "bird.jpg").write_bytes(b"edited")
     db.close()
 

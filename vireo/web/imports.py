@@ -25,6 +25,7 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
+from services.import_locations import MAX_SUGGESTION_PATHS, stream_location_suggestions
 from services.imports import ImportFailure, ImportService
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -94,7 +95,7 @@ def _all_folders(db):
     see this tree". A transfer is defined by a path on disk, so resolve it
     from the path.
     """
-    return db.get_all_folders()
+    return db.folders.all_rows()
 
 
 def _staging_folder_ids(db, staging_destination):
@@ -794,7 +795,7 @@ class _ImportFullRun:
         job = self.job
         self.thread_db = self.ctx.thread_db()
         # Check folder health before scanning to prevent duplicate imports
-        if self.thread_db.check_folder_health():
+        if self.thread_db.folders.check_health():
             self.invalidate_missing_originals()
         job["_start_time"] = time.time()
 
@@ -1005,7 +1006,7 @@ class _ImportFullRun:
             # filed them under the catalog's spelling of the root, which
             # differs from ``scan_target`` when the user typed a case or
             # symlink alias of an already-cataloged folder; match that.
-            photo_ids = thread_db.get_photo_ids_under_path(
+            photo_ids = thread_db.folders.photo_ids_under(
                 catalog_scan_root(thread_db, self.scan_target)
             )
         return photo_ids
@@ -1275,7 +1276,6 @@ def create_imports_blueprint(
     invalidate_missing_originals,
     enqueue_process_job,
     chain_after_move,
-    bulk_gps_location_payload,
     guard_move_folder,
     sync_job_lock,
 ):
@@ -1294,7 +1294,6 @@ def create_imports_blueprint(
         invalidate_missing_originals=invalidate_missing_originals,
         enqueue_process_job=enqueue_process_job,
         chain_after_move=chain_after_move,
-        bulk_gps_location_payload=bulk_gps_location_payload,
     )
 
     def import_response(result):
@@ -1790,6 +1789,37 @@ def create_imports_blueprint(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @blueprint.route("/api/import/location-suggestions", methods=["POST"])
+    def api_import_location_suggestions():
+        """Stream suggested locations for the files an import would bring in.
+
+        Accepts ``{"paths": [...]}`` (the preview's source files) and streams
+        GPS-reading progress, then the files grouped by GPS cell with one
+        suggested place per group; see
+        ``services.import_locations.stream_location_suggestions``. Nothing is
+        written except the shared reverse-geocode cache.
+        """
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths")
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or any(not isinstance(path, str) or not path for path in paths)
+        ):
+            return json_error("paths must be a non-empty list of file paths", 400)
+        if len(paths) > MAX_SUGGESTION_PATHS:
+            return json_error(
+                f"at most {MAX_SUGGESTION_PATHS:,} files can be checked for locations",
+                400,
+            )
+        import config as cfg
+
+        return Response(
+            stream_location_suggestions(db_path, paths, cfg.load()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @blueprint.route("/api/import/collection-preview", methods=["POST"])
     def api_import_collection_preview():
         """Return preview data for photos in a collection."""
@@ -1810,7 +1840,7 @@ def create_imports_blueprint(
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
 
-        folder_rows = db.get_all_folders()
+        folder_rows = db.folders.all_rows()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
 
         files = []
@@ -1898,7 +1928,7 @@ def create_imports_blueprint(
             # "the archive" — so the callout's "N photos" matches what the
             # merge actually considers present. Pure catalog read; no on-disk
             # check.
-            return db.count_present_photos_under_path(archive_path)
+            return db.folders.present_photo_count_under(archive_path)
 
         managed_archives = []
         managed_archive = None

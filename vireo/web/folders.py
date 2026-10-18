@@ -72,14 +72,14 @@ def create_folders_blueprint(
         if include_workspace:
             db.begin()
             try:
-                folders = [dict(f) for f in db.get_folder_tree()]
+                folders = [dict(f) for f in db.folders.tree()]
                 active_workspace_id = db.require_workspace_id()
             finally:
                 db.rollback()
             return jsonify(
                 {"folders": folders, "active_workspace_id": active_workspace_id}
             )
-        folders = db.get_folder_tree()
+        folders = db.folders.tree()
         return jsonify([dict(f) for f in folders])
 
     @blueprint.route("/api/folders/missing")
@@ -89,7 +89,7 @@ def create_folders_blueprint(
         # snapshot so clients can compare this response with /api/browse/init
         # independent of network delivery order.
         db.begin()
-        missing = db.get_missing_folders()
+        missing = db.folders.missing()
         health_version = db.get_folder_health_version()
         response = jsonify([dict(f) for f in missing])
         response.headers["X-Vireo-Folder-Health-Version"] = str(health_version)
@@ -99,7 +99,7 @@ def create_folders_blueprint(
     @blueprint.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
         db = get_db()
-        # ``check_folder_health()`` scans every folder in the DB and returns a
+        # ``folders.check_health()`` scans every folder in the DB and returns a
         # global change count, but the client needs to know whether the
         # ACTIVE workspace's missing set changed. Snapshot the workspace-
         # scoped missing IDs before and after so the client's null-baseline
@@ -108,8 +108,8 @@ def create_folders_blueprint(
         # flip — which must NOT reset the active Browse — from a real
         # active-workspace transition that still needs to notify Browse
         # (Codex review r3686191131).
-        ws_missing_before = {f["id"] for f in db.get_missing_folders()}
-        changed = db.check_folder_health()
+        ws_missing_before = {f["id"] for f in db.folders.missing()}
+        changed = db.folders.check_health()
         # A folder flipping ok→missing turns every one of its photos into a
         # ghost, and missing→ok resurrects them. Either transition would
         # otherwise be masked by a ready /api/photos/missing cache until the
@@ -117,7 +117,7 @@ def create_folders_blueprint(
         if changed:
             invalidate_missing_originals()
         db.begin()
-        missing = db.get_missing_folders()
+        missing = db.folders.missing()
         ws_missing_after = {f["id"] for f in missing}
         health_version = db.get_folder_health_version()
         response = jsonify({
@@ -139,7 +139,7 @@ def create_folders_blueprint(
         absolute paths from folders hidden in this workspace don't leak.
         """
         db = get_db()
-        folder = db.get_folder(folder_id)
+        folder = db.folders.get(folder_id)
         if not folder:
             return json_error("folder not found", 404)
         if folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
@@ -166,7 +166,7 @@ def create_folders_blueprint(
         subtree; bursts never span folders.
         """
         db = get_db()
-        folder = db.get_folder(folder_id)
+        folder = db.folders.get(folder_id)
         if not folder or folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
             return json_error("folder not found", 404)
         try:
@@ -193,7 +193,7 @@ def create_folders_blueprint(
     def api_folder_workspaces(folder_id):
         """List workspaces in which a Browse-visible folder appears."""
         db = get_db()
-        folder = db.get_folder(folder_id)
+        folder = db.folders.get(folder_id)
         if not folder:
             return json_error("folder not found", 404)
 
@@ -266,7 +266,7 @@ def create_folders_blueprint(
                     409,
                 )
             # Staging a descendant rebases its folders.path under local-folders/,
-            # so a folders.path subtree scan (as db.relocate_folder does) no
+            # so a folders.path subtree scan (as db.folders.relocate does) no
             # longer sees it — while local_folder_mappings.source_path still
             # points at the pre-relocation location. Without this check the
             # relocate would rewrite the ancestor while the manifest keeps
@@ -292,14 +292,14 @@ def create_folders_blueprint(
             # are nested under developed_folder_key(folder_path), so a path
             # change invalidates the old key and would silently regress export
             # to RAW until the user re-developed.
-            old_row = db.get_folder(folder_id)
+            old_row = db.folders.get(folder_id)
             old_path = old_row["path"] if old_row else ""
 
             try:
-                cascaded = db.relocate_folder(folder_id, new_path)
+                cascaded = db.folders.relocate(folder_id, new_path)
             except ValueError as e:
                 if old_row and old_row["status"] == "missing":
-                    current_row = db.get_folder(folder_id)
+                    current_row = db.folders.get(folder_id)
                     if current_row and current_row["status"] == "ok":
                         invalidate_missing_originals()
                 return json_error(str(e), 409)
@@ -386,7 +386,7 @@ def create_folders_blueprint(
         body = request.get_json(silent=True) or {}
         incremental = bool(body.get("incremental", False))
         db = get_db()
-        folder = db.get_folder(folder_id)
+        folder = db.folders.get(folder_id)
         if not folder:
             return json_error("folder not found", 404)
         # Folders are global but scans emit workspace-scoped data (predictions,
@@ -473,7 +473,7 @@ def create_folders_blueprint(
         # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
         # patched.
         norm_paths = [os.path.normpath(p) for p in paths]
-        all_rows = db.get_all_folders()
+        all_rows = db.folders.all_rows()
         known_norm = {os.path.normpath(r["path"]) for r in all_rows}
 
         revealed = []

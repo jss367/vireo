@@ -31,7 +31,7 @@ def _set_onnx_providers(monkeypatch, providers):
 
 
 def _collection_with_photo_count(db, count):
-    fid = db.get_folder_tree()[0]["id"]
+    fid = db.folders.tree()[0]["id"]
     photo_ids = [
         r["id"]
         for r in db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
@@ -488,7 +488,7 @@ def test_sync_job_publishes_checkpoint_and_outcome_counts(app_and_db, tmp_path, 
 
     app, db = app_and_db
     photos = db.photos.list_page()[:2]
-    for folder in db.get_folder_tree():
+    for folder in db.folders.tree():
         path = tmp_path / f"sync-folder-{folder['id']}"
         path.mkdir()
         db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(path), folder['id']))

@@ -186,7 +186,7 @@ def test_reveal_invalid_photo_id_returns_400(app_and_db):
 def test_reveal_folder_macos(app_and_db):
     """Passing {folder_id} reveals the folder itself on macOS (open -R <dir>)."""
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "darwin"), \
          patch("web.system.subprocess.run") as run:
@@ -205,7 +205,7 @@ def test_reveal_folder_macos(app_and_db):
 def test_reveal_folder_linux_opens_folder(app_and_db):
     """On Linux, passing {folder_id} opens the folder itself with xdg-open."""
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "linux"), \
          patch("web.system.subprocess.run") as run:
@@ -225,7 +225,7 @@ def test_reveal_folder_windows_opens_folder(app_and_db):
     (no /select, since we want to show the folder's contents, not its parent).
     """
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     # Only override the answer for the target folder; letting the patch
     # blanket-return True for os.path.isdir would break os.makedirs, which
     # the DB layer uses to create per-test scratch dirs.
@@ -252,7 +252,7 @@ def test_reveal_folder_windows_missing_reports_error(app_and_db):
     ignored, so preflight is the only signal).
     """
     app, db = app_and_db
-    folder = db.get_folder_tree()[0]
+    folder = db.folders.tree()[0]
     real_isdir = os.path.isdir
     def fake_isdir(p):
         return False if p == folder["path"] else real_isdir(p)

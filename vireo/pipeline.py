@@ -2489,7 +2489,7 @@ def detect_eye_keypoints_stage(
     photos = _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids)
     if not photos:
         return
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
     total = len(photos)
 
     from resource_ledger import ResourceWaitCancelled

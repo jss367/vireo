@@ -476,7 +476,7 @@ class _ScanRun:
         # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
         # Wrap post-processing so folder counts are always updated, even on failure.
         # On exception, roll back any uncommitted partial writes before updating
-        # counts — otherwise update_folder_counts()'s commit would persist
+        # counts — otherwise folders.update_counts()'s commit would persist
         # half-applied pairing or working-copy records.
         try:
             # A JPEG merged into its RAW's row stops being its own photo, so
@@ -525,4 +525,4 @@ class _ScanRun:
             db.rollback()
             raise
         finally:
-            db.update_folder_counts()
+            db.folders.update_counts()

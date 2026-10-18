@@ -1292,7 +1292,7 @@ def test_serve_thumbnail_retries_original_after_working_copy_eviction(
         tmp_path, monkeypatch, filename="bird.jpg",
     )
     photo = db.photos.get(pid)
-    folder = db.get_folder(photo["folder_id"])
+    folder = db.folders.get(photo["folder_id"])
     original_path = os.path.join(folder["path"], photo["filename"])
     vireo_dir = os.path.dirname(thumb_dir)
     working_dir = os.path.join(vireo_dir, "working")
@@ -1536,7 +1536,7 @@ def test_serve_thumbnail_does_not_refresh_raw_marker_on_cache_write_error(
 
 def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):
     """The self-heal must use the photo's actual folder path even when
-    the folder's status is ``'missing'``. ``get_folder_tree()`` filters
+    the folder's status is ``'missing'``. ``folders.tree()`` filters
     out ``'missing'`` folders, which would leave the canonical-path
     helper with an empty mapping and silently fall back to
     ``os.path.join('', photo['filename'])`` — a CWD-relative path.
@@ -1556,9 +1556,9 @@ def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkey
     db.conn.execute("UPDATE folders SET status = 'missing'")
     db.conn.commit()
 
-    # Sanity: get_folder_tree (the prior lookup) would now omit this
+    # Sanity: folders.tree (the prior lookup) would now omit this
     # folder, forcing the buggy CWD fallback.
-    assert db.get_folder_tree() == [], (
+    assert db.folders.tree() == [], (
         "precondition: folder is filtered out of the workspace tree once "
         "marked missing — the bug we're guarding against"
     )
@@ -1743,7 +1743,7 @@ def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monke
     """The route must 404 when the photo exists in the DB but its folder
     isn't linked to the active workspace. Without workspace scoping,
     ``get_canonical_image_path`` would receive an empty folders dict
-    (``get_folder_tree`` is workspace-scoped) and fall back to a CWD-
+    (``folders.tree`` is workspace-scoped) and fall back to a CWD-
     relative path — which could read or persist a thumbnail derived from
     an unrelated same-named file on the server. Same-filename collision
     across workspaces is not exotic: every Lightroom export produces

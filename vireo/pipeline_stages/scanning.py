@@ -555,7 +555,7 @@ class _ScanPass:
         if os.path.basename(path) == filename:
             return path
         try:
-            folder = thread_db.get_folder(folder_id)
+            folder = thread_db.folders.get(folder_id)
         except Exception:
             log.exception(
                 "Failed to resolve folder %s for photo %s", folder_id, photo_id,

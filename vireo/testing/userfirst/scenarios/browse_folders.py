@@ -3,7 +3,7 @@
 A folder whose ``parent_id`` points at an unlinked (or ``status != 'ok'``)
 parent used to disappear from the browse sidebar tree — the renderer groups
 by ``parent_id`` and only descends from the ``'root'`` bucket, so any folder
-whose parent wasn't in the returned set was stranded. ``get_folder_tree``
+whose parent wasn't in the returned set was stranded. ``folders.tree``
 now rewrites ``parent_id`` to the nearest visible ancestor (or NULL).
 
 This scenario uses ``orphan_folder_seed``: one folder (``2024``) is linked to

@@ -22,7 +22,7 @@ def catalog_folder_path(db, path, *, aliases=None):
     if aliases is None:
         # ``folders.path`` uses binary collation, so an exact match is the
         # stored spelling itself.
-        if db.get_folder_id_by_path(supplied) is not None:
+        if db.folders.id_by_path(supplied) is not None:
             return supplied
         aliases = catalog_folder_aliases(db)
     elif supplied in aliases.get(os.path.normpath(supplied).casefold(), ()):

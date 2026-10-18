@@ -7,7 +7,7 @@ This module is intentionally minimal:
   cache).
 * No new dependencies — only ``urllib`` + stdlib.
 
-Both public functions normalize Google's response into a single shape::
+Both lookups normalize Google's response into a single shape::
 
     {
         "place_id":            str,
@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import ssl
 import urllib.parse
 import urllib.request
@@ -47,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 _PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 _GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+_NEARBY_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
 def _create_ssl_context():
     """Return a trust context containing configured and bundled CA roots."""
@@ -161,12 +164,21 @@ def place_details(
 
     return {
         "place_id": result.get("place_id", place_id),
-        "name": result.get("name", ""),
+        "name": _location_safe_name(result.get("name", "")),
         "types": list(result.get("types", []) or []),
         "lat": lat,
         "lng": lng,
         "address_components": _normalize_components(result.get("address_components")),
     }
+
+
+def _location_safe_name(name: str) -> str:
+    """Google's name for a place, usable as a location keyword.
+
+    Lightroom reserves ``|`` as its keyword hierarchy delimiter, so a name
+    such as "Ocean Beach | Dog Beach" becomes "Ocean Beach - Dog Beach".
+    """
+    return re.sub(r"\s*\|\s*", " - ", name or "").strip()
 
 
 def result_language(config) -> str | None:
@@ -213,15 +225,133 @@ def reverse_geocode(
     *,
     language: str | None = "en",
 ) -> dict | None:
-    """Reverse-geocode a (lat, lng) pair via the Geocoding API.
+    """Name the place at a (lat, lng) pair, never as a street address.
 
-    - Returns the normalized dict on success.
+    Geocoding's first result on land is almost always the nearest street
+    address ("2525 Bacon St, San Diego, CA 92107, USA"), which is useless as a
+    photo location. So the answer is, in order:
+
+    1. the nearest park within :data:`PARK_RADIUS_M` (Places Nearby Search,
+       then Place Details for its address components), or
+    2. the most specific named area Geocoding knows: a natural feature,
+       park, neighborhood, then city and broader (:data:`AREA_TYPE_PRIORITY`).
+
+    The normalized dict gains ``"source"``: ``"park"`` or ``"area"``.
+
     - Returns ``None`` only when Google reports a true no-match
-      (``ZERO_RESULTS`` / ``NOT_FOUND`` / empty results list).
+      (``ZERO_RESULTS`` / ``NOT_FOUND`` / no named area at all).
     - Raises :class:`PlacesTransientError` on transient failures
       (``OVER_QUERY_LIMIT``, ``REQUEST_DENIED``, network/JSON errors).
       Callers that cache results MUST NOT cache when this is raised.
     """
+    park = _nearest_park(lat, lng, api_key, language)
+    if park is not None:
+        details = place_details(park["place_id"], api_key, language=language)
+        if details is None:
+            # Nearby Search just returned this place, so a missing record
+            # is a failed request, not a no-match; don't let a cache store
+            # the area fallback in its place.
+            raise PlacesTransientError("Place Details failed for nearby park")
+        return {**details, "source": "park"}
+    return _named_area(lat, lng, api_key, language)
+
+
+# How close a park must be to name the spot. Large enough to cover a photo
+# taken from a park's edge or trail, small enough not to rename a whole
+# neighborhood after the nearest playground.
+PARK_RADIUS_M = 400
+
+# Anyone can add a "park" to Google Maps, so the type alone admits benches,
+# volleyball courts and "welcome to zatchu punch". Parks people actually
+# visit have reviews: Robb Field has over a thousand.
+PARK_MIN_RATINGS = 100
+
+# Geocoding result types that name a place, most specific first. Street
+# addresses, premises, routes, intersections, plus codes, postal codes and
+# bare establishments are deliberately absent: an establishment's result
+# carries only its street address, not its name.
+AREA_TYPE_PRIORITY = (
+    "natural_feature",
+    "park",
+    "colloquial_area",
+    "neighborhood",
+    "sublocality_level_1",
+    "sublocality",
+    "locality",
+    "postal_town",
+    "administrative_area_level_3",
+    "administrative_area_level_2",
+    "administrative_area_level_1",
+    "country",
+)
+
+
+def _google_results(url: str, where: str) -> list[dict] | None:
+    """Fetch a Google search/geocode URL; ``None`` means a true no-match."""
+    try:
+        payload = _get_json(url)
+    except Exception as e:  # noqa: BLE001 — log + raise transient
+        logger.warning("%s: HTTP/JSON failure", where, exc_info=True)
+        raise PlacesTransientError("HTTP/JSON failure") from e
+    status = payload.get("status", "")
+    if status in _EMPTY_STATUSES:
+        return None
+    if status != "OK":
+        # _ERROR_STATUSES (OVER_QUERY_LIMIT, REQUEST_DENIED, INVALID_REQUEST,
+        # UNKNOWN_ERROR) and any other unexpected status are transient.
+        logger.warning("%s: Google API returned status=%s", where, status)
+        raise PlacesTransientError(f"Google API status={status}")
+    return payload.get("results") or None
+
+
+def _result_point(result: dict) -> tuple[float, float] | None:
+    location = (result.get("geometry") or {}).get("location") or {}
+    try:
+        return float(location["lat"]), float(location["lng"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in meters."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371000 * math.asin(math.sqrt(min(1.0, a)))
+
+
+def _nearest_park(lat: float, lng: float, api_key: str, language: str | None) -> dict | None:
+    """The nearest well-known park within :data:`PARK_RADIUS_M`, as a raw result."""
+    params = {
+        "location": f"{lat},{lng}",
+        "rankby": "distance",
+        "type": "park",
+        "key": api_key,
+    }
+    if language:
+        params["language"] = language
+    url = f"{_NEARBY_SEARCH_URL}?{urllib.parse.urlencode(params)}"
+    # rankby=distance orders the results, so the first one past the radius
+    # ends the search.
+    for result in _google_results(url, "nearby park search") or []:
+        point = _result_point(result)
+        if point is None or not result.get("place_id"):
+            continue
+        if _distance_m(lat, lng, *point) > PARK_RADIUS_M:
+            return None
+        if (result.get("user_ratings_total") or 0) >= PARK_MIN_RATINGS:
+            return result
+    return None
+
+
+def _area_rank(result: dict) -> int | None:
+    ranks = [AREA_TYPE_PRIORITY.index(t) for t in result.get("types") or []
+             if t in AREA_TYPE_PRIORITY]
+    return min(ranks) if ranks else None
+
+
+def _named_area(lat: float, lng: float, api_key: str, language: str | None) -> dict | None:
+    """The most specific named area Geocoding returns for the point."""
     params = {
         "latlng": f"{lat},{lng}",
         "key": api_key,
@@ -229,54 +359,26 @@ def reverse_geocode(
     if language:
         params["language"] = language
     url = f"{_GEOCODE_URL}?{urllib.parse.urlencode(params)}"
-
-    try:
-        payload = _get_json(url)
-    except Exception as e:  # noqa: BLE001 — log + raise transient
-        logger.warning(
-            "reverse_geocode: HTTP/JSON failure for latlng=%s,%s", lat, lng, exc_info=True
-        )
-        raise PlacesTransientError("HTTP/JSON failure") from e
-
-    status = payload.get("status", "")
-    if status in _EMPTY_STATUSES:
+    ranked = []
+    for result in _google_results(url, "reverse_geocode") or []:
+        rank = _area_rank(result)
+        point = _result_point(result)
+        components = result.get("address_components") or []
+        if rank is None or point is None or not components:
+            continue
+        ranked.append((rank, point, result))
+    if not ranked:
         return None
-    if status != "OK":
-        # _ERROR_STATUSES (OVER_QUERY_LIMIT, REQUEST_DENIED, INVALID_REQUEST,
-        # UNKNOWN_ERROR) and any other unexpected status are transient.
-        logger.warning("reverse_geocode: Google API returned status=%s", status)
-        raise PlacesTransientError(f"Google API status={status}")
-
-    results = payload.get("results") or []
-    if not results:
-        return None
-
-    result = results[0]
-
-    location = (result.get("geometry") or {}).get("location") or {}
-    try:
-        out_lat = float(location["lat"])
-        out_lng = float(location["lng"])
-    except (KeyError, TypeError, ValueError):
-        logger.warning(
-            "reverse_geocode: missing/invalid geometry.location for latlng=%s,%s",
-            lat,
-            lng,
-        )
-        return None
-
-    # ``name`` for reverse-geocode results: prefer formatted_address, fall back
-    # to the broadest address component's long_name.
-    name = result.get("formatted_address", "")
+    _, (out_lat, out_lng), result = min(ranked, key=lambda item: item[0])
     components = result.get("address_components") or []
-    if not name and components:
-        name = components[0].get("long_name", "")
-
+    # An area result's first component is the area itself ("Ocean Beach");
+    # formatted_address would be the whole breadcrumb.
     return {
         "place_id": result.get("place_id", ""),
-        "name": name,
+        "name": _location_safe_name(components[0].get("long_name", "")),
         "types": list(result.get("types", []) or []),
         "lat": out_lat,
         "lng": out_lng,
         "address_components": _normalize_components(components),
+        "source": "area",
     }

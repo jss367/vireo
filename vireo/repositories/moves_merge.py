@@ -131,7 +131,7 @@ class MovesMergeRepository:
                          relink_parents_by_path):
         """Rebase a folder subtree's paths and commit.
 
-        ``relink_parents_by_path`` is ``Database._relink_parents_by_path``; it
+        ``relink_parents_by_path`` is ``FolderRepository.relink_parents_by_path``; it
         runs after every path has changed and before the provenance rewrite,
         inside the same transaction.
         """
@@ -822,7 +822,7 @@ class MovesMergeRepository:
         * ``prune_nonroot_links_outside_roots`` ->
           ``Database._prune_ws_nonroot_links_outside_roots``
         * ``materialize_workspace_descendants``, ``add_workspace_folder``,
-          ``add_workspace_folder_no_commit``, ``update_folder_counts`` -> the
+          ``add_workspace_folder_no_commit``, ``folders.update_counts`` -> the
           ``Database`` methods of the same name
         * ``case_insensitive_root`` -> ``move._case_insensitive_root``
         * ``move_location_state``, ``reconcile_keyword_edits``,
@@ -1189,7 +1189,7 @@ class _StagedTreeMerge:
         returns nothing, and the UPDATE below repoints the staged root to
         ``archive_path`` with ``parent_id=NULL`` — floating it outside the
         managed archive tree and breaking every parent-based subtree
-        operation (cascade path renames, ``_folder_subtree_ids_by_path``,
+        operation (cascade path renames, ``folders.subtree_ids_by_path``,
         etc.). Walk up from the archive parent until an existing row shows
         up (or the filesystem root). When no anchor is found (no tracked
         ancestor row in the catalog), the destination is a brand-new

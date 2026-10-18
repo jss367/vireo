@@ -1809,7 +1809,7 @@ def _start_missing_originals(app, db_path):
     # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
     # ``app_and_db`` fixture seeds folders at fictional paths like
     # ``/photos/2024`` that don't exist on disk. After the 30s grace period
-    # this loop calls ``check_folder_health`` on the tmp_path DB, sees the
+    # this loop calls ``folders.check_health`` on the tmp_path DB, sees the
     # paths missing, and flips folder status to ``'missing'`` — which causes
     # ``get_photos`` to filter the seeded photos out and any subsequent
     # assertion against them to fail with ``IndexError``. On the slow
@@ -2172,7 +2172,6 @@ def _register_job_blueprints(app, w):
             invalidate_missing_originals=missing_originals.invalidate,
             enqueue_process_job=w.pipeline_chain.enqueue_process_job,
             chain_after_move=w.pipeline_chain.chain_after_move,
-            bulk_gps_location_payload=w.bulk_gps_locations.payload,
             guard_move_folder=w.folder_moves.guard_error,
             sync_job_lock=app._sync_job_lock,
         )

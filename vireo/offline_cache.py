@@ -276,7 +276,7 @@ def release_photo_original(
             return {"status": "not_cached", "bytes": 0}
         if selected_photo is not None and not photo_source_matches(selected_photo, photo):
             return {"status": "kept", "bytes": 0, "reason": "Photo changed since release was requested"}
-        folder = db.get_folder(photo["folder_id"])
+        folder = db.folders.get(photo["folder_id"])
         if folder is None:
             return {"status": "kept", "bytes": 0, "reason": "Source folder is unavailable"}
         base = os.path.realpath(vireo_dir)
@@ -290,7 +290,7 @@ def release_photo_original(
             with db.transaction():
                 current = db.photos.get(photo_id, verify_workspace=verify_workspace)
                 cached = db.caches.offline_original_get(photo_id)
-                current_folder = db.get_folder(photo["folder_id"])
+                current_folder = db.folders.get(photo["folder_id"])
                 if (not photo_source_matches(photo, current)
                         or current_folder is None or current_folder["path"] != folder["path"]
                         or cached is None or dict(cached) != dict(row)):

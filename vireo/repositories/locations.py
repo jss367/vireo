@@ -721,6 +721,48 @@ class LocationRepository:
             (self.workspace_id_fn(),),
         ).fetchall()
 
+    def tagged_location_points(self, min_lat, max_lat, min_lng, max_lng):
+        """Photos with GPS inside the box, each with its location leaf.
+
+        Rows (``photo_id``, ``latitude``, ``longitude``, ``keyword_id``),
+        one per photo that carries a location keyword, catalog-wide. The leaf is the
+        deepest-linked, newest location keyword, as in
+        :meth:`gps_discrepancy_rows`.
+        """
+        return self.conn.execute(
+            """WITH ranked AS (
+                   SELECT p.id AS photo_id, p.latitude, p.longitude, k.id AS keyword_id,
+                          ROW_NUMBER() OVER (PARTITION BY p.id
+                            ORDER BY (k.parent_id IS NULL) ASC, k.id DESC) AS rn
+                   FROM photos p
+                   JOIN photo_keywords pk ON pk.photo_id = p.id
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   WHERE k.type = 'location'
+                     AND p.latitude BETWEEN ? AND ?
+                     AND p.longitude BETWEEN ? AND ?)
+               SELECT photo_id, latitude, longitude, keyword_id FROM ranked WHERE rn = 1""",
+            (min_lat, max_lat, min_lng, max_lng),
+        ).fetchall()
+
+    def location_keyword_rows(self):
+        """Every location keyword: rows (``id``, ``name``, ``parent_id``)."""
+        return self.conn.execute(
+            "SELECT id, name, parent_id FROM keywords WHERE type = 'location'"
+        ).fetchall()
+
+    def located_keyword_points(self, min_lat, max_lat, min_lng, max_lng):
+        """Location keywords whose own map point lies inside the box.
+
+        Rows (``id``, ``latitude``, ``longitude``), catalog-wide.
+        """
+        return self.conn.execute(
+            """SELECT id, latitude, longitude FROM keywords
+               WHERE type = 'location'
+                 AND latitude BETWEEN ? AND ?
+                 AND longitude BETWEEN ? AND ?""",
+            (min_lat, max_lat, min_lng, max_lng),
+        ).fetchall()
+
     # -- GPS discrepancy reviews ----------------------------------------------
 
     def gps_discrepancy_rows(self, photo_ids):
