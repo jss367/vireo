@@ -179,7 +179,7 @@ def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
     assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
     assert "_vireoPairPendingSourceByPhoto" in html
     assert "A failed request leaves the old source intact" in html
-    assert "_lbCurrentSrcKey === 'full'" in html
+    assert "lbState.currentSrcKey === 'full'" in html
     assert "_lbLoadDetections(photoId)" in html
     assert "_vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg)" in html
 
@@ -6971,13 +6971,13 @@ def test_navbar_js_fallbacks_match_python_constants():
         text = f.read()
 
     tabs_match = re.search(
-        r'window\.NAV_DEFAULT_TABS\s*=\s*(\[[^\]]*\])', text, re.DOTALL
+        r'export var NAV_DEFAULT_TABS\s*=\s*(\[[^\]]*\])', text, re.DOTALL
     )
     pages_match = re.search(
-        r'window\.NAV_ALL_PAGES\s*=\s*(\[.*?\n\];)', text, re.DOTALL
+        r'export var NAV_ALL_PAGES\s*=\s*(\[.*?\n\];)', text, re.DOTALL
     )
-    assert tabs_match, "window.NAV_DEFAULT_TABS not found in navbar-tabs.js"
-    assert pages_match, "window.NAV_ALL_PAGES not found in navbar-tabs.js"
+    assert tabs_match, "NAV_DEFAULT_TABS not found in navbar-tabs.js"
+    assert pages_match, "NAV_ALL_PAGES not found in navbar-tabs.js"
 
     # Coerce JS-ish list literals to JSON: single→double quotes, strip
     # trailing semicolon, quote bare object keys.
@@ -7006,8 +7006,10 @@ def test_bottom_panel_has_history_tab(app_and_db):
     client = app.test_client()
     resp = client.get('/browse')
     html = resp.data.decode()
-    assert "switchBpTab('history')" in html
+    assert 'data-navbar-on="click:showHistoryPanel"' in html
     assert 'id="bpHistory"' in html
+    markup = client.get('/static/navbar-markup.js').get_data(as_text=True)
+    assert "showHistoryPanel: function() { switchBpTab('history'); }" in markup
 
 
 def test_text_search_requires_query(app_and_db):
@@ -24187,10 +24189,9 @@ def _run_id_conflicts_batch(html, payload):
     # From the first of the helpers ``batchAction`` leans on, so the code
     # under test is the shipped one rather than a paraphrase of it.
     start = html.find("function loadedPhoto(")
-    # ``rfind``: the threshold control is also *called* earlier in the page,
-    # and only the last occurrence is the bootstrap line that follows
-    # ``batchAction``.
-    end = html.rfind("updateConflictThresholdControl();")
+    # Up to the page's startup, which follows ``batchAction`` and runs once
+    # the document has loaded.
+    end = html.rfind("document.addEventListener('DOMContentLoaded', function() { updateConflictThresholdControl(); });")
     assert start != -1 and end > start, (
         "id_conflicts.html's batch action code could not be located"
     )

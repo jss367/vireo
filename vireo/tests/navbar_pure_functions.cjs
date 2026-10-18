@@ -31,12 +31,14 @@ function test(name, body) { tests.push([name, body]); }
 const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
-// Follow the same order as the browser instead of duplicating the script list.
+// Follow the order navbar-boot.js imports the lightbox modules in instead of
+// duplicating the list.
 const lightbox = Array.from(
-  fs.readFileSync('vireo/templates/_navbar.html', 'utf8').matchAll(
-    /<script src="\/static\/(lightbox\/[^"]+\.js)"><\/script>/g
+  fs.readFileSync(STATIC + 'navbar-boot.js', 'utf8').matchAll(
+    /^import '\.\/(lightbox\/[^']+\.js)';$/gm
   ), match => match[1]
 );
+assert(lightbox.length > 10, 'navbar-boot.js imports the lightbox modules');
 
 test('safeEventSource toasts a dropped stream unless the caller shows its own message', () => {
   for (const [quietError, expected] of [[undefined, ['Connection lost']], [true, []]]) {

@@ -50,7 +50,7 @@ interface VireoKeymap {
   shortcutsForScope(scope: string): KeymapShortcut[];
   setScope(scope: string): void; getScope(): string;
   pushEsc(handler: (event: KeyboardEvent) => void): number;
-  popEsc(token: number): boolean;
+  popEsc(token: number | null | undefined): boolean;
   lockBodyScroll(): void; unlockBodyScroll(): void;
   pauseDispatch(handler?: (event: KeyboardEvent) => void): void;
   resumeDispatch(): void; isDispatchPaused(): boolean;

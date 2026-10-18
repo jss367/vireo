@@ -18,7 +18,6 @@ STATIC = Path(__file__).resolve().parents[1] / "static"
 # may have none. Lower an entry (or delete it at zero) when you move a page's
 # script out; never raise one: put new page code in vireo/static/ instead.
 INLINE_SCRIPT_LINE_LIMITS = {
-    "_navbar.html": 1,
     "_sync_panel.html": 876,
     "audit.html": 480,
     "best_batch.html": 236,
@@ -30,7 +29,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "id_conflicts.html": 968,
     "lightroom.html": 135,
     "logs.html": 64,
-    "map.html": 389,
     "shortcuts.html": 251,
     "stats.html": 992,
     "storage.html": 867,
@@ -113,7 +111,7 @@ def test_split_page_loads_each_script_once_boot_last(app_and_db, route, director
     app, _ = app_and_db
     html = app.test_client().get(route).get_data(as_text=True)
     loaded = re.findall(
-        rf'<script src="/static/{re.escape(directory)}/([\w.-]+\.js)"></script>', html
+        rf'<script(?: defer)? src="/static/{re.escape(directory)}/([\w.-]+\.js)"></script>', html
     )
     on_disk = sorted(p.name for p in (STATIC / directory).glob("*.js"))
     assert sorted(loaded) == on_disk

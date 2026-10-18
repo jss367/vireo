@@ -319,7 +319,7 @@ function saveShortcuts() {
 }
 
 // Load config and init editor
-safeFetch('/api/config', {}, { toast: false }).then(function(cfg) {
+document.addEventListener('DOMContentLoaded', () => safeFetch('/api/config', {}, { toast: false }).then(function(cfg) {
   currentShortcuts = (cfg && cfg.keyboard_shortcuts) || JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS));
   // Ensure all default keys exist (for newly added shortcuts). Presence
   // check on the action: if the server-side config already includes the
@@ -336,7 +336,7 @@ safeFetch('/api/config', {}, { toast: false }).then(function(cfg) {
     }
   }
   renderShortcutsEditor();
-}).catch(function() {});
+}).catch(function() {}));
 </script>
 
 </body>

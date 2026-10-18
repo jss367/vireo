@@ -16,29 +16,14 @@ interface NavTabs {
   getAllPages(): NavPage[];
   setTabs(order: string[]): Promise<NavTabState | void>;
 }
-interface NavPhoto {
+// The navbar's photos are the lightbox's (types/pages/lightbox.d.ts): the
+// navbar hands them to openLightbox and the render helpers.
+interface NavPhoto extends LightboxPhoto {
   timestamp?: string;
-  flag?: string | null;
-  keywords?: {name: string; type?: string}[];
-  eye_x?: number | null;
-  eye_y?: number | null;
-  eye_conf?: number | null;
-  eye_tenengrad?: number | null;
-  id: number;
-  filename?: string;
   path?: string;
-  wildlife_excluded?: boolean | number;
-  edit_recipe?: NavRecipe | null;
+  eye_tenengrad?: number | null;
 }
-interface NavRecipe {
-  version?: number;
-  rotation?: number;
-  straighten?: number;
-  flip?: {horizontal?: boolean; vertical?: boolean};
-  crop?: {x: number; y: number; w: number; h: number};
-  adjustments?: Record<string,number>;
-  local?: unknown;
-}
+type NavRecipe = LightboxRecipe;
 interface NavRecipeClipboard {
   recipe: NavRecipe;
   source?: string | null;
@@ -66,7 +51,7 @@ interface NavMenuItem {
   onClick?: () => unknown;
   chips?: NavMenuItem[];
   active?: boolean;
-  color?: string;
+  color?: string | null;
   colorBaseTitle?: string;
   danger?: boolean;
   shortcut?: string;
@@ -169,7 +154,21 @@ interface NavSubjectData {
   selection: string;
   choice_unavailable?: boolean;
 }
+// Real window properties the navbar reads: help.js and vendor globals, and
+// server config from /config-defaults.js.
 interface Window {
+  _helpEscToken?: number | null;
+  openHelpModal(): void;
+  closeHelpModal(): void;
+  _helpSearchRefresh?: () => void;
+  Fuse?: typeof Fuse;
+  VIREO_FILE_MANAGER_NAME?: string;
+  VIREO_REVEAL_LABEL?: string;
+  VireoTextSearch?: typeof VireoTextSearch;
+}
+// The navbar modules' exports, typed once here and referenced with
+// `@type {NavbarApi['name']}` where a declaration takes its signature.
+interface NavbarApi {
   NAV_ALL_PAGES: NavPage[];
   NAV_DEFAULT_TABS: string[];
   _navTabs?: NavTabs;
@@ -181,30 +180,15 @@ interface Window {
   vireoSetNumberedNavigationMode(mode: string): Promise<void> | undefined;
   openCommandPalette(): void;
   closeCommandPalette(): void;
-  _cmdPaletteRender?: (query: string) => void;
   pinTab(navId: string): Promise<NavTabState | void>;
   toggleOverflowMenu(event?: Event): void;
   _applyNavHotkeyHints?: () => void;
-  _vireoShortcuts?: Record<string,Record<string,string>>;
-  _helpEscToken?: number | null;
-  _pipelineEscToken?: number | null;
-  _reportEscToken?: number | null;
-  _sheetEscToken?: number | null;
-  _similarEscToken?: number | null;
-  openHelpModal(): void;
-  closeHelpModal(): void;
-  _helpSearchRefresh?: () => void;
   openShortcutsSheet(): void;
   closeShortcutsSheet(): void;
-  Fuse?: typeof Fuse;
   vireoEditNav: NavEditorNavigation;
   vireoWorkspaceSwitcher: WorkspaceSwitcher;
-  VIREO_FILE_MANAGER_NAME?: string;
-  VIREO_REVEAL_LABEL?: string;
   openContextMenu(event: MouseEvent, items: NavMenuItem[], options?: {onDismiss?: () => void}): void;
   openInBrowse?: (photoId: number) => unknown;
-  _vireoNativeMenuPhotoIdsOverride?: number[] | null;
-  getExternalEditorsSync(): NavExternalEditor[];
   invalidateEditorsCache(): void;
   buildOpenInEditorMenuItems(photoIds: number[]): NavMenuItem[];
   handleNativeMenuCommand(command: string): Promise<void>;
@@ -217,9 +201,7 @@ interface Window {
   setTheme(themeId: string): void;
   toggleTheme(): void;
   isAdvancedMode(): boolean;
-  isDevMode(): boolean;
   toggleAdvancedMode(): void;
-  toggleDevMode(): void;
   dismissRuntimeWarning(): void;
   refreshHistoryControls(): void;
   renderHistoryControls(): void;
@@ -230,13 +212,12 @@ interface Window {
   vireoThumbnailUrl?: (photo: NavPhoto | number) => string;
   coerceSelectionOnContext?: (selection: Set<number>, photoId: number | null) => number[];
   markMissingFoldersReconciliationPending?: () => void;
-  VireoTextSearch?: typeof VireoTextSearch;
 }
 declare var Keymap: VireoKeymap;
 declare var VireoWorkspaceSwitcher: Window['VireoWorkspaceSwitcher'];
 declare var vireoWorkspaceSwitcher: WorkspaceSwitcher;
 declare var VireoViewPreferences: {restoreAll(root?: ParentNode): void; set(name: string, value: string | number): void; get(name: string, fallback?: string | number): string | number;};
-declare var VireoTextSearch: {readOptions(namespace: string): TextSearchOptions; matchesFields(fields: unknown, query: string, options?: TextSearchOptions): boolean;};
+declare var VireoTextSearch: {readOptions(namespace: string): TextSearchOptions; matchesFields(fields: unknown, query: string, options?: TextSearchOptions): boolean; toggle(namespace: string, option: string, callback?: (options: TextSearchOptions) => void): void;};
 
 declare function escapeHtml(value: unknown): string;
 declare function escapeAttr(value: unknown): string;

@@ -1,8 +1,14 @@
+import { vireoThumbnailUrl } from './lightbox/edits.js';
+import { openLightbox } from './lightbox/navigation.js';
+import { safeFetch } from './navbar-shared-helpers.js';
+
+/** @type {number | null} */ var _similarEscToken = null;
+
 /** @param {number} photoId */
-function findSimilar(photoId) {
-  var alreadyOpen = !!window._similarEscToken;
-  if (alreadyOpen) Keymap.popEsc(window._similarEscToken ?? -1);
-  window._similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
+export function findSimilar(photoId) {
+  var alreadyOpen = !!_similarEscToken;
+  if (alreadyOpen) Keymap.popEsc(_similarEscToken ?? -1);
+  _similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
 
   var overlay = /** @type {HTMLElement} */ (document.getElementById('similarOverlay'));
   var content = /** @type {HTMLElement} */ (document.getElementById('similarContent'));
@@ -49,8 +55,8 @@ function findSimilar(photoId) {
             openLightbox(p.id, p.filename || '', similarPhotoList, lightboxOptions);
           });
           var img = document.createElement('img');
-          img.src = window.vireoThumbnailUrl
-            ? window.vireoThumbnailUrl(p)
+          img.src = vireoThumbnailUrl
+            ? vireoThumbnailUrl(p)
             : '/thumbnails/' + p.id + '.jpg';
           img.loading = 'lazy';
           img.alt = '';
@@ -75,9 +81,9 @@ function findSimilar(photoId) {
     });
 }
 
-function closeSimilar() {
-  var wasOpen = !!window._similarEscToken;
-  if (wasOpen) { Keymap.popEsc(window._similarEscToken ?? -1); window._similarEscToken = null; }
+export function closeSimilar() {
+  var wasOpen = !!_similarEscToken;
+  if (wasOpen) { Keymap.popEsc(_similarEscToken ?? -1); _similarEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('similarOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
 }

@@ -9,27 +9,27 @@
 <nav class="navbar">
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
   <div class="ws-dropdown" id="wsDropdown">
-    <button class="ws-current" onclick="vireoWorkspaceSwitcher.toggle()" id="wsCurrentBtn" data-testid="workspace-dropdown">
+    <button class="ws-current" id="wsCurrentBtn" data-testid="workspace-dropdown" data-navbar-on="click:toggleWorkspaceMenu">
       <span id="wsCurrentName">Workspace</span>
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
       <div id="wsMenuList"></div>
       <div class="ws-menu-divider"></div>
-      <button class="ws-menu-action" onclick="vireoWorkspaceSwitcher.showCreate()">+ New Workspace</button>
-      <button class="ws-menu-action" onclick="openRescanModal()">⟳ Rescan folders…</button>
+      <button class="ws-menu-action" data-navbar-on="click:showCreateWorkspace">+ New Workspace</button>
+      <button class="ws-menu-action" data-navbar-on="click:openRescanModal">⟳ Rescan folders…</button>
     </div>
   </div>
-  <span class="nav-cmd-hint" title="Open command palette (⌘K)" onclick="openCommandPalette()">⌘K</span>
+  <span class="nav-cmd-hint" title="Open command palette (⌘K)" data-navbar-on="click:openCommandPalette">⌘K</span>
   <span id="navTabStrip" class="nav-tab-strip"></span>
-  <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden onclick="toggleOverflowMenu(event)">&hellip;</button>
+  <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden data-navbar-on="click:toggleOverflowMenu">&hellip;</button>
   <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
   <span class="nav-spacer"></span>
-  <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
-  <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
-  <span class="nav-icon" onclick="toggleAdvancedMode()" title="Toggle advanced mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
-  <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
-  <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
+  <span class="nav-icon" title="Report Issue" id="reportToggle" data-navbar-on="click:openReportModal">&#9888;</span>
+  <span class="nav-icon" title="Help (F1)" id="helpToggle" data-navbar-on="click:openHelpModal">&#63;</span>
+  <span class="nav-icon" title="Toggle advanced mode" id="devModeToggle" style="opacity:0.4;" data-navbar-on="click:toggleAdvancedMode">&#9881;</span>
+  <span class="nav-icon" title="Toggle light/dark mode" id="themeToggle" data-navbar-on="click:toggleTheme">&#9788;</span>
+  <span class="nav-icon" title="Toggle panel" data-navbar-on="click:toggleBottomPanel">
     &#9638;
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
@@ -37,22 +37,21 @@
 
 <div class="runtime-warning-banner" id="runtimeWarningBanner" data-testid="runtime-warning-banner">
   <div class="runtime-warning-text" id="runtimeWarningText"></div>
-  <button class="banner-dismiss" type="button" onclick="dismissRuntimeWarning()" title="Dismiss">&times;</button>
+  <button class="banner-dismiss" type="button" title="Dismiss" data-navbar-on="click:dismissRuntimeWarning">&times;</button>
 </div>
 
 <!-- Command palette (cmd+K) -->
-<div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
+<div class="cmd-palette-overlay" id="commandPalette" hidden data-navbar-on="click:closeCommandPaletteOnBackdrop">
   <div class="cmd-palette">
     <div class="search-control">
       <input type="text" id="cmdPaletteInput" autocomplete="off" placeholder="Jump to page…" />
-      <button id="cmdPaletteMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('cmdPalette', 'match_case', function() { window._cmdPaletteRender && window._cmdPaletteRender(document.getElementById('cmdPaletteInput').value || ''); })" title="Match case">Aa</button>
-      <button id="cmdPaletteWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('cmdPalette', 'whole_word', function() { window._cmdPaletteRender && window._cmdPaletteRender(document.getElementById('cmdPaletteInput').value || ''); })" title="Match whole word">ab</button>
+      <button id="cmdPaletteMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match case" data-navbar-on="click:toggleCommandPaletteMatchCase">Aa</button>
+      <button id="cmdPaletteWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match whole word" data-navbar-on="click:toggleCommandPaletteWholeWord">ab</button>
     </div>
     <div id="cmdPaletteResults" class="cmd-palette-results"></div>
   </div>
 </div>
 
-<script src="/static/navbar-command-palette-open.js"></script>
 
 <!-- Help Modal -->
 <div class="help-overlay" id="helpModal">
@@ -60,8 +59,8 @@
     <div class="help-search">
       <div class="search-control">
         <input type="text" id="helpSearchInput" placeholder="Search help..." autocomplete="off">
-        <button id="helpSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('helpSearch', 'match_case', window._helpSearchRefresh)" title="Match case">Aa</button>
-        <button id="helpSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('helpSearch', 'whole_word', window._helpSearchRefresh)" title="Match whole word">ab</button>
+        <button id="helpSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match case" data-navbar-on="click:toggleHelpMatchCase">Aa</button>
+        <button id="helpSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match whole word" data-navbar-on="click:toggleHelpWholeWord">ab</button>
       </div>
     </div>
     <div class="help-results" id="helpResults"></div>
@@ -69,14 +68,14 @@
 </div>
 
 <!-- Report Issue Modal -->
-<div class="report-overlay" id="reportModal" onclick="if(event.target===this)closeReportModal()">
+<div class="report-overlay" id="reportModal" data-navbar-on="click:closeReportModalOnBackdrop">
   <div class="report-modal">
     <h3>Report Issue</h3>
     <textarea id="reportDescription" placeholder="What happened? What did you expect?"></textarea>
     <div class="report-hint">This report includes recent logs and system info to help diagnose the issue.</div>
     <div class="report-actions">
-      <button class="modal-btn modal-btn-cancel" onclick="closeReportModal()">Cancel</button>
-      <button class="modal-btn modal-btn-primary" id="reportSendBtn" onclick="sendReport()">Send Report</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeReportModal">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="reportSendBtn" data-navbar-on="click:sendReport">Send Report</button>
     </div>
     <div class="report-status" id="reportStatus"></div>
   </div>
@@ -86,8 +85,7 @@
 {% include '_page_find.html' %}
 
 <!-- Color Label Description Modal -->
-<div class="modal-overlay" id="colorLabelDescriptionModal"
-     onclick="if(event.target===this)VireoColorLabels.closeEditor()">
+<div class="modal-overlay" id="colorLabelDescriptionModal" data-navbar-on="click:closeColorLabelEditorOnBackdrop">
   <div class="modal" role="dialog" aria-modal="true"
        aria-labelledby="colorLabelDescriptionTitle">
     <h3 class="color-label-description-heading" id="colorLabelDescriptionTitle">
@@ -104,46 +102,43 @@
     </div>
     <div class="modal-error" id="colorLabelDescriptionError" role="alert"></div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-cancel" type="button"
-              onclick="VireoColorLabels.closeEditor()">Cancel</button>
+      <button class="modal-btn modal-btn-cancel" type="button" data-navbar-on="click:closeColorLabelEditor">Cancel</button>
       <button class="modal-btn modal-btn-primary" id="colorLabelDescriptionSave"
-              type="button" onclick="VireoColorLabels.saveEditor()">Save</button>
+              type="button" data-navbar-on="click:saveColorLabelEditor">Save</button>
     </div>
   </div>
 </div>
 <script src="/static/vireo-color-labels.js"></script>
-<script src="/static/navbar-edit-nav.js"></script>
-<script src="/static/navbar-report-context-menu.js"></script>
 
 <!-- Missing Folders Banner -->
 <div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
   <span id="missingFoldersMsg"></span>
-  <a href="#" onclick="openMissingFoldersModal(); return false;">Review</a>
-  <button class="banner-dismiss" onclick="dismissMissingBanner()">&times;</button>
+  <a href="#" data-navbar-on="click:openMissingFoldersModal">Review</a>
+  <button class="banner-dismiss" data-navbar-on="click:dismissMissingBanner">&times;</button>
 </div>
 
 <!-- Missing Originals Banner -->
 <div class="missing-folders-banner" id="missingPhotosBanner" style="display:none;">
   <span id="missingPhotosMsg"></span>
-  <a href="#" onclick="openMissingPhotosModal(); return false;">Review</a>
-  <button class="banner-dismiss" onclick="dismissMissingPhotosBanner()">&times;</button>
+  <a href="#" data-navbar-on="click:openMissingPhotosModal">Review</a>
+  <button class="banner-dismiss" data-navbar-on="click:dismissMissingPhotosBanner">&times;</button>
 </div>
 
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
-  <button type="button" class="banner-cta" onclick="reviewNewImagesImport(this)">Review import</button>
+  <button type="button" class="banner-cta" data-navbar-on="click:reviewNewImagesImport">Review import</button>
   <button type="button" class="banner-recheck" id="newImagesRecheck"
-          style="display:none;" onclick="recheckNewImages()">Check again</button>
+          style="display:none;" data-navbar-on="click:recheckNewImages">Check again</button>
   <span class="banner-meta" id="newImagesCheckedAt"></span>
-  <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
+  <button class="banner-dismiss" data-navbar-on="click:dismissNewImagesBanner">&times;</button>
 </div>
 
 <!-- Duplicate Cleanup Banner -->
 <div class="dup-cleanup-banner" id="dupCleanupBanner" style="display:none;">
   <span id="dupCleanupMsg"></span>
   <a href="/duplicates?show=resolved">Review</a>
-  <button class="banner-dismiss" onclick="dismissDupCleanupBanner()">&times;</button>
+  <button class="banner-dismiss" data-navbar-on="click:dismissDupCleanupBanner">&times;</button>
 </div>
 
 <!-- Missing Folders Modal -->
@@ -155,9 +150,9 @@
     </p>
     <div id="missingFoldersList"></div>
     <div class="modal-actions">
-      <button class="modal-btn danger" id="missingFoldersRemoveAllBtn" onclick="removeAllMissingFolders()" style="display:none;color:var(--danger);margin-right:auto;">Remove All</button>
-      <button class="modal-btn" onclick="loadMissingFolders()">Check Again</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
+      <button class="modal-btn danger" id="missingFoldersRemoveAllBtn" style="display:none;color:var(--danger);margin-right:auto;" data-navbar-on="click:removeAllMissingFolders">Remove All</button>
+      <button class="modal-btn" data-navbar-on="click:loadMissingFolders">Check Again</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeMissingFoldersModal">Close</button>
     </div>
   </div>
 </div>
@@ -171,15 +166,14 @@
       These photos' original files can't be found on disk. Vireo may still have a cached thumbnail, preview, working copy, or XMP sidecar — review what's left, then remove the ones you no longer want in your library.
     </p>
     <div class="missing-photos-toolbar" id="missingPhotosToolbar" style="display:none;">
-      <label><input type="checkbox" id="missingPhotosSelectAll" onchange="toggleAllMissingPhotos(this.checked)"> Select all</label>
+      <label><input type="checkbox" id="missingPhotosSelectAll" data-navbar-on="change:toggleAllMissingPhotos"> Select all</label>
       <span id="missingPhotosSelectedCount">0 selected</span>
       <span class="spacer"></span>
       <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
         <input type="range" id="missingPhotosThumbSizeSlider" min="40" max="160" step="8" value="56"
                data-view-preference="vireo.missingPhotos.thumbSize"
                aria-label="Thumbnail size"
-               style="width:80px;accent-color:var(--accent);"
-               oninput="updateMissingPhotosThumbSize(this.value)">
+               style="width:80px;accent-color:var(--accent);" data-navbar-on="input:updateMissingPhotosThumbSize">
         <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
       </label>
       <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars" checked> Also delete leftover XMP sidecars</label>
@@ -187,9 +181,9 @@
     <div class="missing-photos-action-status" id="missingPhotosActionStatus" role="status" aria-live="polite" hidden></div>
     <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
     <div class="modal-actions">
-      <button class="modal-btn danger" id="missingPhotosRemoveBtn" onclick="removeSelectedMissingPhotos()" disabled>Remove selected</button>
-      <button class="modal-btn" id="missingPhotosRefreshBtn" onclick="refreshMissingPhotosNow()">Check Again</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeMissingPhotosModal()">Close</button>
+      <button class="modal-btn danger" id="missingPhotosRemoveBtn" disabled data-navbar-on="click:removeSelectedMissingPhotos">Remove selected</button>
+      <button class="modal-btn" id="missingPhotosRefreshBtn" data-navbar-on="click:refreshMissingPhotosNow">Check Again</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeMissingPhotosModal">Close</button>
     </div>
   </div>
 </div>
@@ -205,11 +199,11 @@
     </p>
     <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-        <input type="radio" name="rescanScope" value="workspace" checked onchange="onRescanScopeChange()">
+        <input type="radio" name="rescanScope" value="workspace" checked data-navbar-on="change:changeRescanScope">
         <span>Entire workspace <span style="color:var(--text-secondary);">— every folder in this workspace</span></span>
       </label>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-        <input type="radio" name="rescanScope" value="folder" onchange="onRescanScopeChange()">
+        <input type="radio" name="rescanScope" value="folder" data-navbar-on="change:changeRescanScope">
         <span>A specific folder</span>
       </label>
       <select id="rescanFolderSelect" style="margin-left:26px;max-width:100%;padding:6px 8px;" disabled></select>
@@ -218,8 +212,8 @@
       This workspace has no folders yet. Open Import to add photos first.
     </div>
     <div class="modal-actions">
-      <button class="modal-btn" id="rescanRunBtn" onclick="runRescan()">Rescan</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeRescanModal()">Cancel</button>
+      <button class="modal-btn" id="rescanRunBtn" data-navbar-on="click:runRescan">Rescan</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeRescanModal">Cancel</button>
     </div>
   </div>
 </div>
@@ -233,8 +227,8 @@
     <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
     <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="relocateSelectBtn" onclick="confirmRelocate()">Select This Folder</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeRelocateBrowser()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="relocateSelectBtn" data-navbar-on="click:confirmRelocate">Select This Folder</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeRelocateBrowser">Cancel</button>
     </div>
   </div>
 </div>
@@ -245,8 +239,8 @@
     <h3>Subfolders Found</h3>
     <p id="cascadeMsg"></p>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="confirmCascade()">Re-link All</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeCascadeConfirm()">Skip</button>
+      <button class="modal-btn modal-btn-primary" data-navbar-on="click:confirmCascade">Re-link All</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeCascadeConfirm">Skip</button>
     </div>
   </div>
 </div>
@@ -260,58 +254,49 @@
       <input class="modal-input" id="newWsName" placeholder="e.g. Kenya 2025">
     </div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" onclick="vireoWorkspaceSwitcher.createWorkspace()">Create</button>
-      <button class="modal-btn modal-btn-cancel" onclick="vireoWorkspaceSwitcher.hideCreate()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" data-navbar-on="click:createWorkspace">Create</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:hideCreateWorkspace">Cancel</button>
     </div>
     <div class="modal-error" id="newWsError"></div>
   </div>
 </div>
 
 <!-- Shortcuts Cheat Sheet Overlay -->
-<div class="shortcuts-overlay" id="shortcutsCheatSheet" onclick="if(event.target===this)closeShortcutsSheet()">
+<div class="shortcuts-overlay" id="shortcutsCheatSheet" data-navbar-on="click:closeShortcutsSheetOnBackdrop">
   <div class="shortcuts-sheet">
-    <h3>Keyboard Shortcuts <button class="shortcuts-sheet-close" onclick="closeShortcutsSheet()">&times;</button></h3>
+    <h3>Keyboard Shortcuts <button class="shortcuts-sheet-close" data-navbar-on="click:closeShortcutsSheet">&times;</button></h3>
     <div id="shortcutsSheetContent"></div>
     <div class="sc-footer"><a href="/shortcuts">Edit shortcuts &rarr;</a></div>
   </div>
 </div>
 
-<script src="/static/navbar-tabs.js"></script>
 
-<script src="/static/navbar-tab-reorder-hotkeys.js"></script>
 <script src="/static/vireo-workspace-switcher.js"></script>
-<script src="/static/navbar-workspace-switcher-init.js"></script>
 
 <!-- Lightbox -->
-<div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
-  <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
-  <div id="lightboxPrev" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
-  <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(vireoLightboxViewport.zoom() - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
-    <div class="lightbox-zoom-control" id="lightboxZoomControl" onclick="event.stopPropagation();">
+<div class="lightbox-overlay" id="lightboxOverlay" data-navbar-on="click:closeLightbox">
+  <span class="lightbox-close" data-navbar-on="click:closeLightbox">&times;</span>
+  <div id="lightboxPrev" class="lightbox-nav" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)" data-navbar-on="click:lightboxPrevious">&#9664;</div>
+  <div id="lightboxNext" class="lightbox-nav" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)" data-navbar-on="click:lightboxNext">&#9654;</div>
+  <div class="lightbox-img-wrap" id="lightboxWrap" data-navbar-on="click:lightboxImageClick">
+    <div class="lightbox-zoom-control" id="lightboxZoomControl" data-navbar-on="click:stopPropagation">
       <div id="lightboxPreviewStatus" class="lightbox-detail-status" role="status" aria-live="polite" style="display:none;">
         <span class="lb-detail-spinner" aria-hidden="true"></span>
         <span id="lightboxPreviewStatusText"></span>
       </div>
       <button type="button" class="lightbox-zoom-badge" id="lightboxZoomBadge"
-              aria-haspopup="true" aria-expanded="false"
-              onclick="toggleLightboxZoomPopover();" title="Zoom controls">Fit</button>
+              aria-haspopup="true" aria-expanded="false" title="Zoom controls" data-navbar-on="click:toggleLightboxZoomPopover">Fit</button>
       <div class="lightbox-zoom-popover" id="lightboxZoomPopover" role="group" aria-label="Zoom controls">
-        <button type="button" class="lb-zoom-step" id="lightboxZoomOut"
-                onclick="stepLightboxZoom(-1);" aria-label="Zoom out" title="Zoom out (−)">−</button>
+        <button type="button" class="lb-zoom-step" id="lightboxZoomOut" aria-label="Zoom out" title="Zoom out (−)" data-navbar-on="click:lightboxZoomOut">−</button>
         <div class="lb-zoom-track">
           <input type="range" class="lightbox-zoom-slider" id="lightboxZoomSlider"
                  min="0" max="1000" step="1" value="0" aria-label="Zoom level"
-                 aria-valuetext="Fit" oninput="setLightboxZoomFromSlider(this.value);">
-          <button type="button" class="lb-zoom-stop lb-zoom-stop-fit"
-                  onclick="setLightboxZoomToFit();">Fit</button>
-          <button type="button" class="lb-zoom-stop lb-zoom-stop-native" id="lightboxZoomNativeStop"
-                  onclick="setLightboxZoomToOneToOne();">1:1</button>
-          <button type="button" class="lb-zoom-stop lb-zoom-max-label" id="lightboxZoomMaxLabel"
-                  onclick="setLightboxZoomFromSlider(1000);">400%</button>
+                 aria-valuetext="Fit" data-navbar-on="input:setLightboxZoomFromSlider">
+          <button type="button" class="lb-zoom-stop lb-zoom-stop-fit" data-navbar-on="click:setLightboxZoomToFit">Fit</button>
+          <button type="button" class="lb-zoom-stop lb-zoom-stop-native" id="lightboxZoomNativeStop" data-navbar-on="click:setLightboxZoomToOneToOne">1:1</button>
+          <button type="button" class="lb-zoom-stop lb-zoom-max-label" id="lightboxZoomMaxLabel" data-navbar-on="click:setLightboxZoomToMax">400%</button>
         </div>
-        <button type="button" class="lb-zoom-step" id="lightboxZoomIn"
-                onclick="stepLightboxZoom(1);" aria-label="Zoom in" title="Zoom in (+)">+</button>
+        <button type="button" class="lb-zoom-step" id="lightboxZoomIn" aria-label="Zoom in" title="Zoom in (+)" data-navbar-on="click:lightboxZoomIn">+</button>
       </div>
     </div>
     <div class="lightbox-transform" id="lightboxTransform">
@@ -325,7 +310,7 @@
   </div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
-  <details id="lightboxSubjects" class="lb-subject-panel" hidden onclick="event.stopPropagation();" onmousedown="event.stopPropagation();" onkeydown="event.stopPropagation();">
+  <details id="lightboxSubjects" class="lb-subject-panel" hidden data-navbar-on="click:stopPropagation mousedown:stopPropagation keydown:stopPropagation">
     <summary id="lightboxSubjectSummary">Subjects</summary>
     <div id="lightboxSubjectList" class="lb-subject-list" aria-label="Choose primary subject"></div>
     <div id="lightboxSubjectDetails"></div>
@@ -341,137 +326,134 @@
   <div class="lightbox-bottom-bar">
     <div class="lightbox-info">
       <div class="lightbox-filename" id="lightboxFilename"
-           onmousedown="event.stopPropagation();"
-           onclick="event.stopPropagation();"
-           title="Select and copy filename"></div>
+           title="Select and copy filename" data-navbar-on="mousedown:stopPropagation click:stopPropagation"></div>
       <div class="lightbox-keywords" id="lightboxKeywords"
-           aria-label="Keywords"
-           onclick="event.stopPropagation();"></div>
+           aria-label="Keywords" data-navbar-on="click:stopPropagation"></div>
     </div>
     <div id="lightboxActions" class="lightbox-actions">
-    <button class="lb-action-btn" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(vireoLightboxSession.requestedPhotoId());" title="Switch between the developed JPEG and RAW source">
+    <button class="lb-action-btn" id="lightboxSourceControl" style="display:none;" title="Switch between the developed JPEG and RAW source" data-navbar-on="click:toggleLightboxPairSource">
       Viewing JPEG · Show RAW
     </button>
-    <button class="lb-action-btn" id="lightboxViewBtn" aria-haspopup="true" aria-expanded="false" onclick="event.stopPropagation(); toggleLightboxViewMenu();" title="Overlay and interface visibility options">
+    <button class="lb-action-btn" id="lightboxViewBtn" aria-haspopup="true" aria-expanded="false" title="Overlay and interface visibility options" data-navbar-on="click:toggleLightboxViewMenu">
       View &#9662;
     </button>
     <span class="lb-action-sep" aria-hidden="true"></span>
-    <button class="lb-action-btn" id="lightboxFlagBtn" aria-pressed="false" onclick="event.stopPropagation(); lightboxSetFlagAction('flagged');" title="Flag photo (p)">
+    <button class="lb-action-btn" id="lightboxFlagBtn" aria-pressed="false" title="Flag photo (p)" data-navbar-on="click:lightboxFlag">
       Flag
     </button>
-    <button class="lb-action-btn" id="lightboxRejectBtn" aria-pressed="false" onclick="event.stopPropagation(); lightboxSetFlagAction('rejected');" title="Reject photo (x)">
+    <button class="lb-action-btn" id="lightboxRejectBtn" aria-pressed="false" title="Reject photo (x)" data-navbar-on="click:lightboxReject">
       Reject
     </button>
     <span class="lb-action-sep" aria-hidden="true"></span>
-    <button class="lb-action-btn" id="lightboxInat" onclick="">
+    <button class="lb-action-btn" id="lightboxInat">
       iNaturalist
     </button>
-    <button class="lb-action-btn" id="lightboxSimilar" onclick="">
+    <button class="lb-action-btn" id="lightboxSimilar">
       Find Similar
     </button>
-    <button class="lb-action-btn" id="lightboxInspect" onclick="">
+    <button class="lb-action-btn" id="lightboxInspect">
       Inspect Pipeline
     </button>
     <span class="lb-action-sep" aria-hidden="true"></span>
-    <button class="lb-action-btn" id="lightboxAdjustBtn" aria-expanded="false" onclick="event.stopPropagation(); toggleLightboxAdjustPanel();" title="Quick non-destructive adjustments">
+    <button class="lb-action-btn" id="lightboxAdjustBtn" aria-expanded="false" title="Quick non-destructive adjustments" data-navbar-on="click:toggleLightboxAdjustPanel">
       Quick Adjust
     </button>
-    <button class="lb-action-btn lb-action-accent" id="lightboxEditPhoto" onclick="">
+    <button class="lb-action-btn lb-action-accent" id="lightboxEditPhoto">
       Edit Photo
     </button>
     <span class="lb-action-gap" aria-hidden="true"></span>
-    <button class="lb-action-btn lb-action-danger" id="lightboxDeleteBtn" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+    <button class="lb-action-btn lb-action-danger" id="lightboxDeleteBtn" title="Delete photo" data-navbar-on="click:lightboxDelete">Delete</button>
     </div>
   </div>
-  <div class="lightbox-view-panel" id="lightboxViewPanel" onclick="event.stopPropagation();">
+  <div class="lightbox-view-panel" id="lightboxViewPanel" data-navbar-on="click:stopPropagation">
     <label class="lb-view-row" title="Toggle detection boxes (b)">
-      <input type="checkbox" id="lightboxToggleBoxes" onchange="toggleLightboxBoxes();">
+      <input type="checkbox" id="lightboxToggleBoxes" data-navbar-on="change:toggleLightboxBoxes">
       <span class="lb-view-label">Detection boxes</span>
       <span class="lb-view-note" id="lightboxBoxesNote"></span>
     </label>
     <label class="lb-view-row" title="Toggle mask overlay">
-      <input type="checkbox" id="lightboxToggleMasks" onchange="toggleLightboxMasks();">
+      <input type="checkbox" id="lightboxToggleMasks" data-navbar-on="change:toggleLightboxMasks">
       <span class="lb-view-label">Mask overlay</span>
       <span class="lb-view-note" id="lightboxMasksNote"></span>
     </label>
     <span class="lb-mask-controls" id="lightboxMaskControls" title="SAM mask overlay variant">
       <span>Variant</span>
-      <select id="lightboxMaskSelect" onchange="event.stopPropagation(); _lbOnMaskVariantChange();"></select>
+      <select id="lightboxMaskSelect" data-navbar-on="change:changeLightboxMaskVariant"></select>
     </span>
     <label class="lb-view-row" title="Toggle eye marker">
-      <input type="checkbox" id="lightboxToggleEye" onchange="toggleLightboxEye();">
+      <input type="checkbox" id="lightboxToggleEye" data-navbar-on="change:toggleLightboxEye">
       <span class="lb-view-label">Eye marker</span>
       <span class="lb-view-note" id="lightboxEyeNote"></span>
     </label>
     <label class="lb-view-row" title="Keep the detected eye in the same screen position while navigating">
-      <input type="checkbox" id="lightboxTrackEye" onchange="toggleLightboxTrackEye();">
+      <input type="checkbox" id="lightboxTrackEye" data-navbar-on="change:toggleLightboxTrackEye">
       <span class="lb-view-label">Track eye between photos</span>
       <span class="lb-view-note" id="lightboxTrackEyeNote"></span>
     </label>
     <div class="lb-view-divider"></div>
     <label class="lb-view-row" title="Toggle filename, counter, and zoom badge">
-      <input type="checkbox" id="lightboxToggleInfo" onchange="toggleLightboxInfo();">
+      <input type="checkbox" id="lightboxToggleInfo" data-navbar-on="change:toggleLightboxInfo">
       <span class="lb-view-label">Filename &amp; counter</span>
     </label>
     <label class="lb-view-row" title="Toggle lightbox controls (h)">
-      <input type="checkbox" id="lightboxToggleChrome" onchange="toggleLightboxChrome();">
+      <input type="checkbox" id="lightboxToggleChrome" data-navbar-on="change:toggleLightboxChrome">
       <span class="lb-view-label">Lightbox controls</span>
       <span class="lb-view-note">h restores</span>
     </label>
   </div>
-  <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation();">
+  <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" data-navbar-on="click:stopPropagation">
     <div class="lb-adjust-header">
       <span>Adjustments</span>
-      <button class="lb-adjust-reset" type="button" onclick="resetLightboxAdjustments()">Reset</button>
+      <button class="lb-adjust-reset" type="button" data-navbar-on="click:resetLightboxAdjustments">Reset</button>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjExposure">Exposure</label>
-      <input id="lbAdjExposure" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjExposure" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjExposureValue">0.0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjHighlights">Highlights</label>
-      <input id="lbAdjHighlights" data-adjustment="highlights" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjHighlights" data-adjustment="highlights" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjHighlightsValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjShadows">Shadows</label>
-      <input id="lbAdjShadows" data-adjustment="shadows" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjShadows" data-adjustment="shadows" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjShadowsValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjWhites">Whites</label>
-      <input id="lbAdjWhites" data-adjustment="whites" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjWhites" data-adjustment="whites" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjWhitesValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjBlacks">Blacks</label>
-      <input id="lbAdjBlacks" data-adjustment="blacks" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjBlacks" data-adjustment="blacks" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjBlacksValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjContrast">Contrast</label>
-      <input id="lbAdjContrast" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjContrast" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjContrastValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjTemperature">Temp</label>
-      <input id="lbAdjTemperature" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjTemperature" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjTemperatureValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjTint">Tint</label>
-      <input id="lbAdjTint" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjTint" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjTintValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjVibrance">Vibrance</label>
-      <input id="lbAdjVibrance" data-adjustment="vibrance" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjVibrance" data-adjustment="vibrance" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjVibranceValue">0</span>
     </div>
     <div class="lb-adjust-row">
       <label for="lbAdjSaturation">Saturation</label>
-      <input id="lbAdjSaturation" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <input id="lbAdjSaturation" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" data-navbar-on="input:lightboxAdjustmentInput">
       <span class="lb-adjust-value" id="lbAdjSaturationValue">0</span>
     </div>
     <div class="lb-adjust-status" id="lightboxAdjustStatus"></div>
@@ -532,8 +514,8 @@
       <div id="deleteProgressDetail" class="inat-progress-text"></div>
     </div>
     <div class="modal-actions">
-      <button class="modal-btn modal-btn-cancel" onclick="hideDeleteModal()">Cancel</button>
-      <button class="modal-btn" id="deleteConfirmBtn" onclick="confirmDelete()" style="background:var(--danger);color:white;">Delete</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:hideDeleteModal">Cancel</button>
+      <button class="modal-btn" id="deleteConfirmBtn" style="background:var(--danger);color:white;" data-navbar-on="click:confirmDelete">Delete</button>
     </div>
   </div>
 </div>
@@ -548,56 +530,40 @@
       <div class="inat-progress-text" id="inatProgressText"></div>
     </div>
     <div class="modal-actions" id="inatActions">
-      <button class="modal-btn modal-btn-primary" id="inatSubmitBtn" onclick="inatDoSubmit()">Submit</button>
-      <button class="modal-btn modal-btn-cancel" onclick="closeInatModal()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="inatSubmitBtn" data-navbar-on="click:inatDoSubmit">Submit</button>
+      <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeInatModal">Cancel</button>
     </div>
   </div>
 </div>
 
-<script src="/static/lightbox/session.js"></script>
-<script src="/static/lightbox/viewport.js"></script>
-<script src="/static/lightbox/state.js"></script>
-<script src="/static/lightbox/curation.js"></script>
-<script src="/static/lightbox/edits.js"></script>
-<script src="/static/lightbox/flags.js"></script>
-<script src="/static/lightbox/overlays.js"></script>
-<script src="/static/lightbox/crop.js"></script>
-<script src="/static/lightbox/navigation.js"></script>
-<script src="/static/lightbox/controls.js"></script>
-<script src="/static/lightbox/delete.js"></script>
-<script src="/static/lightbox/inat.js"></script>
-<script src="/static/lightbox/keyboard.js"></script>
-<script src="/static/lightbox/source-loading.js"></script>
 
 <!-- Pipeline Inspector -->
 <div class="pipeline-overlay" id="pipelineOverlay">
   <div class="pipeline-panel" style="position:relative;">
-    <button class="pipeline-close" onclick="closePipeline()">&times;</button>
+    <button class="pipeline-close" data-navbar-on="click:closePipeline">&times;</button>
     <h2>Pipeline Inspector</h2>
     <div id="pipelineContent">Loading...</div>
   </div>
 </div>
 
-<script src="/static/navbar-pipeline-inspector.js"></script>
 
 <!-- Similar Photos -->
 <div class="similar-overlay" id="similarOverlay">
   <div class="similar-panel">
-    <button class="pipeline-close" onclick="closeSimilar()">&times;</button>
+    <button class="pipeline-close" data-navbar-on="click:closeSimilar">&times;</button>
     <h2>Similar Photos</h2>
     <div id="similarContent">Loading...</div>
   </div>
 </div>
 
-<script src="/static/navbar-similar-photos.js"></script>
 
 <!-- Bottom Panel -->
 <div class="bottom-panel" id="bottomPanel">
   <div class="bp-drag-handle" id="bpDragHandle"></div>
   <div class="bp-tabs">
-    <div class="bp-tab active" onclick="switchBpTab('jobs')">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
-    <div class="bp-tab" onclick="switchBpTab('history')">History <span class="bp-tab-badge" id="historyBadge">0</span></div>
-    <div class="bp-tab" onclick="switchBpTab('logs')">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
+    <div class="bp-tab active" data-navbar-on="click:showJobsPanel">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
+    <div class="bp-tab" data-navbar-on="click:showHistoryPanel">History <span class="bp-tab-badge" id="historyBadge">0</span></div>
+    <div class="bp-tab" data-navbar-on="click:showLogsPanel">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
   </div>
   <div class="bp-content">
     <!-- Jobs Pane -->
@@ -615,7 +581,7 @@
     <!-- Logs Pane -->
     <div class="bp-pane" id="bpLogs">
       <div class="bp-logs-toolbar">
-        <select id="lpLevelFilter" onchange="lpApplyFilter()">
+        <select id="lpLevelFilter" data-navbar-on="change:applyLogLevelFilter">
           <option value="DEBUG">DEBUG+</option>
           <option value="INFO" selected>INFO+</option>
           <option value="WARNING">WARNING+</option>
@@ -631,27 +597,21 @@
   </div>
 </div>
 <div class="bottom-toggle" id="bottomToggle">
-  <span class="toggle-arrow" id="bpArrow" onclick="toggleBottomPanel()">&#9650;</span>
+  <span class="toggle-arrow" id="bpArrow" data-navbar-on="click:toggleBottomPanel">&#9650;</span>
   <span class="job-summary idle" id="jobSummary">No active jobs</span>
   <div class="history-controls" id="undoToast" role="group" aria-label="Edit history">
     <span class="history-description" id="undoMsg" role="status" aria-live="polite"></span>
-    <button type="button" class="undo-toast-btn" id="historyUndoBtn" onclick="doUndo()" disabled>Undo</button>
-    <button type="button" id="historyRedoBtn" onclick="doRedo()" disabled>Redo</button>
+    <button type="button" class="undo-toast-btn" id="historyUndoBtn" disabled data-navbar-on="click:undo">Undo</button>
+    <button type="button" id="historyRedoBtn" disabled data-navbar-on="click:redo">Redo</button>
   </div>
 </div>
 
-<script src="/static/navbar-shared-helpers.js"></script>
-<script src="/static/navbar-folder-banners.js"></script>
 <!-- Shared by every page that decides predictions (Review, ID Conflicts):
      the one implementation of "which rows did my earlier request already
      decide". See vireo-predictions.js. -->
 <script src="/static/vireo-predictions.js"></script>
 <script src="/static/tauri-bridge.js"></script>
-<script>
-  /* Updater disabled — startupUpdateCheck skipped until updater is configured */
-</script>
 <script src="/static/vendor/fuse.min.js"></script>
-<script src="/static/navbar-command-palette.js"></script>
 <script src="/static/help.js"></script>
 
 <style>
@@ -679,4 +639,8 @@
 
 .lightbox-overlay.lb-hide-chrome .lb-subject-panel { display: none !important; }
 </style>
-<script src="/static/navbar-lightbox-subjects.js"></script>
+<!-- The navbar and lightbox: ES modules reached from one deferred entry
+     (see navbar-boot.js). Page scripts are deferred behind it, so the
+     globals it publishes for classic pages (navbar-globals.js) exist by the
+     time they run. -->
+<script type="module" src="/static/navbar-boot.js"></script>

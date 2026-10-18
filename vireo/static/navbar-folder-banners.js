@@ -1,67 +1,75 @@
+import { vireoWorkspaceSwitcher } from './navbar-workspace-switcher-init.js';
+import { vireoThumbnailUrl } from './lightbox/edits.js';
+import { safeFetch, showToast } from './navbar-shared-helpers.js';
+
 /* ---------- Missing Folders Banner ---------- */
 let _missingBannerDismissedCount = 0;
-// Snapshot of missing-folder ids from the last /api/folders/missing poll.
-// The server's own _folder_health_loop (app.py) flips folders ok\u2194missing on
-// its 10-minute cadence with no client involvement, so the modal's
-// /api/folders/check-health POST is only one of two paths that mutate this
-// set. Without a diff here a long-lived Browse view would keep serving its
-// pre-flip photo grid until the user manually reopened the modal or
-// reloaded \u2014 the background reconnect that just restored the folder would
-// never reach the page (Codex review r3685083009).
-/** @type {number[] | null} */ let _missingFoldersLastIds = null;
-// Race guards for the two paths that observe the missing-folder set —
-// the GET poll (checkMissingFolders) and the modal's mutating check-
-// health POST (loadMissingFolders). Issuance order alone is not a
-// freshness guarantee across them: the POST commits DB updates a
-// concurrent GET can't yet see, so a GET started after the POST can
-// still return an older snapshot than what the POST will observe once
-// its filesystem check finishes. Semantics:
-//   * ``_missingFoldersObservationGen`` bumps on every GET only, for
-//     GET-vs-GET supersession.
-//   * ``_missingFoldersMutationGen`` bumps on every POST only, for
-//     POST-vs-POST supersession (a modal reopen while an earlier POST
-//     is still in flight; the newest post-mutation observation wins).
-//   * ``_missingFoldersMutationInFlight`` counts running POSTs. A GET
-//     whose response arrives while > 0 has observed pre-mutation state
-//     and must skip its snapshot update / dispatch — the POST is the
-//     freshness authority and will fire the event itself
-//     (Codex review r3685627312).
-//   * ``_missingFoldersMutationEpoch`` bumps when a POST finishes. A
-//     GET snapshots it at start and skips if it changed by completion —
-//     catches the case where a POST started AFTER the GET and completed
-//     BEFORE it (also stale for the GET).
-// Together, these preserve r3685515796's guarantee — a stale GET can
-// never overwrite a fresher POST — while also giving the POST
-// precedence over GETs that happen to start after it
-// (Codex review r3685627312).
-let _missingFoldersObservationGen = 0;
-let _missingFoldersMutationGen = 0;
-let _missingFoldersMutationInFlight = 0;
-let _missingFoldersMutationEpoch = 0;
-// When Browse abandons its short-term retry loop after a folder-health event
-// (``/api/folders`` stayed down through every retry), the pre-transition
-// grid/tree is still on screen but ``_missingFoldersLastIds`` has already
-// advanced to the post-transition IDs. The normal 10-minute poll then sees
-// unchanged IDs and never re-emits, so the page stays stale until an
-// unrelated health flip or a reload (Codex review r3687331927). This flag
-// tells the next successful poll to dispatch a synthetic reconciliation
-// event regardless of the ID diff, so Browse can retry the refresh once the
-// endpoint recovers.
-let _missingFoldersReconciliationPending = false;
-window.markMissingFoldersReconciliationPending = function() {
-  _missingFoldersReconciliationPending = true;
+export const missingFolders = {
+  // Snapshot of missing-folder ids from the last /api/folders/missing poll.
+  // The server's own _folder_health_loop (app.py) flips folders ok\u2194missing on
+  // its 10-minute cadence with no client involvement, so the modal's
+  // /api/folders/check-health POST is only one of two paths that mutate this
+  // set. Without a diff here a long-lived Browse view would keep serving its
+  // pre-flip photo grid until the user manually reopened the modal or
+  // reloaded \u2014 the background reconnect that just restored the folder would
+  // never reach the page (Codex review r3685083009).
+  /** @type {number[] | null} */
+  lastIds: null,
+  // Race guards for the two paths that observe the missing-folder set —
+  // the GET poll (checkMissingFolders) and the modal's mutating check-
+  // health POST (loadMissingFolders). Issuance order alone is not a
+  // freshness guarantee across them: the POST commits DB updates a
+  // concurrent GET can't yet see, so a GET started after the POST can
+  // still return an older snapshot than what the POST will observe once
+  // its filesystem check finishes. Semantics:
+  //   * ``missingFolders.observationGen`` bumps on every GET only, for
+  //     GET-vs-GET supersession.
+  //   * ``missingFolders.mutationGen`` bumps on every POST only, for
+  //     POST-vs-POST supersession (a modal reopen while an earlier POST
+  //     is still in flight; the newest post-mutation observation wins).
+  //   * ``missingFolders.mutationInFlight`` counts running POSTs. A GET
+  //     whose response arrives while > 0 has observed pre-mutation state
+  //     and must skip its snapshot update / dispatch — the POST is the
+  //     freshness authority and will fire the event itself
+  //     (Codex review r3685627312).
+  //   * ``missingFolders.mutationEpoch`` bumps when a POST finishes. A
+  //     GET snapshots it at start and skips if it changed by completion —
+  //     catches the case where a POST started AFTER the GET and completed
+  //     BEFORE it (also stale for the GET).
+  // Together, these preserve r3685515796's guarantee — a stale GET can
+  // never overwrite a fresher POST — while also giving the POST
+  // precedence over GETs that happen to start after it
+  // (Codex review r3685627312).
+  observationGen: 0,
+  mutationGen: 0,
+  mutationInFlight: 0,
+  mutationEpoch: 0,
+  // When Browse abandons its short-term retry loop after a folder-health event
+  // (``/api/folders`` stayed down through every retry), the pre-transition
+  // grid/tree is still on screen but ``missingFolders.lastIds`` has already
+  // advanced to the post-transition IDs. The normal 10-minute poll then sees
+  // unchanged IDs and never re-emits, so the page stays stale until an
+  // unrelated health flip or a reload (Codex review r3687331927). This flag
+  // tells the next successful poll to dispatch a synthetic reconciliation
+  // event regardless of the ID diff, so Browse can retry the refresh once the
+  // endpoint recovers.
+  reconciliationPending: false,
+  // Incremented whenever a GET, POST, or Browse init snapshot becomes the
+  // client-side baseline. Browse captures this immediately before requesting
+  // /api/browse/init, which lets it distinguish a baseline that was already
+  // applied (init is newer) from one that landed while init was in flight
+  // (the later observation remains authoritative).
+  snapshotVersion: 0,
+  // Monotonic SQLite-backed observation marker returned by every server
+  // endpoint that can establish the missing-folder baseline. Unlike client
+  // request generations, this orders responses even when an older server read
+  // is delivered before a newer init response is applied.
+  /** @type {number | null} */
+  serverVersion: null,
 };
-// Incremented whenever a GET, POST, or Browse init snapshot becomes the
-// client-side baseline. Browse captures this immediately before requesting
-// /api/browse/init, which lets it distinguish a baseline that was already
-// applied (init is newer) from one that landed while init was in flight
-// (the later observation remains authoritative).
-let _missingFoldersSnapshotVersion = 0;
-// Monotonic SQLite-backed observation marker returned by every server
-// endpoint that can establish the missing-folder baseline. Unlike client
-// request generations, this orders responses even when an older server read
-// is delivered before a newer init response is applied.
-/** @type {number | null} */ let _missingFoldersServerVersion = null;
+export function markMissingFoldersReconciliationPending() {
+  missingFolders.reconciliationPending = true;
+}
 
 /** @param {unknown} value */
 function _parseFolderHealthVersion(value) {
@@ -101,7 +109,7 @@ function _dispatchFolderHealthChangeFromIds(prevIds, currentIds, source) {
 // (checkMissingFolders) and the modal POST (loadMissingFolders). The POST
 // must NOT delegate to checkMissingFolders here: if the user closes the
 // modal while its POST is still pending, closeMissingFoldersModal fires a
-// GET that our own _missingFoldersMutationInFlight guard rejects, and a
+// GET that our own missingFolders.mutationInFlight guard rejects, and a
 // tail-call checkMissingFolders() from the POST body is rejected too —
 // its GET starts while the in-flight counter is still > 0, then finishes
 // after our finally bumps the mutation epoch (stale by both checks). The
@@ -130,37 +138,37 @@ function _updateMissingFoldersBanner(folders) {
 // the version changed in flight, keep that later observation and dispatch
 // init→current so Browse discards its stale init payload.
 /** @param {number[]} initIds @param {number} snapshotVersionAtStart @param {string} source @param {unknown} [initServerVersion] */
-function _reconcileMissingFoldersInitSnapshot(
+export function _reconcileMissingFoldersInitSnapshot(
   initIds, snapshotVersionAtStart, source, initServerVersion
 ) {
   const currentIds = initIds.slice().sort((a, b) => a - b);
   const serverVersion = _parseFolderHealthVersion(initServerVersion);
   let initIsNewer;
-  if (_missingFoldersServerVersion === null || serverVersion === null) {
-    initIsNewer = _missingFoldersLastIds === null ||
-      snapshotVersionAtStart === _missingFoldersSnapshotVersion;
-  } else if (serverVersion !== _missingFoldersServerVersion) {
-    initIsNewer = serverVersion > _missingFoldersServerVersion;
+  if (missingFolders.serverVersion === null || serverVersion === null) {
+    initIsNewer = missingFolders.lastIds === null ||
+      snapshotVersionAtStart === missingFolders.snapshotVersion;
+  } else if (serverVersion !== missingFolders.serverVersion) {
+    initIsNewer = serverVersion > missingFolders.serverVersion;
   } else {
-    initIsNewer = _missingFoldersLastIds === null ||
-      snapshotVersionAtStart === _missingFoldersSnapshotVersion;
+    initIsNewer = missingFolders.lastIds === null ||
+      snapshotVersionAtStart === missingFolders.snapshotVersion;
   }
   if (initIsNewer) {
-    _missingFoldersLastIds = currentIds;
-    if (serverVersion !== null) _missingFoldersServerVersion = serverVersion;
-    _missingFoldersSnapshotVersion++;
+    missingFolders.lastIds = currentIds;
+    if (serverVersion !== null) missingFolders.serverVersion = serverVersion;
+    missingFolders.snapshotVersion++;
     _updateMissingFoldersBanner(currentIds.map(id => ({ id })));
     return false;
   }
   const dispatched = _dispatchFolderHealthChangeFromIds(
-    currentIds, _missingFoldersLastIds || [], source);
+    currentIds, missingFolders.lastIds || [], source);
   if (dispatched) return true;
   // A higher server version proves the init payload is stale even when the
   // missing-ID set is unchanged (for example a healthy folder was linked,
   // unlinked, inserted, or deleted). Force the conservative no-ID refresh so
   // bootstrap does not render the obsolete folder tree/photo grid.
-  if (serverVersion !== null && _missingFoldersServerVersion !== null &&
-      serverVersion < _missingFoldersServerVersion) {
+  if (serverVersion !== null && missingFolders.serverVersion !== null &&
+      serverVersion < missingFolders.serverVersion) {
     document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
       detail: { restored: [], wentMissing: [], source },
     }));
@@ -183,13 +191,13 @@ function _reconcileMissingFoldersInitSnapshot(
 // giving the false impression that recovery ran. The 10-minute
 // background poll is the only remaining fallback for a genuinely
 // hung POST (Codex review r3686842771).
-let _missingFoldersRecoveryScheduled = false;
-function _scheduleMissingFoldersRecovery() {
+export let _missingFoldersRecoveryScheduled = false;
+export function _scheduleMissingFoldersRecovery() {
   if (_missingFoldersRecoveryScheduled) return;
   _missingFoldersRecoveryScheduled = true;
   let attempts = 0;
   const tick = function() {
-    if (_missingFoldersMutationInFlight === 0) {
+    if (missingFolders.mutationInFlight === 0) {
       _missingFoldersRecoveryScheduled = false;
       checkMissingFolders();
       return;
@@ -204,10 +212,10 @@ function _scheduleMissingFoldersRecovery() {
   setTimeout(tick, 0);
 }
 
-async function checkMissingFolders() {
-  const myGen = ++_missingFoldersObservationGen;
-  const mutationEpochAtStart = _missingFoldersMutationEpoch;
-  const snapshotVersionAtStart = _missingFoldersSnapshotVersion;
+export async function checkMissingFolders() {
+  const myGen = ++missingFolders.observationGen;
+  const mutationEpochAtStart = missingFolders.mutationEpoch;
+  const snapshotVersionAtStart = missingFolders.snapshotVersion;
   try {
     const resp = await fetch('/api/folders/missing');
     if (!resp.ok) return;
@@ -219,7 +227,7 @@ async function checkMissingFolders() {
     // response: banner too, since a stale banner update would just
     // paint a false state that the newer GET is about to overwrite
     // anyway.
-    if (myGen !== _missingFoldersObservationGen) return;
+    if (myGen !== missingFolders.observationGen) return;
     // A mutating /api/folders/check-health POST is either in flight or
     // completed during our await; its post-mutation observation is the
     // freshness authority and this GET may only reflect pre-mutation
@@ -229,43 +237,43 @@ async function checkMissingFolders() {
     // (Codex review r3685627312). The POST paints the banner directly
     // from its own authoritative response via _updateMissingFoldersBanner
     // — see r3686095481 for why it can't safely delegate back here.
-    if (_missingFoldersMutationInFlight > 0 ||
-        mutationEpochAtStart !== _missingFoldersMutationEpoch) return;
+    if (missingFolders.mutationInFlight > 0 ||
+        mutationEpochAtStart !== missingFolders.mutationEpoch) return;
     // Prefer the server's monotonic observation ordering. The client version
     // remains the compatibility/tie-break guard when the response lacks the
     // marker or observed the same SQLite health version.
-    if (_missingFoldersServerVersion !== null && serverVersion !== null) {
-      if (serverVersion < _missingFoldersServerVersion) return;
-      if (serverVersion === _missingFoldersServerVersion &&
-          snapshotVersionAtStart !== _missingFoldersSnapshotVersion) return;
-    } else if (snapshotVersionAtStart !== _missingFoldersSnapshotVersion) {
+    if (missingFolders.serverVersion !== null && serverVersion !== null) {
+      if (serverVersion < missingFolders.serverVersion) return;
+      if (serverVersion === missingFolders.serverVersion &&
+          snapshotVersionAtStart !== missingFolders.snapshotVersion) return;
+    } else if (snapshotVersionAtStart !== missingFolders.snapshotVersion) {
       return;
     }
     const currentIds = folders.map(f => f.id).sort((a, b) => a - b);
     const dispatched = _dispatchFolderHealthChangeFromIds(
-      _missingFoldersLastIds, currentIds, 'poll');
+      missingFolders.lastIds, currentIds, 'poll');
     // Browse abandoned an earlier refresh because ``/api/folders`` stayed
-    // down through every retry; ``_missingFoldersLastIds`` was already
+    // down through every retry; ``missingFolders.lastIds`` was already
     // advanced then, so this poll's diff can be empty even though the page
     // is still on pre-transition data. Force a synthetic reconciliation so
     // Browse re-attempts the refresh now that the endpoint is answering
     // again. Empty restored/wentMissing routes through the conservative
     // reload path in ``folderHealthTouchesActiveScope`` (Codex review
     // r3687331927).
-    if (!dispatched && _missingFoldersReconciliationPending) {
+    if (!dispatched && missingFolders.reconciliationPending) {
       document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
         detail: { restored: [], wentMissing: [], source: 'poll-reconcile' },
       }));
     }
-    _missingFoldersReconciliationPending = false;
-    _missingFoldersLastIds = currentIds;
-    if (serverVersion !== null) _missingFoldersServerVersion = serverVersion;
-    _missingFoldersSnapshotVersion++;
+    missingFolders.reconciliationPending = false;
+    missingFolders.lastIds = currentIds;
+    if (serverVersion !== null) missingFolders.serverVersion = serverVersion;
+    missingFolders.snapshotVersion++;
     _updateMissingFoldersBanner(folders);
   } catch (e) { /* ignore */ }
 }
 
-function dismissMissingBanner() {
+export function dismissMissingBanner() {
   /** @type {HTMLElement} */ (document.getElementById('missingFoldersBanner')).style.display = 'none';
   const msg = /** @type {HTMLElement} */ (document.getElementById('missingFoldersMsg')).textContent;
   const match = msg.match(/^(\d+)/);
@@ -278,13 +286,6 @@ checkMissingFolders();
 
 /* ---------- Missing Originals Banner ---------- */
 /** @type {NavMissingPhoto[]} */ let _missingPhotosCache = [];
-// Whatever rows the currently open Missing Originals modal is showing,
-// keyed by photo id. Populated by every modal load — including scoped
-// ones that intentionally skip _missingPhotosCache to keep the banner's
-// dismissed-count math honest — so sidecar cleanup can still look up
-// has_xmp_sidecar for a freshly discovered ghost that only exists in a
-// folder-scoped view.
-/** @type {Map<number,NavMissingPhoto>} */ let _missingPhotosModalRows = new Map();
 let _missingPhotosBannerDismissedCount = 0;
 // Both the banner and modal read cached /api/photos/missing status. A slow
 // earlier fetch returning after a newer one used to overwrite fresh state
@@ -299,12 +300,12 @@ let _missingPhotosBannerDismissedCount = 0;
 let _missingPhotosCacheFetchId = 0;
 let _missingPhotosBannerFetchId = 0;
 let _missingPhotosModalFetchId = 0;
-let _missingPhotosBannerInFlight = false;
+export let _missingPhotosBannerInFlight = false;
 // Separate timer handles per target: a banner status poll firing while the
 // modal is waiting on a long scan used to cancel the modal's own poll (they
 // shared a single handle), leaving the modal stuck on "Checking missing
 // originals…" until the user closed and reopened it.
-/** @type {ReturnType<typeof setTimeout> | null} */ let _missingPhotosBannerStatusPoll = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ export let _missingPhotosBannerStatusPoll = null;
 /** @type {ReturnType<typeof setTimeout> | null} */ let _missingPhotosModalStatusPoll = null;
 const MISSING_PHOTOS_INITIAL_DELAY_MS = 180000;
 const MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS = 30 * 60 * 1000;
@@ -323,7 +324,7 @@ function _missingPhotosPayloadPhotos(payload) {
 }
 
 /** @param {number | null | undefined} folderId @param {boolean} modal */
-function _scheduleMissingPhotosPoll(folderId, modal) {
+export function _scheduleMissingPhotosPoll(folderId, modal) {
   if (modal) {
     if (_missingPhotosModalStatusPoll !== null) clearTimeout(_missingPhotosModalStatusPoll);
     _missingPhotosModalStatusPoll = setTimeout(function() {
@@ -340,7 +341,7 @@ function _scheduleMissingPhotosPoll(folderId, modal) {
 }
 
 /** @param {{automatic?: boolean; folderId?: number | null; modal?: boolean}} [opts] */
-async function startMissingPhotosCheck(opts) {
+export async function startMissingPhotosCheck(opts) {
   opts = opts || {};
   /** @type {{automatic: boolean; folder_id?: number}} */ const body = { automatic: !!opts.automatic };
   if (opts.folderId != null) body.folder_id = opts.folderId;
@@ -359,7 +360,7 @@ async function startMissingPhotosCheck(opts) {
   return payload;
 }
 
-async function checkMissingPhotos() {
+export async function checkMissingPhotos() {
   if (_missingPhotosBannerInFlight) {
     // Supersede the in-flight banner poll before returning: bump the
     // generation counters so the still-running fetch's response is
@@ -415,7 +416,7 @@ async function checkMissingPhotos() {
   }
 }
 
-function dismissMissingPhotosBanner() {
+export function dismissMissingPhotosBanner() {
   /** @type {HTMLElement} */ (document.getElementById('missingPhotosBanner')).style.display = 'none';
   _missingPhotosBannerDismissedCount = _missingPhotosCache.length;
 }
@@ -489,8 +490,8 @@ function _isNewImagesDismissed(wsId, newCount, offlineRoots) {
 // Without the in-flight guard, two ticks whose fetches are still in flight
 // both schedule timers when their responses land, leaking chains; the
 // start-of-call clearTimeout only catches the most recent handle.
-/** @type {ReturnType<typeof setTimeout> | null} */ let _newImagesPendingTimer = null;
-let _newImagesInFlight = false;
+/** @type {ReturnType<typeof setTimeout> | null} */ export let _newImagesPendingTimer = null;
+export let _newImagesInFlight = false;
 // Set when a *forced* check — the manual recheck — is dropped by the
 // in-flight guard. That poll was issued before the recheck cleared the
 // caches, so its answer predates the request and the client would otherwise
@@ -518,7 +519,7 @@ function _newImagesAnswersRecheck(startInvalidated) {
 }
 
 /** @param {{manualRecheck?: boolean; answersRecheck?: boolean; force?: boolean} | undefined} [options] */
-async function checkNewImages(options) {
+export async function checkNewImages(options) {
   if (_newImagesInFlight) {
     if (options && options.force) _newImagesForcedRerun = true;
     return;
@@ -787,7 +788,7 @@ function _setNewImagesRecheckBusy(busy) {
 // Manual recheck. The automatic poll recovers on its own once the offline
 // caches expire (30s), but those timers are invisible: someone who just
 // remounted the share gets to say "look now" instead of waiting them out.
-async function recheckNewImages() {
+export async function recheckNewImages() {
   const btn = /** @type {HTMLButtonElement} */ (document.getElementById('newImagesRecheck'));
   if (btn && btn.disabled) return;
   // Claim the recheck before awaiting anything: a poll that lands while the
@@ -830,7 +831,7 @@ function _newImagesOfflineDismissKey(wsId) {
   return 'newImagesOfflineDismissed_ws_' + String(wsId);
 }
 
-function dismissNewImagesBanner() {
+export function dismissNewImagesBanner() {
   const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
   if (!banner) return;
   const wsId = banner.dataset.ws || '';
@@ -845,7 +846,7 @@ function dismissNewImagesBanner() {
 }
 
 /** @param {HTMLButtonElement} [btn] */
-async function reviewNewImagesImport(btn) {
+export async function reviewNewImagesImport(btn) {
   if (btn && btn.disabled) return;
   if (btn) {
     btn.disabled = true;
@@ -927,7 +928,7 @@ async function checkDupCleanup() {
   finally { _dupCleanupInFlight = false; }
 }
 
-function dismissDupCleanupBanner() {
+export function dismissDupCleanupBanner() {
   const banner = /** @type {HTMLElement} */ (document.getElementById('dupCleanupBanner'));
   if (!banner) return;
   const count = Number(banner.dataset.count || 0);
@@ -942,22 +943,21 @@ checkDupCleanup();
 /** @type {number | null} */ let _relocatingFolderId = null;
 /** @type {{name: string; path: string} | null} */ let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null for current dir
 let _relocateBrowserPath = '';
-/** @type {NavMissingFolder[]} */ let _pendingCascaded = [];
 let _browseRelocateGen = 0;
 /** @type {NavMissingFolder[]} */ let _missingFoldersRows = [];
 let _missingFoldersRemoving = false;
 
-function openMissingFoldersModal() {
+export function openMissingFoldersModal() {
   /** @type {HTMLElement} */ (document.getElementById('missingFoldersModal')).classList.add('open');
   loadMissingFolders();
 }
 
-function closeMissingFoldersModal() {
+export function closeMissingFoldersModal() {
   /** @type {HTMLElement} */ (document.getElementById('missingFoldersModal')).classList.remove('open');
   checkMissingFolders();
 }
 
-async function loadMissingFolders() {
+export async function loadMissingFolders() {
   if (_missingFoldersRemoving) return;
   _missingFoldersRows = [];
   /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn')).style.display = 'none';
@@ -968,9 +968,9 @@ async function loadMissingFolders() {
   // bumped here: a POST that started earlier must not be discarded just
   // because a later GET (e.g. from closeMissingFoldersModal) bumped it
   // (Codex review r3685627312). GET-vs-POST supersession is handled
-  // instead via ``_missingFoldersMutationInFlight`` + ``…MutationEpoch``.
-  const myMutationGen = ++_missingFoldersMutationGen;
-  _missingFoldersMutationInFlight++;
+  // instead via ``missingFolders.mutationInFlight`` + ``…MutationEpoch``.
+  const myMutationGen = ++missingFolders.mutationGen;
+  missingFolders.mutationInFlight++;
   try {
     const resp = await fetch('/api/folders/check-health', { method: 'POST' });
     if (!resp.ok) throw new Error('check failed');
@@ -1015,25 +1015,25 @@ async function loadMissingFolders() {
     // settle helper the catch path uses — so one GET reconciles with
     // whatever the server actually committed last (Codex review
     // r3686912886).
-    if (myMutationGen !== _missingFoldersMutationGen) {
+    if (myMutationGen !== missingFolders.mutationGen) {
       _scheduleMissingFoldersRecovery();
       return;
     }
-    if (_missingFoldersServerVersion !== null && serverVersion !== null &&
-        serverVersion < _missingFoldersServerVersion) {
+    if (missingFolders.serverVersion !== null && serverVersion !== null &&
+        serverVersion < missingFolders.serverVersion) {
       _scheduleMissingFoldersRecovery();
       return;
     }
-    const prevIds = _missingFoldersLastIds;
+    const prevIds = missingFolders.lastIds;
     const currentIds = folders.map(f => f.id).sort((a, b) => a - b);
     // Keep the poll snapshot in sync with what this POST just observed
     // on the server — closeMissingFoldersModal() and the 10-minute
     // interval both call checkMissingFolders() next, and without this
     // the poll would see (last-poll ≠ post-POST) and fire a second
     // redundant vireo:folder-health-changed for the same transition.
-    _missingFoldersLastIds = currentIds;
-    if (serverVersion !== null) _missingFoldersServerVersion = serverVersion;
-    _missingFoldersSnapshotVersion++;
+    missingFolders.lastIds = currentIds;
+    if (serverVersion !== null) missingFolders.serverVersion = serverVersion;
+    missingFolders.snapshotVersion++;
     const dispatched = _dispatchFolderHealthChangeFromIds(
       prevIds, currentIds, 'check-health');
     // Narrow initial-load race: the user opened this modal before the
@@ -1105,7 +1105,7 @@ async function loadMissingFolders() {
     // Same stale guard as the success path — a superseded POST must not
     // overwrite the newer POST's in-flight "Checking folders…" placeholder
     // with a false failure message (Codex review r3686095489).
-    if (myMutationGen === _missingFoldersMutationGen) {
+    if (myMutationGen === missingFolders.mutationGen) {
       container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check folders.</p>';
     }
     // When the POST fails (network drop, lost response) the server may have
@@ -1114,8 +1114,8 @@ async function loadMissingFolders() {
     // were discarded by our mutation guard. Without a follow-up poll the
     // banner and Browse grid stay stuck on the pre-POST snapshot until the
     // ten-minute interval. Schedule a poll AFTER the finally so it runs
-    // once ``_missingFoldersMutationInFlight`` has been decremented (and
-    // ``_missingFoldersMutationEpoch`` bumped) — otherwise its own
+    // once ``missingFolders.mutationInFlight`` has been decremented (and
+    // ``missingFolders.mutationEpoch`` bumped) — otherwise its own
     // in-flight guard rejects it (Codex review r3686605299).
     //
     // Additionally, wait for *every* overlapping POST to settle before
@@ -1130,8 +1130,8 @@ async function loadMissingFolders() {
     // Decrement + bump epoch in the finally so any GET whose ``await``
     // straddled this POST — start OR end — sees the change and defers
     // (Codex review r3685627312).
-    _missingFoldersMutationInFlight--;
-    _missingFoldersMutationEpoch++;
+    missingFolders.mutationInFlight--;
+    missingFolders.mutationEpoch++;
   }
 }
 
@@ -1175,7 +1175,7 @@ async function loadRelocateQuickAccess() {
   } catch (e) { /* /Volumes may not exist on non-macOS */ }
 }
 
-function closeRelocateBrowser() {
+export function closeRelocateBrowser() {
   /** @type {HTMLElement} */ (document.getElementById('relocateBrowserModal')).classList.remove('open');
   _relocatingFolderId = null;
 }
@@ -1235,7 +1235,7 @@ function updateRelocateBtn() {
   }
 }
 
-async function confirmRelocate() {
+export async function confirmRelocate() {
   if (!_relocatingFolderId || !_relocateBrowserPath) return;
   /** @type {{cascaded?: NavMissingFolder[]}} */ const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
     method: 'POST',
@@ -1245,7 +1245,6 @@ async function confirmRelocate() {
   closeRelocateBrowser();
 
   if (data.cascaded && data.cascaded.length > 0) {
-    _pendingCascaded = data.cascaded;
     /** @type {HTMLElement} */ (document.getElementById('cascadeMsg')).textContent =
       `${data.cascaded.length} subfolder${data.cascaded.length !== 1 ? 's were' : ' was'} also found at the new location and re-linked.`;
     /** @type {HTMLElement} */ (document.getElementById('cascadeConfirmModal')).classList.add('open');
@@ -1254,12 +1253,11 @@ async function confirmRelocate() {
   }
 }
 
-function closeCascadeConfirm() {
+export function closeCascadeConfirm() {
   /** @type {HTMLElement} */ (document.getElementById('cascadeConfirmModal')).classList.remove('open');
-  _pendingCascaded = [];
   loadMissingFolders();
 }
-function confirmCascade() { closeCascadeConfirm(); }
+export function confirmCascade() { closeCascadeConfirm(); }
 
 /** @param {number} folderId @param {string} path @param {number} photoCount */
 async function startRemoveFolder(folderId, path, photoCount) {
@@ -1269,7 +1267,7 @@ async function startRemoveFolder(folderId, path, photoCount) {
   loadMissingFolders();
 }
 
-async function removeAllMissingFolders() {
+export async function removeAllMissingFolders() {
   if (_missingFoldersRemoving || !_missingFoldersRows.length) return;
   // Remove children first: deleting a parent also removes its descendants.
   const folders = [..._missingFoldersRows].sort((a, b) => b.path.length - a.path.length);
@@ -1311,7 +1309,7 @@ let _missingPhotosDeleteInFlight = false;
 /** @type {{folderId: number | null; label: string}} */ let _missingPhotosScope = { folderId: null, label: '' };
 
 /** @param {number | null} [folderId] @param {string} [label] */
-function openMissingPhotosModal(folderId, label) {
+export function openMissingPhotosModal(folderId, label) {
   _missingPhotosScope = {
     folderId: (folderId == null ? null : folderId),
     label: label || '',
@@ -1333,7 +1331,7 @@ function openMissingPhotosModal(folderId, label) {
   loadMissingPhotos();
 }
 
-function closeMissingPhotosModal() {
+export function closeMissingPhotosModal() {
   /** @type {HTMLElement} */ (document.getElementById('missingPhotosModal')).classList.remove('open');
   checkMissingPhotos();  // refresh banner
 }
@@ -1341,7 +1339,7 @@ function closeMissingPhotosModal() {
 /* ---------- Rescan Folders ---------- */
 // Opens the Rescan modal. Scope defaults to the whole workspace; the folder
 // dropdown is populated from the active workspace's root folders.
-async function openRescanModal() {
+export async function openRescanModal() {
   // Close the workspace dropdown if this was triggered from its menu.
   vireoWorkspaceSwitcher.close();
   const wsRadio = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"][value="workspace"]'));
@@ -1377,19 +1375,18 @@ async function openRescanModal() {
     if (folderRadio) folderRadio.disabled = true;
   }
 }
-window.openRescanModal = openRescanModal;
 
-function onRescanScopeChange() {
+export function onRescanScopeChange() {
   const scopeEl = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"]:checked'));
   const isFolder = !!(scopeEl && scopeEl.value === 'folder');
   /** @type {HTMLSelectElement} */ (document.getElementById('rescanFolderSelect')).disabled = !isFolder;
 }
 
-function closeRescanModal() {
+export function closeRescanModal() {
   /** @type {HTMLElement} */ (document.getElementById('rescanModal')).classList.remove('open');
 }
 
-async function runRescan() {
+export async function runRescan() {
   const scopeEl = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"]:checked'));
   const scope = scopeEl ? scopeEl.value : 'workspace';
   const btn = /** @type {HTMLButtonElement} */ (document.getElementById('rescanRunBtn'));
@@ -1531,12 +1528,12 @@ function _escapeAttr(s) {
 function _escapeHtml(s) { return _escapeAttr(s); }
 
 /** @param {unknown} value */
-function updateMissingPhotosThumbSize(value) {
+export function updateMissingPhotosThumbSize(value) {
   const list = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
   if (list) list.style.setProperty('--missing-thumb-size', value + 'px');
 }
 
-async function loadMissingPhotos() {
+export async function loadMissingPhotos() {
   const container = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
   const toolbar = /** @type {HTMLElement} */ (document.getElementById('missingPhotosToolbar'));
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking photos…</p>';
@@ -1566,7 +1563,10 @@ async function loadMissingPhotos() {
         : 'Missing originals have not been checked yet.';
       container.innerHTML =
         '<p style="color:var(--text-secondary);">' + msg + '</p>' +
-        '<button class="modal-btn primary" onclick="refreshMissingPhotosNow()">Check now</button>';
+        '<button class="modal-btn primary" type="button">Check now</button>';
+      /** @type {HTMLButtonElement} */ (container.querySelector('button')).addEventListener('click', function() {
+        refreshMissingPhotosNow();
+      });
       _finalizeMissingPhotosRemovalRefresh('failed');
       return 'failed';
     }
@@ -1577,9 +1577,6 @@ async function loadMissingPhotos() {
     // A folder-scoped load is a subset — don't overwrite the workspace-wide
     // banner cache with it, or the banner's dismissed-count math goes stale.
     if (!scoped && cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
-    // Sidecar cleanup consults this map (see _deleteMissingPhotoIds) so a
-    // freshly discovered ghost in a scoped load still gets its .xmp removed.
-    _missingPhotosModalRows = new Map(photos.map(p => [p.id, p]));
     if (photos.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';
       checkMissingPhotos();
@@ -1589,8 +1586,8 @@ async function loadMissingPhotos() {
     /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosSelectAll')).checked = false;
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
-      const thumbUrl = window.vireoThumbnailUrl
-        ? window.vireoThumbnailUrl(p)
+      const thumbUrl = vireoThumbnailUrl
+        ? vireoThumbnailUrl(p)
         : `/thumbnails/${p.id}.jpg`;
       const thumb = p.has_thumb
         ? `<img src="${_escapeAttr(thumbUrl)}" alt="" loading="lazy">`
@@ -1605,7 +1602,7 @@ async function loadMissingPhotos() {
       ).join('');
       return `
         <div class="missing-photo-row" data-photo-id="${p.id}">
-          <input type="checkbox" onchange="toggleMissingPhoto(${p.id}, this.checked)">
+          <input type="checkbox" data-missing-photo-toggle>
           <div class="missing-photo-thumb">${thumb}</div>
           <div class="missing-photo-info">
             <div class="missing-photo-filename" title="${_escapeAttr(p.filename)}">${_escapeHtml(p.filename)}${ts ? ` <span style="font-weight:400;color:var(--text-secondary);">· ${ts}</span>` : ''}</div>
@@ -1613,11 +1610,12 @@ async function loadMissingPhotos() {
             <div class="missing-photo-badges">${badges}</div>
           </div>
           <div class="missing-folder-actions">
-            <button class="danger" onclick="removeOneMissingPhoto(${p.id})">Remove</button>
+            <button class="danger" type="button" data-missing-photo-remove>Remove</button>
           </div>
         </div>
       `;
     }).join('');
+    _bindMissingPhotoRows(container);
     _updateMissingPhotosBulkBtn();
     return 'ready';
   } catch (e) {
@@ -1630,7 +1628,7 @@ async function loadMissingPhotos() {
   }
 }
 
-async function refreshMissingPhotosNow() {
+export async function refreshMissingPhotosNow() {
   const container = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
   const toolbar = /** @type {HTMLElement} */ (document.getElementById('missingPhotosToolbar'));
   if (toolbar) toolbar.style.display = 'none';
@@ -1649,14 +1647,27 @@ async function refreshMissingPhotosNow() {
 }
 
 /** @param {number} id @param {boolean} checked */
-function toggleMissingPhoto(id, checked) {
+/** Bind each Missing Originals row's checkbox and Remove button. @param {HTMLElement} container */
+function _bindMissingPhotoRows(container) {
+  container.querySelectorAll('.missing-photo-row').forEach(function(row) {
+    var photoId = Number(/** @type {HTMLElement} */ (row).dataset.photoId);
+    var checkbox = /** @type {HTMLInputElement} */ (row.querySelector('[data-missing-photo-toggle]'));
+    checkbox.addEventListener('change', function() { toggleMissingPhoto(photoId, checkbox.checked); });
+    /** @type {HTMLButtonElement} */ (row.querySelector('[data-missing-photo-remove]')).addEventListener('click', function() {
+      removeOneMissingPhoto(photoId);
+    });
+  });
+}
+
+/** @param {number} id @param {boolean} checked */
+export function toggleMissingPhoto(id, checked) {
   if (checked) _missingPhotosSelected.add(id);
   else _missingPhotosSelected.delete(id);
   _updateMissingPhotosBulkBtn();
 }
 
 /** @param {boolean} checked */
-function toggleAllMissingPhotos(checked) {
+export function toggleAllMissingPhotos(checked) {
   _missingPhotosSelected = new Set();
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#missingPhotosList .missing-photo-row')).forEach(function(row) {
     const cb = /** @type {HTMLInputElement | null} */ (row.querySelector('input[type="checkbox"]'));
@@ -1737,7 +1748,7 @@ async function removeOneMissingPhoto(id) {
   await _runMissingPhotosRemoval([id], deleteSidecars);
 }
 
-async function removeSelectedMissingPhotos() {
+export async function removeSelectedMissingPhotos() {
   if (_missingPhotosDeleteInFlight) return;
   const ids = Array.from(_missingPhotosSelected);
   if (ids.length === 0) return;

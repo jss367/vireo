@@ -1,6 +1,6 @@
-// Globals every page gets from vireo/static/navbar-shared-helpers.js, which the
-// shared navbar loads before any page script. Declared here for the strict
-// `checkJs` files that call them; the implementations stay classic scripts.
+// Globals every page gets from the shared navbar: navbar-globals.js publishes
+// these exports of navbar-shared-helpers.js before any page script runs.
+// Declared here for the strict `checkJs` files that call them.
 
 interface SafeEventSourceCallbacks<Progress = unknown, Complete = unknown> {
   onProgress?: (data: Progress) => void;

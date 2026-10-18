@@ -2437,18 +2437,18 @@ body.sidebar-resizing {
 <link rel="stylesheet" href="/static/vireo-browse-compare.css">
 
 
-<script src="/static/vireo-work-locally.js"></script>
-<script src="/static/vireo-dialog.js"></script>
-<script src="/static/vireo-panel-loader.js"></script>
-<script src="/static/vireo-folder-browser.js"></script>
-<script src="/static/vireo-export-presets.js"></script>
-<script src="/static/vireo-export-collisions.js"></script>
-<script src="/static/vireo-export-job.js"></script>
+<script defer src="/static/vireo-work-locally.js"></script>
+<script defer src="/static/vireo-dialog.js"></script>
+<script defer src="/static/vireo-panel-loader.js"></script>
+<script defer src="/static/vireo-folder-browser.js"></script>
+<script defer src="/static/vireo-export-presets.js"></script>
+<script defer src="/static/vireo-export-collisions.js"></script>
+<script defer src="/static/vireo-export-job.js"></script>
 <link rel="stylesheet" href="/static/vireo-batch-edits.css">
-<script src="/static/vireo-batch-edits.js"></script>
-<script src="/static/vireo-thumbnail-queue.js"></script>
-<script src="/static/vireo-panorama.js"></script>
-<script src="/static/vireo-browse-compare.js"></script>
+<script defer src="/static/vireo-batch-edits.js"></script>
+<script defer src="/static/vireo-thumbnail-queue.js"></script>
+<script defer src="/static/vireo-panorama.js"></script>
+<script defer src="/static/vireo-browse-compare.js"></script>
 {# Browse's page script, split by concern into classic scripts that share page
    globals. Order is load-time dependency order: a file may only use, while it
    loads, what an earlier file (or itself) declares. Files that only declare come
@@ -2456,42 +2456,42 @@ body.sidebar-resizing {
    cannot fire before the code it reaches has loaded; boot.js is last because it
    starts the work (bootstrap, folder-health subscription, infinite scroll, photo
    deep link) that reaches every other file. #}
-<script src="/static/browse/state.js"></script>
-<script src="/static/browse/panel-requests.js"></script>
-<script src="/static/browse/selection-panel-state.js"></script>
-<script src="/static/browse/keyword-autocomplete.js"></script>
-<script src="/static/browse/config.js"></script>
-<script src="/static/browse/cards.js"></script>
-<script src="/static/browse/stacks.js"></script>
-<script src="/static/browse/grid.js"></script>
-<script src="/static/browse/anchors.js"></script>
-<script src="/static/browse/sidebar-folders.js"></script>
-<script src="/static/browse/sidebar-keywords.js"></script>
-<script src="/static/browse/sidebar-collections.js"></script>
-<script src="/static/browse/folder-health.js"></script>
-<script src="/static/browse/collection-editor.js"></script>
-<script src="/static/browse/loading.js"></script>
-<script src="/static/browse/layout.js"></script>
-<script src="/static/browse/calendar.js"></script>
-<script src="/static/browse/view-controls.js"></script>
-<script src="/static/browse/selection.js"></script>
-<script src="/static/browse/batch-bar.js"></script>
-<script src="/static/browse/best-batch.js"></script>
-<script src="/static/browse/selection-panel.js"></script>
-<script src="/static/browse/prediction-panels.js"></script>
-<script src="/static/browse/panel-loaders.js"></script>
-<script src="/static/browse/selection-panel-events.js"></script>
-<script src="/static/browse/batch-actions.js"></script>
-<script src="/static/browse/detail.js"></script>
-<script src="/static/browse/edit-actions.js"></script>
-<script src="/static/browse/location.js"></script>
-<script src="/static/browse/export.js"></script>
-<script src="/static/vireo-release-originals.js"></script>
-<script src="/static/browse/lightbox.js"></script>
-<script src="/static/browse/scroll.js"></script>
-<script src="/static/browse/keyboard.js"></script>
-<script src="/static/browse/context-menus.js"></script>
-<script src="/static/browse/boot.js"></script>
+<script defer src="/static/browse/state.js"></script>
+<script defer src="/static/browse/panel-requests.js"></script>
+<script defer src="/static/browse/selection-panel-state.js"></script>
+<script defer src="/static/browse/keyword-autocomplete.js"></script>
+<script defer src="/static/browse/config.js"></script>
+<script defer src="/static/browse/cards.js"></script>
+<script defer src="/static/browse/stacks.js"></script>
+<script defer src="/static/browse/grid.js"></script>
+<script defer src="/static/browse/anchors.js"></script>
+<script defer src="/static/browse/sidebar-folders.js"></script>
+<script defer src="/static/browse/sidebar-keywords.js"></script>
+<script defer src="/static/browse/sidebar-collections.js"></script>
+<script defer src="/static/browse/folder-health.js"></script>
+<script defer src="/static/browse/collection-editor.js"></script>
+<script defer src="/static/browse/loading.js"></script>
+<script defer src="/static/browse/layout.js"></script>
+<script defer src="/static/browse/calendar.js"></script>
+<script defer src="/static/browse/view-controls.js"></script>
+<script defer src="/static/browse/selection.js"></script>
+<script defer src="/static/browse/batch-bar.js"></script>
+<script defer src="/static/browse/best-batch.js"></script>
+<script defer src="/static/browse/selection-panel.js"></script>
+<script defer src="/static/browse/prediction-panels.js"></script>
+<script defer src="/static/browse/panel-loaders.js"></script>
+<script defer src="/static/browse/selection-panel-events.js"></script>
+<script defer src="/static/browse/batch-actions.js"></script>
+<script defer src="/static/browse/detail.js"></script>
+<script defer src="/static/browse/edit-actions.js"></script>
+<script defer src="/static/browse/location.js"></script>
+<script defer src="/static/browse/export.js"></script>
+<script defer src="/static/vireo-release-originals.js"></script>
+<script defer src="/static/browse/lightbox.js"></script>
+<script defer src="/static/browse/scroll.js"></script>
+<script defer src="/static/browse/keyboard.js"></script>
+<script defer src="/static/browse/context-menus.js"></script>
+<script defer src="/static/browse/boot.js"></script>
 
 
 </body>

@@ -393,12 +393,12 @@
 
 </div>
 
-<script src="/static/duplicates-card.js"></script>
-<script src="/static/duplicates-restore.js"></script>
-<script src="/static/duplicates-reveal.js"></script>
-<script src="/static/duplicates-categories.js"></script>
-<script src="/static/duplicates-patterns.js"></script>
-<script src="/static/duplicates-cleanup.js"></script>
+<script defer src="/static/duplicates-card.js"></script>
+<script defer src="/static/duplicates-restore.js"></script>
+<script defer src="/static/duplicates-reveal.js"></script>
+<script defer src="/static/duplicates-categories.js"></script>
+<script defer src="/static/duplicates-patterns.js"></script>
+<script defer src="/static/duplicates-cleanup.js"></script>
 <script>
   var _proposals = [];
   var _currentJobId = null;
@@ -1250,8 +1250,7 @@
     setEmptyVisible(true);
   }
 
-  document.addEventListener('DOMContentLoaded', tryRestoreLastScan);
-  VireoFilter.init({
+  document.addEventListener('DOMContentLoaded', () => VireoFilter.init({
     page: 'duplicates',
     root: document.getElementById('vireoFilterBar'),
     scopeLabel: 'Duplicates \u00b7 Grouped matches',
@@ -1263,8 +1262,9 @@
     // would hang unrendered forever waiting for a filter query that
     // never runs.
     if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
-  });
+  }));
+  document.addEventListener('DOMContentLoaded', function(event) { tryRestoreLastScan(event); });
 </script>
-<script src="/static/duplicates-page-hooks.js"></script>
+<script defer src="/static/duplicates-page-hooks.js"></script>
 </body>
 </html>

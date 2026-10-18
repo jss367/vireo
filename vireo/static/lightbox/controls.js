@@ -1,25 +1,45 @@
-function toggleLightboxZoomPopover(/** @type {unknown} */ value) { return vireoLightboxViewport.togglePopover(); }
-function setLightboxZoomFromSlider(/** @type {number | string} */ value) { return vireoLightboxViewport.setFromSlider(value); }
-function stepLightboxZoom(/** @type {number} */ value) { return vireoLightboxViewport.stepZoom(value); }
-function setLightboxZoomToFit(/** @type {unknown} */ value) { return vireoLightboxViewport.fit(); }
-function setLightboxZoomToOneToOne(/** @type {Pick<MouseEvent, "clientX" | "clientY"> | undefined} */ value) { return vireoLightboxViewport.oneToOne(value); }
-function toggleLightboxZoom(/** @type {Pick<MouseEvent, "clientX" | "clientY">} */ value) { return vireoLightboxViewport.toggleZoom(value); }
+import { lbState } from './shared-state.js';
+import { openContextMenu, openInBrowse } from '../navbar-report-context-menu.js';
+import {
+  _lbApplyReadOnlyState, _lbPhotoDataByPhoto, _lbSetPhotoTransitionPending,
+  vireoLightboxSession, vireoLightboxViewport,
+} from './state.js';
+import { buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems } from './curation.js';
+import { _lbClearAdjustmentPreview, _lbFlushPendingAdjustmentSave } from './edits.js';
+import { _lbApplyFlag, _lbSetFlagStatus } from './flags.js';
+import {
+  _lbResetMaskOverlay, lbOverlays, toggleLightboxBoxes, toggleLightboxChrome, toggleLightboxEye,
+  toggleLightboxInfo, toggleLightboxMasks, toggleLightboxTrackEye, toggleLightboxViewMenu,
+} from './overlays.js';
+import { lightboxToggleWildlifeExcluded } from './delete.js';
+import { _lbResetDetailStatus } from './source-loading.js';
+import { findSimilar } from '../navbar-similar-photos.js';
+import {
+  buildOpenInEditorMenuItems, openInEditor, safeFetch, showRevealFeedback, showToast,
+} from '../navbar-shared-helpers.js';
 
-function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
+export function toggleLightboxZoomPopover() { return vireoLightboxViewport.togglePopover(); }
+export function setLightboxZoomFromSlider(/** @type {number | string} */ value) { return vireoLightboxViewport.setFromSlider(value); }
+export function stepLightboxZoom(/** @type {number} */ value) { return vireoLightboxViewport.stepZoom(value); }
+export function setLightboxZoomToFit() { return vireoLightboxViewport.fit(); }
+export function setLightboxZoomToOneToOne(/** @type {Pick<MouseEvent, "clientX" | "clientY"> | undefined} */ value = undefined) { return vireoLightboxViewport.oneToOne(value); }
+export function toggleLightboxZoom(/** @type {Pick<MouseEvent, "clientX" | "clientY">} */ value) { return vireoLightboxViewport.toggleZoom(value); }
+
+export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   if (e && e.target instanceof Element && e.target.tagName === 'IMG') return;
   _lbFlushPendingAdjustmentSave();
   if (vireoLightboxSession.requestedPhotoId() != null) vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
-  var wasOpen = !!window._lbEscToken;
-  if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
+  var wasOpen = !!lbState.escToken;
+  if (wasOpen) { Keymap.popEsc(lbState.escToken); lbState.escToken = null; }
   // The wrap's click-to-zoom latch (set by a mouseup that zoomed out) must not
   // carry into the next session, or it would swallow its first click-to-zoom.
-  window._lightboxZoomHandled = false;
+  lbState.zoomHandled = false;
   vireoLightboxViewport.close();
-  _lbVisualTransitionPending = false;
+  lbState.visualTransitionPending = false;
   _lbSetPhotoTransitionPending(false);
-  _lbDeferredOverlayApply = null;
-  _lbDesiredSrcKey = null;
-  _lbInitialDecodePending = false;
+  lbState.deferredOverlayApply = null;
+  lbState.desiredSrcKey = null;
+  lbState.initialDecodePending = false;
   _lbResetDetailStatus();
   _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
@@ -33,8 +53,8 @@ function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   var closedPhotoId = vireoLightboxSession.close();
   var image = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
   if (image) { image.src = ''; image.onload = null; image.onerror = null; }
-  _lbReadOnly = false;
-  _lbReadOnlyMessage = 'This lightbox is read-only';
+  lbState.readOnly = false;
+  lbState.readOnlyMessage = 'This lightbox is read-only';
   _lbApplyReadOnlyState();
   try {
     document.dispatchEvent(new CustomEvent('lightbox:closed', {
@@ -62,8 +82,8 @@ function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
  * the review workflow, so the color row is omitted when `setColorLabelFor` is
  * not registered.
  */
-function buildLightboxContextMenu(/** @type {number} */ pid) {
-  var readOnlyHint = _lbReadOnly ? _lbReadOnlyMessage : null;
+export function buildLightboxContextMenu(/** @type {number} */ pid) {
+  var readOnlyHint = lbState.readOnly ? lbState.readOnlyMessage : null;
 
   var rateChip = function(/** @type {number} */ n) {
     return {
@@ -128,13 +148,13 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
     flagChip('none', '\u25CB', 'Unflag'),
   ] });
   items.push({ separator: true });
-  items.push(toggleItem('Detection boxes', _lbBoxesVisible, toggleLightboxBoxes));
-  items.push(toggleItem('Mask overlay', _lbMasksVisible, toggleLightboxMasks));
-  items.push(toggleItem('Eye marker', _lbEyeVisible, toggleLightboxEye));
-  items.push(toggleItem('Track eye', _lbTrackEyeEnabled, toggleLightboxTrackEye));
-  items.push(toggleItem('Filename and counter', _lbInfoVisible, toggleLightboxInfo));
-  items.push(toggleItem('Lightbox controls', _lbChromeVisible, toggleLightboxChrome));
-  items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded,
+  items.push(toggleItem('Detection boxes', lbOverlays.boxesVisible, toggleLightboxBoxes));
+  items.push(toggleItem('Mask overlay', lbOverlays.masksVisible, toggleLightboxMasks));
+  items.push(toggleItem('Eye marker', lbOverlays.eyeVisible, toggleLightboxEye));
+  items.push(toggleItem('Track eye', lbOverlays.trackEyeEnabled, toggleLightboxTrackEye));
+  items.push(toggleItem('Filename and counter', lbOverlays.infoVisible, toggleLightboxInfo));
+  items.push(toggleItem('Lightbox controls', lbOverlays.chromeVisible, toggleLightboxChrome));
+  items.push(toggleItem('Wildlife classification', !lbState.currentWildlifeExcluded,
     lightboxToggleWildlifeExcluded, readOnlyHint));
   items.push({ separator: true });
   const editButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxEditPhoto'));
@@ -147,26 +167,26 @@ function buildLightboxContextMenu(/** @type {number} */ pid) {
   items.push({ label: 'Open in Browse', disabled: !!browseDisabledHint,
     disabledHint: browseDisabledHint || undefined,
     onClick: function() {
-      window.openInBrowse(pid);
+      openInBrowse(pid);
     } });
-  if (!_lbReadOnly && typeof window.buildSpeciesHighlightMenuItems === 'function') {
-    items = items.concat(window.buildSpeciesHighlightMenuItems([pid], {
+  if (!lbState.readOnly && typeof buildSpeciesHighlightMenuItems === 'function') {
+    items = items.concat(buildSpeciesHighlightMenuItems([pid], {
       photoById: _lbPhotoDataByPhoto,
       showFetchFallback: true,
     }));
   }
-  if (!_lbReadOnly && typeof window.buildSpeciesRepresentativeMenuItems === 'function') {
-    items = items.concat(window.buildSpeciesRepresentativeMenuItems([pid], {
+  if (!lbState.readOnly && typeof buildSpeciesRepresentativeMenuItems === 'function') {
+    items = items.concat(buildSpeciesRepresentativeMenuItems([pid], {
       photoById: _lbPhotoDataByPhoto,
     }));
   }
 
-  if (typeof window.findSimilar === 'function') {
+  if (typeof findSimilar === 'function') {
     items.push({ label: 'Find Similar',
-      onClick: function() { window.findSimilar(pid); } });
+      onClick: function() { findSimilar(pid); } });
   }
-  if (typeof window.openInEditor === 'function') {
-    items = items.concat(window.buildOpenInEditorMenuItems([pid]));
+  if (typeof openInEditor === 'function') {
+    items = items.concat(buildOpenInEditorMenuItems([pid]));
   }
   if (Vireo.pageHook('openPhotoExportModal')) {
     items.push({ label: 'Export\u2026',
@@ -209,7 +229,7 @@ function revealLightboxPhoto(/** @type {number} */ pid) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: pid}),
   }, { toast: false }).then(function(data) {
-    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(/** @type {NavRevealResult} */ (data));
   }).catch(function(err) {
     if (typeof showToast === 'function') {
       showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
@@ -229,7 +249,7 @@ function revealLightboxPhoto(/** @type {number} */ pid) {
     // handler in full control.)
     e.preventDefault();
     e.stopPropagation();
-    if (_lbVisualTransitionPending) return;
+    if (lbState.visualTransitionPending) return;
     var pid = vireoLightboxSession.requestedPhotoId();
     if (!pid) return;
     openContextMenu(e, buildLightboxContextMenu(pid));

@@ -1,15 +1,21 @@
+import { _lbGuardReadOnly } from './state.js';
+import { vireoThumbnailUrl } from './edits.js';
+import { bindExternalLinks, safeEventSource, safeFetch, showToast } from '../navbar-shared-helpers.js';
+
 /* ---------- iNat Submission ---------- */
-/** @type {InatQueueItem[]} */ var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+/** @type {number | null} */ var _inatEscToken = null;
+
+/** @type {InatQueueItem[]} */ export var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
 var _inatSubmitOwner = 0;
 var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
 var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
 /** @type {InatPreparationFailure[]} */ var _inatQuickFailures = [];
 var _inatModalGeneration = 0;
-/** @type {EventSource | null} */ var _inatExportStream = null;
+/** @type {EventSource | null} */ export var _inatExportStream = null;
 
 function _closeInatExportStream() {
   if (!_inatExportStream) return;
-  try { _inatExportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
+  try { _inatExportStream.close(); } catch(e) {}
   _inatExportStream = null;
 }
 
@@ -35,7 +41,7 @@ async function _inatOpenUrl(/** @type {string} */ url) {
     if (typeof openExternal === 'function') {
       return await openExternal(url);
     }
-  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
+  } catch(e) {}
   return false;
 }
 
@@ -97,7 +103,7 @@ function copyInatQuickUploadUrl(/** @type {number} */ idx) {
   return copyExternalUrl(_inatQuickUploadUrl(idx));
 }
 
-async function submitToInat(/** @type {number} */ photoId) {
+export async function submitToInat(/** @type {number} */ photoId) {
   if (_lbGuardReadOnly()) return false;
   try {
     var data = await /** @type {Promise<InatPreparedPhoto>} */ (safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false }));
@@ -116,7 +122,7 @@ async function submitToInat(/** @type {number} */ photoId) {
   }
 }
 
-async function submitToInatBatch(/** @type {number[]} */ photoIds) {
+export async function submitToInatBatch(/** @type {number[]} */ photoIds) {
   if (_lbGuardReadOnly()) return false;
   // Prepare all photos
   inatQueue = [];
@@ -151,11 +157,11 @@ async function submitToInatBatch(/** @type {number[]} */ photoIds) {
   openInatModal(failures);
 }
 
-async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @type {InatPreparationFailure[]} */ failures) {
+export async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @type {InatPreparationFailure[]} */ failures) {
   _inatModalGeneration++;
   _closeInatExportStream();
-  if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
-  window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
+  if (_inatEscToken) Keymap.popEsc(_inatEscToken);
+  _inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
   inatQueue = items.slice();
   _inatQuickFailures = (failures || []).slice();
@@ -174,7 +180,7 @@ async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @typ
   function _inatAlreadySubmittedWarning(/** @type {InatQueueItem} */ item) {
     if (!item.already_submitted) return '';
     var linkOrText = item.existing_url
-      ? '<a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a>'
+      ? '<a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" rel="noopener" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a>'
       : 'no observation URL recorded';
     return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
   }
@@ -210,11 +216,11 @@ async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @typ
     '<div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:5px;">Direct submission needs an iNaturalist token</div>' +
     '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);margin-bottom:9px;">' +
       'Paste a token below and Vireo will validate it before saving. iNaturalist tokens expire after 24 hours. ' +
-      '<a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">Get a token</a>' +
+      '<a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener" data-external-link style="color:var(--accent);">Get a token</a>' +
     '</div>' +
     '<div style="display:flex;gap:8px;align-items:center;">' +
       '<input id="inatQuickToken" type="password" autocomplete="off" placeholder="Paste iNaturalist token" style="flex:1;min-width:0;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:3px;padding:7px 8px;font-size:12px;font-family:monospace;">' +
-      '<button type="button" class="modal-btn modal-btn-primary" id="inatQuickTokenBtn" onclick="validateAndSaveInatToken()">Validate &amp; Save</button>' +
+      '<button type="button" class="modal-btn modal-btn-primary" id="inatQuickTokenBtn">Validate &amp; Save</button>' +
     '</div>' +
     '<div class="inat-card-status" id="inatQuickTokenStatus">The Send button will be enabled after validation.</div>' +
   '</div>';
@@ -232,8 +238,8 @@ async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @typ
       '</div>' +
       _inatQuickOptions(items[0], 0) +
       '<div style="margin-top:12px;">' +
-        '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" onclick="return openInatQuickUpload(event, 0)" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
-        '<button type="button" class="modal-btn" onclick="copyInatQuickUploadUrl(0)" style="margin-left:8px;">Copy URL</button>' +
+        '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" data-inat-upload="0" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
+        '<button type="button" class="modal-btn" data-inat-copy-url="0" style="margin-left:8px;">Copy URL</button>' +
       '</div>' +
     '</div>';
   } else {
@@ -246,8 +252,8 @@ async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @typ
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
           '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
           '<span style="display:flex;align-items:center;gap:8px;white-space:nowrap;">' +
-            '<a href="' + escapeAttr(item.upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" onclick="return openInatQuickUpload(event, ' + idx + ')" style="color:var(--accent);font-size:12px;">Open Upload</a>' +
-            '<button type="button" onclick="copyInatQuickUploadUrl(' + idx + ')" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
+            '<a href="' + escapeAttr(item.upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" data-inat-upload="' + idx + '" style="color:var(--accent);font-size:12px;">Open Upload</a>' +
+            '<button type="button" data-inat-copy-url="' + idx + '" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
           '</span>' +
         '</div>' +
         _inatQuickOptions(item, idx) +
@@ -269,12 +275,31 @@ async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @typ
     '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);margin-bottom:9px;">' +
       'Export edited JPEG' + (items.length === 1 ? '' : 's') + ' with only the checked metadata, then add ' + (items.length === 1 ? 'it' : 'them') + ' on the iNaturalist upload page.' +
     '</div>' +
-    '<button type="button" class="modal-btn modal-btn-primary" id="inatQuickExportBtn" onclick="exportInatQuickPhotos()">' + escapeHtml(exportLabel) + '</button>' +
+    '<button type="button" class="modal-btn modal-btn-primary" id="inatQuickExportBtn">' + escapeHtml(exportLabel) + '</button>' +
     '<div class="inat-card-status" id="inatQuickExportStatus"></div>' +
   '</div>';
 
-  /** @type {HTMLElement} */ (document.getElementById('inatCards')).innerHTML = html;
+  _inatRenderQuickCards(html);
   /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.add('open');
+}
+
+/** Show the quick modal's cards and bind their upload, copy, token and export controls. @param {string} html */
+function _inatRenderQuickCards(html) {
+  var cards = /** @type {HTMLElement} */ (document.getElementById('inatCards'));
+  cards.innerHTML = html;
+  bindExternalLinks(cards);
+  cards.querySelectorAll('[data-inat-upload]').forEach(function(link) {
+    var idx = Number(link.getAttribute('data-inat-upload'));
+    link.addEventListener('click', function(event) { openInatQuickUpload(/** @type {MouseEvent} */ (event), idx); });
+  });
+  cards.querySelectorAll('[data-inat-copy-url]').forEach(function(button) {
+    var idx = Number(button.getAttribute('data-inat-copy-url'));
+    button.addEventListener('click', function() { copyInatQuickUploadUrl(idx); });
+  });
+  var tokenButton = document.getElementById('inatQuickTokenBtn');
+  if (tokenButton) tokenButton.addEventListener('click', function() { validateAndSaveInatToken(); });
+  var exportButton = document.getElementById('inatQuickExportBtn');
+  if (exportButton) exportButton.addEventListener('click', function() { exportInatQuickPhotos(); });
 }
 
 async function validateAndSaveInatToken() {
@@ -349,7 +374,7 @@ function _inatApplyQuickChoicesToQueue() {
   });
 }
 
-async function exportInatQuickPhotos() {
+export async function exportInatQuickPhotos() {
   var status = /** @type {HTMLElement} */ (document.getElementById('inatQuickExportStatus'));
   var button = /** @type {HTMLButtonElement} */ (document.getElementById('inatQuickExportBtn'));
   if (!button || button.disabled) return;
@@ -415,7 +440,7 @@ async function exportInatQuickPhotos() {
       onComplete: function(/** @type {InatExportCompletion} */ done) {
         var isCurrentStream = _inatExportStream === exportStream;
         if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
+        try { exportStream.close(); } catch(e) {}
         _inatExportStream = null;
         var result = done.result || {};
         var count = (result.exported || []).length;
@@ -440,7 +465,7 @@ async function exportInatQuickPhotos() {
       onError: function() {
         var isCurrentStream = _inatExportStream === exportStream;
         if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
+        try { exportStream.close(); } catch(e) {}
         _inatExportStream = null;
         status.className = 'inat-card-status error';
         status.textContent = '\u2717 Lost the export progress connection.';
@@ -461,8 +486,8 @@ async function exportInatQuickPhotos() {
 function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
   _inatModalGeneration++;
   _closeInatExportStream();
-  if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
-  window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
+  if (_inatEscToken) Keymap.popEsc(_inatEscToken);
+  _inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
   var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
   /** @type {HTMLElement} */ (document.getElementById('inatModalTitle')).textContent = title;
@@ -478,9 +503,9 @@ function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
   inatQueue.forEach(function(item, idx) {
     var warn = '';
     if (item.already_submitted) {
-      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a></div>';
+      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a></div>';
     }
-    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl({id: item.photo_id, edit_recipe: item.edit_recipe}) : '/thumbnails/' + item.photo_id + '.jpg';
+    var thumbUrl = vireoThumbnailUrl ? vireoThumbnailUrl({id: item.photo_id, edit_recipe: item.edit_recipe}) : '/thumbnails/' + item.photo_id + '.jpg';
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
         '<img class="inat-card-thumb" src="' + escapeAttr(thumbUrl) + '" alt="">' +
@@ -506,14 +531,16 @@ function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
       escapeHtml(failures.length + ' photo' + (failures.length === 1 ? '' : 's') + ' could not be prepared.') +
       '</div>';
   }
-  /** @type {HTMLElement} */ (document.getElementById('inatCards')).innerHTML = html;
+  var cards = /** @type {HTMLElement} */ (document.getElementById('inatCards'));
+  cards.innerHTML = html;
+  bindExternalLinks(cards);
   /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.add('open');
 }
 
-function closeInatModal() {
+export function closeInatModal() {
   _inatModalGeneration++;
   _closeInatExportStream();
-  if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
+  if (_inatEscToken) { Keymap.popEsc(_inatEscToken); _inatEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.remove('open');
   if (_inatSubmitting) {
     // Cancel/Esc during an in-flight submit: don't clear the queue out from
@@ -526,7 +553,7 @@ function closeInatModal() {
   }
 }
 
-async function inatDoSubmit() {
+export async function inatDoSubmit() {
   if (_lbGuardReadOnly()) return false;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('inatSubmitBtn'));
   btn.disabled = true;
@@ -584,7 +611,8 @@ async function inatDoSubmit() {
         statusEl.textContent = '✗ ' + result.error;
       } else {
         statusEl.className = 'inat-card-status success';
-        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url || '') + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">View on iNaturalist</a>';
+        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url || '') + '" target="_blank" data-external-link style="color:var(--accent);">View on iNaturalist</a>';
+        bindExternalLinks(statusEl);
         if (total === 1 && result.observation_url && isTauri()) {
           var opened = await openExternal(result.observation_url);
           if (!opened) showToast('Submitted, but could not open iNaturalist: ' + result.observation_url, 'error');
@@ -596,7 +624,8 @@ async function inatDoSubmit() {
       statusEl.className = 'inat-card-status error';
       if (failure.body && failure.body.partial && failure.body.observation_url) {
         statusEl.innerHTML = '&#10007; ' + escapeHtml(failure.message) +
-          ' <a href="' + escapeAttr(failure.body.observation_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
+          ' <a href="' + escapeAttr(failure.body.observation_url) + '" target="_blank" rel="noopener" data-external-link style="color:var(--danger);text-decoration:underline;">View created observation</a>';
+        bindExternalLinks(statusEl);
       } else {
         statusEl.textContent = '✗ ' + failure.message;
       }

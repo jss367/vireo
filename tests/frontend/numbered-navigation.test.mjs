@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import {moduleAsScript} from './module-source.mjs';
 
-const source = readFileSync(new URL('../../vireo/static/navbar-command-palette-open.js', import.meta.url), 'utf8');
+const source = moduleAsScript(readFileSync(new URL('../../vireo/static/navbar-command-palette-open.js', import.meta.url), 'utf8'));
 const pages = [
   ['import', '/import'], ['browse', '/browse'], ['pipeline', '/pipeline'],
   ['pipeline_review', '/pipeline/review'], ['review', '/review'], ['cull', '/cull'],
@@ -14,18 +15,22 @@ const pages = [
 function harness(invoke, platform = 'MacIntel') {
   let tabs = ['keywords', 'storage', 'browse'];
   let keydown;
-  const window = {
-    location: {href: ''},
-    _navTabs: {getTabs: () => tabs, getAllPages: () => pages},
-    vireoResolveNavigationHref: path => path === '/browse' ? '/browse?photo_id=42' : path,
-  };
+  const window = {location: {href: ''}};
   if (invoke) window.__TAURI_INTERNALS__ = {invoke};
-  vm.runInNewContext(source, {
+  // The module's imports from navbar-tabs.js and navbar-command-palette.js.
+  const context = vm.createContext({
     window, navigator: {platform}, console,
     document: {addEventListener: (type, callback) => { if (type === 'keydown') keydown = callback; }},
+    _navTabs: {getTabs: () => tabs, getAllPages: () => pages},
+    vireoResolveNavigationHref: path => path === '/browse' ? '/browse?photo_id=42' : path,
+    openCommandPalette() {}, renderCommandPalette() {},
   });
+  vm.runInContext(source, context);
+  // navbar-boot.js binds the palette's keys once every navbar module has loaded.
+  vm.runInContext('bindCommandPaletteKeys()', context);
   return {
     window,
+    api: context,
     reorder: order => { tabs = order; },
     press: (key, modifiers = {}) => {
       let prevented = false;
@@ -46,15 +51,15 @@ test('tab order follows reordering; fixed pages remain stable; both preserve Bro
   h.press('2');
   assert.equal(h.window.location.href, '/browse?photo_id=42');
 
-  h.window.vireoSetNumberedNavigationMode('fixed_pages');
+  h.api.vireoSetNumberedNavigationMode('fixed_pages');
   for (const [index, page] of pages.slice(0, 9).entries()) {
     assert(h.press(String(index + 1)));
-    assert.equal(h.window.location.href, h.window.vireoResolveNavigationHref(page.href));
+    assert.equal(h.window.location.href, h.api.vireoResolveNavigationHref(page.href));
   }
   h.reorder(['keywords', 'browse']);
   h.press('1');
   assert.equal(h.window.location.href, '/import');
-  h.window.vireoSetNumberedNavigationMode('tab_order');
+  h.api.vireoSetNumberedNavigationMode('tab_order');
   h.press('1');
   assert.equal(h.window.location.href, '/keywords');
 });
@@ -73,14 +78,14 @@ test('locale-required Shift preserves logical digits in both modes and the deskt
     for (const native of [false, true]) {
       const h = harness(native ? async () => {} : undefined, platform);
       for (const mode of ['tab_order', 'fixed_pages']) {
-        await h.window.vireoSetNumberedNavigationMode(mode);
+        await h.api.vireoSetNumberedNavigationMode(mode);
         assert(h.press('1', {shiftKey: true, code: 'Digit1'}));
         assert.equal(h.window.location.href, mode === 'tab_order' ? '/keywords' : '/import');
         assert.equal(h.press('!', {shiftKey: true, code: 'Digit1'}), false);
         assert.equal(h.press('1', {shiftKey: true, altKey: true}), false);
       }
       h.reorder(['settings', 'browse']);
-      await h.window.vireoSetNumberedNavigationMode('tab_order');
+      await h.api.vireoSetNumberedNavigationMode('tab_order');
       assert(h.press('1', {shiftKey: true, code: 'Digit1'}));
       assert.equal(h.window.location.href, '/settings');
     }
@@ -95,17 +100,17 @@ test('native menu updates use the same destinations and finish in order', async 
     calls.push({command, paths: Array.from(args.paths)});
     if (calls.length === 1) await first;
   });
-  const initial = h.window.vireoSyncNumberedNavigation();
+  const initial = h.api.vireoSyncNumberedNavigation();
   await Promise.resolve();
   assert.deepEqual(calls, [{command: 'sync_navigation_shortcuts', paths: ['/keywords', '/storage', '/browse']}]);
-  const fixed = h.window.vireoSetNumberedNavigationMode('fixed_pages');
+  const fixed = h.api.vireoSetNumberedNavigationMode('fixed_pages');
   assert.equal(calls.length, 1);
   release();
   await initial;
   await fixed;
   assert.deepEqual(calls[1].paths, pages.slice(0, 9).map(page => page.href));
   h.reorder(['storage', 'keywords']);
-  await h.window.vireoSetNumberedNavigationMode('tab_order');
+  await h.api.vireoSetNumberedNavigationMode('tab_order');
   assert.deepEqual(calls[2].paths, ['/storage', '/keywords']);
   assert(h.press('J', {shiftKey: true}));
   assert.equal(h.window.location.href, '/jobs');

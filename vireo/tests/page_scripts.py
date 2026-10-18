@@ -18,8 +18,9 @@ from pathlib import Path
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 MODULE_PAGES_PATH = STATIC_DIR.parents[1] / "frontend-module-pages.json"
 # Paths may include a subdirectory: Browse's scripts live in static/browse/.
+# Classic page scripts after the navbar are deferred (see _navbar.html).
 _STATIC_SCRIPT_RE = re.compile(
-    r'<script( type="module")? src="/static/([\w./-]+\.js)"></script>'
+    r'<script( type="module")?(?: defer)? src="/static/([\w./-]+\.js)"></script>'
 )
 # Static imports and re-exports. Module pages import only relative paths
 # (``./state.js``), which test_module_pages.py checks.
