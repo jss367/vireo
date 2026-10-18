@@ -9860,12 +9860,9 @@ def test_extract_masks_aborts_when_rollback_fails():
     """A broken reused connection must not be carried to later photos."""
     import pipeline_job as pj
 
-    class BrokenConnection:
+    class BrokenDatabase:
         def rollback(self):
             raise sqlite3.OperationalError("cannot roll back")
-
-    class BrokenDatabase:
-        conn = BrokenConnection()
 
     with pytest.raises(RuntimeError, match="rollback failed for photo 42"):
         pj._rollback_failed_mask_photo(BrokenDatabase(), 42)

@@ -80,6 +80,25 @@ def test_incremental_baseline_rows_match_a_trailing_separator_folder(db, tmp_pat
     assert rows[0]["summary_needs_extract"] == 1
 
 
+def test_broken_metadata_rows_select_photos_a_rescan_should_repair(db, tmp_path):
+    fid = db.add_folder(str(tmp_path / "b"), name="b")
+    other = db.add_folder(str(tmp_path / "a"), name="a")
+    no_time = _photo(db, fid, "z.jpg")
+    small_raw = _photo(db, fid, "c.nef", timestamp="2024-01-01T00:00:00", width=640)
+    big_raw = _photo(db, fid, "d.nef", timestamp="2024-01-01T00:00:00", width=6000)
+    small_jpg = _photo(db, other, "e.jpg", timestamp="2024-01-01T00:00:00", width=640)
+    has_exif = _photo(db, other, "f.jpg", exif_data="{}")
+    other_no_time = _photo(db, other, "y.jpg")
+    rows = db.scanning.broken_metadata_rows(
+        [no_time, small_raw, big_raw, small_jpg, has_exif, other_no_time], (".nef",),
+    )
+    assert [(r["folder_path"], r["filename"]) for r in rows] == [
+        (str(tmp_path / "a"), "y.jpg"),
+        (str(tmp_path / "b"), "c.nef"),
+        (str(tmp_path / "b"), "z.jpg"),
+    ]
+
+
 def test_collection_change_counter_counts_this_connections_writes(db):
     repo = db.scanning
     repo.install_collection_change_counter()
@@ -180,6 +199,19 @@ def test_defer_and_undo_deferral_round_trip(db, tmp_path):
     assert db.conn.execute(
         "SELECT working_copy_evicted_mtime FROM photos WHERE id=?", (pid,),
     ).fetchone()[0] is None
+    db.rollback()
+
+
+def test_mark_source_decode_failed_stamps_the_marker_without_committing(db, tmp_path):
+    fid = db.add_folder(str(tmp_path), name="p")
+    pid = _photo(db, fid, "a.nef", file_mtime=5.0)
+    db.working_copies.mark_source_decode_failed(pid, 7.5)
+    row = db.conn.execute(
+        "SELECT working_copy_failed_at IS NOT NULL, working_copy_failed_mtime,"
+        " working_copy_failed_source FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert tuple(row) == (1, 7.5, "source")
+    assert db.in_transaction
     db.rollback()
 
 

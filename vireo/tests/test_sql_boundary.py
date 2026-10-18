@@ -69,8 +69,6 @@ CONN_USE_LIMITS = {
     "new_images.py": 5,
     "pending_archives.py": 3,
     "pipeline.py": 18,
-    "pipeline_job.py": 9,
-    "pipeline_plan.py": 2,
     "pipeline_stages/classification.py": 2,
     "pipeline_stages/detection.py": 4,
     "pipeline_stages/features.py": 4,

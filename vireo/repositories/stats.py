@@ -666,6 +666,15 @@ class StatsRepository:
             "pending": row["pending"] or 0,
         }
 
+    def has_quality_input_recipe(self, scope_sql, scope_params):
+        """Whether any workspace photo in scope has a recipe-rendered quality
+        input, i.e. a prior run analysed it with RAW exposure correction."""
+        return self.conn.execute(
+            "SELECT 1 FROM photos p JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
+            "WHERE wf.workspace_id=? AND p.quality_input_recipe IS NOT NULL"
+            + scope_sql + " LIMIT 1", [self.workspace_id_fn(), *scope_params],
+        ).fetchone() is not None
+
     def count_photos_missing_thumb(self, scope_sql, scope_params):
         """Return (eligible, pending) for the thumbnails substage."""
         ws = self.workspace_id_fn()

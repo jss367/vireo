@@ -8,7 +8,9 @@ and then spends seconds per row decoding, so every write it makes for a
 candidate carries the snapshot's full source identity (see
 ``ROW_IDENTITY_WHERE``): a row whose id was reused, or whose companion or
 folder changed while extraction ran, is never stamped with this batch's
-result.
+result. The pipeline's thumbnail stage also stamps the RAW-decode failure
+marker here (``mark_source_decode_failed``) when it falls back to another
+source.
 
 The candidate predicate itself (``scanner._working_copy_candidate_predicate``)
 stays in the scanner beside the retry window it encodes; the backfill summary
@@ -212,6 +214,23 @@ class WorkingCopyRepository:
                 row["file_mtime"], failure_source,
                 *row_identity_params(row),
             ),
+        )
+
+    def mark_source_decode_failed(self, photo_id: int, file_mtime: float) -> None:
+        """Record that decoding the photo's RAW source failed at ``file_mtime``.
+
+        The pipeline's thumbnail stage stamps this when it falls back to a
+        companion JPEG or a working copy, so the next run does not retry the
+        RAW decode until the source changes. Keyed on the id alone: the stage
+        holds no snapshot identity.
+        """
+        self.conn.execute(
+            "UPDATE photos SET"
+            " working_copy_failed_at=datetime('now'),"
+            " working_copy_failed_mtime=?,"
+            " working_copy_failed_source='source'"
+            " WHERE id=?",
+            (file_mtime, photo_id),
         )
 
     def reset(self, photo_id: int) -> None:

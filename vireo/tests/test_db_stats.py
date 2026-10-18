@@ -907,6 +907,19 @@ def test_stats_method_delegates_to_repository(name):
 _REMOVED_STATS_WRAPPERS = ("_stage_scope_ids", "_sampled_top1_medians")
 
 
+def test_has_quality_input_recipe_reads_the_workspace_scope(db, lib):
+    assert db.stats.has_quality_input_recipe("", []) is False
+    _set(db, lib["p5"], quality_input_recipe="{}")
+    # p5 sits in a folder linked only to the other workspace.
+    assert db.stats.has_quality_input_recipe("", []) is False
+    _set(db, lib["p2"], quality_input_recipe="{}")
+    assert db.stats.has_quality_input_recipe("", []) is True
+    scope_sql, scope_params = db._scope_clause([lib["p1"]])
+    assert db.stats.has_quality_input_recipe(scope_sql, scope_params) is False
+    scope_sql, scope_params = db._scope_clause([lib["p1"], lib["p2"]])
+    assert db.stats.has_quality_input_recipe(scope_sql, scope_params) is True
+
+
 def test_stats_is_a_fresh_repository_on_the_connection_per_access(db):
     """``db.stats`` builds a new repository each time, never a cached one.
 
