@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
+from page_scripts import module_pages
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 STATIC = Path(__file__).resolve().parents[1] / "static"
@@ -76,8 +77,10 @@ def test_inline_page_script_only_shrinks():
     )
 
 
-# Pages split into a per-page directory under vireo/static/, keyed by route.
-# Browse has its own check in test_browse_pure_helpers.py.
+# Pages split into a per-page directory of classic scripts under
+# vireo/static/, keyed by route. Browse has its own check in
+# test_browse_pure_helpers.py. A page converted to ES modules moves from here
+# to frontend-module-pages.json, whose pages test_module_pages.py checks.
 SPLIT_PAGES = {
     "/settings": "settings",
     "/import": "import",
@@ -89,10 +92,17 @@ SPLIT_PAGES = {
     "/locations/review": "location-review",
     "/jobs": "jobs",
     "/review": "review",
-    "/misses": "misses",
     "/move": "move",
     "/keywords": "keywords",
 }
+
+
+def test_module_pages_are_not_listed_as_classic_split_pages():
+    modules = {contract["route"] for contract in module_pages().values()}
+    assert not modules & set(SPLIT_PAGES), (
+        "A page is either classic (SPLIT_PAGES) or a module page "
+        "(frontend-module-pages.json), not both."
+    )
 
 
 @pytest.mark.parametrize("route, directory", sorted(SPLIT_PAGES.items()))

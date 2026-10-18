@@ -13,13 +13,18 @@ result.
 The candidate predicate itself (``scanner._working_copy_candidate_predicate``)
 stays in the scanner beside the retry window it encodes; the backfill summary
 and the extractor's SELECT both receive it from there so the two stay in sync.
+The quota eviction in ``working_copy_cache`` reads and clears the same columns
+(``eviction_rows``, ``clear_missing_tracked``, ``record_eviction``) and keeps
+its own transaction and commit points.
 
 Callers reach this module as ``db.working_copies`` (a fresh repository per
 access, see ``Database.working_copies``); there are no forwarding wrappers on
 ``Database``. The data is catalog-wide, so the repository takes no workspace
 id. Nothing here commits: the extraction pass owns its commits (through
 ``Database.commit_with_retry``) except ``load_scope``, which commits only the
-transaction it opened itself, exactly as the scanner did.
+transaction it opened itself, exactly as the scanner did. The render paths'
+RAW-decode failure marker (``mark_raw_decode_failed``) lives here too; they
+commit it themselves.
 """
 
 import sqlite3
@@ -214,6 +219,22 @@ class WorkingCopyRepository:
             ),
         )
 
+    def mark_raw_decode_failed(self, photo_id: int, file_mtime: Any) -> None:
+        """Record that the photo's RAW source failed to decode at ``file_mtime``.
+
+        The render paths (the thumbnail fallbacks, ``render_source``) stamp it
+        so the next request fails fast instead of repeating the decode until
+        the source changes. The caller commits.
+        """
+        self.conn.execute(
+            "UPDATE photos SET"
+            " working_copy_failed_at=datetime('now'),"
+            " working_copy_failed_mtime=?,"
+            " working_copy_failed_source='source'"
+            " WHERE id=?",
+            (file_mtime, photo_id),
+        )
+
     def reset(self, photo_id: int) -> None:
         """Forget the photo's working copy and any eviction or failure marker."""
         self.conn.execute(
@@ -224,6 +245,40 @@ class WorkingCopyRepository:
             " working_copy_failed_source = NULL"
             " WHERE id = ?",
             (photo_id,),
+        )
+
+    # -- quota eviction (working_copy_cache) ----------------------------------
+
+    def eviction_rows(self) -> list[sqlite3.Row]:
+        """``(id, working_copy_path, file_mtime)`` of every photo, for the quota scan."""
+        return self.conn.execute(
+            "SELECT id, working_copy_path, file_mtime FROM photos "
+        ).fetchall()
+
+    def clear_missing_tracked(self, rows: Iterable[tuple[int, str]]) -> None:
+        """Clear ``working_copy_path`` for ``(id, path)`` rows still recording ``path``.
+
+        The quota scan found those files gone. The caller commits.
+        """
+        self.conn.executemany(
+            "UPDATE photos SET working_copy_path=NULL "
+            "WHERE id=? AND working_copy_path=?",
+            rows,
+        )
+
+    def record_eviction(self, photo_id: int, expected_rel: str) -> None:
+        """Mark one photo's working copy evicted at its current ``file_mtime``.
+
+        Only while the row still records ``expected_rel`` (or nothing), so a
+        replacement published under another path is left alone. The caller
+        commits.
+        """
+        self.conn.execute(
+            "UPDATE photos SET working_copy_path=NULL, "
+            "working_copy_evicted_mtime=COALESCE(file_mtime, -1) "
+            "WHERE id=? AND (working_copy_path IS NULL "
+            "OR working_copy_path=?)",
+            (photo_id, expected_rel),
         )
 
     # -- capacity deferral ---------------------------------------------------

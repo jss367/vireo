@@ -104,7 +104,7 @@ def create_predictions_blueprint(
         Returns ``(preds, alt_preds)``; raises ``ValueError`` on a bad rule.
         """
         if collection_id:
-            photos = db.get_collection_photos(collection_id, per_page=999999)
+            photos = db.collections.get_photos(collection_id, per_page=999999)
             photo_ids = [p["id"] for p in photos]
             # An explicit ``photo_ids`` narrows the collection rather than
             # replacing it, so a Browse panel opened inside a collection

@@ -132,7 +132,7 @@ class _DetectPass:
         self.thread_db = thread_db
 
         photos = self.filter_excluded(
-            thread_db.get_collection_photos(run.collection_id, per_page=999999)
+            thread_db.collections.get_photos(run.collection_id, per_page=999999)
         )
         photo_ids = [p["id"] for p in photos]
         kept_ids = set(thread_db.filter_out_wildlife_excluded(photo_ids))

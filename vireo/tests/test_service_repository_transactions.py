@@ -49,7 +49,7 @@ def test_service_domain_accessors_are_fresh_on_the_live_connection(db, name):
 
 def test_collection_service_reads_resolve_workspace_at_use(db):
     first = db.active_workspace_id
-    collection_id = db.add_collection("First workspace collection", "[]")
+    collection_id = db.collections.add("First workspace collection", "[]")
     repo = db.collections
     assert repo.get(collection_id)["id"] == collection_id
     second = db.create_workspace("Second workspace")

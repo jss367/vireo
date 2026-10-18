@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tone import (
     HIGHLIGHT_KNEE,
+    LocalAdjustments,
+    ToneAdjustments,
     apply_adjustments,
     apply_color_grading,
     apply_hsl_mixer,
@@ -38,7 +40,7 @@ def test_exposure_is_a_linear_multiply_in_shadows():
     # A mid-shadow tone pushed +1 stop should roughly double in linear light
     # (well below the highlight knee, so the shoulder does not engage).
     rgb = np.full((1, 1, 3), 0.2, dtype=np.float32)
-    out = apply_adjustments(rgb, exposure=1.0)
+    out = apply_adjustments(rgb, ToneAdjustments(exposure=1.0))
     lin_in = srgb_to_linear(np.float32(0.2))
     lin_out = srgb_to_linear(out[0, 0, 0])
     assert lin_out == float(lin_out)  # finite
@@ -51,7 +53,7 @@ def test_highlights_roll_off_instead_of_clipping():
     rgb = np.full((1, 1, 3), 0.7, dtype=np.float32)
     prev = -1.0
     for ev in (0.0, 1.0, 2.0, 4.0):
-        out = float(apply_adjustments(rgb, exposure=ev)[0, 0, 0])
+        out = float(apply_adjustments(rgb, ToneAdjustments(exposure=ev))[0, 0, 0])
         assert out < 1.0  # never hard-clips to flat white
         assert out > prev  # monotonic increase with exposure
         prev = out
@@ -68,7 +70,7 @@ def test_positive_exposure_never_darkens_near_white_highlights():
     base = float(apply_adjustments(rgb)[0, 0, 0])
     prev = base
     for ev in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0):
-        out = float(apply_adjustments(rgb, exposure=ev)[0, 0, 0])
+        out = float(apply_adjustments(rgb, ToneAdjustments(exposure=ev))[0, 0, 0])
         assert out >= base - 1e-5, (
             f"+{ev} EV darkened below the ev=0 baseline: {base:.4f} -> {out:.4f}"
         )
@@ -90,7 +92,7 @@ def test_highlight_rolloff_never_exceeds_one():
 
 def test_negative_exposure_darkens():
     rgb = np.full((1, 1, 3), 0.5, dtype=np.float32)
-    out = float(apply_adjustments(rgb, exposure=-1.0)[0, 0, 0])
+    out = float(apply_adjustments(rgb, ToneAdjustments(exposure=-1.0))[0, 0, 0])
     assert out < 0.5
 
 
@@ -101,21 +103,21 @@ def test_white_balance_gains_default_to_unity():
 
 def test_warm_white_balance_pushes_red_over_blue():
     rgb = np.full((1, 1, 3), 0.5, dtype=np.float32)
-    out = apply_adjustments(rgb, white_balance={"temperature": 60})
+    out = apply_adjustments(rgb, ToneAdjustments(white_balance={"temperature": 60}))
     r, g, b = out[0, 0]
     assert r > b
 
 
 def test_saturation_zero_is_grey_and_preserves_luma():
     rgb = np.array([[[0.8, 0.3, 0.1]]], dtype=np.float32)
-    out = apply_adjustments(rgb, saturation=-100.0)
+    out = apply_adjustments(rgb, ToneAdjustments(saturation=-100.0))
     r, g, b = out[0, 0]
     assert abs(r - g) < 1e-3 and abs(g - b) < 1e-3  # fully desaturated -> grey
 
 
 def test_shadows_lift_dark_pixels_more_than_midtones():
     rgb = np.array([[[0.12, 0.12, 0.12], [0.55, 0.55, 0.55]]], dtype=np.float32)
-    out = apply_adjustments(rgb, shadows=80)
+    out = apply_adjustments(rgb, ToneAdjustments(shadows=80))
     dark_delta = float(out[0, 0, 0] - rgb[0, 0, 0])
     mid_delta = float(out[0, 1, 0] - rgb[0, 1, 0])
     assert dark_delta > mid_delta
@@ -124,7 +126,7 @@ def test_shadows_lift_dark_pixels_more_than_midtones():
 
 def test_highlights_pull_bright_pixels_more_than_midtones():
     rgb = np.array([[[0.55, 0.55, 0.55], [0.9, 0.9, 0.9]]], dtype=np.float32)
-    out = apply_adjustments(rgb, highlights=-80)
+    out = apply_adjustments(rgb, ToneAdjustments(highlights=-80))
     mid_delta = float(rgb[0, 0, 0] - out[0, 0, 0])
     bright_delta = float(rgb[0, 1, 0] - out[0, 1, 0])
     assert bright_delta > mid_delta
@@ -136,7 +138,7 @@ def test_whites_and_blacks_target_extreme_ranges():
         [[[0.05, 0.05, 0.05], [0.30, 0.30, 0.30], [0.85, 0.85, 0.85]]],
         dtype=np.float32,
     )
-    out = apply_adjustments(rgb, blacks=-80, whites=80)
+    out = apply_adjustments(rgb, ToneAdjustments(blacks=-80, whites=80))
     assert out[0, 0, 0] < rgb[0, 0, 0]
     assert abs(float(out[0, 1, 0] - rgb[0, 1, 0])) < 0.02
     assert out[0, 2, 0] > rgb[0, 2, 0]
@@ -157,7 +159,7 @@ def test_each_range_control_is_monotonic_at_every_slider_value():
     ramp = _grey_ramp()
     for name in ("shadows", "highlights", "blacks", "whites"):
         for amount in range(-100, 101):
-            _assert_monotonic_grey(apply_adjustments(ramp, **{name: amount}))
+            _assert_monotonic_grey(apply_adjustments(ramp, ToneAdjustments(**{name: amount})))
 
 
 def test_extreme_range_control_combinations_remain_monotonic():
@@ -167,21 +169,21 @@ def test_extreme_range_control_combinations_remain_monotonic():
     names = ("shadows", "highlights", "blacks", "whites")
     for values in itertools.product((-100, -50, 0, 50, 100), repeat=4):
         adjustments = dict(zip(names, values, strict=True))
-        _assert_monotonic_grey(apply_adjustments(ramp, **adjustments))
+        _assert_monotonic_grey(apply_adjustments(ramp, ToneAdjustments(**adjustments)))
 
 
 def test_shadows_and_highlights_preserve_black_and_white_endpoints():
     endpoints = np.array([[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]], dtype=np.float32)
     for name in ("shadows", "highlights"):
         for amount in (-100, -50, 50, 100):
-            out = apply_adjustments(endpoints, **{name: amount})
+            out = apply_adjustments(endpoints, ToneAdjustments(**{name: amount}))
             assert np.allclose(out, endpoints, atol=1e-6)
 
 
 def test_blacks_and_whites_deliberately_move_only_their_endpoint_direction():
     endpoints = np.array([[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]], dtype=np.float32)
-    lifted_black = apply_adjustments(endpoints, blacks=100)
-    lowered_white = apply_adjustments(endpoints, whites=-100)
+    lifted_black = apply_adjustments(endpoints, ToneAdjustments(blacks=100))
+    lowered_white = apply_adjustments(endpoints, ToneAdjustments(whites=-100))
     assert 0.10 < float(lifted_black[0, 0, 0]) < 0.15
     assert np.allclose(lifted_black[0, 1], 1.0, atol=1e-6)
     assert 0.85 < float(lowered_white[0, 1, 0]) < 0.90
@@ -190,7 +192,7 @@ def test_blacks_and_whites_deliberately_move_only_their_endpoint_direction():
 
 def test_shadow_lift_preserves_linear_rgb_ratios_when_in_gamut():
     rgb = np.array([[[0.18, 0.07, 0.025]]], dtype=np.float32)
-    out = apply_adjustments(rgb, shadows=80)
+    out = apply_adjustments(rgb, ToneAdjustments(shadows=80))
     channel_gains = srgb_to_linear(out) / srgb_to_linear(rgb)
     assert float(np.ptp(channel_gains)) < 1e-4
     assert np.all(out > rgb)
@@ -201,7 +203,7 @@ def test_lifted_black_neutralizes_one_code_chroma_noise():
         [[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0 / 255.0]]],
         dtype=np.float32,
     )
-    out = apply_adjustments(rgb, blacks=100)
+    out = apply_adjustments(rgb, ToneAdjustments(blacks=100))
     exact_black, blue_noise = out[0]
     assert float(np.ptp(blue_noise)) < 0.01
     assert np.max(np.abs(blue_noise - exact_black)) < 0.01
@@ -275,11 +277,12 @@ def test_advanced_color_runs_with_local_tone_branch():
     weight = np.array([[1.0, 0.0]], dtype=np.float32)
     out = apply_adjustments(
         rgb,
-        local_weight=weight,
-        local_subject={"exposure": 0.5},
-        tone_curve={"midtones": 60},
-        hsl={"blue": {"saturation": -30}},
-        color_grading={"shadows": {"hue": 30, "saturation": 10}},
+        ToneAdjustments(
+            tone_curve={"midtones": 60},
+            hsl={"blue": {"saturation": -30}},
+            color_grading={"shadows": {"hue": 30, "saturation": 10}},
+        ),
+        local=LocalAdjustments(weight=weight, subject={"exposure": 0.5}),
     )
     assert out.shape == rgb.shape
     assert np.all(np.isfinite(out))
@@ -295,15 +298,27 @@ def _halves_weight(height=4, width=8):
     return w
 
 
-def test_local_weight_none_matches_global_only():
+def test_tone_adjustments_from_mapping_reads_only_present_tone_keys():
+    controls = ToneAdjustments.from_mapping({
+        "exposure": 0.5, "white_balance": None, "sharpness": 40, "hsl": {"red": {"hue": 5}},
+    })
+    assert controls == ToneAdjustments(exposure=0.5, hsl={"red": {"hue": 5}})
+    assert ToneAdjustments.from_mapping({}) == ToneAdjustments()
+
+
+def test_local_without_weight_or_deltas_matches_global_only():
     rng = np.random.default_rng(9)
     px = rng.random((4, 8, 3)).astype(np.float32)
-    a = apply_adjustments(px, exposure=0.7, shadows=20)
-    b = apply_adjustments(
-        px, exposure=0.7, shadows=20,
-        local_weight=None, local_subject=None, local_background=None,
-    )
-    assert np.array_equal(a, b)
+    controls = ToneAdjustments(exposure=0.7, shadows=20)
+    a = apply_adjustments(px, controls)
+    for local in (
+        None,
+        LocalAdjustments(weight=None, subject={"exposure": 1.0}),
+        LocalAdjustments(weight=_halves_weight(), subject=None, background=None),
+        LocalAdjustments(weight=_halves_weight(), subject={}, background={}),
+    ):
+        b = apply_adjustments(px, controls, local=local)
+        assert np.array_equal(a, b)
 
 
 def test_local_exposure_applies_only_inside_weight():
@@ -311,7 +326,8 @@ def test_local_exposure_applies_only_inside_weight():
     w = _halves_weight()
 
     out = apply_adjustments(
-        px, local_weight=w, local_subject={"exposure": 1.0},
+        px,
+        local=LocalAdjustments(weight=w, subject={"exposure": 1.0}),
     )
     global_only = apply_adjustments(px)
 
@@ -328,7 +344,8 @@ def test_local_background_applies_to_inverse_weight():
     w = _halves_weight()
 
     out = apply_adjustments(
-        px, local_weight=w, local_background={"exposure": -1.0},
+        px,
+        local=LocalAdjustments(weight=w, background={"exposure": -1.0}),
     )
 
     # Subject half untouched, background half darkened.
@@ -343,10 +360,12 @@ def test_local_deltas_compose_with_global():
     w = _halves_weight()
 
     out = apply_adjustments(
-        px, shadows=40, local_weight=w, local_subject={"shadows": -40},
+        px,
+        ToneAdjustments(shadows=40),
+        local=LocalAdjustments(weight=w, subject={"shadows": -40}),
     )
     no_lift = apply_adjustments(px)
-    lifted = apply_adjustments(px, shadows=40)
+    lifted = apply_adjustments(px, ToneAdjustments(shadows=40))
 
     assert np.allclose(out[:, :4], no_lift[:, :4], atol=1e-3)
     assert np.allclose(out[:, 4:], lifted[:, 4:], atol=1e-3)
@@ -360,7 +379,8 @@ def test_local_saturation_weighted():
     w = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
 
     out = apply_adjustments(
-        px, local_weight=w, local_subject={"saturation": -100},
+        px,
+        local=LocalAdjustments(weight=w, subject={"saturation": -100}),
     )
 
     # w=1 column fully desaturated (channels equal), w=0 column unchanged.
@@ -373,7 +393,8 @@ def test_local_fractional_weight_is_between():
     w = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
 
     out = apply_adjustments(
-        px, local_weight=w, local_subject={"exposure": 1.5},
+        px,
+        local=LocalAdjustments(weight=w, subject={"exposure": 1.5}),
     )
 
     assert out[0, 0, 0] < out[0, 1, 0] < out[0, 2, 0]

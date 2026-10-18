@@ -716,7 +716,7 @@ def test_photo_context_menu_adds_photo_to_existing_collection(live_server, page)
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:4]
     _write_grouped_pipeline_cache(live_server, photo_ids)
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Process Review Picks",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
@@ -733,7 +733,7 @@ def test_photo_context_menu_adds_photo_to_existing_collection(live_server, page)
     modal.locator(".modal-btn-primary", has_text="Add").click()
     expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
 
-    members = db.get_collection_photos(collection_id, per_page=100)
+    members = db.collections.get_photos(collection_id, per_page=100)
     assert [member["id"] for member in members] == [photo_id]
 
 
@@ -1205,7 +1205,7 @@ def test_group_context_menu_preserves_selection_for_collection_action(
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:4]
     _write_grouped_pipeline_cache(live_server, photo_ids)
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Burst Shortlist",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
@@ -1242,7 +1242,7 @@ def test_group_context_menu_preserves_selection_for_collection_action(
     modal.locator(".modal-btn-primary", has_text="Add").click()
     expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
 
-    members = db.get_collection_photos(collection_id, per_page=100)
+    members = db.collections.get_photos(collection_id, per_page=100)
     assert {member["id"] for member in members} == set(selected_ids)
 
 
@@ -1943,7 +1943,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:4]
     _write_grouped_pipeline_cache(live_server, photo_ids)
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Read-only target",
         json.dumps([{"field": "photo_ids", "value": []}]),
     )
@@ -1967,7 +1967,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
         "confirmPipelineCollection(), confirmPipelineKeyword()]); }"
     )
     assert results == [False, False]
-    assert db.get_collection_photos(collection_id, per_page=100) == []
+    assert db.collections.get_photos(collection_id, per_page=100) == []
     assert "must-not-write" not in {
         keyword["name"] for keyword in db.get_photo_keywords(photo_id)
     }

@@ -1872,7 +1872,7 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
     # robin2 (all_ids[4], in "yard") is left out of the saved review.
     cached_ids = all_ids[:4]
     _write_predictionless_pipeline_cache(live_server, cached_ids)
-    collection_id = live_server["db"].add_collection(
+    collection_id = live_server["db"].collections.add(
         "First hawk", json.dumps([{"field": "photo_ids", "value": [all_ids[0]]}]),
     )
     regroup_payloads = []

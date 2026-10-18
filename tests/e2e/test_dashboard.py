@@ -56,7 +56,7 @@ def test_dashboard_collection_drill_down_is_explicitly_composable(live_server, p
     """Dashboard marks combined collection links without changing plain deep links."""
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Two seasons",
         json.dumps([{"field": "photo_ids", "value": [photo_ids[0], photo_ids[3]]}]),
     )
@@ -98,7 +98,7 @@ def test_dashboard_collection_deep_link_loads_offline_availability(
     db.conn.commit()
     collection_id = next(
         collection["id"]
-        for collection in db.get_collections()
+        for collection in db.collections.list_all()
         if collection["name"] == "All Photos"
     )
 
@@ -135,7 +135,7 @@ def test_dashboard_scoped_visual_collection_link_loads_visual_clause(live_server
     import json as _json
 
     db = live_server["db"]
-    visual_id = db.add_collection(
+    visual_id = db.collections.add(
         "Soaring hawks",
         _json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=_json.dumps(
@@ -206,7 +206,7 @@ def test_scoped_dashboard_disables_workspace_wide_sync(live_server, page):
 
 def test_process_blocks_unavailable_dashboard_collection(live_server, page):
     """A stale Dashboard shortcut cannot fall back to a different Process source."""
-    collection_id = live_server["db"].add_collection("Broken", "{not json")
+    collection_id = live_server["db"].collections.add("Broken", "{not json")
     page.goto(
         f"{live_server['url']}/pipeline?dashboard_stage=previews"
         f"&collection_id={collection_id}"

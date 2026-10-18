@@ -1,11 +1,11 @@
-"""Tests for POST /api/collections/<id>/duplicate and db.duplicate_collection."""
+"""Tests for POST /api/collections/<id>/duplicate and db.collections.duplicate."""
 
 import json
 
 
 def _clear_default_collections(db):
-    for c in db.get_collections():
-        db.delete_collection(c["id"])
+    for c in db.collections.list_all():
+        db.collections.delete(c["id"])
 
 
 def test_duplicate_collection_copies_name_and_rules(app_and_db):
@@ -15,7 +15,7 @@ def test_duplicate_collection_copies_name_and_rules(app_and_db):
     _clear_default_collections(db)
 
     rules = [{"field": "rating", "op": ">=", "value": 3}]
-    cid = db.add_collection("My Picks", json.dumps(rules))
+    cid = db.collections.add("My Picks", json.dumps(rules))
 
     with app.test_client() as c:
         resp = c.post(f"/api/collections/{cid}/duplicate", json={})
@@ -25,7 +25,7 @@ def test_duplicate_collection_copies_name_and_rules(app_and_db):
         new_id = body["id"]
         assert new_id != cid
 
-    collections = {c["id"]: c for c in db.get_collections()}
+    collections = {c["id"]: c for c in db.collections.list_all()}
     assert new_id in collections
     new = collections[new_id]
     assert new["name"].startswith("My Picks")
@@ -43,7 +43,7 @@ def test_duplicate_collection_copies_static_photo_memberships(app_and_db):
     photos = db.get_photos()
     pids = [p["id"] for p in photos][:3]
 
-    cid = db.add_collection("Static", json.dumps([]))
+    cid = db.collections.add("Static", json.dumps([]))
     # Use the existing add-photos endpoint to seed membership.
     with app.test_client() as c:
         resp = c.post(
@@ -57,8 +57,8 @@ def test_duplicate_collection_copies_static_photo_memberships(app_and_db):
         new_id = resp.get_json()["id"]
 
     # New collection returns the same photos as the source.
-    orig_photos = {p["id"] for p in db.get_collection_photos(cid, per_page=100)}
-    new_photos = {p["id"] for p in db.get_collection_photos(new_id, per_page=100)}
+    orig_photos = {p["id"] for p in db.collections.get_photos(cid, per_page=100)}
+    new_photos = {p["id"] for p in db.collections.get_photos(new_id, per_page=100)}
     assert orig_photos == new_photos
     assert orig_photos == set(pids)
 
@@ -102,14 +102,14 @@ def test_duplicate_unknown_collection_returns_404(app_and_db):
 
 
 def test_duplicate_collection_is_workspace_scoped(app_and_db):
-    """db.duplicate_collection is scoped to the active workspace: duplicating
+    """db.collections.duplicate is scoped to the active workspace: duplicating
     a collection that belongs to a different workspace raises, and the new
     collection lands in the active workspace."""
     app, db = app_and_db
     _clear_default_collections(db)
 
     source_ws = db._active_workspace_id
-    cid = db.add_collection("Wsp", json.dumps([{"field": "all"}]))
+    cid = db.collections.add("Wsp", json.dumps([{"field": "all"}]))
 
     # Create a second workspace with no collections, and make it active.
     other_ws = db.create_workspace("Other")
@@ -119,11 +119,11 @@ def test_duplicate_collection_is_workspace_scoped(app_and_db):
     import pytest
 
     with pytest.raises(ValueError):
-        db.duplicate_collection(cid)
+        db.collections.duplicate(cid)
 
     # Duplicating from the source workspace lands the copy there.
     db.set_active_workspace(source_ws)
-    new_id = db.duplicate_collection(cid)
+    new_id = db.collections.duplicate(cid)
 
     row = db.conn.execute(
         "SELECT workspace_id FROM collections WHERE id = ?", (new_id,)

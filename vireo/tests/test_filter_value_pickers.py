@@ -24,7 +24,7 @@ def test_equipment_choices_include_any_and_exclude_all(db, tmp_path, field):
     b = _photo(db, folder, "b.jpg", **{field: "Beta"})
     c = _photo(db, folder, "c.jpg")
     def ids(op, value):
-        return set(db.query_photo_ids([{"field": field, "op": op, "value": value}]))
+        return set(db.collections.query_photo_ids([{"field": field, "op": op, "value": value}]))
     assert ids("in", ["ALPHA", "beta"]) == {a, b}
     assert ids("not_in", ["ALPHA", "beta"]) == {c}
     assert ids("in", []) == set()
@@ -43,13 +43,13 @@ def test_keyword_choices_match_any_and_exclude_all(db, tmp_path, field):
     db.tag_photo(a, hawk)
     db.tag_photo(a, robin)
     db.tag_photo(b, robin)
-    assert set(db.query_photo_ids([{"field": field, "op": "in", "value": ["Hawk", "Robin"]}])) == {a, b}
-    assert set(db.query_photo_ids([{"field": field, "op": "not_in", "value": ["Hawk", "Robin"]}])) == {c}
+    assert set(db.collections.query_photo_ids([{"field": field, "op": "in", "value": ["Hawk", "Robin"]}])) == {a, b}
+    assert set(db.collections.query_photo_ids([{"field": field, "op": "not_in", "value": ["Hawk", "Robin"]}])) == {c}
     nested = {"mode": "any", "rules": [
         {"field": field, "op": "in", "value": ["Hawk"]},
         {"field": "filename", "op": "is", "value": "c.jpg"},
     ]}
-    assert set(db.query_photo_ids(nested)) == {a, c}
+    assert set(db.collections.query_photo_ids(nested)) == {a, c}
 
 
 def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
@@ -67,7 +67,7 @@ def test_model_choices_respect_workspace_and_visible_predictions(db, tmp_path):
     folder2 = db.add_folder(str(tmp_path / "elsewhere"))
     predict(_photo(db, folder2, "elsewhere.jpg"), "Other workspace model")
     db.set_active_workspace(ws)
-    assert db.get_filter_field_values("classifier_model") == [{"value": "Visible model", "count": 1}]
-    assert db.get_filter_field_values("classifier_model", q="Visible") == [{"value": "Visible model", "count": 1}]
-    assert db.get_filter_field_values("classifier_model", q="%") == []
-    assert db.get_filter_field_values("classifier_model", rules=[{"field": "filename", "op": "is", "value": "missing"}]) == []
+    assert db.collections.get_filter_field_values("classifier_model") == [{"value": "Visible model", "count": 1}]
+    assert db.collections.get_filter_field_values("classifier_model", q="Visible") == [{"value": "Visible model", "count": 1}]
+    assert db.collections.get_filter_field_values("classifier_model", q="%") == []
+    assert db.collections.get_filter_field_values("classifier_model", rules=[{"field": "filename", "op": "is", "value": "missing"}]) == []
