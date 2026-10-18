@@ -63,22 +63,17 @@ def refresh_common_name_index(conn, taxonomy_data):
             "ambiguous_names": len(ambiguous)}
 
 
-def plan_repairs(conn):
+def plan_repairs(db):
     """Only repair custom BioCLIP labels whose identity has verified evidence.
 
     Raw labels, confidences, prediction IDs, keywords and all review state are
     preserved. Model-native scientific labels and hybrids are outside this
     repair: a similar common name is not evidence to rewrite their identity.
     """
+    repairs = db.species_identity_repairs
     changes = []
     for name, evidence in COMMON_NAME_CORRECTIONS.items():
-        rows = conn.execute(
-            "SELECT id, species, detection_id, classifier_model, labels_fingerprint, scientific_name, "
-            "source_taxon_id FROM predictions WHERE species = ? COLLATE NOCASE "
-            "AND classifier_model LIKE 'BioCLIP%' AND labels_fingerprint NOT IN ('tol', 'legacy') "
-            "AND source_taxon_id IS NULL AND scientific_name IS NOT ?",
-            (name, evidence["scientific_name"]),
-        ).fetchall()
+        rows = repairs.bioclip_correction_candidates(name, evidence["scientific_name"])
         for row in rows:
             changes.append({
                 **dict(row), "new_scientific_name": evidence["scientific_name"],
@@ -88,7 +83,7 @@ def plan_repairs(conn):
     return changes
 
 
-def apply_repairs(conn, changes, retire_artifacts=True):
+def apply_repairs(db, changes, retire_artifacts=True):
     """Apply the plan atomically, retaining an in-database before/after audit.
 
     Optimistic row checks reject a plan if predictions changed after preview.
@@ -97,40 +92,38 @@ def apply_repairs(conn, changes, retire_artifacts=True):
     False only when a fresh run in this catalog would write the corrected
     values itself, so the cached output still matches its fingerprint.
     """
+    repairs = db.species_identity_repairs
     count = 0
     for change in changes:
         after = {
             "scientific_name": change["new_scientific_name"],
             "source_taxon_id": change["new_source_taxon_id"],
         }
-        updated = conn.execute(
-            "UPDATE predictions SET scientific_name = ?, source_taxon_id = ? "
-            "WHERE id = ? AND scientific_name IS ? AND source_taxon_id IS ? "
-            "AND species IS ? AND classifier_model IS ? AND labels_fingerprint IS ? AND detection_id IS ?",
-            (*after.values(), change["id"], change["scientific_name"], change["source_taxon_id"],
-             change["species"], change["classifier_model"], change["labels_fingerprint"], change["detection_id"]),
+        updated = repairs.stamp_prediction_identity(
+            change["id"], *after.values(),
+            scientific_name=change["scientific_name"],
+            source_taxon_id=change["source_taxon_id"],
+            species=change["species"],
+            classifier_model=change["classifier_model"],
+            labels_fingerprint=change["labels_fingerprint"],
+            detection_id=change["detection_id"],
         )
-        if updated.rowcount != 1:
+        if updated != 1:
             raise ValueError(f"Prediction {change['id']} changed after the repair was planned")
-        conn.execute(
-            "INSERT INTO species_identity_repairs "
-            "(prediction_id, resolution_identity, before_json, after_json, reason) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (change["id"], resolution_identity(), json.dumps({
+        repairs.record_repair(
+            change["id"], resolution_identity(), json.dumps({
                 "scientific_name": change["scientific_name"],
                 "source_taxon_id": change["source_taxon_id"],
-            }), json.dumps(after), change["reason"]),
+            }), json.dumps(after), change["reason"],
         )
         # Do not export corrected rows under an old artifact fingerprint.
         if retire_artifacts:
-            conn.execute(
-                "UPDATE classifier_runs SET runtime_fingerprint = 'legacy' "
-                "WHERE detection_id = ? AND classifier_model = ? AND labels_fingerprint = ?",
-                (change["detection_id"], change["classifier_model"], change["labels_fingerprint"]),
+            repairs.retire_classifier_runs(
+                change["detection_id"], change["classifier_model"], change["labels_fingerprint"],
             )
         count += 1
     if count:
-        conn.execute("UPDATE workspaces SET last_group_fingerprint = NULL")
+        repairs.clear_group_fingerprints()
     return count
 
 
@@ -138,7 +131,7 @@ def repair_on_upgrade(db):
     marker = "species_identity_repair:" + resolution_identity()
     if db.get_meta(marker) == "1":
         return 0
-    with db.conn:
-        count = apply_repairs(db.conn, plan_repairs(db.conn))
+    with db.transaction():
+        count = apply_repairs(db, plan_repairs(db))
         db.set_meta(marker, "1", _commit=False)
     return count

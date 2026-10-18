@@ -17,9 +17,6 @@
   "repositories/photos.py:PhotoRepository.get_ids": 16,
   "repositories/photos.py:PhotoRepository.list_page": 18,
   "repositories/predictions.py:PredictionRepository.add": 17,
-  "services/folder_moves.py:FolderMoves._run_move_job": 18,
-  "services/folder_moves.py:FolderMoves.start_job": 20,
-  "services/import_in_place.py:_admit_in_place_job": 17,
   "web/export.py:_photo_export_work": 14,
   "web/imports.py:_DuplicateCheckStream.__init__": 13,
   "web/job_launchers.py:create_job_launchers_blueprint": 14

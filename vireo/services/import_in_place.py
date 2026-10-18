@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from db import Database
 from metadata import scan_metadata_warning
@@ -25,9 +25,69 @@ from services.local_folder import local_copy_scan_conflict, stage_pending_source
 from services.local_workspace import stage_boundary_lock
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from types import ModuleType
+
+    from jobs import JobRunner
     from services.imports import ImportService
+    from services.service_types import JobDict, JsonDict
+
+    # A deferred working-copy scope entry: a recursive root, or ``(dir, "exact")``.
+    _WorkingCopyScopeEntry = str | tuple[str, str]
 
 log = logging.getLogger(__name__)
+
+
+class _SnapshotExclusion(TypedDict):
+    """The folders a snapshot import left out, and how many files that dropped."""
+
+    folders: list[str]
+    files: int
+
+
+@dataclass(frozen=True)
+class _InPlaceSources:
+    """What an in-place import scans: explicit folders or a new-images snapshot."""
+
+    sources: list[str]
+    """The source folders; in snapshot mode, the snapshot's roots."""
+
+    recursive: bool
+    """Scan below each source folder."""
+
+    conflict_paths: list[str]
+    """The paths re-checked against local copies when the job registers:
+    the explicit sources, or every path in the snapshot."""
+
+    source_snapshot_id: int | None = None
+    """The frozen new-images snapshot being admitted, if any."""
+
+    snapshot_paths: list[str] | None = None
+    """The snapshot's file paths (snapshot mode only)."""
+
+    snapshot_paths_by_root: dict[str, list[str]] | None = None
+    """``snapshot_paths`` grouped by the registered root they live under."""
+
+    snapshot_exclusion: _SnapshotExclusion | None = None
+    """The folders the request excluded from the snapshot."""
+
+
+@dataclass(frozen=True)
+class _InPlaceOptions:
+    """The request's import options, validated before the workspace switch."""
+
+    import_tags: list[str]
+    location_from_gps: bool
+    explicit_after_import: bool
+    """Whether the request named ``after_import``; when it did not, the
+    import workspace's default process is resolved after the switch."""
+
+    after_import: int | None
+    """The explicitly requested after-import process."""
+
+    restart_config: JsonDict | None = None
+    """The restart provenance merged into the job config, including a
+    frozen ``after_import_snapshot`` that replaces resolving the process."""
 
 
 def restart_import_in_place(service: ImportService, db: Database, job_id: str) -> dict | ImportFailure:
@@ -93,7 +153,7 @@ def restart_import_in_place(service: ImportService, db: Database, job_id: str) -
 
 
 def enqueue_import_in_place(
-    service: ImportService, db: Database, body: dict, *, restart_config=None,
+    service: ImportService, db: Database, body: dict, *, restart_config: JsonDict | None = None,
 ) -> dict | ImportFailure:
     """Import existing folders or a new-images snapshot without copying.
 
@@ -117,7 +177,6 @@ def enqueue_import_in_place(
     )
     if sources_error is not None:
         return sources_error
-    snapshot_paths = None
 
     recursive = bool(body.get("recursive", True))
     import_tags, location_from_gps, tag_options_err = (
@@ -125,23 +184,20 @@ def enqueue_import_in_place(
     )
     if tag_options_err is not None:
         return tag_options_err
-    snapshot_exclusion = None
     if source_snapshot_id is not None:
-        (
-            snapshot_paths, snapshot_paths_by_root, snapshot_exclusion,
-            snapshot_err,
-        ) = _resolve_snapshot_paths(
-            service, db, source_snapshot_id, body.get("exclude_folders"),
+        snapshot_sources, snapshot_err = _snapshot_sources(
+            service, db, body, source_snapshot_id, recursive,
         )
         if snapshot_err is not None:
             return snapshot_err
-        sources = sorted(snapshot_paths_by_root)
-        # Re-checked atomically with ``runner.start`` below. See the
-        # explicit-sources branch of ``_requested_in_place_sources`` for
-        # why the pre-flight check is not sufficient on its own.
-        _conflict_paths = list(snapshot_paths)
+        in_place_sources = cast("_InPlaceSources", snapshot_sources)
     else:
-        snapshot_paths_by_root = None
+        # ``_requested_in_place_sources`` returned on any invalid source.
+        in_place_sources = _InPlaceSources(
+            sources=cast("list[str]", sources),
+            recursive=recursive,
+            conflict_paths=cast("list[str]", _conflict_paths),
+        )
     # Preflight an explicit after_import before creating a workspace so
     # a bad value doesn't leave an orphan Card Import behind. The
     # omitted branch has to wait until AFTER the workspace switch — see
@@ -158,28 +214,27 @@ def enqueue_import_in_place(
     if workspace_err is not None:
         return workspace_err
 
+    # Each check above returned on its error, so the casts below hold.
+    options = _InPlaceOptions(
+        import_tags=cast("list[str]", import_tags),
+        location_from_gps=cast("bool", location_from_gps),
+        explicit_after_import=cast("bool", explicit_after_import),
+        after_import=after_import,
+        restart_config=restart_config,
+    )
+
     # Everything from here to ``runner.start`` runs inside
     # ``_admit_into_import_workspace``: a ``new_workspace_name`` request
     # has already committed the workspace and switched active to it, so
     # any failure, returned or raised, must undo both. Add new checks
     # before ``_prepare_import_workspace`` or inside ``_admit_in_place_job``.
-    def admit():
+    def admit() -> str | ImportFailure:
         return _admit_in_place_job(
             service, db, body,
-            active_ws=active_ws,
+            active_ws=cast("int", active_ws),
             created_workspace=created_workspace,
-            explicit_after_import=explicit_after_import,
-            after_import=after_import,
-            sources=sources,
-            snapshot_paths=snapshot_paths,
-            snapshot_paths_by_root=snapshot_paths_by_root,
-            source_snapshot_id=source_snapshot_id,
-            snapshot_exclusion=snapshot_exclusion,
-            recursive=recursive,
-            import_tags=import_tags,
-            location_from_gps=location_from_gps,
-            conflict_paths=_conflict_paths,
-            restart_config=restart_config,
+            in_place_sources=in_place_sources,
+            options=options,
         )
 
     return service._admit_into_import_workspace(
@@ -187,7 +242,40 @@ def enqueue_import_in_place(
     )
 
 
-def _requested_in_place_sources(service, db, body, source_snapshot_id):
+def _snapshot_sources(
+    service: ImportService, db: Database, body: JsonDict, source_snapshot_id: int,
+    recursive: bool,
+) -> tuple[_InPlaceSources | None, ImportFailure | None]:
+    """Resolve a snapshot request's frozen paths into what the import scans."""
+    (
+        snapshot_paths, snapshot_paths_by_root, snapshot_exclusion,
+        snapshot_err,
+    ) = _resolve_snapshot_paths(
+        service, db, source_snapshot_id, body.get("exclude_folders"),
+    )
+    if snapshot_err is not None:
+        return None, snapshot_err
+    # Without an error ``_resolve_snapshot_paths`` returns both path sets.
+    snapshot_paths = cast("list[str]", snapshot_paths)
+    snapshot_paths_by_root = cast("dict[str, list[str]]", snapshot_paths_by_root)
+    return _InPlaceSources(
+        sources=sorted(snapshot_paths_by_root),
+        recursive=recursive,
+        # Re-checked atomically with ``runner.start`` when the job
+        # registers. See the explicit-sources branch of
+        # ``_requested_in_place_sources`` for why the pre-flight check is
+        # not sufficient on its own.
+        conflict_paths=list(snapshot_paths),
+        source_snapshot_id=source_snapshot_id,
+        snapshot_paths=snapshot_paths,
+        snapshot_paths_by_root=snapshot_paths_by_root,
+        snapshot_exclusion=snapshot_exclusion,
+    ), None
+
+
+def _requested_in_place_sources(
+    service: ImportService, db: Database, body: JsonDict, source_snapshot_id: object,
+) -> tuple[list[str] | None, list[str] | None, ImportFailure | None]:
     """Normalize and check the request's sources.
 
     Returns ``(sources, conflict_paths, error)``. ``conflict_paths`` is
@@ -218,11 +306,14 @@ def _requested_in_place_sources(service, db, body, source_snapshot_id):
         # Re-checked atomically with ``runner.start`` (in the admit step)
         # so a stage request that races between the pre-flight release and
         # job registration still blocks on the same boundary lock.
-        conflict_paths = list(sources)
+        # ``_explicit_sources_error`` refused anything but a list of paths.
+        conflict_paths = list(cast("list[str]", sources))
     return sources, conflict_paths, None
 
 
-def _explicit_after_import(service, db, body, restart_config):
+def _explicit_after_import(
+    service: ImportService, db: Database, body: JsonDict, restart_config: JsonDict | None,
+) -> tuple[bool | None, int | None, ImportFailure | None]:
     """Validate an explicit ``after_import``.
 
     Returns ``(explicit_after_import, after_import, error)``.
@@ -250,18 +341,19 @@ def _explicit_after_import(service, db, body, restart_config):
 
 
 def _admit_in_place_job(
-    service, db, body, *, active_ws, created_workspace,
-    explicit_after_import, after_import, sources, snapshot_paths,
-    snapshot_paths_by_root, source_snapshot_id, snapshot_exclusion,
-    recursive, import_tags, location_from_gps, conflict_paths,
-    restart_config=None,
-):
+    service: ImportService, db: Database, body: JsonDict, *, active_ws: int,
+    created_workspace: JsonDict | None, in_place_sources: _InPlaceSources,
+    options: _InPlaceOptions,
+) -> str | ImportFailure:
     """The admission steps after the workspace switch; returns a job id or
     an ``ImportFailure``. ``runner.start`` must stay the last step."""
+    after_import = options.after_import
+    restart_config = options.restart_config
+    source_snapshot_id = in_place_sources.source_snapshot_id
     # Resolve the omitted-default AFTER the workspace switch. Reading
     # pipeline.default_process_id off the previously-active workspace
     # would leak that workspace's override into a new-workspace import.
-    if not explicit_after_import:
+    if not options.explicit_after_import:
         after_import, err = _default_after_import(service, db)
         if err is not None:
             return err
@@ -292,14 +384,14 @@ def _admit_in_place_job(
         service=service,
         runner=runner,
         active_ws=active_ws,
-        sources=sources,
-        snapshot_paths=snapshot_paths,
-        snapshot_paths_by_root=snapshot_paths_by_root,
+        sources=in_place_sources.sources,
+        snapshot_paths=in_place_sources.snapshot_paths,
+        snapshot_paths_by_root=in_place_sources.snapshot_paths_by_root,
         source_snapshot_id=source_snapshot_id,
-        snapshot_exclusion=snapshot_exclusion,
-        recursive=recursive,
-        import_tags=import_tags,
-        location_from_gps=location_from_gps,
+        snapshot_exclusion=in_place_sources.snapshot_exclusion,
+        recursive=in_place_sources.recursive,
+        import_tags=options.import_tags,
+        location_from_gps=options.location_from_gps,
         after_import=after_import,
         after_import_snapshot=after_import_snapshot,
         thumb_cache_dir=thumb_cache_dir,
@@ -324,7 +416,7 @@ def _admit_in_place_job(
     # registration would otherwise see no import job and be admitted,
     # letting the stage rebase paths this import is about to walk.
     with stage_boundary_lock():
-        conflict = _local_copy_conflict(db, runner, conflict_paths)
+        conflict = _local_copy_conflict(db, runner, in_place_sources.conflict_paths)
         if conflict:
             return ImportFailure(conflict, 409)
         return runner.start(
@@ -334,7 +426,7 @@ def _admit_in_place_job(
         )
 
 
-def _default_after_import(service, db):
+def _default_after_import(service: ImportService, db: Database) -> tuple[int | None, ImportFailure | None]:
     """The active workspace's default after-import process, validated."""
     import config as cfg
 
@@ -348,7 +440,9 @@ def _default_after_import(service, db):
     return after_import, None
 
 
-def _after_import_process_snapshot(db, after_import):
+def _after_import_process_snapshot(
+    db: Database, after_import: int | None,
+) -> tuple[JsonDict | None, ImportFailure | None]:
     """Snapshot the chosen saved process's stage flags at enqueue time.
 
     A mid-import edit or delete then can't silently change (or void)
@@ -366,7 +460,7 @@ def _after_import_process_snapshot(db, after_import):
     return after_import_snapshot, None
 
 
-def _snapshot_import_lock(service, active_ws, source_snapshot_id):
+def _snapshot_import_lock(service: ImportService, active_ws: int, source_snapshot_id: int) -> threading.Lock:
     snapshot_lock_key = (active_ws, source_snapshot_id)
     with service.snapshot_import_locks_guard:
         return service.snapshot_import_locks.setdefault(
@@ -374,7 +468,7 @@ def _snapshot_import_lock(service, active_ws, source_snapshot_id):
         )
 
 
-def _copy_only_option_error(body):
+def _copy_only_option_error(body: JsonDict) -> ImportFailure | None:
     """Reject the options that only make sense when copying to an archive."""
     if body.get("local_processing"):
         return ImportFailure("Local processing with temporary storage requires Copy to archive")
@@ -388,7 +482,7 @@ def _copy_only_option_error(body):
     return None
 
 
-def _snapshot_request_error(body, sources, source_snapshot_id):
+def _snapshot_request_error(body: JsonDict, sources: object, source_snapshot_id: object) -> ImportFailure | None:
     """Reject a snapshot request that also names sources or a new workspace."""
     if sources:
         return ImportFailure(
@@ -407,7 +501,9 @@ def _snapshot_request_error(body, sources, source_snapshot_id):
     return None
 
 
-def _explicit_sources_error(service, db, sources, is_excluded_scan_path):
+def _explicit_sources_error(
+    service: ImportService, db: Database, sources: object, is_excluded_scan_path: Callable[[str], bool],
+) -> ImportFailure | None:
     """Validate explicit source folders and pre-flight the local-copy check."""
     if not sources or not isinstance(sources, list) or not all(
         isinstance(s, str) and s for s in sources
@@ -424,7 +520,7 @@ def _explicit_sources_error(service, db, sources, is_excluded_scan_path):
     return _preflight_local_copy_conflict(service, db, sources)
 
 
-def _local_copy_conflict(db, runner, paths):
+def _local_copy_conflict(db: Database, runner: JobRunner | None, paths: Sequence[str]) -> str | None:
     """The local-copy conflict for ``paths``; the caller holds ``stage_boundary_lock``."""
     pending_sources = stage_pending_source_paths(
         runner.list_jobs
@@ -438,7 +534,7 @@ def _local_copy_conflict(db, runner, paths):
     )
 
 
-def _preflight_local_copy_conflict(service, db, paths):
+def _preflight_local_copy_conflict(service: ImportService, db: Database, paths: Sequence[str]) -> ImportFailure | None:
     runner = service.get_runner()
     with stage_boundary_lock():
         conflict = _local_copy_conflict(db, runner, paths)
@@ -447,7 +543,11 @@ def _preflight_local_copy_conflict(service, db, paths):
     return None
 
 
-def _resolve_snapshot_paths(service, db, source_snapshot_id, exclude_folders):
+def _resolve_snapshot_paths(
+    service: ImportService, db: Database, source_snapshot_id: int, exclude_folders: object,
+) -> tuple[
+    list[str] | None, dict[str, list[str]] | None, _SnapshotExclusion | None, ImportFailure | None,
+]:
     """The snapshot's frozen paths, grouped by the registered root holding each.
 
     Files directly in ``exclude_folders`` (folders the user left out on the
@@ -471,10 +571,11 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id, exclude_folders):
         )
     except ValueError as e:
         return None, None, None, ImportFailure(str(e))
-    exclusion = None
+    exclusion: _SnapshotExclusion | None = None
     if exclude_folders:
+        # ``exclude_snapshot_folders`` raised unless it is a list of paths.
         exclusion = {
-            "folders": sorted(set(exclude_folders)),
+            "folders": sorted(set(cast("list[str]", exclude_folders))),
             "files": len(snap["file_paths"]) - len(snapshot_paths),
         }
 
@@ -496,7 +597,7 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id, exclude_folders):
         reverse=True,
     )
 
-    snapshot_paths_by_root = {}
+    snapshot_paths_by_root: dict[str, list[str]] = {}
     for path in snapshot_paths:
         root = _registered_root_for(path, registered_roots)
         if root is None:
@@ -521,7 +622,7 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id, exclude_folders):
     return snapshot_paths, snapshot_paths_by_root, exclusion, None
 
 
-def _registered_root_for(path, registered_roots):
+def _registered_root_for(path: str, registered_roots: Sequence[tuple[str, str]]) -> str | None:
     candidate = os.path.normpath(path)
     for normalized_root, stored_root in registered_roots:
         try:
@@ -545,23 +646,23 @@ class _InPlaceImportJob:
     """What the request admitted, fixed when the job is enqueued."""
 
     service: ImportService
-    runner: object
+    runner: JobRunner
     active_ws: int
-    sources: list
-    snapshot_paths: list | None
-    snapshot_paths_by_root: dict | None
+    sources: list[str]
+    snapshot_paths: list[str] | None
+    snapshot_paths_by_root: dict[str, list[str]] | None
     source_snapshot_id: int | None
-    snapshot_exclusion: dict | None
+    snapshot_exclusion: _SnapshotExclusion | None
     recursive: bool
-    import_tags: object
-    location_from_gps: object
-    after_import: object
-    after_import_snapshot: object
+    import_tags: list[str]
+    location_from_gps: bool
+    after_import: int | None
+    after_import_snapshot: JsonDict | None
     thumb_cache_dir: str
     vireo_dir: str
-    snapshot_import_lock: object
+    snapshot_import_lock: threading.Lock | None
 
-    def job_config(self, body, created_workspace):
+    def job_config(self, body: JsonDict, created_workspace: JsonDict | None) -> JsonDict:
         exclusion = self.snapshot_exclusion
         return {
             "sources": self.sources,
@@ -581,19 +682,19 @@ class _InPlaceImportJob:
             "created_workspace": created_workspace,
         }
 
-    def work(self, job):
+    def work(self, job: JobDict) -> JsonDict:
         if self.snapshot_import_lock is None:
             return self._run_import_in_place(job)
         with self.snapshot_import_lock:
             return self._run_import_in_place(job)
 
-    def _run_import_in_place(self, job):
+    def _run_import_in_place(self, job: JobDict) -> JsonDict:
         # Scan callbacks form reference cycles that can outlive the job.
         # Release SQLite files on every return/error without waiting for GC.
         with Database(self.service.db_path) as thread_db:
             return _InPlaceImportRun(self, job, thread_db).run()
 
-    def _chain_after_import(self, job, result):
+    def _chain_after_import(self, job: JobDict, result: JsonDict) -> None:
         service = self.service
         after_import = self.after_import
         photo_ids = result.get("photo_ids") or []
@@ -645,6 +746,8 @@ class _InPlaceImportJob:
                 "failed to create import collection"
             )
             return
+        # ``_record_import_collection`` returns its database with the id.
+        thread_db = cast("Database", thread_db)
         try:
             process_job_id, model_warning, process_blocker = service.enqueue_process_job(
                 thread_db, self.runner, self.active_ws,
@@ -670,15 +773,15 @@ class _InPlaceImportJob:
 class _SourceScope:
     """The snapshot restriction one source's scan replays."""
 
-    files: set | None = None
-    dirs: list | None = None
-    dir_identities: dict = field(default_factory=dict)
+    files: set[str] | None = None
+    dirs: list[str] | None = None
+    dir_identities: dict[str, object] = field(default_factory=dict)
 
 
 class _InPlaceImportRun:
     """State shared by every phase of one in-place import job run."""
 
-    def __init__(self, plan, job, thread_db):
+    def __init__(self, plan: _InPlaceImportJob, job: JobDict, thread_db: Database) -> None:
         self.plan = plan
         self.job = job
         self.thread_db = thread_db
@@ -687,11 +790,11 @@ class _InPlaceImportRun:
         self.snapshot_paths = plan.snapshot_paths
         self.snapshot_paths_by_root = plan.snapshot_paths_by_root
 
-        self.photo_ids = []
-        self.seen_photo_ids = set()
+        self.photo_ids: list[int] = []
+        self.seen_photo_ids: set[int] = set()
         self.reported_photo_identities = {}
-        self.indexed_paths = set()
-        self.root_errors = []
+        self.indexed_paths: set[str] = set()
+        self.root_errors: list[str] = []
         self.scan_acc = {
             "prior": 0,
             "last_current": 0,
@@ -699,19 +802,19 @@ class _InPlaceImportRun:
             "overall_total": 0,
             "source_index": 0,
         }
-        self.working_copy_scope = []
-        self.working_copy_scope_baselines = {}
-        self.working_copy_scope_identities = {}
-        self.source_mount_baselines = {}
-        self.source_mount_identities = {}
+        self.working_copy_scope: list[_WorkingCopyScopeEntry] = []
+        self.working_copy_scope_baselines: dict[_WorkingCopyScopeEntry, dict[str, bool]] = {}
+        self.working_copy_scope_identities: dict[_WorkingCopyScopeEntry, dict[str, object]] = {}
+        self.source_mount_baselines: dict[str, dict[str, bool]] = {}
+        self.source_mount_identities: dict[str, dict[str, object]] = {}
 
         self.snapshot_requested = len(self.snapshot_paths or [])
-        self.snapshot_missing = []
-        self.snapshot_unreadable = []
+        self.snapshot_missing: list[str] = []
+        self.snapshot_unreadable: list[str] = []
         self.snapshot_eligible = set(self.snapshot_paths or [])
-        self.snapshot_known_before = {}
+        self.snapshot_known_before: dict[str, int] = {}
 
-        self.source_manifests = {}
+        self.source_manifests: dict[str, list[Path]] = {}
         # Per-source dict of directory-path → mount identity captured at
         # discovery time. Discovery walks each source and produces a
         # frozen list of files, but only the source root's identity is
@@ -724,13 +827,13 @@ class _InPlaceImportRun:
         # unique parent directory of the manifest lets the scan loop
         # reject the source before scanner.stat()s the frozen filenames
         # under the replacement.
-        self.source_manifest_dir_identities = {}
-        self.source_discovery_failures = set()
+        self.source_manifest_dir_identities: dict[str, dict[str, object]] = {}
+        self.source_discovery_failures: set[str] = set()
         self.cancelled = False
 
     # -- the run -----------------------------------------------------
 
-    def run(self):
+    def run(self) -> JsonDict:
         import errno as errno_mod
 
         import config as cfg
@@ -777,7 +880,7 @@ class _InPlaceImportRun:
             self._extract_deferred_working_copies()
         return self._finish()
 
-    def _start(self, cfg):
+    def _start(self, cfg: ModuleType) -> None:
         thread_db = self.thread_db
         thread_db.set_active_workspace(self.plan.active_ws)
         if thread_db.check_folder_health():
@@ -791,7 +894,7 @@ class _InPlaceImportRun:
         ])
         self.runner.update_step(self.job["id"], "scan", status="running")
 
-    def _baseline_source_mounts(self, load_known_mount_roots):
+    def _baseline_source_mounts(self, load_known_mount_roots: Callable[[Database], set[str]]) -> None:
         known_mount_roots = load_known_mount_roots(self.thread_db)
         for source in self.sources:
             source_key = str(Path(source))
@@ -807,7 +910,7 @@ class _InPlaceImportRun:
             self.source_mount_identities[source_key] = identities
             self.record_known_mount_roots(self.thread_db, baseline)
 
-    def _active_photo_ids_by_path(self):
+    def _active_photo_ids_by_path(self) -> dict[str, int]:
         """Map primary and companion paths to active photo records."""
         rows = self.thread_db.photo_visibility.active_path_rows(self.plan.active_ws)
         result = {}
@@ -824,12 +927,13 @@ class _InPlaceImportRun:
                 result[companion_path] = row["id"]
         return result
 
-    def _freeze_snapshot_outcomes(self):
+    def _freeze_snapshot_outcomes(self) -> None:
         # Freeze execution outcomes before scanning. Missing and
         # unreadable files stay visible in the result instead of
         # silently shrinking the banner's promised count.
         self.snapshot_eligible.clear()
-        for path in self.snapshot_paths:
+        # ``run`` calls this only for a snapshot import.
+        for path in cast("list[str]", self.snapshot_paths):
             if not os.path.isfile(path):
                 self.snapshot_missing.append(path)
                 continue
@@ -850,14 +954,14 @@ class _InPlaceImportRun:
             if path in self.snapshot_eligible
         }
 
-    def _record_error(self, msg):
+    def _record_error(self, msg: str) -> None:
         self.root_errors.append(msg)
         if msg not in self.job["errors"]:
             self.job["errors"].append(msg)
 
     # -- scanner callbacks -------------------------------------------
 
-    def _photo_cb(self, photo_id, path):
+    def _photo_cb(self, photo_id: int, path: str) -> None:
         if photo_id not in self.seen_photo_ids:
             self.seen_photo_ids.add(photo_id)
             self.photo_ids.append(photo_id)
@@ -866,7 +970,7 @@ class _InPlaceImportRun:
             self.job["id"], "scan", current_file=os.path.basename(path),
         )
 
-    def _photo_merged_cb(self, old_id, new_id, path):
+    def _photo_merged_cb(self, old_id: int, new_id: int | None, path: str) -> None:
         """Follow a JPEG photo the scan's pairing pass merged into its RAW.
 
         ``old_id`` no longer names a photo and could be given to the next
@@ -884,7 +988,7 @@ class _InPlaceImportRun:
             self.seen_photo_ids.add(new_id)
             self.photo_ids.append(new_id)
 
-    def _progress_cb(self, current, total):
+    def _progress_cb(self, current: int, total: int) -> None:
         job = self.job
         scan_acc = self.scan_acc
         scan_acc["last_current"] = current
@@ -910,7 +1014,10 @@ class _InPlaceImportRun:
             "phase_label": None,
         })
 
-    def _status_cb(self, message, phase_current=None, phase_total=None, phase_label=None):
+    def _status_cb(
+        self, message: str, phase_current: int | None = None, phase_total: int | None = None,
+        phase_label: str | None = None,
+    ) -> None:
         job = self.job
         sources = self.sources
         visible_phase_label = phase_label
@@ -924,7 +1031,7 @@ class _InPlaceImportRun:
                 f"{self.scan_acc['source_index']} of {len(sources)}"
             )
         job["progress"]["current_file"] = message
-        step_update = {"current_file": message}
+        step_update: JsonDict = {"current_file": message}
         if (
             phase_total
             and phase_label == "Generating working copies"
@@ -948,23 +1055,23 @@ class _InPlaceImportRun:
             "phase_label": visible_phase_label,
         })
 
-    def _advance_scan_acc(self):
+    def _advance_scan_acc(self) -> None:
         self.scan_acc["prior"] += self.scan_acc["last_current"]
         self.scan_acc["last_current"] = 0
         self.scan_acc["last_total"] = 0
 
-    def _cancel_check(self):
+    def _cancel_check(self) -> bool:
         return self.runner.is_cancelled(self.job["id"])
 
-    def _pause_check(self):
+    def _pause_check(self) -> bool:
         return self.runner.pause_requested(self.job["id"])
 
-    def _cancel_only_check(self):
+    def _cancel_only_check(self) -> bool:
         return self.runner.cancellation_requested(self.job["id"])
 
     # -- discovery ---------------------------------------------------
 
-    def _emit_discovery(self, source_index, source, checked=0, found=0):
+    def _emit_discovery(self, source_index: int, source: str, checked: int = 0, found: int = 0) -> None:
         sources = self.sources
         source_name = os.path.basename(os.path.normpath(source)) or source
         message = (
@@ -984,7 +1091,7 @@ class _InPlaceImportRun:
             "phase_label": "Discovering sources",
         })
 
-    def _discover_sources(self):
+    def _discover_sources(self) -> None:
         """Discover every source before processing any of them.
 
         Previously each scan discovered its source just-in-time, so the UI
@@ -1021,7 +1128,7 @@ class _InPlaceImportRun:
             # and rechecked post-scan when scoping working-copy extraction.
             # See source_manifest_dir_identities for the full rationale.
             if self.snapshot_paths_by_root is None:
-                manifest_dir_identities = {}
+                manifest_dir_identities: dict[str, object] = {}
                 for manifest_path in manifest:
                     parent_key = str(Path(manifest_path).parent)
                     if parent_key in manifest_dir_identities:
@@ -1044,7 +1151,7 @@ class _InPlaceImportRun:
                 "phase_label": "Discovering sources",
             })
 
-    def _discover_manifest(self, source_index, source):
+    def _discover_manifest(self, source_index: int, source: str) -> list[Path]:
         if self.snapshot_paths_by_root is not None:
             return sorted(
                 Path(path)
@@ -1053,7 +1160,7 @@ class _InPlaceImportRun:
             )
         errno_mod = self.errno_mod
 
-        def discovery_onerror(exc):
+        def discovery_onerror(exc: OSError) -> None:
             if exc.errno in (errno_mod.EPERM, errno_mod.EACCES):
                 raise exc
             log.warning(
@@ -1071,7 +1178,7 @@ class _InPlaceImportRun:
             s=source: self._emit_discovery(i, s, checked, found),
         )
 
-    def _publish_overall_total(self):
+    def _publish_overall_total(self) -> None:
         job = self.job
         overall_total = self.scan_acc["overall_total"]
         # Publish the overall denominator only after every source has
@@ -1098,7 +1205,7 @@ class _InPlaceImportRun:
 
     # -- per-source scan ---------------------------------------------
 
-    def _scan_sources(self):
+    def _scan_sources(self) -> None:
         for idx, source in enumerate(self.sources, 1):
             # Discovery can observe a transient pause request and raise
             # ScanCancelled before the runner settles into its paused
@@ -1114,7 +1221,7 @@ class _InPlaceImportRun:
             if self.cancelled:
                 break
 
-    def _scan_source(self, idx, source):
+    def _scan_source(self, idx: int, source: str) -> None:
         scan_acc = self.scan_acc
         scan_acc["source_index"] = idx
         scan_acc["last_current"] = 0
@@ -1137,7 +1244,7 @@ class _InPlaceImportRun:
         finally:
             self._finish_source(source)
 
-    def _source_scope(self, source):
+    def _source_scope(self, source: str) -> _SourceScope | None:
         """The snapshot restriction for ``source``, or None to skip it."""
         if self.snapshot_paths_by_root is None:
             return _SourceScope()
@@ -1160,7 +1267,7 @@ class _InPlaceImportRun:
         restricted_dirs = sorted(
             {os.path.dirname(path) for path in restricted_files}
         )
-        restricted_dir_identities = {
+        restricted_dir_identities: dict[str, object] = {
             str(Path(directory)): self.mount_identity(directory)
             for directory in restricted_dirs
         }
@@ -1170,7 +1277,7 @@ class _InPlaceImportRun:
             dir_identities=restricted_dir_identities,
         )
 
-    def _announce_source(self, idx, source):
+    def _announce_source(self, idx: int, source: str) -> None:
         job = self.job
         sources = self.sources
         phase = (
@@ -1192,7 +1299,7 @@ class _InPlaceImportRun:
             "phase_label": None,
         })
 
-    def _revalidate_source_mounts(self, source):
+    def _revalidate_source_mounts(self, source: str) -> None:
         errno_mod = self.errno_mod
         # Revalidate the source's mount identity before replaying
         # its frozen manifest. Between discovery and scan a
@@ -1240,7 +1347,7 @@ class _InPlaceImportRun:
                 source,
             )
 
-    def _scan_manifest(self, source, scope):
+    def _scan_manifest(self, source: str, scope: _SourceScope) -> None:
         from scanner import ScanControl, ScanHooks, ScanOptions
 
         plan = self.plan
@@ -1252,7 +1359,7 @@ class _InPlaceImportRun:
         # source is processed; the vanished bucket must be
         # surfaced as a source failure or a successful import
         # report would silently follow a partial catalog.
-        source_scan_counts = {}
+        source_scan_counts: dict[str, int] = {}
         self.do_scan(
             source, self.thread_db,
             options=ScanOptions(
@@ -1307,7 +1414,7 @@ class _InPlaceImportRun:
             )
             self._record_error(msg)
 
-    def _retain_working_copy_scope(self, source, scope):
+    def _retain_working_copy_scope(self, source: str, scope: _SourceScope) -> None:
         # Retain extraction scope only after the scan returns and
         # only while its paths are still valid. A selected volume
         # can disappear after request validation; handing that
@@ -1357,7 +1464,7 @@ class _InPlaceImportRun:
                 self.source_mount_identities.get(normalized_source, {})
             )
 
-    def _advance_past_failed_source(self):
+    def _advance_past_failed_source(self) -> None:
         job = self.job
         scan_acc = self.scan_acc
         # Advance the counter past this source's frozen
@@ -1396,7 +1503,7 @@ class _InPlaceImportRun:
                 "phase_label": None,
             })
 
-    def _finish_source(self, source):
+    def _finish_source(self, source: str) -> None:
         try:
             invalidate_new_images_after_scan(self.thread_db, source)
         except Exception as cache_exc:
@@ -1425,7 +1532,7 @@ class _InPlaceImportRun:
 
     # -- working copies ----------------------------------------------
 
-    def _extract_deferred_working_copies(self):
+    def _extract_deferred_working_copies(self) -> None:
         revalidated_scope = self._revalidated_working_copy_scope()
         if revalidated_scope:
             try:
@@ -1442,7 +1549,7 @@ class _InPlaceImportRun:
                 )
                 self._record_error(f"[working copies] {exc}")
 
-    def _revalidated_working_copy_scope(self):
+    def _revalidated_working_copy_scope(self) -> list[_WorkingCopyScopeEntry]:
         # A removable source can disappear after its scan succeeded
         # but before the aggregate extract pass runs (later sources
         # were still scanning, or a card was pulled between the loop
@@ -1490,7 +1597,7 @@ class _InPlaceImportRun:
 
     # -- result ------------------------------------------------------
 
-    def _finish(self):
+    def _finish(self) -> JsonDict:
         if self.snapshot_paths is not None:
             # Pairing can merge a JPEG photo into its RAW and delete the
             # JPEG's row after photo_cb saw it (``_photo_merged_cb`` follows
@@ -1510,7 +1617,7 @@ class _InPlaceImportRun:
             return self._cancelled_result(indexed, snapshot_unindexed)
         return self._completed_result(indexed, snapshot_unindexed)
 
-    def _snapshot_result_fields(self, snapshot_unindexed):
+    def _snapshot_result_fields(self, snapshot_unindexed: list[str]) -> JsonDict:
         known_before = set(self.snapshot_known_before)
         exclusion = self.plan.snapshot_exclusion
         return {
@@ -1528,14 +1635,14 @@ class _InPlaceImportRun:
             "excluded": exclusion["files"] if exclusion else 0,
         }
 
-    def _apply_import_tags(self, result):
+    def _apply_import_tags(self, result: JsonDict) -> None:
         plan = self.plan
         plan.service._apply_import_tags(
             plan.active_ws, self.photo_ids, plan.import_tags,
             plan.location_from_gps, result, job=self.job, runner=self.runner,
         )
 
-    def _cancelled_result(self, indexed, snapshot_unindexed):
+    def _cancelled_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
         self.runner.update_step(
             self.job["id"], "scan", status="cancelled",
             summary=f"{indexed} photos (cancelled)",
@@ -1555,7 +1662,7 @@ class _InPlaceImportRun:
         self._apply_import_tags(result)
         return result
 
-    def _completed_result(self, indexed, snapshot_unindexed):
+    def _completed_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
         snapshot_missing = self.snapshot_missing
         snapshot_unreadable = self.snapshot_unreadable
         metadata_warning = scan_metadata_warning()
