@@ -87,7 +87,6 @@ def analyze_image(image, detections):
 
 def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
-    from db import commit_with_retry
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
 
@@ -98,41 +97,24 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         # only when that row exists made the intended cleanup a no-op there,
         # leaving stale mask/quality/DINO/eye state attached to a photo with
         # no detections. Check either signal (Codex r4056698678).
-        stale = db.conn.execute(
-            "SELECT 1 WHERE EXISTS (SELECT 1 FROM photo_subject_state WHERE photo_id=?) "
-            "OR EXISTS (SELECT 1 FROM photos WHERE id=? AND ("
-            "mask_path IS NOT NULL OR active_mask_variant IS NOT NULL "
-            "OR quality_score IS NOT NULL OR subject_sharpness IS NOT NULL "
-            "OR subject_size IS NOT NULL OR subject_clip_high IS NOT NULL "
-            "OR subject_clip_low IS NOT NULL OR subject_y_median IS NOT NULL "
-            "OR subject_tenengrad IS NOT NULL OR bg_tenengrad IS NOT NULL "
-            "OR crop_complete IS NOT NULL OR bg_separation IS NOT NULL "
-            "OR phash_crop IS NOT NULL OR noise_estimate IS NOT NULL "
-            "OR dino_subject_embedding IS NOT NULL "
-            "OR eye_x IS NOT NULL OR eye_y IS NOT NULL "
-            "OR eye_conf IS NOT NULL OR eye_tenengrad IS NOT NULL "
-            "OR eye_kp_fingerprint IS NOT NULL))",
-            (photo_id, photo_id),
-        ).fetchone()
+        stale = db.subjects.has_stale_primary_state(photo_id)
         if stale:
             with acquire_photo_mask(photo_id):
                 if checkpoint:
                     checkpoint()
                 sync_primary(db, photo_id, min_conf=min_conf)
-                commit_with_retry(db.conn)
+                db.commit_with_retry()
         return 0
     stat = os.stat(image_path)
     source_key = hashlib.sha256(f"{os.path.realpath(image_path)}:{stat.st_size}:{stat.st_mtime_ns}:{ANALYSIS_VERSION}".encode()).hexdigest()
-    cached = {r["detection_id"] for r in db.conn.execute(
-        "SELECT s.detection_id FROM detection_subjects s JOIN detections d ON d.id=s.detection_id "
-        "WHERE d.photo_id=? AND s.source_key=?", (photo_id, source_key))}
+    cached = db.subjects.cached_detection_ids(photo_id, source_key)
     pending = [d for d in detections if force or d["id"] not in cached]
     if not pending:
         with acquire_photo_mask(photo_id):
             if checkpoint:
                 checkpoint()
             sync_primary(db, photo_id, min_conf=min_conf)
-            commit_with_retry(db.conn)
+            db.commit_with_retry()
         return 0
     image = load_image(image_path, max_size=1024)
     if image is None:
@@ -144,31 +126,11 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     with acquire_photo_mask(photo_id):
         if checkpoint:
             checkpoint()
-        for result in results:
-            # The detector may have been replaced while the image was decoded.
-            db.conn.execute(
-                """INSERT INTO detection_subjects
-                   (detection_id, source_key, crop, quality_score, exposure_ev, features)
-                   SELECT id, ?, ?, ?, ?, ? FROM detections WHERE id=?
-                   ON CONFLICT(detection_id) DO UPDATE SET source_key=excluded.source_key,
-                   crop=excluded.crop, quality_score=excluded.quality_score,
-                   exposure_ev=excluded.exposure_ev, features=excluded.features""",
-                (source_key, json.dumps(result["crop"]), result["quality_score"],
-                 result["exposure_ev"], json.dumps(result["features"]), result["detection_id"]),
-            )
+        # The detector may have been replaced while the image was decoded.
+        db.subjects.save_analyses(source_key, results)
         sync_primary(db, photo_id, min_conf=min_conf)
-        commit_with_retry(db.conn)
+        db.commit_with_retry()
     return len(results)
-
-
-def _clear_primary_features(db, photo_id):
-    db.conn.execute("""UPDATE photos SET mask_path=NULL, active_mask_variant=NULL,
-        quality_score=NULL, subject_sharpness=NULL, subject_size=NULL,
-        subject_clip_high=NULL, subject_clip_low=NULL, subject_y_median=NULL,
-        subject_tenengrad=NULL, bg_tenengrad=NULL, crop_complete=NULL,
-        bg_separation=NULL, phash_crop=NULL, noise_estimate=NULL,
-        eye_x=NULL, eye_y=NULL, eye_conf=NULL, eye_tenengrad=NULL,
-        eye_kp_fingerprint=NULL, dino_subject_embedding=NULL WHERE id=?""", (photo_id,))
 
 
 def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
@@ -179,35 +141,27 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     """
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
     if not detections:
-        _clear_primary_features(db, photo_id)
-        db.conn.execute("DELETE FROM photo_subject_state WHERE photo_id=?", (photo_id,))
+        db.subjects.clear_primary_features(photo_id)
+        db.subjects.clear_primary_state(photo_id)
         return
     primary = detections[0]
-    analysis = db.conn.execute("SELECT * FROM detection_subjects WHERE detection_id=?", (primary["id"],)).fetchone()
-    previous = db.conn.execute("SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
-    active_mask = db.conn.execute("""SELECT pm.* FROM photo_masks pm JOIN photos p
-        ON p.id=pm.photo_id AND p.active_mask_variant=pm.variant WHERE p.id=?""", (photo_id,)).fetchone()
+    analysis = db.subjects.analysis(primary["id"])
+    previous = db.subjects.primary_state(photo_id)
+    active_mask = db.subjects.active_mask(photo_id)
     mask_matches = active_mask and active_mask["detector_model"] == primary["detector_model"] and all(
         active_mask["prompt_" + k] == primary["box_" + k] for k in "xywh")
     changed = previous and previous["detection_id"] != primary["id"]
     if changed or (active_mask and not mask_matches):
-        _clear_primary_features(db, photo_id)
+        db.subjects.clear_primary_features(photo_id)
     if analysis:
         features = json.loads(analysis["features"])
-        db.conn.execute("UPDATE photos SET quality_score=?, subject_sharpness=? WHERE id=?",
-                        (analysis["quality_score"], features["subject_sharpness"], photo_id))
+        db.subjects.set_primary_quality(photo_id, analysis["quality_score"], features["subject_sharpness"])
         if changed or not mask_matches:
-            db.conn.execute("""UPDATE photos SET subject_size=?,
-                subject_clip_high=?, subject_clip_low=?, subject_y_median=? WHERE id=?""",
-                (features["subject_size"], features["subject_clip_high"], features["subject_clip_low"],
-                 features["subject_y_median"], photo_id))
-    db.conn.execute("INSERT INTO photo_subject_state(photo_id,detection_id) VALUES (?,?) "
-                    "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id", (photo_id, primary["id"]))
+            db.subjects.set_primary_box_features(photo_id, features)
+    db.subjects.set_primary_state(photo_id, primary["id"])
 
 
 def select_primary(db, photo_id, detection_id):
-    from db import commit_with_retry
-
     if detection_id is not None:
         if isinstance(detection_id, bool) or not isinstance(detection_id, int):
             raise ValueError("detection_id must be an integer or null for automatic selection")
@@ -215,31 +169,22 @@ def select_primary(db, photo_id, detection_id):
             raise ValueError("Choose a retained animal detection from this photo")
     sync_primary(db, photo_id)
     if detection_id is None:
-        db.conn.execute("DELETE FROM photo_subject_choices WHERE photo_id=?", (photo_id,))
+        db.subjects.clear_choice(photo_id)
     else:
         # No detection FK: content-addressed identities survive clear/recreate
         # during reprocessing. A temporarily missing choice remains remembered.
-        db.conn.execute("INSERT INTO photo_subject_choices(photo_id,detection_id) VALUES (?,?) "
-                        "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id", (photo_id, detection_id))
+        db.subjects.set_choice(photo_id, detection_id)
     sync_primary(db, photo_id)
-    commit_with_retry(db.conn)
+    db.commit_with_retry()
 
 
 def payload(db, photo_id):
     detections = retained(db, photo_id)
-    choice = db.conn.execute("SELECT detection_id FROM photo_subject_choices WHERE photo_id=?", (photo_id,)).fetchone()
-    analyses = {r["detection_id"]: dict(r) for r in db.conn.execute(
-        "SELECT s.* FROM detection_subjects s JOIN detections d ON d.id=s.detection_id WHERE d.photo_id=?", (photo_id,))}
+    choice = db.subjects.choice(photo_id)
+    analyses = db.subjects.analyses_for_photo(photo_id)
     import config as cfg
     floor = db.get_effective_config(cfg.load()).get("classifier_confidence", 0)
-    predictions = db.conn.execute("""SELECT pr.*, COALESCE(rv.status,'pending') AS status
-        FROM predictions pr JOIN detections d ON d.id=pr.detection_id
-        LEFT JOIN prediction_review rv ON rv.prediction_id=pr.id AND rv.workspace_id=?
-        WHERE d.photo_id=? AND pr.confidence>=? AND COALESCE(rv.status,'pending')!='rejected'
-        AND pr.labels_fingerprint=(SELECT pr2.labels_fingerprint FROM predictions pr2
-            WHERE pr2.detection_id=pr.detection_id AND pr2.classifier_model=pr.classifier_model
-            ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)
-        ORDER BY pr.confidence DESC, pr.id ASC""", (db.require_workspace_id(), photo_id, floor)).fetchall()
+    predictions = db.subjects.visible_predictions(db.require_workspace_id(), photo_id, floor)
     grouped = {}
     for prediction in predictions:
         grouped.setdefault(prediction["detection_id"], []).append(dict(prediction))
