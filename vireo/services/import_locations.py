@@ -483,10 +483,10 @@ def _choice_leaf(
         if existing is not None:
             row = db.get_keyword_place_row(existing["id"])
             return existing["id"], row["name"] if row else choice["name"]
-        details = (
-            places.place_details_for_language(choice["place_id"], api_key, language)
-            if api_key else None
-        )
+        if not api_key:
+            raise LocationChoiceError(
+                f'Add a Google Maps API key in Settings to add "{choice["name"]}"')
+        details = places.place_details_for_language(choice["place_id"], api_key, language)
         if details is None:
             raise LocationChoiceError(
                 f'Could not look up "{choice["name"]}" on Google Maps')
