@@ -26,7 +26,6 @@ from xmp import (
     NS_XMP,
     NS_XMPDM,
     SidecarEditor,
-    _property_occurrences,
     read_hierarchical_keywords,
     read_keywords,
     read_sync_preview_metadata,
@@ -35,6 +34,7 @@ from xmp import (
     write_gps_location,
     write_rating,
 )
+from xmp.photo_scope import _property_occurrences
 
 EXIFTOOL_XMP = f"""\
 <x:xmpmeta xmlns:x='adobe:ns:meta/' x:xmptk='Image::ExifTool 13.55'>
@@ -4035,7 +4035,7 @@ def test_qualified_variant_is_canonicalized_in_place_preserving_qualifiers(tmp_p
 
 
 def _li_value_local(li):
-    """Local helper mirroring ``xmp._li_value`` for test assertions."""
+    """Local helper mirroring ``xmp.rdf._li_value`` for test assertions."""
     rdf_value = li.find(f"{{{NS_RDF}}}value")
     if rdf_value is not None:
         return (rdf_value.text or "").strip()
