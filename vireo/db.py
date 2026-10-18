@@ -3277,11 +3277,11 @@ class Database:
         any SQL, and the catalog-wide methods never do. The column lists and
         the ``db`` module helpers are passed in, the helpers read at call
         time so tests that patch ``db.commit_with_retry`` /
-        ``db.execute_with_retry`` still apply. The façade helpers the
-        listing reads consult (folder subtrees, the rules engine, the
-        location-status filter) are bound here, so patches of those
-        ``Database`` methods still reach them, and the collection-rules SQL
-        and sort clauses come from a collection repository built when used.
+        ``db.execute_with_retry`` still apply. The façade methods the
+        listing reads consult (``repositories.photos.FACADE_METHODS``: folder
+        subtrees, the rules engine, the location-status filter, the
+        collection repository factory) are bound from this instance, so
+        patches of those ``Database`` methods still reach them.
         """
         from repositories.photos import PhotoRepository
 
@@ -3296,10 +3296,7 @@ class Database:
             commit_with_retry=commit_with_retry,
             inclusive_date_to=_inclusive_date_to,
             keyword_token_clause=_keyword_token_clause,
-            get_folder_subtree_ids=self.get_folder_subtree_ids,
-            build_query_from_rules=self._build_query_from_rules,
-            append_location_status_filter=self._append_location_status_filter,
-            collection_repository=self._collection_repository,
+            facade=self,
         )
 
     def add_photo(

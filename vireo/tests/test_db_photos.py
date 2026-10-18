@@ -1457,10 +1457,15 @@ def test_composition_stays_on_the_facade():
     } <= _self_attrs("delete_photos")
     assert "check_and_resolve_duplicates_for_hash" in _self_attrs("add_photo")
     assert "get_effective_config" in _self_attrs("get_browse_summary")
-    assert {
-        "_FILTER_SUBJECT_CHUNK", "get_folder_subtree_ids", "_build_query_from_rules",
-        "_append_location_status_filter", "_collection_repository", "_ws_id",
-    } <= _self_attrs("_photos_repository")
+    assert {"_FILTER_SUBJECT_CHUNK", "_ws_id"} <= _self_attrs("_photos_repository")
+
+
+def test_photo_repository_routes_facade_calls_through_database(db):
+    from repositories.photos import FACADE_METHODS
+
+    repo = db._photos_repository()
+    for name in FACADE_METHODS:
+        assert getattr(repo, name) == getattr(db, name), name
 
 
 def test_photo_repository_imports_no_db_code():

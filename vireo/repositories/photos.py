@@ -7,11 +7,12 @@ methods that read through ``workspace_folders`` resolve the active workspace
 (``workspace_id``) before any SQL and raise when none is active, while the
 catalog-wide ones never read it.
 
-``Database`` keeps the composition. The listing reads use the façade's
-folder-subtree, rules and location-filter helpers, bound when the façade
-builds the repository so patches of those ``Database`` methods still apply,
-and the collection-rules SQL and sort clauses from a ``CollectionRepository``
-built when they are needed; the calls happen at the same point as before.
+``Database`` keeps the composition. The listing reads call the façade's
+folder-subtree, rules and location-filter helpers under their ``Database``
+names, bound from the instance (see ``FACADE_METHODS``) so patches of those
+methods still apply, and take the collection-rules SQL and sort clauses from
+a ``CollectionRepository`` built when they are needed; the calls happen at
+the same point as before.
 ``delete_photos`` keeps the
 companion resolution, the new-images cache invalidation and the pipeline
 cache prune on the façade; ``add_photo`` keeps the duplicate auto-resolve
@@ -22,13 +23,32 @@ plus the catalog-wide eviction reset a raised working-copy quota triggers.
 """
 
 import os
+from collections.abc import Callable
+from typing import Any
 
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
+# ``Database`` methods the listing reads call through the façade: the folder
+# subtree, the rules engine, the location-status filter, and the collection
+# repository factory behind ``_build_collection_query`` / ``_photo_sort_clause``.
+FACADE_METHODS = (
+    "get_folder_subtree_ids",
+    "_build_query_from_rules",
+    "_append_location_status_filter",
+    "_collection_repository",
+)
+
 
 class PhotoRepository:
+    # Bound ``Database`` methods that ``__init__`` installs from
+    # ``FACADE_METHODS``, declared so the type checker sees them.
+    get_folder_subtree_ids: Callable[..., Any]
+    _build_query_from_rules: Callable[..., Any]
+    _append_location_status_filter: Callable[..., Any]
+    _collection_repository: Callable[..., Any]
+
     def __init__(
         self,
         conn,
@@ -42,10 +62,7 @@ class PhotoRepository:
         commit_with_retry,
         inclusive_date_to,
         keyword_token_clause,
-        get_folder_subtree_ids,
-        build_query_from_rules,
-        append_location_status_filter,
-        collection_repository,
+        facade,
     ):
         self.conn = conn
         # ``Database._ws_id``, uncalled: the workspace-scoped reads resolve
@@ -66,13 +83,10 @@ class PhotoRepository:
         self.commit_with_retry = commit_with_retry
         self.inclusive_date_to = inclusive_date_to
         self.keyword_token_clause = keyword_token_clause
-        # Façade helpers the listing reads consult, bound from ``Database``
-        # so patches of those methods still apply, and the collection
-        # repository factory for the collection-rules SQL and sort clauses.
-        self.get_folder_subtree_ids = get_folder_subtree_ids
-        self.build_query_from_rules = build_query_from_rules
-        self.append_location_status_filter = append_location_status_filter
-        self._collection_repository = collection_repository
+        # Bound ``Database`` methods, kept under their façade names, so
+        # patches of those methods still reach the listing reads.
+        for name in FACADE_METHODS:
+            setattr(self, name, getattr(facade, name))
 
     @property
     def workspace_id(self):
@@ -562,7 +576,7 @@ class PhotoRepository:
         where_params = [ws, str(year)]
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
-                self.build_query_from_rules(rules)
+                self._build_query_from_rules(rules)
             )
             conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -679,7 +693,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self.append_location_status_filter(conditions, location_status)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -771,7 +785,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self.append_location_status_filter(conditions, location_status)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -903,7 +917,7 @@ class PhotoRepository:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
-        self.append_location_status_filter(conditions, location_status)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -1006,7 +1020,7 @@ class PhotoRepository:
 
         conditions, join_params, where_params = self._browse_summary_scope(
             ws, folder_id, collection_id, rules, self.get_folder_subtree_ids,
-            self._build_collection_query, self.build_query_from_rules,
+            self._build_collection_query, self._build_query_from_rules,
         )
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
