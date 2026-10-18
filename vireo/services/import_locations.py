@@ -691,7 +691,9 @@ def stream_location_suggestions(
     for start in range(0, total, _GPS_READ_CHUNK):
         gps.update(read_source_gps(unique[start:start + _GPS_READ_CHUNK]))
         yield frame({"reading": min(start + _GPS_READ_CHUNK, total), "total": total})
-    db = Database(db_path)
+    # create_app already set up the schema; repeating its DDL here could
+    # queue behind an import's write transaction. Same rule as the request DB.
+    db = Database(db_path, initialize_schema=(db_path == ":memory:"))
     try:
         suggester = ImportLocationSuggester(
             db, gps,
