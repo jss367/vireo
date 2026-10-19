@@ -41,7 +41,7 @@ def regroup_stage(run: PipelineRun) -> None:
     # regroup lock, so there's no cycle to invert.
     try:
         _run_full_regroup(run)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[regroup] Fatal: {e}")
         log.exception("Pipeline regroup stage failed")
         run.stages["regroup"]["status"] = "failed"
@@ -84,7 +84,7 @@ def _skip_regroup_or_review_species(run: PipelineRun) -> None:
         return
     try:
         _run_species_review(run)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[review] Fatal: {e}")
         log.exception("Pipeline species-review stage failed")
         run.stages["regroup"]["status"] = "failed"
@@ -315,6 +315,7 @@ def miss_stage(run: PipelineRun) -> None:
         effective_cfg = thread_db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
     except Exception as e:
+        # broad: stage setup boundary (imports, Database(), cfg.load()).
         # Mark the stage failed BEFORE returning. The transient
         # "running" write is *below* this guard, so without stamping
         # "failed" here the stage would stay "pending"; the pipeline
@@ -379,7 +380,7 @@ def miss_stage(run: PipelineRun) -> None:
             if cached is not None:
                 cached["miss_computed_at"] = now_ts
                 save_results_raw(cached, cache_dir, run.workspace_id)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[misses] Fatal: {e}")
         log.exception("Pipeline miss-detection stage failed")
         run.stages["misses"]["status"] = "failed"
