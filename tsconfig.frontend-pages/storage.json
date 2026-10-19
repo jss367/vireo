@@ -2,8 +2,17 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/storage.d.ts",
-    "../vireo/static/storage-overview.js",
-    "../vireo/static/storage-retained.js",
-    "../vireo/static/storage-hf-cache.js"
+    "../types/page-hooks.d.ts",
+    "../vireo/static/storage/format.js",
+    "../vireo/static/storage/config.js",
+    "../vireo/static/storage/working-copy-limit.js",
+    "../vireo/static/storage/panel.js",
+    "../vireo/static/storage/masks.js",
+    "../vireo/static/storage/files-modal.js",
+    "../vireo/static/storage/caches.js",
+    "../vireo/static/storage/overview.js",
+    "../vireo/static/storage/retained.js",
+    "../vireo/static/storage/hf-cache.js",
+    "../vireo/static/storage/boot.js"
   ]
 }
