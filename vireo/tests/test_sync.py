@@ -516,7 +516,7 @@ def test_sync_from_xmp_keeps_keywords_when_the_sidecar_cannot_be_read(
 
     sync_from_xmp(db, [pid])
 
-    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Sparrow"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Sparrow"}
     assert db.in_transaction is False
 
 

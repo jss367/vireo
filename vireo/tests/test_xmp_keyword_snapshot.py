@@ -413,6 +413,50 @@ def test_catalog_read_success_and_failure_keep_ownership_and_acknowledgement_bou
         assert events.count("acknowledged") == (1 if error is None else 0)
 
 
+def test_failed_catalog_read_defers_duplicate_resolution_until_the_retry():
+    ns, db, _, imported = _namespace()
+    parse = ns["ET"].parse
+    unreadable = [True]
+    resolved = []
+
+    def transient_parse(path):
+        if unreadable[0]:
+            raise PermissionError("invented temporary failure")
+        return parse(path)
+
+    ns["ET"].parse = transient_parse
+    full_row, _, catalog = _catalog_boundary(ns, db, existing=False)
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    catalog()
+    assert resolved == [] and imported == []
+    row, _, reuse = _incremental_boundary(ns, db)
+    row["xmp_mtime"] = None
+    row["file_hash"] = "invented hash"
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    unreadable[0] = False
+    assert reuse(9) is True
+    assert resolved == ["invented hash"] and imported == [({"Paris"}, [])]
+
+
+def test_sidecarless_catalog_still_runs_duplicate_resolution():
+    ns, db, _, _ = _namespace()
+    resolved = []
+    row, _, catalog = _catalog_boundary(ns, db, existing=False, xmp_mtime=None)
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    catalog()
+    assert resolved == ["invented hash"]
+
+
+def test_incremental_retry_without_a_prior_null_mtime_does_not_rerun_duplicate_resolution():
+    ns, db, _, imported = _namespace()
+    resolved = []
+    row, _, reuse = _incremental_boundary(ns, db)
+    # Simulate a legitimate Lightroom edit: stored mtime is 5, incoming is 9.
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    assert reuse(9) is True
+    assert resolved == [] and imported == [({"Paris"}, [])]
+
+
 def test_failed_catalog_read_retries_incrementally_without_a_sidecar_mtime_change():
     ns, db, _, imported = _namespace()
     parse = ns["ET"].parse

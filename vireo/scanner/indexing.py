@@ -272,12 +272,18 @@ class _FileIndexer:
         # the loser its keywords are visible to apply_duplicate_resolution's
         # metadata query and get merged onto the winner. Otherwise the
         # keywords would be stranded on the rejected row.
-        if item.xmp_mtime is not None and _import_keywords_for_photo(
-            db, photo_id, str(xmp_path),
-        ):
-            # A stat alone cannot vouch for an unreadable sidecar's keywords.
-            db.scanning.set_xmp_mtime(photo_id, item.xmp_mtime)
-            db.commit_with_retry()
+        sidecar_import_deferred = False
+        if item.xmp_mtime is not None:
+            if _import_keywords_for_photo(db, photo_id, str(xmp_path)):
+                # A stat alone cannot vouch for an unreadable sidecar's keywords.
+                db.scanning.set_xmp_mtime(photo_id, item.xmp_mtime)
+                db.commit_with_retry()
+            else:
+                # The retry path in _reuse_existing_row imports these keywords
+                # and fires resolution; running it now would reject this row
+                # with its sidecar still unread, stranding its keywords on the
+                # loser once the retry finally imports them.
+                sidecar_import_deferred = True
         # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
         # This path runs whenever the file is new or changed, which is also
         # when such a write lands: it rewrites the file, not a sidecar.
@@ -286,7 +292,7 @@ class _FileIndexer:
         # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
         # are committed. add_photo was called without the hash, so the hook
         # there was a no-op — we own firing it here.
-        if file_hash is not None:
+        if file_hash is not None and not sidecar_import_deferred:
             db.check_and_resolve_duplicates_for_hash(file_hash)
 
         self.tally.report_cataloged(
