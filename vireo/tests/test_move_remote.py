@@ -335,6 +335,29 @@ def test_remote_move_verify_error_preserves_originals(remote_env, monkeypatch):
     assert (env["src"] / "a.nef").exists()
 
 
+def test_remote_move_reports_rsync_that_cannot_start(remote_env, monkeypatch):
+    """A configured GNU rsync that is not executable fails the move with a
+    reported error instead of a raw ``PermissionError``."""
+    env = remote_env
+    monkeypatch.setattr(move_mod.folder_target, "_remote_dir_exists", lambda r, p: False)
+
+    def _cannot_start(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _cannot_start)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert result["errors"] == [
+        "Couldn't start rsync ('/usr/bin/rsync'): [Errno 13] Permission "
+        "denied. Nothing was copied. Originals untouched."
+    ]
+    assert (env["src"] / "a.nef").exists()
+
+
 def test_remote_move_missing_rsync_bin_errors(remote_env, monkeypatch):
     """No resolved GNU rsync -> clear error, nothing transferred or deleted."""
     env = remote_env

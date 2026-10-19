@@ -19,6 +19,7 @@ from resource_ledger import (
     ResourceWaitCancelled,
     bind_resource_cancel_check,
 )
+from services import subject_masks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1219,8 +1220,8 @@ class _MaskPass:
             ),
             _commit=False,
         )
-        thread_db.set_active_mask_variant(
-            photo_id, self.sam2_variant, _commit=False,
+        subject_masks.set_active_mask_variant(
+            thread_db, photo_id, self.sam2_variant, _commit=False,
             weak_rescue_min_conf=(self.weak_detection_confidence
                 if photo_id in self.contextual_weak_ids else None),
         )
@@ -1578,8 +1579,8 @@ class _EyeKeypointPass:
                 pid for pid in collection_photo_ids
                 if pid not in params.exclude_photo_ids
             }
-        self.photos = self.thread_db.list_photos_for_eye_keypoint_stage(
-            photo_ids=collection_photo_ids,
+        self.photos = subject_masks.list_photos_for_eye_keypoint_stage(
+            self.thread_db, photo_ids=collection_photo_ids,
         )
         # Defensive second filter: when collection_photo_ids is None
         # (whole-workspace path) the DB query above returned every

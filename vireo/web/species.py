@@ -69,7 +69,7 @@ def create_species_blueprint(get_db):
 
         # Also search existing species keywords in the database
         db = get_db()
-        for kw_name in db.keywords.species_names_matching(q, match_case, whole_word):
+        for kw_name in db.keyword_taxa.species_names_matching(q, match_case, whole_word):
             name_key = kw_name.casefold()
             if name_key not in seen:
                 seen.add(name_key)

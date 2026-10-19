@@ -272,7 +272,7 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
 
 
 def grouped_keywords(db):
-    rows = [dict(r) for r in db.keywords.list_all()]
+    rows = [dict(r) for r in db.keyword_tree.list_all()]
     identities = {r['id']: r['identity'] for r in db.keyword_merges.identities()}
     paths = keyword_paths(rows)
     groups = defaultdict(list)
@@ -308,7 +308,7 @@ def location_candidates(db):
     rows = [dict(r) for r in db.keyword_merges.candidate_rows()]
     paths = keyword_paths(rows)
     by_id = {r['id']: r for r in rows}
-    visible = {r['id'] for r in db.keywords.get_tree()}
+    visible = {r['id'] for r in db.keyword_tree.get_tree()}
     parents = {r['parent_id'] for r in rows}
     children = defaultdict(list)
     for row in rows:
@@ -1097,7 +1097,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     """
     overrides = _validated_merge_overrides(keyword_ids, target_id, overrides)
     selected = set(keyword_ids)
-    visible = {r['id'] for r in db.keywords.get_tree()}
+    visible = {r['id'] for r in db.keyword_tree.get_tree()}
     if not selected <= visible:
         raise ValueError('A selected keyword is no longer available in this workspace. Refresh the list.')
     rows = [dict(r) for r in db.keyword_merges.all_rows()]

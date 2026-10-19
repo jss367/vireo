@@ -505,7 +505,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
     """Apply durable merge work only to its recorded photo and keyword identity."""
     if not any(plan.keyword_merges for plan in plans.values()):
         return
-    rows = db.keywords.parent_rows()
+    rows = db.keyword_tree.parent_rows()
     paths = keyword_paths(rows)
     location_leaves = db.get_photo_location_keyword_ids([
         pid for pid, plan in plans.items() if plan.sync_location_keywords

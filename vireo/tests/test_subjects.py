@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
-from services import stage_counts
+from services import stage_counts, subject_masks
 from subjects import analyze_photo, payload, select_primary
 
 
@@ -192,10 +192,10 @@ def test_cannot_reactivate_mask_from_previous_primary(db, subject_photo):
     det = db.get_detections(photo_id)[0]
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id, det['detector_model'], *(det['box_' + k] for k in 'xywh')))
-    db.set_active_mask_variant(photo_id, 'test')
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
     select_primary(db, photo_id, ids[0])
     with pytest.raises(ValueError, match='another subject'):
-        db.set_active_mask_variant(photo_id, 'test')
+        subject_masks.set_active_mask_variant(db, photo_id, 'test')
 
 
 def test_activate_mask_survives_floor_change_without_state_sync(db, subject_photo):
@@ -220,7 +220,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
         (photo_id, det_hi['detector_model'],
          *(det_hi['box_' + k] for k in 'xywh')),
     )
-    db.set_active_mask_variant(photo_id, 'test')
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
     # Raise the workspace's detector_confidence above ids[1]'s 0.7 so the
     # current effective primary flips to ids[0] (0.95) WITHOUT syncing
     # photo_subject_state, which still names ids[1].
@@ -235,7 +235,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
         detector_model=det_lo['detector_model'],
         prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
-    db.set_active_mask_variant(photo_id, 'test')
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
 
 
 def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident(db, subject_photo):
@@ -258,8 +258,8 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
         (photo_id, primary_det['detector_model'],
          *(primary_det['box_' + k] for k in 'xywh')),
     )
-    db.set_active_mask_variant(photo_id, 'test')
-    rows = db.list_photos_for_eye_keypoint_stage([photo_id])
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .6
 
@@ -293,10 +293,10 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
         (photo_id, det_hi['detector_model'],
          *(det_hi['box_' + k] for k in 'xywh')),
     )
-    db.set_active_mask_variant(photo_id, 'test')
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
     # Baseline: cached state names ids[1] (initial primary at floor 0.2);
     # eye stage surfaces the photo on ids[1]'s box.
-    baseline = db.list_photos_for_eye_keypoint_stage([photo_id])
+    baseline = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
     assert len(baseline) == 1 and baseline[0]['box_x'] == .6
     # Raise the workspace's floor above ids[1]'s 0.7. ids[0] (0.95) is
     # now the effective primary, but photo_subject_state still names
@@ -308,7 +308,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # prompt, so the stale-mask predicate excludes the photo — the eye
     # stage will not run keypoint inference against a wrong-subject
     # mask.
-    assert db.list_photos_for_eye_keypoint_stage([photo_id]) == []
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id]) == []
     # Regenerate the mask against the new primary (as extract_masks_stage
     # would). photo_subject_state is intentionally not touched — the eye
     # stage must resolve the primary at the current floor.
@@ -319,8 +319,8 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
         detector_model=det_lo['detector_model'],
         prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
-    db.set_active_mask_variant(photo_id, 'test')
-    rows = db.list_photos_for_eye_keypoint_stage([photo_id])
+    subject_masks.set_active_mask_variant(db, photo_id, 'test')
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, [photo_id])
     assert len(rows) == 1
     assert rows[0]['box_x'] == .05
 

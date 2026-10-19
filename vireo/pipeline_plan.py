@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from services import stage_counts
+from services import stage_counts, subject_masks
 
 log = logging.getLogger(__name__)
 
@@ -814,7 +814,7 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     eligible = counts["eligible"]
     pending = counts["pending"]
     stale = stage_counts.count_extract_stale(db, sam2_variant, photo_ids)
-    sam_warning = db.sam_variant_rerun_warning(sam2_variant, photo_ids)
+    sam_warning = subject_masks.sam_variant_rerun_warning(db, sam2_variant, photo_ids)
     if eligible == 0:
         return _extract_no_eligible_plan(params, photo_ids, new_count)
     if pending == 0 and stale == 0 and new_count == 0:
@@ -934,7 +934,7 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "summary": f"Will skip — {skip_reason}",
         }
 
-    pending = len(db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids))
+    pending = len(subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=photo_ids))
     eligible = stage_counts.count_eye_keypoint_eligible(db, photo_ids)
     stale = stage_counts.count_eye_keypoint_stale(db, photo_ids)
     processed = max(eligible - pending, 0)

@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from repositories.masks_features import PipelineFeatures
-from services import stage_counts
+from services import stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -46,7 +46,7 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(photo_id, variant)
+    subject_masks.set_active_mask_variant(db, photo_id, variant)
 
 
 def _tol_weights(tmp_path, name="bioclip-2"):
@@ -491,7 +491,7 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
     assert stage_counts.count_photos_pending_masks(db) == {"eligible": 2, "pending": 0}
     assert stage_counts.count_photos_pending_masks(
@@ -509,7 +509,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(p_done, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p_done, "sam2-small")
     db.conn.execute(
         "UPDATE photos SET mask_path='/m/legacy.png' WHERE id=?",
         (p_legacy,),
@@ -558,7 +558,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
     plan = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
@@ -757,7 +757,7 @@ def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
 
     # list_photos_for_eye_keypoint_stage cannot produce work here — the
     # count must agree.
-    assert db.list_photos_for_eye_keypoint_stage() == []
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db) == []
     assert stage_counts.count_eye_keypoint_eligible(db) == 0
 
 
@@ -795,7 +795,7 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
     )
     db.conn.commit()
 
-    assert db.list_photos_for_eye_keypoint_stage() == []
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db) == []
     assert stage_counts.count_eye_keypoint_eligible(db) == 0
     assert stage_counts.count_eye_keypoint_stale(db) == 0
 
@@ -2061,7 +2061,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
     assert extract["state"] == "done-prior"
@@ -2077,7 +2077,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(pid_done, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid_done, "sam2-small")
     _add_photo_with_detection(db, folder_id, "todo.jpg")
     db.conn.commit()
 

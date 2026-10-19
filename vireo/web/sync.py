@@ -891,7 +891,7 @@ class _SyncPreviewPage:
         from keyword_identity import keyword_paths, resolve_merge_target
         self.resolve_merge_target = resolve_merge_target
         self.merge_paths = keyword_paths(
-            db.keywords.parent_rows()
+            db.keyword_tree.parent_rows()
         ) if any(
             change['type'] == 'keyword_merge'
             for photo in self.photos for change in photo['changes']

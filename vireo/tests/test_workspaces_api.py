@@ -256,7 +256,7 @@ def test_update_workspace_location_keywords_true_to_false_queues_cleanup(
     calls = []
     monkeypatch.setattr(
         workspaces_mod,
-        "queue_location_keyword_cleanup_for_workspace",
+        "queue_location_keyword_cleanup_reporting",
         lambda _db, wid: calls.append(wid),
     )
     resp = client.put(f"/api/workspaces/{ws_id}", json={
