@@ -382,6 +382,14 @@ class DuplicatesRepository:
         """
         from duplicates import DupCandidate, resolve_duplicates
 
+        # An explicit choice must not reject a copy before its keywords
+        # have been imported, even when that copy was already rejected.
+        if self.conn.execute(
+            "SELECT 1 FROM photos WHERE file_hash = ? AND xmp_import_pending != 0 LIMIT 1",
+            (file_hash,),
+        ).fetchone() is not None:
+            return None, None, "sidecar keywords pending"
+
         rows = self.conn.execute(
             """SELECT p.id, p.filename, p.file_mtime, p.rating,
                       f.path AS folder_path
@@ -476,7 +484,8 @@ class DuplicatesRepository:
         keeps in one group must not both plan against the same old keeper).
         Returns ``(plan, None)`` with ``plan`` a dict of ``file_hash``,
         ``loser_ids`` and ``winner_flag`` (the flag the kept copy ends with),
-        or ``(None, reason)`` with ``"not found"`` or ``"not a duplicate"``.
+        or ``(None, reason)`` with ``"not found"``, ``"not a duplicate"``
+        or ``"sidecar keywords pending"``.
         Writes nothing.
         """
         row = self.conn.execute(
@@ -486,6 +495,13 @@ class DuplicatesRepository:
             return None, "not found"
         if not row["file_hash"]:
             return None, "not a duplicate"
+        # This check runs inside the caller's writer-locked transaction.
+        # Include the chosen copy and rejected siblings in the group guard.
+        if self.conn.execute(
+            "SELECT 1 FROM photos WHERE file_hash = ? AND xmp_import_pending != 0 LIMIT 1",
+            (row["file_hash"],),
+        ).fetchone() is not None:
+            return None, "sidecar keywords pending"
         siblings = self.conn.execute(
             "SELECT id, flag FROM photos WHERE file_hash = ? AND id != ?",
             (row["file_hash"], photo_id),

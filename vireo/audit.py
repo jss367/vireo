@@ -9,7 +9,7 @@ from image_loader import (
     is_excluded_scan_path,
     safe_scan_walk,
 )
-from xmp import read_keywords
+from xmp import read_keyword_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,9 @@ def check_drift(db):
 
         db_keywords = {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])}
 
-        if not os.path.exists(xmp_path):
+        try:
+            os.stat(xmp_path)
+        except (FileNotFoundError, NotADirectoryError):
             # No XMP file — if DB has keywords, that's a pending sync
             if db_keywords:
                 drifts.append(
@@ -58,8 +60,15 @@ def check_drift(db):
                     }
                 )
             continue
+        except OSError:
+            log.warning("Cannot inspect sidecar during drift check: %s", xmp_path, exc_info=True)
+            continue
 
-        xmp_keywords = read_keywords(xmp_path)
+        snapshot = read_keyword_snapshot(xmp_path)
+        if snapshot is None:
+            log.warning("Cannot read sidecar during drift check: %s", xmp_path)
+            continue
+        xmp_keywords = snapshot[0]
 
         # Compare case-insensitively: resolve_drift('use_xmp') reconciles
         # via sync_from_xmp, which treats keywords differing only by case as
