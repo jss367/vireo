@@ -23,7 +23,7 @@ def test_large_scope_releases_its_read_transaction(db, tmp_path):
     other = Database(db._db_path)
     try:
         db.conn.commit()
-        clause, params = db._scope_clause(range(1, 802))
+        clause, params = db.stats.scope_clause(range(1, 802))
         db.conn.execute("SELECT p.id FROM photos p WHERE 1=1" + clause, params).fetchall()
         assert not db.conn.in_transaction
         other.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
@@ -354,7 +354,7 @@ def test_staging_lock_failure_allows_retry(db, tmp_path):
 def test_large_scope_preserves_caller_transaction(db, tmp_path):
     _, pid = seed(db, tmp_path / "photos")
     db.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
-    db._scope_clause(range(1, 802))
+    db.stats.scope_clause(range(1, 802))
     assert db.conn.in_transaction
     db.conn.rollback()
     assert db.photos.get(pid)["rating"] != 4

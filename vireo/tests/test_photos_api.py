@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
+from services import stage_counts
 from testing.waits import synchronization_timeout
 
 
@@ -8780,11 +8781,11 @@ def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
         (f"{photo_id}.jpg", photo_id),
     )
     db.conn.commit()
-    assert db.count_photos_missing_thumb()["pending"] == 0
+    assert stage_counts.count_photos_missing_thumb(db)["pending"] == 0
 
     resp = client.post("/api/storage/clear", json={"type": "thumbnails"})
     assert resp.status_code == 200
-    assert db.count_photos_missing_thumb()["pending"] == 1
+    assert stage_counts.count_photos_missing_thumb(db)["pending"] == 1
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
     ).fetchone()

@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from services import dashboard_stats
 
 
 def test_database_creates_tables(db):
@@ -834,13 +835,13 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     db.tag_photo(pid_b, k2)
 
     db.set_active_workspace(ws_a)
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     kw_names = [kw["name"] for kw in stats["top_keywords"]]
     assert "Robin" in kw_names
     assert "Hawk" not in kw_names
 
     db.set_active_workspace(ws_b)
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     kw_names = [kw["name"] for kw in stats["top_keywords"]]
     assert "Hawk" in kw_names
     assert "Robin" not in kw_names

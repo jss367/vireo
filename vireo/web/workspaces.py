@@ -17,6 +17,7 @@ import sqlite3
 from config import settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
 from flask import Blueprint, abort, jsonify, request
+from services import stage_counts
 from services.local_folder import (
     affected_workspace_ids as local_folder_workspace_ids,
 )
@@ -1530,7 +1531,7 @@ def create_workspace_blueprint(
             "detector_confidence", 0.2,
         )
 
-        db_inv = db.get_classification_inventory(ws_id, min_conf=min_conf)
+        db_inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=min_conf)
         total_dets = db_inv["total_real_detections"]
         db_pairs = {
             (p["classifier_model"], p["labels_fingerprint"]): p

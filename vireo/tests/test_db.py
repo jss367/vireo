@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
+from services import dashboard_stats, stage_counts
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -3938,7 +3939,7 @@ def _make_workspace_with_photos(tmp_path, photo_overrides=None):
 def test_get_dashboard_stats_empty(tmp_path):
     """Returns sensible defaults when workspace has photos but no metadata."""
     db, _ = _make_workspace_with_photos(tmp_path, [{}])
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert stats['top_keywords'] == []
     assert stats['photos_by_month'] == []
     assert stats['classified_count'] == 0
@@ -3966,7 +3967,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Robin', 0.95, 'test')
 
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
 
     # top_keywords: only the explicit Robin taxonomy term is stored.
     by_name = {k['name']: k['photo_count'] for k in stats['top_keywords']}
@@ -4032,12 +4033,12 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
         "date_from": "2024-06-01",
         "date_to": "2024-06-30",
     }
-    stats = db.get_dashboard_stats(**scope)
+    stats = dashboard_stats.get_dashboard_stats(db, **scope)
     assert stats["total_photos"] == 2
     assert stats["folder_count"] == 2
     assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
-    assert db.get_coverage_stats(**scope)["total"] == 2
-    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+    assert dashboard_stats.get_coverage_stats(db, **scope)["total"] == 2
+    assert {row["path"] for row in dashboard_stats.get_folder_coverage_stats(db, **scope)} == {
         "/photos/park", "/photos/yard",
     }
 
@@ -4085,7 +4086,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
     )
     db.conn.commit()
 
-    stats = db.get_dashboard_stats(collection_id=collection_id)
+    stats = dashboard_stats.get_dashboard_stats(db, collection_id=collection_id)
     assert stats["total_photos"] == 2, (
         "Dashboard totals must count the offline photo when scoped by "
         f"a collection that matches it; got {stats['total_photos']}"
@@ -4099,7 +4100,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
 
     # Coverage still restricts to accessible folders in its outer join, so
     # the collection scope must not further shrink that count either.
-    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+    assert dashboard_stats.get_coverage_stats(db, collection_id=collection_id)["total"] == 1
 
     # Regression guard: Browse and pipeline callers must still filter out
     # photos in offline folders even when the collection rules match them.
@@ -4129,8 +4130,8 @@ def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
     )
     db.conn.commit()
 
-    attention = db.get_dashboard_stats(
-        date_from="2024-06-01", date_to="2024-06-30",
+    attention = dashboard_stats.get_dashboard_stats(
+        db, date_from="2024-06-01", date_to="2024-06-30",
     )["attention"]
     assert attention == {
         "unclassified": 1,
@@ -4151,7 +4152,7 @@ def test_get_coverage_stats_empty_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats['total'] == 0
     for key in ('thumbnail', 'phash', 'quality', 'detected', 'classified',
                 'gps', 'file_hash', 'working_copy', 'mask', 'rating'):
@@ -4181,7 +4182,7 @@ def test_get_coverage_stats_counts_each_stage(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Robin', 0.95, 'test')
 
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats['total'] == 3
     assert stats['thumbnail'] == 2
     assert stats['phash'] == 2
@@ -4221,9 +4222,9 @@ def test_coverage_stats_scoped_to_active_workspace(tmp_path):
     db.add_photo(folder_id=fid2, filename='c.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(ws1)
-    assert db.get_coverage_stats()['total'] == 1
+    assert dashboard_stats.get_coverage_stats(db)['total'] == 1
     db.set_active_workspace(ws2)
-    assert db.get_coverage_stats()['total'] == 2
+    assert dashboard_stats.get_coverage_stats(db)['total'] == 2
 
 
 def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
@@ -4246,7 +4247,7 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
                  file_size=1, file_mtime=1.0)
     db.conn.commit()
 
-    folders = db.get_folder_coverage_stats()
+    folders = dashboard_stats.get_folder_coverage_stats(db)
     by_path = {f['path']: f for f in folders}
     assert by_path['/A']['total'] == 1
     assert by_path['/A']['thumbnail'] == 1
@@ -4276,14 +4277,14 @@ def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
         file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
     )
 
-    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    no_matches = dashboard_stats.get_folder_coverage_stats(db, date_from="2024-02-01")
     assert {row["path"]: row["total"] for row in no_matches} == {
         "/A": 0,
         "/B": 0,
     }
 
-    folder_scoped = db.get_folder_coverage_stats(
-        folder_id=folder_a, date_from="2024-02-01",
+    folder_scoped = dashboard_stats.get_folder_coverage_stats(
+        db, folder_id=folder_a, date_from="2024-02-01",
     )
     assert [(row["path"], row["total"]) for row in folder_scoped] == [
         ("/A", 0),
@@ -4569,7 +4570,7 @@ def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_p
     )
     db.conn.commit()
 
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     # detected_count applies threshold → only photo A qualifies.
     assert stats["detected_count"] == 1
     # classified_count must match — NOT 2 (ignored threshold) and NOT 3
@@ -10679,7 +10680,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     db.photo_review.set_rating(p2, 3)
 
     # Sanity: stats populated when folder is ok.
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert len(stats["photos_by_month"]) == 2
     assert len(stats["rating_distribution"]) >= 1
 
@@ -10687,7 +10688,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     db.conn.commit()
 
     # Metadata aggregates still populated — they don't depend on disk presence.
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert len(stats["photos_by_month"]) == 2, \
         "photos_by_month went empty when folder marked missing"
     assert len(stats["rating_distribution"]) >= 1, \
@@ -11112,7 +11113,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     assert db.photo_labels.get_for_photos([pid]) == {}  # removal applied
 
     # Scope-clause consumers and the reclassify purge must not raise either.
-    counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
+    counts = stage_counts.count_real_detections_in_scope(db, photo_ids=huge, min_conf=0.2)
     assert counts is not None
     db.predictions.clear(model="some-model", collection_photo_ids=huge)
 
@@ -22647,7 +22648,7 @@ def _cap_sqlite_vars(db, cap=999):
 def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
     """Pipeline callers pass the full resolved collection scope as
     photo_ids; a single IN clause would exceed the bind-var cap for big
-    collections. Must route through _scope_clause like its count siblings."""
+    collections. Must route through stats.scope_clause like its count siblings."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id

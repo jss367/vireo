@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
+from services import dashboard_stats
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -6139,7 +6140,7 @@ def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
     )
 
     # And coverage stats should still count it.
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats["total"] >= 1, (
         f"coverage should count photos in partial folders, "
         f"got total={stats['total']!r}"
