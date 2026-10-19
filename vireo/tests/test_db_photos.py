@@ -19,7 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
-from services import photo_ingest
+from services import duplicate_resolution, photo_ingest
 
 
 @pytest.fixture
@@ -117,7 +117,8 @@ def test_add_photo_existing_row_returns_existing_id_without_update(db):
 def test_add_photo_runs_duplicate_resolution_only_with_hash(db, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        db, "check_and_resolve_duplicates_for_hash", calls.append,
+        duplicate_resolution, "check_and_resolve_duplicates_for_hash",
+        lambda _db, file_hash: calls.append(file_hash),
     )
     fid = db.add_folder("/p", name="p")
     _photo(db, fid, "x.jpg")
