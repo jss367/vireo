@@ -98,6 +98,18 @@ def read_keyword_lists(xmp_path):
     from a sidecar that carries none: a reconcile that untags what the
     sidecar lacks would untag everything.
     """
+    snapshot = read_keyword_snapshot(xmp_path)
+    return snapshot[:2] if snapshot is not None else None
+
+
+def read_keyword_snapshot(xmp_path):
+    """Read keyword lists and location ownership from one successful parse.
+
+    Returns ``(flat, hierarchical, location_marker, owned_marker)``, or
+    ``None`` if the sidecar cannot be read. Only a successful snapshot's
+    absent ownership marker may mean legacy ownership of both entries;
+    a failed read provides no evidence about ownership or absent keywords.
+    """
     result = _parse_xmp(xmp_path)
     if result is None:
         return None
@@ -105,6 +117,8 @@ def read_keyword_lists(xmp_path):
     return (
         set(_bag_values(root, f"{{{NS_DC}}}subject")),
         _bag_values(root, f"{{{NS_LR}}}hierarchicalSubject"),
+        _get_property(root, LOCATION_KEYWORDS_MARKER),
+        _get_property(root, LOCATION_KEYWORDS_OWNED),
     )
 
 

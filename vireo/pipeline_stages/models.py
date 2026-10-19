@@ -149,7 +149,7 @@ def _enter_cached_classifier(
                 # own cancel probe.
                 load.park_paused_load()
                 continue
-    except Exception as load_err:
+    except Exception as load_err:  # broad: re-raises every load failure, as the incomplete-model error when ONNX data is missing
         if looks_like_missing_external_data(load_err):
             load.raise_incomplete_model(load_err)
         raise
@@ -624,7 +624,7 @@ def model_loader_stage(
         try:
             bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
             loaded_models.update(bundle)
-        except Exception as preload_err:
+        except Exception as preload_err:  # broad: model loaders raise undocumented errors; with more models queued, one failure is not fatal
             if _is_classification_cancellation(run, preload_err):
                 raise
             if len(resolved_specs) > 1:
@@ -632,6 +632,7 @@ def model_loader_stage(
                 log.warning(
                     "First model %s failed to load, %d remaining: %s",
                     first_name, len(resolved_specs) - 1, preload_err,
+                    exc_info=True,
                 )
                 loaded_models["preload_error"] = str(preload_err)
             else:
@@ -641,7 +642,7 @@ def model_loader_stage(
         loaded_models["pending_specs"] = resolved_specs[1:]
 
         _mark_models_loaded(run, loaded_models, resolved_specs, first_name)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; a failure is recorded as this stage's fatal error, a cancel as skipped
         if _is_classification_cancellation(run, e):
             run.abort.set()
             run.stages["model_loader"]["status"] = "skipped"
@@ -704,8 +705,8 @@ def _load_run_taxonomy(run: PipelineRun, loaded_models: dict) -> Taxonomy | None
                     run.runner, run.job["id"], run.stages, "model_loader", msg,
                 )
             )
-        except Exception as e:
-            log.warning("Taxonomy download failed, continuing without: %s", e)
+        except Exception as e:  # broad: download failures are network/HTTP/IO; the run continues with the local taxonomy
+            log.warning("Taxonomy download failed, continuing without: %s", e, exc_info=True)
 
     # Taxonomy is shared across every classifier in the run.
     # Use load_local_taxonomy() so a corrupt persistent file

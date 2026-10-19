@@ -76,7 +76,7 @@ def detect_stage(
     )
     try:
         detect.run_all()
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[detect] Fatal: {e}")
         log.exception("Pipeline detect stage failed")
         run.abort.set()
@@ -177,7 +177,7 @@ class _DetectPass:
                 if not self.run.params.reclassify else {}
             )
             self.detect_state["portable_reused"] = reused
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure detect recomputes
             log.warning(
                 "Could not apply local computation cache", exc_info=True,
             )
@@ -388,7 +388,7 @@ class _DetectPass:
                     + post["classifier_runs_applied"]
                 )
                 self.detect_state["portable_reused"] = merged
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure the fresh results stand
             log.warning(
                 "Could not reapply local computation cache after detect",
                 exc_info=True,
@@ -418,7 +418,7 @@ class _DetectPass:
             _det_conf = _effective_cfg.get(
                 "detector_confidence", 0.2,
             )
-        except Exception:
+        except Exception:  # broad: settings fall back to defaults so the anchors still get built
             log.warning(
                 "Could not read workspace detector settings; using defaults",
                 exc_info=True,
@@ -602,7 +602,7 @@ class _DetectPass:
                     )
                     if crt:
                         known_classifier_runtimes.add(crt)
-            except Exception:
+            except Exception:  # broad: without fingerprints the reapply runs unfiltered, which is still correct
                 log.warning(
                     "Could not compute classifier runtime fingerprints; "
                     "reapplying without a classifier filter",

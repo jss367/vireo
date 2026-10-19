@@ -66,6 +66,7 @@ from xmp.namespaces import (
 from xmp.readers import (
     read_hierarchical_keywords,
     read_keyword_lists,
+    read_keyword_snapshot,
     read_keywords,
     read_sync_preview_metadata,
     read_vireo_location_keywords,
@@ -89,6 +90,7 @@ __all__ = [
     "location_keyword_entries",
     "read_hierarchical_keywords",
     "read_keyword_lists",
+    "read_keyword_snapshot",
     "read_keywords",
     "read_sync_preview_metadata",
     "read_vireo_location_keywords",

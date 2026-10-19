@@ -639,6 +639,50 @@ def test_remove_keywords_canonicalization_preserves_qualified_variant(tmp_path):
     assert survivor.findtext(f"{{{foo_ns}}}source") == "user"
 
 
+def test_remove_keywords_reports_an_in_place_canonicalization(tmp_path):
+    """Rewriting a qualified variant in place is a change, and says so.
+
+    ``keep_exact=True'' leaves a qualified variant in the bag and
+    rewrites its value to the canonical spelling. That edit is what
+    the commit publishes, so ``remove_keywords'' must report it the
+    same way it reports a removal; returning False while the sidecar
+    is rewritten tells the caller nothing happened.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:foo='{foo_ns}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>bird</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    original = path.read_bytes()
+
+    editor = SidecarEditor(str(path))
+    assert editor.remove_keywords(
+        {"Bird"}, hierarchical=False, keep_exact=True,
+    ) is True
+    assert editor.commit() is True
+    assert path.read_bytes() != original
+    assert read_keywords(str(path)) == {"Bird"}
+
+    # Nothing left to canonicalize: the second pass changes nothing and
+    # says so.
+    editor = SidecarEditor(str(path))
+    assert editor.remove_keywords(
+        {"Bird"}, hierarchical=False, keep_exact=True,
+    ) is False
+    assert editor.commit() is False
+
+
 def test_read_keywords_uses_document_uri_resolution(tmp_path):
     """``read_keywords'' honors the same subject resolution as the sync preview.
 

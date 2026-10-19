@@ -532,14 +532,14 @@ def test_sync_from_xmp_locks_before_reading_sidecar(tmp_path, monkeypatch):
         tmp_path, db, keywords={"Wildlife"},
     )
 
-    original_read_keyword_lists = sync.read_keyword_lists
+    original_read_keyword_snapshot = sync.read_keyword_snapshot
     observed_transactions = []
 
-    def read_keyword_lists_under_lock(path):
+    def read_keyword_snapshot_under_lock(path):
         observed_transactions.append(db.conn.in_transaction)
-        return original_read_keyword_lists(path)
+        return original_read_keyword_snapshot(path)
 
-    monkeypatch.setattr(sync, "read_keyword_lists", read_keyword_lists_under_lock)
+    monkeypatch.setattr(sync, "read_keyword_snapshot", read_keyword_snapshot_under_lock)
 
     sync.sync_from_xmp(db, [pid])
 
