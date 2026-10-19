@@ -359,6 +359,12 @@ def test_duplicate_bag_merge_keeps_a_locally_declared_prefix_on_the_copy(tmp_pat
     the copy must inherit the original's recorded binding; otherwise
     the ``<q:value>`` child inside it would fall back to ``ns0`` on
     rewrite, dropping the sidecar's own prefix.
+
+    The marked item has to live in the later (``extra``) bag so
+    ``_bag_target_property`` picks the plain-``Egret`` bag as the merge
+    target, forcing the marked item through ``_copy_with_source_markup``:
+    otherwise reverting that call to ``copy.deepcopy`` would still copy
+    only the plain ``Egret`` item and leave this regression unguarded.
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -366,14 +372,14 @@ def test_duplicate_bag_merge_keeps_a_locally_declared_prefix_on_the_copy(tmp_pat
         f'<rdf:RDF xmlns:rdf="{NS_RDF}">'
         '<rdf:Description rdf:about=""'
         ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
         "<dc:subject><rdf:Bag>"
         '<rdf:li xmlns:q="urn:item" rdf:parseType="Resource">'
         "<q:value>Heron</q:value></rdf:li>"
         "</rdf:Bag></dc:subject>"
-        "</rdf:Description>"
-        '<rdf:Description rdf:about=""'
-        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
-        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
         "</rdf:Description>"
         "</rdf:RDF></x:xmpmeta>",
         encoding="utf-8",
@@ -384,9 +390,18 @@ def test_duplicate_bag_merge_keeps_a_locally_declared_prefix_on_the_copy(tmp_pat
     assert editor.commit() is True
 
     text = path.read_text(encoding="utf-8")
-    assert 'xmlns:q="urn:item"' in text
     assert "<q:value>Heron</q:value>" in text
     assert "ns0:" not in text
+    assert 'xmlns:q="urn:item"' in text
+    # The declaration has to stay on the copied ``rdf:li`` where the
+    # source recorded it. A plain ``copy.deepcopy`` loses the recorded
+    # binding on the copy, and the serializer then has to declare ``q``
+    # on an enclosing scope (the ``rdf:Description``), which the
+    # ``xmlns:q`` string check above does not detect.
+    for description_tag in text.split("<rdf:Description")[1:]:
+        assert "xmlns:q" not in description_tag.split(">", 1)[0]
+    carrier_tag_open = text[: text.index("<q:value>")].rsplit("<rdf:li", 1)[1]
+    assert 'xmlns:q="urn:item"' in carrier_tag_open
 
 
 def test_duplicate_bag_merge_carries_inner_comments_onto_the_copy(tmp_path):
@@ -396,6 +411,12 @@ def test_duplicate_bag_merge_carries_inner_comments_onto_the_copy(tmp_path):
     identity, so the merge's deep copy must carry those entries onto
     the new element; otherwise an ordinary keyword edit would silently
     drop the comment when the original property is removed.
+
+    The marked item has to live in the later (``extra``) bag so
+    ``_bag_target_property`` picks the plain-``Egret`` bag as the merge
+    target, forcing the marked item through ``_copy_with_source_markup``:
+    otherwise reverting that call to ``copy.deepcopy`` would still copy
+    only the plain ``Egret`` item and leave this regression unguarded.
     """
     path = tmp_path / "photo.xmp"
     path.write_text(
@@ -403,14 +424,14 @@ def test_duplicate_bag_merge_carries_inner_comments_onto_the_copy(tmp_path):
         f'<rdf:RDF xmlns:rdf="{NS_RDF}">'
         '<rdf:Description rdf:about=""'
         ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
         "<dc:subject><rdf:Bag>"
         '<rdf:li rdf:parseType="Resource">'
         "<rdf:value>Heron</rdf:value><!-- source: Lightroom --></rdf:li>"
         "</rdf:Bag></dc:subject>"
-        "</rdf:Description>"
-        '<rdf:Description rdf:about=""'
-        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
-        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
         "</rdf:Description>"
         "</rdf:RDF></x:xmpmeta>",
         encoding="utf-8",
