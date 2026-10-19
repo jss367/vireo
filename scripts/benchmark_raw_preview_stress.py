@@ -19,10 +19,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Support both direct execution and test imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from services import photo_ingest
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / 'vireo'))
+from services import photo_ingest  # noqa: E402
 
-from scripts.benchmark_raw_previews import ROOT, corpus_entries, environment, provenance, summarize
+from scripts.benchmark_raw_previews import ROOT, corpus_entries, environment, provenance, summarize  # noqa: E402
 
 SCHEMA = 1
 

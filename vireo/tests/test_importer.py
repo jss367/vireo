@@ -158,7 +158,7 @@ def test_execute_import_populates_db(tmp_path):
     # Check keywords were imported
     photos = db.photos.list_page()
     if photos:
-        kws = db.keywords.get_for_photo(photos[0]['id'])
+        kws = db.photo_keywords.get_for_photo(photos[0]['id'])
         kw_names = {k['name'] for k in kws}
         assert 'Cardinal' in kw_names
         cardinal_source = db.conn.execute(
@@ -207,7 +207,7 @@ def test_execute_import_skips_empty_normalized_keywords(tmp_path):
     assert result['imported'] >= 1
     photos = db.photos.list_page()
     assert photos
-    kw_names = {k['name'] for k in db.keywords.get_for_photo(photos[0]['id'])}
+    kw_names = {k['name'] for k in db.photo_keywords.get_for_photo(photos[0]['id'])}
     assert 'Cardinal' in kw_names
     assert "'" not in kw_names
 
@@ -321,7 +321,7 @@ def test_execute_import_prefers_last_across_cased_paths(tmp_path, monkeypatch):
     result = execute_import([cat1, cat2], db, write_xmp=False, strategy='prefer_last')
 
     assert result['imported'] == 1
-    names = {k['name'] for k in db.keywords.get_for_photo(pid)}
+    names = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
     assert 'Blue jay' in names
     assert 'Cardinal' not in names
 
@@ -401,8 +401,8 @@ def test_execute_import_keeps_case_distinct_photos_apart(tmp_path, monkeypatch):
     result = execute_import([cat_path], db, write_xmp=False)
 
     assert result['imported'] == 2
-    assert {k['name'] for k in db.keywords.get_for_photo(upper)} == {'Cardinal'}
-    assert {k['name'] for k in db.keywords.get_for_photo(lower)} == {'Blue jay'}
+    assert {k['name'] for k in db.photo_keywords.get_for_photo(upper)} == {'Cardinal'}
+    assert {k['name'] for k in db.photo_keywords.get_for_photo(lower)} == {'Blue jay'}
 
 
 def test_execute_import_skips_a_path_that_folds_onto_two_photos(tmp_path, monkeypatch):
@@ -432,8 +432,8 @@ def test_execute_import_skips_a_path_that_folds_onto_two_photos(tmp_path, monkey
 
     assert result['imported'] == 0
     assert result['skipped'] == 1
-    assert db.keywords.get_for_photo(upper) == []
-    assert db.keywords.get_for_photo(lower) == []
+    assert db.photo_keywords.get_for_photo(upper) == []
+    assert db.photo_keywords.get_for_photo(lower) == []
 
 
 def test_preview_import_keeps_two_case_distinct_files_apart(tmp_path, monkeypatch):

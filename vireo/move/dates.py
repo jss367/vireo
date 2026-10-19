@@ -366,11 +366,6 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             "moved": group_moved,
             "already_in_place": int(result.get("already_in_place", 0)),
         })
-        if progress_cb and completed > group_start + group_moved:
-            # Keep the overall bar advancing when a photo was skipped because
-            # of a missing source or collision (move_photos only reports
-            # successful items).
-            progress_cb(completed, total, "", "Organizing by capture date")
 
     result = {
         "moved": moved,

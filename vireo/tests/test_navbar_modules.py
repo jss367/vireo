@@ -112,9 +112,7 @@ def test_bridge_publishes_only_names_classic_code_still_uses():
 
 # Page scripts an inline script needs while the page parses. They must not
 # use the navbar at load, since they run before its deferred module entry.
-UNDEFERRED = {
-    "card_cleanup.html": {"/static/vireo-folder-browser.js"},
-}
+UNDEFERRED = {}
 
 
 def test_classic_page_scripts_after_the_navbar_are_deferred():

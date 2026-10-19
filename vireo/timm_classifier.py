@@ -4,9 +4,11 @@ Uses ONNX Runtime for inference with pre-exported EVA-02 models.
 Model files are stored in ~/.vireo/models/timm-inat21-eva02-l/.
 """
 
+import contextlib
 import json
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -170,7 +172,7 @@ def rearm_pending_label_desc_heal(model_str, model_dir):
     try:
         import models as _models_mod
         descs = _models_mod.load_label_descriptions(label_desc_path)
-    except Exception:
+    except Exception:  # broad: a missing or malformed descriptions file schedules a heal
         log.debug("Could not read %s; scheduling a heal", label_desc_path, exc_info=True)
         descs = None
     if descs is not None:
@@ -211,16 +213,26 @@ def _spawn_label_desc_heal(model_dir, model_str):
         _HEAL_ATTEMPTS[key] = attempts + 1
 
     def _worker():
-        try:
-            import models as _models_mod
-            ok = _models_mod.ensure_timm_label_descriptions(
-                model_dir, model_str,
-            )
-        except Exception as e:
-            log.info(
-                "label_descriptions heal failed for %s: %s", model_str, e,
-            )
-            ok = False
+        ok = False
+        # broad: the heal raises a wide set (network, HF, IO); it is retried
+        # on the next load. The exc_info diagnostic must stay best-effort:
+        # a logging handler that raised here would strand _HEAL_STATE[key]
+        # in "in_flight" and permanently disable the heal for this
+        # installation.
+        with contextlib.suppress(Exception):
+            try:
+                import models as _models_mod
+                ok = _models_mod.ensure_timm_label_descriptions(
+                    model_dir, model_str,
+                )
+            finally:
+                exc = sys.exception()
+                if not ok and isinstance(exc, Exception):
+                    log.info(
+                        "label_descriptions heal failed for %s: %s",
+                        model_str, exc,
+                        exc_info=True,
+                    )
         with _HEAL_LOCK:
             _HEAL_STATE[key] = "done" if ok else "failed"
             if ok:

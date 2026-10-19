@@ -20,7 +20,7 @@ function page() {
     storageFormatBytes: bytes => `${bytes} B`,
     safeFetch() { throw new Error('Unexpected transport'); },
   });
-  for (const file of ['settings/models.js', 'storage-hf-cache.js']) {
+  for (const file of ['settings/models.js', 'storage/hf-cache.js']) {
     vm.runInContext(readFileSync(new URL(`../../vireo/static/${file}`, import.meta.url), 'utf8'), c);
   }
   c.loadModels = () => reloads.push('models');

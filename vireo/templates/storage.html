@@ -140,7 +140,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     <div class="section-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <span>Storage</span>
       <span id="storageUpdatedAt" style="font-size:11px;font-weight:400;color:var(--text-ghost);">Loading…</span>
-      <button id="refreshStorageBtn" class="btn-secondary" onclick="refreshStoragePage()" style="margin-left:auto;">Refresh</button>
+      <button id="refreshStorageBtn" class="btn-secondary" style="margin-left:auto;" data-storage-on="click:refreshStoragePage">Refresh</button>
     </div>
     <div class="storage-health">
       <div class="health-card">
@@ -157,7 +157,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="health-label">Safe to reclaim</div>
         <div class="health-value" id="storageReclaimableSize">-</div>
         <div class="health-detail">Thumbnails, previews, and label embeddings</div>
-        <button id="clearSafeCachesBtn" class="btn-secondary" onclick="clearSafeCaches()" style="margin-top:9px;">Clear safe caches</button>
+        <button id="clearSafeCachesBtn" class="btn-secondary" style="margin-top:9px;" data-storage-on="click:clearSafeCaches">Clear safe caches</button>
       </div>
     </div>
     <div id="storageLowSpaceWarning" class="storage-note storage-warning" style="display:none;"></div>
@@ -170,7 +170,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div class="storage-sort">
       <label for="storageSort">Sort by</label>
-      <select id="storageSort" onchange="renderStorageCards()" disabled>
+      <select id="storageSort" disabled data-storage-on="change:renderStorageCards">
         <option value="size-desc">Storage: largest first</option>
         <option value="size-asc">Storage: smallest first</option>
         <option value="name">Name: A–Z</option>
@@ -188,8 +188,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="setting-label">Thumbnail size<small>Maximum generated thumbnail dimension.</small></div>
         <div class="setting-control">
           <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
-                 style="width:130px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveStorageConfig()">
+                 style="width:130px;accent-color:var(--accent);" data-storage-on="input:thumbSizeInput">
           <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgThumbSizeVal">400px</span>
         </div>
       </div>
@@ -197,8 +196,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="setting-label">Thumbnail quality<small>JPEG quality for generated thumbnails.</small></div>
         <div class="setting-control">
           <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
-                 style="width:130px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveStorageConfig()">
+                 style="width:130px;accent-color:var(--accent);" data-storage-on="input:thumbQualityInput">
           <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgThumbQualityVal">85</span>
         </div>
       </div>
@@ -206,8 +204,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="setting-label">Preview quality<small>JPEG quality for generated previews.</small></div>
         <div class="setting-control">
           <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
-                 style="width:130px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveStorageConfig()">
+                 style="width:130px;accent-color:var(--accent);" data-storage-on="input:previewQualityInput">
           <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
         </div>
       </div>
@@ -215,10 +212,9 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="setting-label">Preview cache quota<small>Maximum disk space for generated previews.</small></div>
         <div class="setting-control">
           <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="20480"
-                 style="width:96px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-                 onchange="saveStorageConfig()">
+                 style="width:96px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;" data-storage-on="change:saveStorageConfig">
           <span style="font-size:13px;color:var(--text-dim);">MB</span>
-          <button id="clearPreviewCacheBtn" class="btn-secondary" onclick="clearPreviewCache()">Clear cache</button>
+          <button id="clearPreviewCacheBtn" class="btn-secondary" data-storage-on="click:clearPreviewCache">Clear cache</button>
         </div>
       </div>
       <div id="previewCacheStatus" style="font-size:12px;color:var(--text-dim);margin-top:10px;">Loading...</div>
@@ -232,11 +228,9 @@ dialog.modal-overlay::backdrop { background: transparent; }
         <div class="setting-control">
           <input type="number" id="cfgWorkingCopyCacheMaxGb" min="0" max="1024" step="1" value="20"
                  aria-label="Working-copy storage limit in GB"
-                 style="width:96px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-                 oninput="updateWorkingCopyLimitState()">
+                 style="width:96px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;" data-storage-on="input:updateWorkingCopyLimitState">
           <span style="font-size:13px;color:var(--text-dim);">GB</span>
-          <button id="applyWorkingCopyLimitBtn" class="btn-secondary"
-                  onclick="applyWorkingCopyLimit()" disabled>Apply</button>
+          <button id="applyWorkingCopyLimitBtn" class="btn-secondary" disabled data-storage-on="click:applyWorkingCopyLimit">Apply</button>
         </div>
       </div>
       <div id="workingCopyCacheStatus" style="font-size:12px;color:var(--text-dim);margin-top:10px;">Loading...</div>
@@ -259,7 +253,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
       <span>Embedding Cache</span>
       <span id="embeddingCacheSize" style="font-size:12px;font-weight:400;color:var(--text-dim);"></span>
       <span id="embeddingCacheCount" style="font-size:12px;font-weight:400;color:var(--text-dim);"></span>
-      <button id="clearCacheBtn" class="btn-secondary" onclick="clearEmbeddingCache()" style="display:none;margin-left:auto;">Clear cache</button>
+      <button id="clearCacheBtn" class="btn-secondary" style="display:none;margin-left:auto;" data-storage-on="click:clearEmbeddingCache">Clear cache</button>
     </div>
     <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
@@ -280,7 +274,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     <input id="groupingHistoryLimit" type="number" min="0" max="1048576" step="1" required aria-describedby="retainedPolicyNote">
   </div>
   <p id="retainedPolicyNote" class="storage-legend">Maintenance runs hourly and after applying limits. Automatic render cleanup requires independent catalog sources to be fully readable and unchanged; offline or unverifiable sources are retained, even above the limit. Newly written files have a one-hour grace period. Age uses the latest filesystem access, write or change timestamp; 0 disables age expiry. Size 0 removes eligible generated files past the grace period; protected files remain. Grouping history retires the oldest completed snapshots first, preserving photo edits and snapshots awaiting redo. Removing snapshots makes space reusable inside the catalog; the database file may stay the same size.</p>
-  <button class="btn-secondary" onclick="saveRetainedStoragePolicy(this)">Apply retention limits</button>
+  <button class="btn-secondary" data-storage-on="click:saveRetainedStoragePolicy">Apply retention limits</button>
   <p id="retainedStorageStatus" role="status" aria-live="polite"></p>
   <div id="retainedStorageItems">Loading retained storage…</div>
 </div>
@@ -298,30 +292,27 @@ dialog.modal-overlay::backdrop { background: transparent; }
 </dialog>
 
 <dialog class="modal-overlay" id="workingCopyLimitModal"
-        aria-labelledby="workingCopyLimitModalTitle"
-        oncancel="event.preventDefault();closeWorkingCopyLimitModal()"
-        onclick="if(event.target===this)closeWorkingCopyLimitModal()">
+        aria-labelledby="workingCopyLimitModalTitle" data-storage-on="cancel:cancelWorkingCopyLimitModal click:workingCopyLimitBackdrop">
   <div class="modal">
     <div class="modal-header">
       <h3 id="workingCopyLimitModalTitle">Lower working-copy storage limit?</h3>
-      <button class="modal-close" aria-label="Close" onclick="closeWorkingCopyLimitModal()">&times;</button>
+      <button class="modal-close" aria-label="Close" data-storage-on="click:closeWorkingCopyLimitModal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="modal-desc" id="workingCopyLimitModalDesc"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeWorkingCopyLimitModal()">Cancel</button>
-      <button class="btn-danger" id="confirmWorkingCopyLimitBtn"
-              onclick="confirmWorkingCopyLimit()">Lower limit and remove copies</button>
+      <button class="btn-secondary" data-storage-on="click:closeWorkingCopyLimitModal">Cancel</button>
+      <button class="btn-danger" id="confirmWorkingCopyLimitBtn" data-storage-on="click:confirmWorkingCopyLimit">Lower limit and remove copies</button>
     </div>
   </div>
 </dialog>
 
-<div class="modal-overlay" id="masksModal" onclick="if(event.target===this)closeMasksModal()">
+<div class="modal-overlay" id="masksModal" data-storage-on="click:masksBackdrop">
   <div class="modal">
     <div class="modal-header">
       <h3>Manage Mask Variants</h3>
-      <button class="modal-close" onclick="closeMasksModal()">&times;</button>
+      <button class="modal-close" data-storage-on="click:closeMasksModal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="modal-desc">SAM mask files saved per photo per variant. Inactive variants are safe to delete.</div>
@@ -329,44 +320,44 @@ dialog.modal-overlay::backdrop { background: transparent; }
       <ul class="file-list" id="masksModalRows"></ul>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeMasksModal()">Close</button>
+      <button class="btn-secondary" data-storage-on="click:closeMasksModal">Close</button>
     </div>
   </div>
 </div>
 
-<div class="modal-overlay" id="storageModal" onclick="if(event.target===this)closeStorageModal()">
+<div class="modal-overlay" id="storageModal" data-storage-on="click:storageModalBackdrop">
   <div class="modal">
     <div class="modal-header">
       <h3 id="modalTitle">Manage Cache</h3>
-      <button class="modal-close" onclick="closeStorageModal()">&times;</button>
+      <button class="modal-close" data-storage-on="click:closeStorageModal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="modal-desc" id="modalDesc"></div>
       <div id="modalLoading" style="color:var(--text-ghost);font-size:13px;">Loading files...</div>
       <div id="modalFileList" style="display:none;">
         <div class="file-select-bar">
-          <a id="modalSelectAllLink" onclick="selectAllFiles(true)">Select all shown</a>
-          <a onclick="selectAllFiles(false)">Select none</a>
+          <a id="modalSelectAllLink" data-storage-on="click:selectAllShownFiles">Select all shown</a>
+          <a data-storage-on="click:selectNoFiles">Select none</a>
           <span id="modalSelectedInfo" style="color:var(--text-dim);margin-left:auto;"></span>
         </div>
         <ul class="file-list" id="modalFiles"></ul>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeStorageModal()">Cancel</button>
+      <button class="btn-secondary" data-storage-on="click:closeStorageModal">Cancel</button>
       <div>
-        <button class="btn-danger" id="modalDeleteSelected" onclick="deleteSelectedFiles()" disabled>Delete Selected</button>
-        <button class="btn-danger" id="modalDeleteAll" onclick="deleteAllFiles()" style="margin-left:8px;">Delete Entire Cache</button>
+        <button class="btn-danger" id="modalDeleteSelected" disabled data-storage-on="click:deleteSelectedFiles">Delete Selected</button>
+        <button class="btn-danger" id="modalDeleteAll" style="margin-left:8px;" data-storage-on="click:deleteAllFiles">Delete Entire Cache</button>
       </div>
     </div>
   </div>
 </div>
 
-<div class="modal-overlay" id="hfCacheModal" onclick="if(event.target===this)closeHfCacheModal()">
+<div class="modal-overlay" id="hfCacheModal" data-storage-on="click:hfCacheBackdrop">
   <div class="modal">
     <div class="modal-header">
       <h3>Manage Hugging Face Cache</h3>
-      <button class="modal-close" onclick="closeHfCacheModal()">&times;</button>
+      <button class="modal-close" data-storage-on="click:closeHfCacheModal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="modal-desc">
@@ -382,940 +373,23 @@ dialog.modal-overlay::backdrop { background: transparent; }
       <ul class="file-list" id="hfCacheRows"></ul>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeHfCacheModal()">Close</button>
-      <button class="btn-danger" id="hfCacheRemoveUnused" onclick="removeUnusedHfCache()" disabled>Remove unused entries</button>
+      <button class="btn-secondary" data-storage-on="click:closeHfCacheModal">Close</button>
+      <button class="btn-danger" id="hfCacheRemoveUnused" disabled data-storage-on="click:removeUnusedHfCache">Remove unused entries</button>
     </div>
   </div>
 </div>
 
 <script defer src="/static/vireo-release-originals.js"></script>
-<script defer src="/static/storage-retained.js"></script>
-<script defer src="/static/storage-overview.js"></script>
-<script defer src="/static/storage-hf-cache.js"></script>
-<script>
-function storageEscapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function storageEscapeAttr(s) {
-  return storageEscapeHtml(s).replace(/`/g, '&#96;');
-}
-
-function storageFormatBytes(b) {
-  if (b == null || b === 0) return '0 B';
-  if (b < 1024) return b + ' B';
-  if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
-  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-  return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-}
-
-document.addEventListener('DOMContentLoaded', function() { refreshStoragePage(); });
-document.addEventListener('DOMContentLoaded', function() { loadStorageConfig(); });
-
-var _storageSaveTimer = null;
-var _committedWorkingCopyQuotaMb = 20480;
-var MAX_WORKING_COPY_QUOTA_MB = 1048576;
-// null = current working-copy usage has not yet been measured.
-var _workingCopySizeBytes = null;
-var _pendingWorkingCopyQuotaMb = null;
-
-async function loadStorageConfig() {
-  try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
-    var ts = cfg.thumbnail_size != null ? cfg.thumbnail_size : 400;
-    document.getElementById('cfgThumbSize').value = ts;
-    document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
-    var tq = cfg.thumbnail_quality != null ? cfg.thumbnail_quality : 85;
-    document.getElementById('cfgThumbQuality').value = tq;
-    document.getElementById('cfgThumbQualityVal').textContent = tq;
-    var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
-    document.getElementById('cfgPreviewQuality').value = pq;
-    document.getElementById('cfgPreviewQualityVal').textContent = pq;
-    document.getElementById('cfgPreviewCacheMaxMb').value =
-      cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480;
-    _committedWorkingCopyQuotaMb =
-      cfg.working_copy_cache_max_mb != null ? cfg.working_copy_cache_max_mb : 20480;
-    document.getElementById('cfgWorkingCopyCacheMaxGb').value =
-      _committedWorkingCopyQuotaMb / 1024;
-    updateWorkingCopyLimitState();
-  } catch(e) {}
-}
-
-function readWorkingCopyQuotaMb() {
-  var input = document.getElementById('cfgWorkingCopyCacheMaxGb');
-  var gb = Number(input.value);
-  if (!Number.isFinite(gb) || gb < 0 || input.value.trim() === '') return null;
-  var quotaMb = Math.round(gb * 1024);
-  if (!Number.isFinite(quotaMb) || quotaMb > MAX_WORKING_COPY_QUOTA_MB) return null;
-  return quotaMb;
-}
-
-function updateWorkingCopyLimitState() {
-  var quotaMb = readWorkingCopyQuotaMb();
-  var input = document.getElementById('cfgWorkingCopyCacheMaxGb');
-  var applyBtn = document.getElementById('applyWorkingCopyLimitBtn');
-  var valid = quotaMb != null;
-  input.setAttribute('aria-invalid', valid ? 'false' : 'true');
-  applyBtn.disabled = !valid || quotaMb === _committedWorkingCopyQuotaMb;
-}
-
-// Autosaved storage controls — everything EXCEPT the working-copy quota.
-// The quota has its own explicit Apply flow (postWorkingCopyLimit); mixing
-// it into the autosave payload would let a debounced autosave that fires
-// while commitWorkingCopyLimit is in flight silently POST the old
-// _committedWorkingCopyQuotaMb and undo the quota change on the server.
-function autosaveStorageConfigPayload() {
-  return {
-    thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
-    thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
-    preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
-    preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
-  };
-}
-
-async function postAutosaveStorageConfig() {
-  await safeFetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(autosaveStorageConfigPayload()),
-  });
-}
-
-async function postWorkingCopyLimit(workingCopyQuotaMb, opts) {
-  opts = opts || {};
-  var payload = {working_copy_cache_max_mb: workingCopyQuotaMb};
-  if (opts.confirmed) payload._confirm_working_copy_eviction = true;
-  // Suppress the default toast: commitWorkingCopyLimit routes the
-  // 409 confirmation-required response back into the modal flow, and
-  // shows its own message for other failures.
-  await safeFetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  }, { toast: false });
-}
-
-function saveStorageConfig() {
-  clearTimeout(_storageSaveTimer);
-  _storageSaveTimer = setTimeout(async function() {
-    _storageSaveTimer = null;
-    try {
-      await postAutosaveStorageConfig();
-      loadPreviewCacheStatus();
-      loadStoragePanel();
-    } catch(e) {}
-  }, 250);
-}
-
-// If a debounced autosave for other storage controls is queued but has not
-// yet fired, POST its payload synchronously before returning. The
-// working-copy Apply flow used to `clearTimeout(_storageSaveTimer)` on
-// entry, which silently dropped any preview-cache or thumbnail edit from
-// the last 250 ms; flushing keeps those edits reaching the server.
-async function flushPendingStorageAutosave() {
-  if (_storageSaveTimer == null) return;
-  clearTimeout(_storageSaveTimer);
-  _storageSaveTimer = null;
-  try {
-    await postAutosaveStorageConfig();
-  } catch(e) {
-    // Keep the unrelated edit queued for retry and tell the Apply flow to
-    // stop. Proceeding would both lose that edit and send a quota snapshot
-    // whose surrounding storage settings are stale.
-    saveStorageConfig();
-    throw e;
-  }
-}
-
-// Fetch a fresh working-copy usage snapshot. Returns the size in bytes on
-// success, or null if the /api/storage scan failed. Keeps
-// _workingCopySizeBytes and the Apply button state in sync with the result.
-async function refreshWorkingCopyUsage() {
-  try {
-    var s = await safeFetch('/api/storage', {}, { toast: false });
-    var working = s && s.working_copies ? s.working_copies : null;
-    if (!working) {
-      _workingCopySizeBytes = null;
-      return null;
-    }
-    _workingCopySizeBytes = working.size || 0;
-    return _workingCopySizeBytes;
-  } catch(e) {
-    _workingCopySizeBytes = null;
-    return null;
-  } finally {
-    updateWorkingCopyLimitState();
-  }
-}
-
-async function applyWorkingCopyLimit() {
-  var quotaMb = readWorkingCopyQuotaMb();
-  if (quotaMb == null) {
-    showToast('Enter a valid working-copy storage limit', 'error');
-    return;
-  }
-  if (quotaMb === _committedWorkingCopyQuotaMb) return;
-
-  // Any reduction the client can already see needs the confirmation modal.
-  // For a raise, POST straight through: if _committedWorkingCopyQuotaMb is
-  // stale and the server sees a reduction, /api/config rejects with 409
-  // and commitWorkingCopyLimit reroutes to the modal below.
-  if (quotaMb > _committedWorkingCopyQuotaMb) {
-    await commitWorkingCopyLimit(quotaMb, { confirmed: false });
-    return;
-  }
-  await promptWorkingCopyLimit(quotaMb);
-}
-
-// Open the eviction confirmation modal for a proposed reduction. When the
-// server has already measured usage under the publication guard (the 409
-// response body), reuse that value instead of racing another /api/storage
-// scan against a concurrent publication.
-async function promptWorkingCopyLimit(quotaMb, opts) {
-  opts = opts || {};
-  var applyBtn = document.getElementById('applyWorkingCopyLimitBtn');
-  var input = document.getElementById('cfgWorkingCopyCacheMaxGb');
-  applyBtn.disabled = true;
-  input.disabled = true;
-  var usage;
-  if (opts.usageBytes != null) {
-    _workingCopySizeBytes = opts.usageBytes;
-    usage = opts.usageBytes;
-  } else {
-    applyBtn.textContent = 'Checking…';
-    usage = await refreshWorkingCopyUsage();
-  }
-  var quotaBytes = quotaMb * 1024 * 1024;
-  var removalBytes = usage == null ? null : Math.max(0, usage - quotaBytes);
-  var newLimit = storageFormatBytes(quotaBytes);
-  input.disabled = true;
-  applyBtn.textContent = 'Apply';
-  updateWorkingCopyLimitState();
-  _pendingWorkingCopyQuotaMb = quotaMb;
-  var desc = document.getElementById('workingCopyLimitModalDesc');
-  var confirmBtn = document.getElementById('confirmWorkingCopyLimitBtn');
-  if (removalBytes > 0) {
-    desc.textContent =
-      'Lowering the limit to ' + newLimit + ' will remove approximately ' +
-      storageFormatBytes(removalBytes) + ' of the oldest generated working copies. ' +
-      'Your original photos will not be deleted. Vireo will use the originals when a working copy is unavailable.';
-    confirmBtn.textContent = 'Lower limit and remove copies';
-  } else {
-    var usageNote = usage == null
-      ? 'Current working-copy usage could not be measured. '
-      : 'No working copies currently exceed the new limit. ';
-    desc.textContent = usageNote + 'If usage is above ' + newLimit +
-      ' when the change is applied, Vireo will remove the oldest generated working copies. ' +
-      'Your original photos will not be deleted.';
-    confirmBtn.textContent = 'Lower storage limit';
-  }
-  var modal = document.getElementById('workingCopyLimitModal');
-  modal.classList.add('open');
-  modal.showModal();
-  confirmBtn.focus();
-}
-
-function closeWorkingCopyLimitModal() {
-  var modal = document.getElementById('workingCopyLimitModal');
-  if (modal.open) modal.close();
-  modal.classList.remove('open');
-  _pendingWorkingCopyQuotaMb = null;
-  document.getElementById('cfgWorkingCopyCacheMaxGb').disabled = false;
-  updateWorkingCopyLimitState();
-  document.getElementById('applyWorkingCopyLimitBtn').focus();
-}
-
-function confirmWorkingCopyLimit() {
-  var quotaMb = _pendingWorkingCopyQuotaMb;
-  var modal = document.getElementById('workingCopyLimitModal');
-  if (modal.open) modal.close();
-  modal.classList.remove('open');
-  _pendingWorkingCopyQuotaMb = null;
-  if (quotaMb != null) commitWorkingCopyLimit(quotaMb, { confirmed: true });
-}
-
-async function commitWorkingCopyLimit(quotaMb, opts) {
-  opts = opts || {};
-  var input = document.getElementById('cfgWorkingCopyCacheMaxGb');
-  var applyBtn = document.getElementById('applyWorkingCopyLimitBtn');
-  try {
-    await flushPendingStorageAutosave();
-  } catch(e) {
-    input.disabled = false;
-    applyBtn.textContent = 'Apply';
-    updateWorkingCopyLimitState();
-    showToast(
-      'Could not save pending storage changes; the working-copy limit was not updated',
-      'error'
-    );
-    return;
-  }
-  input.disabled = true;
-  applyBtn.disabled = true;
-  applyBtn.textContent = 'Applying…';
-  var reroutedToModal = false;
-  try {
-    await postWorkingCopyLimit(quotaMb, opts);
-    _committedWorkingCopyQuotaMb = quotaMb;
-    input.value = quotaMb / 1024;
-    showToast('Working-copy storage limit updated', 'success');
-    await refreshStoragePage();
-  } catch(e) {
-    if (
-      !opts.confirmed && e && e.status === 409 &&
-      e.code === 'working_copy_eviction_confirmation_required'
-    ) {
-      // The server sees this as a reduction — either because the client's
-      // cached committed quota was stale (another tab raised it), or
-      // because the storage page was loaded before the current stored
-      // value. Sync the cached committed value to the server's truth so
-      // the Apply button state reflects reality, then re-prompt with the
-      // server's usage measurement.
-      var body = e.body || {};
-      if (typeof body.previous_working_copy_quota_mb === 'number') {
-        _committedWorkingCopyQuotaMb = body.previous_working_copy_quota_mb;
-      }
-      reroutedToModal = true;
-      input.disabled = false;
-      applyBtn.textContent = 'Apply';
-      updateWorkingCopyLimitState();
-      await promptWorkingCopyLimit(quotaMb, {
-        usageBytes:
-          typeof body.current_working_copy_usage_bytes === 'number'
-            ? body.current_working_copy_usage_bytes
-            : null,
-      });
-    } else {
-      showToast('Could not update working-copy storage limit', 'error');
-    }
-  } finally {
-    if (!reroutedToModal) {
-      input.disabled = false;
-      applyBtn.textContent = 'Apply';
-      updateWorkingCopyLimitState();
-    }
-  }
-}
-
-async function loadStoragePanel() {
-  try {
-    var s = await safeFetch('/api/storage', {}, { toast: false });
-    document.getElementById('storageTotalSize').textContent = storageFormatBytes(s.total);
-    document.getElementById('storageReclaimableSize').textContent = storageFormatBytes(s.reclaimable);
-    var volumes = s.volumes || [];
-    var measuredVolumes = volumes.filter(function(v) { return v.free != null; });
-    measuredVolumes.sort(function(a, b) { return a.free - b.free; });
-    var tightest = measuredVolumes[0] || {};
-    document.getElementById('storageFreeSize').textContent = storageFormatBytes(tightest.free);
-    document.getElementById('storageVolumeName').textContent = tightest.name
-      ? (volumes.length > 1 ? volumes.length + ' volumes · tightest is ' : '') + tightest.name +
-        (tightest.capacity != null ? ' · ' + storageFormatBytes(tightest.capacity) + ' capacity' : '')
-      : 'Volume information unavailable';
-    var lowVolumes = measuredVolumes.filter(function(v) {
-      return v.capacity != null &&
-        (v.free < 10 * 1024 * 1024 * 1024 || v.free / v.capacity < 0.10);
-    });
-    var lowSpaceEl = document.getElementById('storageLowSpaceWarning');
-    if (lowVolumes.length) {
-      lowSpaceEl.textContent = 'Storage is running low on ' + lowVolumes.map(function(v) {
-        return (v.name || 'a storage volume') + ' (' + storageFormatBytes(v.free) + ' free)';
-      }).join(', ') + '.';
-      lowSpaceEl.style.display = '';
-    } else {
-      lowSpaceEl.style.display = 'none';
-    }
-    var locationsHtml = '';
-    (s.locations || []).forEach(function(location) {
-      var locationVolume = location.volume || {};
-      locationsHtml += '<div class="storage-location">' +
-        '<span style="font-size:11px;color:var(--text-dim);">' +
-          storageEscapeHtml((location.labels || []).join(' · ')) + '</span>' +
-        '<code>' + storageEscapeHtml(location.path || '') + '</code>' +
-        '<span style="font-size:10px;color:var(--text-ghost);">' +
-          storageEscapeHtml(locationVolume.name || '') + ' · ' + storageFormatBytes(locationVolume.free) + ' free</span>' +
-        '<button class="btn-secondary" onclick="openStorageFolder(\'' + storageEscapeAttr(location.id) + '\')" style="margin-left:auto;">Open folder</button>' +
-        '</div>';
-    });
-    document.getElementById('storageLocations').innerHTML = locationsHtml;
-    var clearSafeBtn = document.getElementById('clearSafeCachesBtn');
-    clearSafeBtn.disabled = !s.reclaimable;
-    clearSafeBtn.textContent = s.reclaimable
-      ? 'Clear safe caches · ' + storageFormatBytes(s.reclaimable)
-      : 'Safe caches are empty';
-
-    var working = s.working_copies || {count: 0, size: 0, quota_bytes: 0};
-    _workingCopySizeBytes = working.size || 0;
-    // Sync the cached "committed" quota from the server's authoritative
-    // value so a concurrent change (another tab, All Settings) is
-    // reflected in the Apply button state. Without this, an outside
-    // reduction leaves the input showing the old higher value and Apply
-    // disabled — the user can't restore that displayed limit without
-    // perturbing the field or reloading. Only overwrite the input value
-    // if it still matches the previously-known committed quota (the
-    // user hasn't edited it) and no confirmation modal is open, so
-    // in-progress edits and the pending-reduction dialog aren't
-    // clobbered by a background refresh.
-    if (working.quota_bytes != null) {
-      var newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024));
-      if (newCommittedMb !== _committedWorkingCopyQuotaMb) {
-        var input = document.getElementById('cfgWorkingCopyCacheMaxGb');
-        var currentInputMb = readWorkingCopyQuotaMb();
-        var modal = document.getElementById('workingCopyLimitModal');
-        var modalOpen = modal && (modal.open || modal.classList.contains('open'));
-        if (!modalOpen && currentInputMb === _committedWorkingCopyQuotaMb) {
-          input.value = newCommittedMb / 1024;
-        }
-        _committedWorkingCopyQuotaMb = newCommittedMb;
-      }
-    }
-    updateWorkingCopyLimitState();
-    var workingFileWord = working.count === 1 ? 'file' : 'files';
-    document.getElementById('workingCopyCacheStatus').textContent =
-      'Current: ' + storageFormatBytes(working.size) + ' / ' +
-      storageFormatBytes(working.quota_bytes) + ' (' +
-      working.count.toLocaleString() + ' ' + workingFileWord + ')';
-
-    var categories = [
-      {name: 'Database', size: s.database.size, type: null, kind: 'keep', kindLabel: 'Keep'},
-      {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails', kind: 'safe', kindLabel: 'Safe to clear'},
-      {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews', kind: 'safe', kindLabel: 'Safe to clear'},
-      {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, type: null, kind: 'managed', kindLabel: 'Quota managed'},
-      {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
-      {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
-      {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', hfCache: true, note: hfCacheCardNote(s.hf_cache)},
-      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, release: true, type: null, kind: 'keep', kindLabel: 'Release when done'},
-    ];
-    var auxiliaryCategories = s.other.categories || [];
-    auxiliaryCategories.forEach(function(c) {
-      categories.push({name: c.name, size: c.size, kind: 'keep', kindLabel: 'Review before removing'});
-    });
-    var breakdownHtml = auxiliaryCategories.length
-      ? '<p class="storage-legend">Files and folders below are sorted by size within each category. Sizes exclude data already counted in the main cache categories.</p>'
-      : '';
-    auxiliaryCategories.forEach(function(c) {
-      breakdownHtml += '<details><summary>' + storageEscapeHtml(c.name) +
-        ' · ' + storageFormatBytes(c.size) + ' · View files and folders</summary>';
-      c.entries.forEach(function(entry) {
-        breakdownHtml += '<div class="storage-breakdown-row"><strong>' +
-          storageFormatBytes(entry.size) + '</strong><p>' +
-          storageEscapeHtml(entry.description) + '</p><code>' +
-          storageEscapeHtml(entry.path) + '</code></div>';
-      });
-      breakdownHtml += '</details>';
-    });
-    document.getElementById('storageBreakdown').innerHTML = breakdownHtml;
-    renderStorageCards(categories);
-  } catch(e) {
-    // Usage is unknown until the next successful scan; keep Apply disabled
-    // so a stale zero can't skip the eviction confirmation.
-    _workingCopySizeBytes = null;
-    updateWorkingCopyLimitState();
-    showStorageLoadError();
-  }
-  await loadMasksCard(s && s.masks);
-}
-
-async function refreshStoragePage() {
-  var btn = document.getElementById('refreshStorageBtn');
-  if (btn) btn.disabled = true;
-  await Promise.all([
-    loadStoragePanel(), loadPreviewCacheStatus(), loadDetectionCacheStats(),
-    loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(),
-  ]);
-  document.getElementById('storageUpdatedAt').textContent =
-    'Updated ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'});
-  if (btn) btn.disabled = false;
-}
-
-async function clearSafeCaches() {
-  var size = document.getElementById('storageReclaimableSize').textContent;
-  if (!confirm('Clear ' + size + ' of thumbnails, previews, and label embeddings? They will regenerate as needed.')) return;
-  var btn = document.getElementById('clearSafeCachesBtn');
-  btn.disabled = true;
-  btn.textContent = 'Clearing…';
-  try {
-    await safeFetch('/api/storage/clear-safe', {method: 'POST'});
-    showToast('Safe caches cleared', 'success');
-  } catch(e) {
-    showToast('Could not clear all safe caches', 'error');
-  }
-  await refreshStoragePage();
-}
-
-async function openStorageFolder(locationId) {
-  try {
-    var result = await safeFetch('/api/storage/open-folder', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({location: locationId}),
-    });
-    if (!result.ok) throw new Error(result.reason || 'Could not open storage folder');
-  } catch(e) {
-    showToast((e && e.message) || 'Could not open storage folder', 'error');
-  }
-}
-
-var _masksData = null;
-
-async function loadMasksCard(storageData) {
-  var card = document.getElementById('masksCard');
-  try {
-    var data = storageData || await safeFetch('/api/storage/masks', {}, { toast: false });
-    _masksData = data;
-    var variants = data.variants || [];
-    var totalBytes = data.total_bytes || 0;
-    var stale = data.stale_count || 0;
-
-    var inner = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">';
-    inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">';
-    inner += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);">Masks ' +
-      '<span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px;">' +
-      storageFormatBytes(totalBytes) + '</span> ' +
-      '<span class="stat-kind keep" style="margin-left:6px;">Review before clearing</span></div>';
-    inner += '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">';
-    inner += '<button class="btn-manage" onclick="openMasksModal()"' +
-      (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
-      '>Manage</button>';
-    inner += '<button class="btn-secondary" onclick="deleteInactiveMasks()"' +
-      (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
-      '>Delete inactive</button>';
-    if (stale > 0) {
-      inner += '<button class="btn-secondary" onclick="deleteStaleMasks()" style="color:var(--warning);border-color:var(--warning);">Delete stale (' + stale + ')</button>';
-    }
-    inner += '</div></div>';
-
-    if (variants.length === 0) {
-      inner += '<div style="font-size:12px;color:var(--text-ghost);">No SAM masks yet.</div>';
-    } else {
-      inner += '<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">Generated from detections; deleting them may require another mask-generation run.</div>';
-      inner += '<div style="display:flex;flex-direction:column;gap:4px;">';
-      variants.forEach(function(v) {
-        var isActive = (v.active_count || 0) > 0;
-        inner += '<div style="display:flex;align-items:center;gap:10px;font-size:12px;font-variant-numeric:tabular-nums;">';
-        inner += '<span style="min-width:120px;color:var(--text-secondary);">' + storageEscapeHtml(v.variant) + '</span>';
-        inner += '<span style="min-width:80px;color:var(--text-dim);">' + (v.count || 0).toLocaleString() + ' photo' + (v.count === 1 ? '' : 's') + '</span>';
-        inner += '<span style="min-width:80px;color:var(--text-faint);">' + storageFormatBytes(v.bytes || 0) + '</span>';
-        if (isActive) {
-          inner += '<span style="font-size:10px;color:var(--accent);background:color-mix(in srgb, var(--accent) 18%, transparent);border-radius:3px;padding:1px 6px;">active - ' +
-            (v.active_count || 0).toLocaleString() + '</span>';
-        }
-        inner += '</div>';
-      });
-      inner += '</div>';
-    }
-    inner += '</div>';
-    card.innerHTML = inner;
-  } catch(e) {
-    card.innerHTML = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">' +
-      '<span style="color:var(--danger);font-size:12px;">Failed to load mask info</span></div>';
-  }
-}
-
-function openMasksModal() {
-  if (!_masksData) return;
-  document.getElementById('masksModalError').style.display = 'none';
-  renderMasksModalRows();
-  document.getElementById('masksModal').classList.add('open');
-}
-
-function closeMasksModal() {
-  document.getElementById('masksModal').classList.remove('open');
-}
-
-function renderMasksModalRows() {
-  var rows = document.getElementById('masksModalRows');
-  rows.textContent = '';
-  if (!_masksData || (_masksData.variants || []).length === 0) {
-    var empty = document.createElement('li');
-    empty.style.color = 'var(--text-ghost)';
-    empty.style.fontSize = '13px';
-    empty.style.padding = '12px 0';
-    empty.textContent = 'No mask variants present.';
-    rows.appendChild(empty);
-    return;
-  }
-  _masksData.variants.forEach(function(v) {
-    var isActive = (v.active_count || 0) > 0;
-    var li = document.createElement('li');
-    li.className = 'file-item';
-    var label = document.createElement('label');
-    label.style.flex = '1';
-    var strong = document.createElement('strong');
-    strong.style.color = 'var(--text-primary)';
-    strong.textContent = v.variant;
-    label.appendChild(strong);
-    var meta = document.createElement('span');
-    meta.style.color = 'var(--text-dim)';
-    meta.textContent = ' - ' + (v.count || 0).toLocaleString() +
-      ' photos - ' + storageFormatBytes(v.bytes || 0);
-    label.appendChild(meta);
-    if (isActive) {
-      var activeTag = document.createElement('span');
-      activeTag.style.fontSize = '10px';
-      activeTag.style.color = 'var(--accent)';
-      activeTag.style.marginLeft = '6px';
-      activeTag.textContent = '[active - ' + (v.active_count || 0).toLocaleString() + ']';
-      label.appendChild(activeTag);
-    }
-    li.appendChild(label);
-    var btn = document.createElement('button');
-    btn.className = 'btn-danger';
-    btn.textContent = 'Delete';
-    if (isActive) {
-      btn.disabled = true;
-      btn.title = 'set another variant active first';
-    } else {
-      btn.addEventListener('click', function() { deleteMaskVariant(v.variant); });
-    }
-    li.appendChild(btn);
-    rows.appendChild(li);
-  });
-}
-
-function _showMasksModalError(msg) {
-  var el = document.getElementById('masksModalError');
-  el.textContent = msg;
-  el.style.display = '';
-}
-
-async function deleteMaskVariant(variant) {
-  if (!confirm('Delete all "' + variant + '" masks? Files and DB rows will be removed.')) return;
-  try {
-    var resp = await fetch('/api/storage/masks/delete-variant', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({variant: variant}),
-    });
-    var body = await resp.json();
-    if (!resp.ok) {
-      _showMasksModalError(body.message || body.error || ('HTTP ' + resp.status));
-      return;
-    }
-    document.getElementById('masksModalError').style.display = 'none';
-  } catch(e) {
-    _showMasksModalError(String(e));
-    return;
-  }
-  await loadStoragePanel();
-  if (_masksData && (_masksData.variants || []).length > 0) renderMasksModalRows();
-  else closeMasksModal();
-}
-
-async function deleteInactiveMasks() {
-  if (!confirm('Delete all non-active mask variants across photos? The active variant per photo is kept.')) return;
-  try {
-    await safeFetch('/api/storage/masks/delete-inactive', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-    });
-  } catch(e) {}
-  await loadStoragePanel();
-}
-
-async function deleteStaleMasks() {
-  if (!confirm('Delete masks whose detection prompt no longer matches the photo primary detection?')) return;
-  try {
-    await safeFetch('/api/storage/masks/delete-stale', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-    });
-  } catch(e) {}
-  await loadStoragePanel();
-}
-
-var _modalType = '';
-var _modalFiles = [];
-var _storageSummary = {};
-var STORAGE_MODAL_FILE_LIMIT = 500;
-var STORAGE_INFO = {
-  thumbnails: {
-    title: 'Thumbnails',
-    desc: 'Small preview images generated for fast browsing. Deleting these is safe; they regenerate automatically.',
-  },
-  previews: {
-    title: 'Previews',
-    desc: 'Larger preview images used for detail views. Deleting these is safe; they regenerate on demand.',
-  },
-  embeddings: {
-    title: 'Label Embeddings',
-    desc: 'Cached text embeddings for species labels used during classification.',
-  },
-};
-
-async function openStorageModal(type) {
-  _modalType = type;
-  _modalFiles = [];
-  var info = STORAGE_INFO[type] || {title: type, desc: ''};
-  document.getElementById('modalTitle').textContent = 'Manage ' + info.title;
-  document.getElementById('modalDesc').textContent = info.desc;
-  document.getElementById('modalLoading').style.display = 'block';
-  document.getElementById('modalLoading').textContent = 'Loading files...';
-  document.getElementById('modalFileList').style.display = 'none';
-  document.getElementById('modalDeleteSelected').disabled = true;
-  document.getElementById('storageModal').classList.add('open');
-
-  try {
-    var url = '/api/storage/files?type=' + encodeURIComponent(type);
-    if (type === 'previews' || type === 'thumbnails') {
-      url += '&limit=' + STORAGE_MODAL_FILE_LIMIT;
-      document.getElementById('modalLoading').textContent =
-        'Loading first ' + STORAGE_MODAL_FILE_LIMIT.toLocaleString() + ' files...';
-    }
-    var data = await safeFetch(url, {}, { toast: false });
-    _modalFiles = data.files || [];
-    document.getElementById('modalLoading').style.display = 'none';
-    document.getElementById('modalFileList').style.display = 'block';
-
-    if (_modalFiles.length === 0) {
-      document.getElementById('modalFiles').innerHTML = '<li style="color:var(--text-ghost);font-size:13px;padding:12px 0;">Cache is empty.</li>';
-      document.getElementById('modalDeleteAll').disabled = true;
-      updateSelectedInfo();
-      return;
-    }
-    document.getElementById('modalDeleteAll').disabled = false;
-
-    var html = '';
-    if (data.truncated) {
-      var summary = _storageSummary[type] || {};
-      var totalCount = summary.count || 0;
-      html += '<li style="color:var(--text-ghost);font-size:12px;padding:8px 0;">Showing the first ' +
-        _modalFiles.length.toLocaleString() +
-        (totalCount ? ' of ' + totalCount.toLocaleString() : '') +
-        ' files. Select all shown and Delete Selected affect only this visible list; Delete Entire Cache removes all ' +
-        info.title.toLowerCase() + '.</li>';
-    }
-    _modalFiles.forEach(function(f, i) {
-      var displayName = storageEscapeHtml(f.name);
-      if (f.meta) {
-        displayName = storageEscapeHtml(f.meta.model || 'Unknown model') +
-          ' <span style="color:var(--text-faint);">- ' + (f.meta.label_count || '?') + ' labels</span>';
-        if (f.meta.created) {
-          displayName += ' <span style="color:var(--text-ghost);">- ' + storageEscapeHtml(f.meta.created.split('T')[0]) + '</span>';
-        }
-      }
-      html += '<li class="file-item">' +
-        '<input type="checkbox" id="fc' + i + '" onchange="updateSelectedInfo()">' +
-        '<label for="fc' + i + '">' + displayName + '</label>' +
-        '<span class="file-size">' + storageFormatBytes(f.size) + '</span>' +
-      '</li>';
-    });
-    document.getElementById('modalFiles').innerHTML = html;
-    updateSelectedInfo();
-  } catch(e) {
-    document.getElementById('modalLoading').innerHTML = '<span style="color:var(--danger);">Failed to load files.</span>';
-  }
-}
-
-function closeStorageModal() {
-  document.getElementById('storageModal').classList.remove('open');
-}
-
-function selectAllFiles(checked) {
-  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
-  boxes.forEach(function(cb) { cb.checked = checked; });
-  updateSelectedInfo();
-}
-
-function updateSelectedInfo() {
-  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
-  var count = 0, size = 0;
-  boxes.forEach(function(cb, i) {
-    if (cb.checked) { count++; size += _modalFiles[i].size; }
-  });
-  document.getElementById('modalSelectedInfo').textContent = count > 0
-    ? count + ' selected (' + storageFormatBytes(size) + ')'
-    : '';
-  document.getElementById('modalDeleteSelected').disabled = count === 0;
-}
-
-async function deleteSelectedFiles() {
-  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
-  var names = [];
-  boxes.forEach(function(cb, i) {
-    if (cb.checked) names.push(_modalFiles[i].name);
-  });
-  if (names.length === 0) return;
-  if (!confirm('Delete ' + names.length + ' file(s)?')) return;
-  try {
-    await safeFetch('/api/storage/delete-files', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({type: _modalType, files: names}),
-    });
-  } catch(e) {}
-  loadStoragePanel();
-  loadPreviewCacheStatus();
-  loadEmbeddingCache();
-  openStorageModal(_modalType);
-}
-
-async function deleteAllFiles() {
-  var info = STORAGE_INFO[_modalType] || {title: _modalType};
-  var summary = _storageSummary[_modalType] || {};
-  var count = summary.count || _modalFiles.length;
-  if (!confirm('Delete all ' + count.toLocaleString() + ' ' + info.title.toLowerCase() + '? They will regenerate as needed.')) return;
-  try {
-    await safeFetch('/api/storage/clear', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({type: _modalType}),
-    });
-  } catch(e) {}
-  loadStoragePanel();
-  loadPreviewCacheStatus();
-  loadEmbeddingCache();
-  openStorageModal(_modalType);
-}
-
-async function loadPreviewCacheStatus() {
-  var statusEl = document.getElementById('previewCacheStatus');
-  var warnEl = document.getElementById('previewCacheWarning');
-  try {
-    var d = await safeFetch('/api/preview-cache', {}, { toast: false });
-    var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
-    var quotaMb = Math.round(d.quota_bytes / 1024 / 1024);
-    var fileWord = d.count === 1 ? 'file' : 'files';
-    statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
-    var rec = d.recommended_mb || 0;
-    if (rec > 0 && quotaMb > 0 && quotaMb < rec) {
-      warnEl.textContent = 'Recommended: ' + rec.toLocaleString() + ' MB for one preview per photo.';
-      warnEl.style.display = 'block';
-    } else {
-      warnEl.style.display = 'none';
-    }
-  } catch(e) {
-    statusEl.textContent = 'Failed to load';
-    warnEl.style.display = 'none';
-  }
-}
-
-async function clearPreviewCache() {
-  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
-  var btn = document.getElementById('clearPreviewCacheBtn');
-  if (btn) btn.disabled = true;
-  try {
-    await safeFetch('/api/preview-cache/clear', { method: 'POST' });
-  } catch(e) {}
-  if (btn) btn.disabled = false;
-  loadStoragePanel();
-  loadPreviewCacheStatus();
-}
-
-async function loadDetectionCacheStats() {
-  var el = document.getElementById('detectionCacheStats');
-  try {
-    var d = await safeFetch('/api/detection-cache/stats', {}, { toast: false });
-    var pc = d.photo_count || 0;
-    var mc = d.model_count || 0;
-    el.textContent = pc + ' ' + (pc === 1 ? 'photo' : 'photos') +
-      ' x ' + mc + ' ' + (mc === 1 ? 'model' : 'models') + ' cached';
-  } catch(e) {
-    el.textContent = 'Failed to load';
-  }
-}
-
-async function loadEmbeddingCache() {
-  try {
-    var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
-    document.getElementById('embeddingCacheSize').textContent = storageFormatBytes(d.total_size);
-    var count = (d.entries || []).length;
-    document.getElementById('embeddingCacheCount').textContent =
-      count > 0 ? count + ' cached label ' + (count === 1 ? 'set' : 'sets') : 'empty';
-    document.getElementById('clearCacheBtn').style.display = count > 0 ? '' : 'none';
-  } catch(e) {}
-}
-
-async function clearEmbeddingCache() {
-  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them.')) return;
-  try {
-    await safeFetch('/api/embedding-cache', { method: 'DELETE' });
-  } catch(e) {}
-  loadStoragePanel();
-  loadEmbeddingCache();
-  loadEmbeddingMatrix();
-}
-
-async function loadEmbeddingMatrix() {
-  try {
-    var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
-    var models = data.models || [];
-    var matrix = data.matrix || [];
-
-    if (models.length === 0 || matrix.length === 0) {
-      document.getElementById('matrixContent').innerHTML =
-        '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
-      return;
-    }
-
-    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
-    html += '<thead><tr><th style="text-align:left;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">Labels</th>';
-    models.forEach(function(m) {
-      html += '<th style="text-align:center;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">' + storageEscapeHtml(m.name) + '</th>';
-    });
-    html += '</tr></thead><tbody>';
-
-    matrix.forEach(function(row) {
-      html += '<tr>';
-      html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
-      // species_count here is already the count a run receives (the
-      // endpoint normalizes), so it only needs the unusable case — same
-      // rule as the Settings matrix, which reads this one endpoint too.
-      html += storageEscapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
-      if (row.unusable) {
-        html += '<div style="font-size:11px;color:var(--warning,#d08700);">no usable species' +
-                (row.skipped ? ' — all ' + row.skipped + ' names are shared by several species' : '') +
-                '; download the list again in Settings &rarr; Labels</div>';
-      }
-      html += '</td>';
-      models.forEach(function(m) {
-        var cell = row.models[m.id];
-        html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
-        if (row.unusable) {
-          html += '<span style="color:var(--text-faint);">&mdash;</span>';
-        } else if (cell && cell.cached) {
-          html += '<span style="color:var(--accent);">cached</span>';
-        } else {
-          html += '<button class="embedding-compute-btn" data-model-id="' + storageEscapeAttr(m.id) +
-            '" data-label-file="' + storageEscapeAttr(row.labels_file) + '" ' +
-            'style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
-        }
-        html += '</td>';
-      });
-      html += '</tr>';
-    });
-    html += '</tbody></table>';
-    document.getElementById('matrixContent').innerHTML = html;
-    document.querySelectorAll('.embedding-compute-btn').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        precomputeEmbeddings(btn.dataset.modelId, btn.dataset.labelFile);
-      });
-    });
-  } catch(e) {
-    document.getElementById('matrixContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
-  }
-}
-
-async function precomputeEmbeddings(modelId, labelsFile) {
-  try {
-    var data = await safeFetch('/api/jobs/precompute-embeddings', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({model_id: modelId, labels_file: labelsFile}),
-    });
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onComplete: function() {
-        loadEmbeddingMatrix();
-        loadEmbeddingCache();
-        loadStoragePanel();
-      },
-    });
-  } catch(e) {}
-}
-</script>
+<script defer src="/static/storage/format.js"></script>
+<script defer src="/static/storage/config.js"></script>
+<script defer src="/static/storage/working-copy-limit.js"></script>
+<script defer src="/static/storage/panel.js"></script>
+<script defer src="/static/storage/masks.js"></script>
+<script defer src="/static/storage/files-modal.js"></script>
+<script defer src="/static/storage/caches.js"></script>
+<script defer src="/static/storage/overview.js"></script>
+<script defer src="/static/storage/retained.js"></script>
+<script defer src="/static/storage/hf-cache.js"></script>
+<script defer src="/static/storage/boot.js"></script>
 </body>
 </html>

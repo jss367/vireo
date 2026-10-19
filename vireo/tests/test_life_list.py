@@ -855,7 +855,7 @@ def test_higher_rank_taxonomy_link_survives_mark_species_pass(life_app):
 
     # The pass makes no changes because the row is already fully typed
     # and its higher-rank binding is preserved.
-    assert db.keywords.mark_species(FakeTaxonomy()) == 0
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 0
     row = db.conn.execute(
         "SELECT taxon_id, type, is_species FROM keywords WHERE id = ?",
         (seed["keyword"],),
@@ -1452,7 +1452,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
 
     # The hierarchical photo only carries the lower-cased leaf.
     hier_names = {
-        row["name"] for row in db.keywords.get_for_photo(pid_hier)
+        row["name"] for row in db.photo_keywords.get_for_photo(pid_hier)
     }
     assert "verdin" in hier_names and "Verdin" not in hier_names
 

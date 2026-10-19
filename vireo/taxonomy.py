@@ -18,6 +18,7 @@ import contextlib
 import csv
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import logging
@@ -245,7 +246,7 @@ def _download_with_resume(url, dest_path, progress_callback=None,
 
         except DownloadCancelled:
             raise
-        except Exception as e:
+        except Exception as e:  # broad: urllib raises a wide set; a 416 is resolved here, anything else counts toward the stall limit
             # 416 Requested Range Not Satisfiable: our Range starts at or
             # past the end of the resource.  Reachable when cancellation
             # lands after the final chunk is written but before the
@@ -714,7 +715,7 @@ def _write_taxonomy_json_atomically(path, data):
         with contextlib.suppress(OSError):
             os.chmod(tmp_path, stat_module.S_IMODE(os.stat(target).st_mode))
         replace_file(tmp_path, target)
-    except BaseException:
+    except BaseException:  # broad: remove the temp file on any exit, then re-raise
         with contextlib.suppress(OSError):
             os.remove(tmp_path)
         raise
@@ -823,7 +824,7 @@ def _parse_taxonomy_with_retries(path):
         pre_stat = _taxonomy_stat_key(path)
         try:
             taxonomy = Taxonomy(path)
-        except Exception as parse_error:
+        except Exception as parse_error:  # broad: Taxonomy() raises undocumented errors on a partial file; retried only when the file moved, else re-raised
             last_error_text = f"{type(parse_error).__name__}: {parse_error}"
             # A rewrite caught mid-stream — from an atomic-save gap
             # on another platform, an interrupted download, or an
@@ -952,10 +953,10 @@ def load_local_taxonomy(path=None):
             # quietly on subsequent requests so a persistently-broken
             # preferred file doesn't flood the log.
             continue
-        except Exception as e:
+        except Exception as e:  # broad: taxonomy parsing raises undocumented errors; the next candidate is tried
             log.warning(
                 "Failed to load taxonomy from %s: %s — trying next candidate",
-                path, e,
+                path, e, exc_info=True,
             )
     return None
 
@@ -1187,7 +1188,7 @@ class Taxonomy:
             req.add_header("User-Agent", "vireo-taxonomy/1.0")
             with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
                 data = json.loads(resp.read())
-        except Exception:
+        except (OSError, ValueError, http.client.HTTPException, RecursionError):
             log.debug("iNat API lookup failed for '%s'", name, exc_info=True)
             return None
 
@@ -1428,7 +1429,7 @@ def load_taxa_from_file(db, gz_path):
     filtered = _filter_major_taxa(all_taxa)
     _insert_filtered_taxa(db, filtered)
 
-    db.keywords.relink_source_species()
+    db.keyword_taxa.relink_source_species()
     db.commit()
 
     loaded = len(filtered)
@@ -1643,7 +1644,7 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     _resolve_taxa_parents(db, entries_by_inat_id, _status)
     cn_loaded = _index_taxa_common_names(db, taxa_by_common, _status)
 
-    db.keywords.relink_source_species()
+    db.keyword_taxa.relink_source_species()
     db.meta.set("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
     db.meta.set("ambiguous_common_names", json.dumps(sorted(ambiguous_common)), _commit=False)
     db.commit()

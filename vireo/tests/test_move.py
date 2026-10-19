@@ -224,6 +224,38 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     }
 
 
+def test_move_folder_by_date_progress_counts_each_photo_once(tmp_path):
+    """Date-organized progress counts every photo exactly once, skipped
+    ones included, and ends at the total."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    (archive / "2026-07-12").mkdir(parents=True)
+    fid = db.add_folder(str(src), name="card")
+    for name, stamp in (("a.jpg", "2026-07-12T09:00:00"),
+                        ("b.jpg", "2026-07-12T09:01:00"),
+                        ("c.jpg", "2026-07-13T09:00:00")):
+        (src / name).write_bytes(name.encode())
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
+                               file_size=5, file_mtime=1.0, timestamp=stamp)
+    # b.jpg collides at its date folder and is skipped.
+    (archive / "2026-07-12" / "b.jpg").write_bytes(b"other")
+
+    calls = []
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        progress_cb=lambda cur, tot, fn, phase: calls.append((cur, tot)),
+    )
+
+    assert result["moved"] == 2
+    assert len(result["errors"]) == 1
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
     """Same-stem photos split by date each retain their shared XMP."""
     from move import move_folder_by_date
@@ -410,6 +442,63 @@ def test_move_photos_relocates_developed_output_per_photo(move_env):
     assert (developed / new_key / "bird1.jpg").read_bytes() == b"bird1-dev"
     # bird2's render is left alone under the old key — its photo didn't move.
     assert (developed / old_key / "bird2.jpg").read_bytes() == b"bird2-dev"
+
+
+@pytest.mark.parametrize("sep", ["\\", "/"])
+def test_move_folder_relocates_subfolder_renders_for_either_separator(tmp_path, sep):
+    """``move_folder`` rebases the developed renders of every moved
+    subfolder, whichever separator the catalog stores.
+
+    Windows stores folder paths with ``\\``. The subfolder lookup used to
+    match ``base + "/"`` (in SQL and in Python), so on Windows only the top
+    folder's renders moved and every subfolder's exports fell back to the
+    RAW. The stored paths are plain strings here, so this runs on every OS.
+    """
+    from types import SimpleNamespace
+
+    from export import developed_folder_key
+    from move.folder_catalog import _FolderCatalogRewrite
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    def path(*parts):
+        return sep.join(("C:" if sep == "\\" else "", *parts))
+
+    src = path("Staging", "Birds")
+    dst = path("Archive", "Birds")
+    # The catalog as ``update_catalog`` leaves it: rows already rebased.
+    root = db.add_folder(dst, name="Birds")
+    sub = db.add_folder(path("Archive", "Birds", "Day 1"), name="Day 1",
+                        parent_id=root)
+    db.add_folder(path("Archive", "Birds", "Day 1", "Eagles"), name="Eagles",
+                  parent_id=sub)
+    # A sibling whose name only shares a prefix is not part of the move.
+    db.add_folder(path("Archive", "Birds2"), name="Birds2")
+
+    developed = tmp_path / "developed"
+    renders = {
+        src: "top.jpg",
+        path("Staging", "Birds", "Day 1"): "day1.jpg",
+        path("Staging", "Birds", "Day 1", "Eagles"): "eagle.jpg",
+    }
+    for folder, render in renders.items():
+        (developed / developed_folder_key(folder)).mkdir(parents=True)
+        (developed / developed_folder_key(folder) / render).write_bytes(b"dev")
+
+    target = SimpleNamespace(merge_into_tracked=None, catalog_path=dst,
+                             merge_reconcile_base=None)
+    rewrite = _FolderCatalogRewrite(
+        db, root, src, "Birds", target, progress=lambda *a: None,
+        pre_commit_check=None, thumb_cache_dir=None,
+        developed_dir=str(developed),
+    )
+    rewrite.relocate_developed_dirs()
+
+    for old, render in renders.items():
+        new = dst + old[len(src):]
+        assert (developed / developed_folder_key(new) / render).exists(), new
+        assert not (developed / developed_folder_key(old)).exists(), old
 
 
 def test_move_photos_rejects_stale_developed_render_at_destination(move_env):
@@ -2882,6 +2971,126 @@ def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
                for v in listing_cache.values())
 
 
+def test_move_photos_reports_leftover_companion_not_original(move_env, monkeypatch):
+    """When the original is deleted but a companion is left behind, the error
+    names the companion and does not claim the original was kept.
+
+    Before the fix every post-commit cleanup failure read "original not
+    deleted", which sends the user looking for a duplicate original that is
+    not there.
+    """
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.xmp")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by an editor")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"], env["p2"]],
+        destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 2
+    assert not (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert (env["dst"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original not deleted" not in error
+    assert "bird1.xmp" in error and "locked by an editor" in error
+    assert str(env["src"]) in error
+
+
+def test_move_photos_original_left_behind_names_kept_companions(move_env, monkeypatch):
+    """When the original itself cannot be deleted, the error says so and
+    that its companions were left at the source with it."""
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by an editor")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original" in error and "locked by an editor" in error
+    assert "bird1.xmp" in error
+
+
+def test_move_photos_original_left_behind_still_names_companions_when_stat_fails(
+    move_env, monkeypatch,
+):
+    """When the source directory or mount is inaccessible, ``os.path.isfile``
+    on a companion silently returns False even though the companion is still
+    there (we never attempted to delete it on this branch). The error must
+    still name the companion as left with the original — otherwise it falsely
+    implies only the original remains.
+    """
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    original_isfile = move_mod.photos.os.path.isfile
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+    xmp_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.xmp")))
+    # The simulated mount outage only takes effect once the original's
+    # delete has been attempted — before that, discovery and copy must see
+    # the real filesystem so the companion makes it into ``item.companions``.
+    mount_inaccessible = {"flag": False}
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            mount_inaccessible["flag"] = True
+            raise PermissionError("source mount inaccessible")
+        return original_remove(path)
+
+    def stat_failing_isfile(path):
+        # Simulate the stat-failure-swallowed-as-False behaviour of
+        # ``os.path.isfile`` on an inaccessible mount. The companion is
+        # physically still there — we just copied from it moments ago.
+        if (mount_inaccessible["flag"]
+                and os.path.normcase(os.path.normpath(path)) == xmp_src):
+            return False
+        return original_isfile(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+    monkeypatch.setattr(move_mod.photos.os.path, "isfile", stat_failing_isfile)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original" in error and "source mount inaccessible" in error
+    # The companion must still be reported as left with the original even
+    # when isfile() silently returned False for it.
+    assert "bird1.xmp" in error
+
+
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """A post-commit os.remove failure must not roll back the catalog and
     must not abort remaining photos in the batch.
@@ -3026,6 +3235,66 @@ def test_move_photos_companion_files(move_env):
     move_photos(db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]))
     assert (env["dst"] / "bird1.nef").exists()
     assert not (env["src"] / "bird1.nef").exists()
+
+
+def test_move_photos_reports_partial_copy_cleanup_failure(move_env, monkeypatch):
+    """A failed companion copy whose partial-copy cleanup also fails stays a
+    per-photo error: the rest of the batch moves, the errors already
+    collected are kept, and the error names the copy left at the destination.
+
+    Before the fix the cleanup's ``os.remove`` raised out of ``move_photos``,
+    aborting the batch with a raw exception and dropping every error it had
+    collected.
+    """
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    # bird0 is missing on disk, so the batch collects an error before bird1.
+    p0 = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="bird0.jpg",
+                                extension=".jpg", file_size=10, file_mtime=0.5)
+    db.conn.execute("UPDATE photos SET companion_path = 'bird1.nef' WHERE id = ?",
+                    (env["p1"],))
+    db.conn.commit()
+    (env["src"] / "bird1.nef").write_bytes(b"\x00" * 50)
+
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_companion_copy(src, dst):
+        if os.path.basename(src) == "bird1.nef":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_companion_copy)
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["dst"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by antivirus")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=db, photo_ids=[p0, env["p1"], env["p2"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1  # bird2 still moved
+    assert (env["dst"] / "bird2.jpg").exists()
+    errors = result["errors"]
+    assert any("bird0.jpg: source file missing" in e for e in errors)
+    assert any("bird1.nef" in e and "companion copy failed" in e for e in errors)
+    leftover = [e for e in errors if "bird1.jpg" in e and "locked by antivirus" in e]
+    assert leftover, errors
+    assert str(env["dst"] / "bird1.jpg") in leftover[0]
+    # The original and its companion are untouched at the source, and the
+    # catalog still points there.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.nef").exists()
+    row = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?",
+                          (env["p1"],)).fetchone()
+    assert row["folder_id"] == env["fid_src"]
 
 
 def test_move_folder_copies_tree(move_env):
@@ -5807,6 +6076,64 @@ def test_move_photos_progress_callback(move_env):
     assert calls[0][1] == 2  # total=2
 
 
+def test_move_photos_progress_counts_skipped_and_failed_photos(move_env, monkeypatch):
+    """Every photo the batch settles advances the bar, not only the moved
+    ones: a missing source, a destination collision and a failed copy each
+    report their position, so the bar reaches the total."""
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    missing = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="gone.jpg",
+                                     extension=".jpg", file_size=10, file_mtime=0.5)
+    (env["src"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x01" * 30)
+    (env["dst"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x02" * 30)
+    clash = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="clash.jpg",
+                                   extension=".jpg", file_size=32, file_mtime=0.6)
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_copy(src, dst):
+        if os.path.basename(src) == "bird2.jpg":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_copy)
+    calls = []
+    result = move_mod.move_photos(
+        db=db,
+        photo_ids=[missing, env["p1"], clash, env["p2"], 999999],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 4
+    assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
+    assert {c[1] for c in calls} == {5}
+    assert [c[2] for c in calls] == [
+        "gone.jpg", "bird1.jpg", "clash.jpg", "bird2.jpg", "",
+    ]
+
+
+def test_move_photos_refused_batch_reports_full_progress(move_env):
+    """A batch refused up front (destination is a file) still finishes the
+    bar, so the job does not sit at 0 of N while reporting N errors."""
+    from move import move_photos
+
+    env = move_env
+    blocker = env["tmp_path"] / "not-a-dir"
+    blocker.write_text("x")
+    calls = []
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"], env["p2"]],
+        destination=str(blocker),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 2
+    assert calls[-1][:2] == (2, 2)
+
+
 def test_move_folder_reports_phases_and_per_file_progress(move_env):
     """move_folder streams the move through named phases and reports each
     file as it is copied, instead of one progress call at the end."""
@@ -5915,6 +6242,48 @@ def test_merge_copy_progress_finishes_with_skipped_files(move_env, monkeypatch, 
     copy = [(cur, total) for cur, total, _, phase in calls if phase == "Copying files"]
     assert copy[0] == (0, 3) and copy[-1] == (3, 3)
     assert not env["src"].exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("launch_error", [
+    PermissionError(13, "Permission denied"),
+    OSError(7, "Argument list too long"),
+])
+def test_move_folder_reports_rsync_launch_failure(move_env, monkeypatch,
+                                                  launch_error, merge):
+    """An rsync that cannot be started (not executable, E2BIG, ...) is a
+    reported move failure, not a raw exception out of ``move_folder``.
+
+    Only ``FileNotFoundError`` used to be caught; any other ``OSError`` from
+    launching rsync escaped the job. The originals and catalog stay put.
+    """
+    import move as move_mod
+
+    def _cannot_start(*a, **k):
+        raise launch_error
+
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _cannot_start)
+
+    env = move_env
+    if merge:
+        (env["dst"] / "src").mkdir()
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=merge,
+    )
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "rsync" in error and str(launch_error.strerror) in error
+    assert "Originals untouched" in error
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    folder = env["db"].conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)).fetchone()
+    assert folder["path"] == str(env["src"])
+    # A merge target that already existed is never removed.
+    assert (env["dst"] / "src").exists() is merge
 
 
 def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):

@@ -134,7 +134,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
                     output.save(stream, format="PNG")
             checkpoint()
             width, height = output.size
-    except BaseException:
+    except BaseException:  # broad: remove the partial output on any exit, then re-raise
         if out_path:
             with contextlib.suppress(OSError):
                 os.unlink(out_path)
