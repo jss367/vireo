@@ -340,7 +340,7 @@ def search_places(query):
         req = urllib.request.Request(url, headers={"User-Agent": "Vireo/1.0"})
         with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
             data = json.loads(resp.read())
-    except (OSError, ValueError, http.client.HTTPException):
+    except (OSError, ValueError, http.client.HTTPException, RecursionError):
         log.warning(
             "Failed to search iNaturalist places for '%s'", query, exc_info=True
         )
@@ -390,7 +390,7 @@ def _fetch_species_counts_page(url, page, group_name, group_prefix,
             with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
                 data = json.loads(resp.read())
             break
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException, RecursionError):
             log.warning(
                 "Fetch attempt %d failed for page %d of %s",
                 attempt + 1,
