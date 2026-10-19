@@ -45,6 +45,16 @@
       "_vireoShortcuts"
     ]
   },
+  "highlights": {
+    "route": "/highlights",
+    "template": "highlights.html",
+    "pageHooks": [
+      "afterHistoryChange",
+      "loadHighlights",
+      "updateHighlightsLightboxControls"
+    ],
+    "sharedWrites": []
+  },
   "lightroom": {
     "route": "/lightroom",
     "template": "lightroom.html",
