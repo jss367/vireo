@@ -1428,7 +1428,7 @@ def load_taxa_from_file(db, gz_path):
     filtered = _filter_major_taxa(all_taxa)
     _insert_filtered_taxa(db, filtered)
 
-    db.keywords.relink_source_species()
+    db.keyword_taxa.relink_source_species()
     db.commit()
 
     loaded = len(filtered)
@@ -1643,7 +1643,7 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     _resolve_taxa_parents(db, entries_by_inat_id, _status)
     cn_loaded = _index_taxa_common_names(db, taxa_by_common, _status)
 
-    db.keywords.relink_source_species()
+    db.keyword_taxa.relink_source_species()
     db.meta.set("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
     db.meta.set("ambiguous_common_names", json.dumps(sorted(ambiguous_common)), _commit=False)
     db.commit()
