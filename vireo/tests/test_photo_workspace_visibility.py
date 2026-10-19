@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import browse_queries, dashboard_stats, photo_ingest
+from services import browse_queries, dashboard_stats, missing_originals, photo_ingest
 
 
 def _photo(db, folder, name, content=b"photo"):
@@ -306,7 +306,7 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
         (tmp_path / 'folder' / 'visible.jpg').unlink()
         (tmp_path / 'folder' / 'hidden.jpg').unlink()
         progress = []
-        assert [r['id'] for r in db.get_missing_photos(progress_callback=progress.append)] == [visible]
+        assert [r['id'] for r in missing_originals.get_missing_photos(db, progress_callback=progress.append)] == [visible]
         assert progress[-1]['total_photos'] == 1
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (folder,))
         db.conn.commit()

@@ -18,7 +18,7 @@ import pytest
 from dir_listing_cache import DirListingCache, ListingPass, read_directory
 from image_loader import safe_scan_walk
 from PIL import Image
-from services import photo_ingest
+from services import missing_originals, photo_ingest
 
 HOUR = 3600
 
@@ -415,18 +415,18 @@ def test_missing_scan_reuses_unchanged_folders_and_sees_deletions(db, tmp_path, 
     cache = DirListingCache()
 
     first = ListingPass(cache)
-    assert db.get_missing_photos(listing_pass=first) == []
+    assert missing_originals.get_missing_photos(db, listing_pass=first) == []
     assert (first.read, first.unchanged) == (1, 0)
 
     second = ListingPass(cache)
     scandir_calls.clear()
-    assert db.get_missing_photos(listing_pass=second) == []
+    assert missing_originals.get_missing_photos(db, listing_pass=second) == []
     assert scandir_calls == []
     assert second.unchanged == 1
 
     os.remove(folder / "b.jpg")
     third = ListingPass(cache)
-    assert [r["filename"] for r in db.get_missing_photos(listing_pass=third)] == ["b.jpg"]
+    assert [r["filename"] for r in missing_originals.get_missing_photos(db, listing_pass=third)] == ["b.jpg"]
     assert third.read == 1
 
 
@@ -444,11 +444,11 @@ def test_missing_scan_checks_symlink_targets_live_on_a_reused_listing(db, tmp_pa
     _photo(db, fid, "link.jpg")
     _age(folder)
     cache = DirListingCache()
-    assert db.get_missing_photos(listing_pass=ListingPass(cache)) == []
+    assert missing_originals.get_missing_photos(db, listing_pass=ListingPass(cache)) == []
 
     os.remove(elsewhere / "real.jpg")
     reused = ListingPass(cache)
-    assert [r["filename"] for r in db.get_missing_photos(listing_pass=reused)] == ["link.jpg"]
+    assert [r["filename"] for r in missing_originals.get_missing_photos(db, listing_pass=reused)] == ["link.jpg"]
     assert reused.unchanged == 1
 
 
@@ -462,8 +462,8 @@ def test_missing_scan_with_a_listing_pass_matches_the_direct_read(db, tmp_path):
     for folder_id, name in ((fid, "here.jpg"), (fid, "gone.jpg"), (fsub, "gone2.jpg")):
         _photo(db, folder_id, name)
     _age(folder, sub)
-    direct = db.get_missing_photos()
+    direct = missing_originals.get_missing_photos(db)
     cache = DirListingCache()
     for _ in range(2):
-        via_pass = db.get_missing_photos(listing_pass=ListingPass(cache))
+        via_pass = missing_originals.get_missing_photos(db, listing_pass=ListingPass(cache))
         assert [r["id"] for r in via_pass] == [r["id"] for r in direct]

@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import browse_queries, detection_store, pending_changes, photo_ingest, subject_masks, workspace_config
+from services import (
+    browse_queries,
+    detection_store,
+    missing_originals,
+    pending_changes,
+    photo_ingest,
+    subject_masks,
+    workspace_config,
+)
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -10846,14 +10854,13 @@ def test_api_folders_check_health(app_and_db):
 
 def test_api_photos_missing_uncached_is_immediate(app_and_db, monkeypatch):
     """GET /api/photos/missing returns cache status without scanning."""
-    from db import Database
     app, _db = app_and_db
     client = app.test_client()
 
     def fail_scan(*_args, **_kwargs):
         raise AssertionError("GET /api/photos/missing must not scan")
 
-    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", fail_scan)
 
     resp = client.get("/api/photos/missing")
     assert resp.status_code == 200
@@ -10910,7 +10917,6 @@ def test_api_photos_missing(app_and_db, tmp_path):
 
 def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatch, tmp_path):
     """A cached Missing Originals result is served without filesystem work."""
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -10937,7 +10943,7 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
     def fail_scan(*_args, **_kwargs):
         raise AssertionError("cached GET must not rescan")
 
-    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", fail_scan)
 
     resp = client.get("/api/photos/missing")
     assert resp.status_code == 200
@@ -10948,7 +10954,6 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
 
 def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, tmp_path):
     """Automatic checks should not rescan when the cached result is still fresh."""
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -10975,7 +10980,7 @@ def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, 
     def fail_scan(*_args, **_kwargs):
         raise AssertionError("fresh automatic check must not rescan")
 
-    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", fail_scan)
 
     resp = client.post("/api/photos/missing/check", json={"automatic": True})
     assert resp.status_code == 200
@@ -11056,18 +11061,17 @@ def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypat
     """Duplicate refreshes for the same scope reuse the active background job."""
     import time
 
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
 
-    real_get_missing = Database.get_missing_photos
+    real_get_missing = missing_originals.get_missing_photos
 
     def slow_get_missing(self, *args, **kwargs):
         time.sleep(0.2)
         return real_get_missing(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", slow_get_missing)
 
     first = client.post("/api/photos/missing/check", json={})
     second = client.post("/api/photos/missing/check", json={})
@@ -11095,7 +11099,6 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
     """
     import threading
 
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -11119,7 +11122,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
 
     snapshot_captured = threading.Event()
     release = threading.Event()
-    real_get_missing = Database.get_missing_photos
+    real_get_missing = missing_originals.get_missing_photos
 
     def slow_get_missing(self, *args, **kwargs):
         # Take the "pre-delete" snapshot first so the scan's result would
@@ -11130,7 +11133,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
         assert release.wait(timeout=synchronization_timeout(5.0))
         return photos
 
-    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", slow_get_missing)
 
     started = client.post("/api/photos/missing/check", json={})
     assert started.status_code == 202
@@ -11474,7 +11477,6 @@ def test_workspace_delete_and_create_invalidate_missing_cache(app_and_db):
 
 def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monkeypatch):
     """A failed manual scan suppresses automatic retries during backoff."""
-    from db import Database
 
     app, _db = app_and_db
     client = app.test_client()
@@ -11482,7 +11484,7 @@ def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monke
     def fail_scan(self, *args, **kwargs):
         raise RuntimeError("network volume unavailable")
 
-    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", fail_scan)
 
     started = client.post("/api/photos/missing/check", json={})
     assert started.status_code == 202
@@ -11540,7 +11542,6 @@ def test_api_photos_missing_progress_phase_only_sent_via_runner(
     app_and_db, monkeypatch,
 ):
     """Missing Originals progress must not resize job["progress"] directly."""
-    from db import Database
 
     app, _db = app_and_db
     client = app.test_client()
@@ -11578,7 +11579,7 @@ def test_api_photos_missing_progress_phase_only_sent_via_runner(
     def fake_push_event(job_id, event_type, data):
         pushed.append((job_id, event_type, data))
 
-    monkeypatch.setattr(Database, "get_missing_photos", fake_missing_photos)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", fake_missing_photos)
     monkeypatch.setattr(app._job_runner, "start", fake_start)
     monkeypatch.setattr(app._job_runner, "push_event", fake_push_event)
 
@@ -11599,7 +11600,7 @@ def test_get_missing_photos_honors_cancel_callback(app_and_db):
     _app, db = app_and_db
 
     with pytest.raises(MissingPhotosCancelled):
-        db.get_missing_photos(cancel_callback=lambda: True)
+        missing_originals.get_missing_photos(db, cancel_callback=lambda: True)
 
 
 def test_api_photos_missing_cancel_does_not_write_ready_cache(
@@ -11613,7 +11614,7 @@ def test_api_photos_missing_cancel_does_not_write_ready_cache(
     import threading
     import time
 
-    from db import Database, MissingPhotosCancelled
+    from db import MissingPhotosCancelled
 
     app, db = app_and_db
     client = app.test_client()
@@ -11640,7 +11641,7 @@ def test_api_photos_missing_cancel_does_not_write_ready_cache(
             "working_copy_path": None,
         }]
 
-    monkeypatch.setattr(Database, "get_missing_photos", slow_missing_photos)
+    monkeypatch.setattr(missing_originals, "get_missing_photos", slow_missing_photos)
 
     started = client.post("/api/photos/missing/check", json={})
     assert started.status_code == 202, started.get_json()
