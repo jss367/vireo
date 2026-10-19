@@ -236,7 +236,8 @@ class _MemorySidecar:
         return "invented-memory://photo.xmp"
 
 
-def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp_mtime=9):
+def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp_mtime=9,
+                      deferred_hashes=None):
     row = {"exists": existing, "xmp_mtime": 5 if existing else None,
            "file_mtime": 5, "file_size": 50}
     events = []
@@ -249,7 +250,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
         return 731, inserted
 
     def set_mtime(photo_id, value):
-        events.append("acknowledged")
+        events.append("acknowledged" if value is not None else "cleared")
         row["xmp_mtime"] = value
 
     def update_photo(photo_id, assignments, values):
@@ -274,6 +275,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
         collections=SimpleNamespace(drop_inherited_collection_membership=lambda photo_id: None),
         tally=SimpleNamespace(credit_indexed=lambda photo_id: None, report_cataloged=lambda *args: None),
         fills=SimpleNamespace(take_pending_companion_fill=lambda *args: None),
+        _deferred_hashes=set() if deferred_hashes is None else deferred_hashes,
         _identity_column_updates=lambda item: (["file_hash=?"], [item.file_hash]) if item.file_hash is not None else ([], []),
         _heal_changed_content=lambda *args: None,
     )
@@ -309,7 +311,11 @@ def test_full_catalog_boundary_only_acknowledges_successful_keyword_reads():
         assert "acknowledged" not in events
         inaccessible[0] = False
         catalog()
-        assert first_stamp == (5 if existing else None)
+        # The deferred branch normalizes an existing row's stored mtime to
+        # NULL so the retry path's prior-NULL heuristic recognizes it;
+        # brand-new rows start NULL and need no clear event.
+        assert first_stamp is None
+        assert events.count("cleared") == (1 if existing else 0)
         assert row["xmp_mtime"] == 9 and events.count("acknowledged") == 1
         assert imported == [({"Paris"}, [])]
 
@@ -409,10 +415,13 @@ def test_catalog_read_success_and_failure_keep_ownership_and_acknowledgement_bou
         catalog()
         assert len(calls) == 1
         assert events.count("photo-update") == 1
-        assert events.count("commit") == (2 if error is None else 1)
-        assert row["xmp_mtime"] == (9 if error is None else 5)
+        # A failed read clears any prior acknowledgement and commits that
+        # clear, so each branch commits twice (photo-update + sidecar).
+        assert events.count("commit") == 2
+        assert row["xmp_mtime"] == (9 if error is None else None)
         assert imported == ([({"Paris"}, [])] if error is None else [])
         assert events.count("acknowledged") == (1 if error is None else 0)
+        assert events.count("cleared") == (0 if error is None else 1)
 
 
 def test_failed_catalog_read_defers_duplicate_resolution_until_the_retry():
@@ -474,13 +483,93 @@ def test_failed_catalog_read_retries_incrementally_without_a_sidecar_mtime_chang
     ns["ET"].parse = transient_parse
     full_row, _, catalog = _catalog_boundary(ns, db, existing=True, file_hash=None)
     catalog()
-    assert full_row["xmp_mtime"] == 5 and not imported
+    # Deferral normalizes the stored mtime to NULL so a prior successful
+    # acknowledgement cannot mask the deferred state for the retry path.
+    assert full_row["xmp_mtime"] is None and not imported
     row, commits, reuse = _incremental_boundary(ns, db)
     row["xmp_mtime"] = full_row["xmp_mtime"]
     unreadable[0] = False
     assert reuse(9) is True and reuse(9) is True
     assert row["xmp_mtime"] == 9 and commits == ["commit"]
     assert len(attempts) == 2 and imported == [({"Paris"}, [])]
+
+
+def test_sibling_in_same_scan_does_not_resolve_a_deferred_hash_group():
+    """A second same-hash file cataloged in the same scan as a deferred one
+    must not fire the group-wide resolver: it would reject the deferred
+    row before its sidecar keywords are available for the winner merge."""
+    ns, db, _, imported = _namespace()
+    parse = ns["ET"].parse
+    resolved = []
+    unreadable = [True]
+
+    def transient_parse(path):
+        if unreadable[0]:
+            raise PermissionError("invented temporary failure for first file")
+        return parse(path)
+
+    ns["ET"].parse = transient_parse
+    # ``shared`` stands in for one indexer's ``_deferred_hashes`` across
+    # successive catalog_file invocations on different items in one scan.
+    shared = set()
+    _, _, first_catalog = _catalog_boundary(ns, db, existing=False, deferred_hashes=shared)
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    first_catalog()
+    assert resolved == [] and imported == []
+    assert "invented hash" in shared
+    # Second file this scan: readable sidecar, same file_hash as the
+    # deferred one. The shared ``_deferred_hashes`` set on the indexer
+    # must suppress this row's resolver call too.
+    unreadable[0] = False
+    _, _, second_catalog = _catalog_boundary(ns, db, existing=False, deferred_hashes=shared)
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    second_catalog()
+    assert resolved == [] and imported == [({"Paris"}, [])]
+
+
+def test_sibling_without_a_prior_deferral_still_resolves_duplicates():
+    """A sanity check: when nothing deferred in this scan, a sibling's
+    sidecarless catalog still fires the group-wide resolver."""
+    ns, db, _, _ = _namespace()
+    resolved = []
+    shared = set()
+    _, _, catalog = _catalog_boundary(
+        ns, db, existing=False, xmp_mtime=None, deferred_hashes=shared,
+    )
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    catalog()
+    assert resolved == ["invented hash"] and shared == set()
+
+
+def test_deferred_catalog_normalizes_prior_acknowledgement_so_the_retry_resolves():
+    """An existing row with a stored sidecar mtime that newly defers must
+    clear that acknowledgement, otherwise the retry path's prior-NULL
+    heuristic cannot recognize the deferred state when the sidecar
+    becomes readable again and the recovered duplicate group stays
+    unresolved."""
+    ns, db, _, imported = _namespace()
+    parse = ns["ET"].parse
+    unreadable = [True]
+
+    def transient_parse(path):
+        if unreadable[0]:
+            raise PermissionError("invented temporary failure")
+        return parse(path)
+
+    ns["ET"].parse = transient_parse
+    full_row, _, catalog = _catalog_boundary(ns, db, existing=True)
+    catalog()
+    # The row previously had a non-NULL acknowledgement (5); deferral
+    # clears it to NULL in the same transaction as the photo update.
+    assert full_row["xmp_mtime"] is None and imported == []
+    row, _, reuse = _incremental_boundary(ns, db)
+    row["xmp_mtime"] = full_row["xmp_mtime"]
+    row["file_hash"] = "invented hash"
+    resolved = []
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    unreadable[0] = False
+    assert reuse(9) is True
+    assert resolved == ["invented hash"] and imported == [({"Paris"}, [])]
 
 
 def test_literal_null_assignment_and_bound_columns_use_one_invented_sqlite_update():

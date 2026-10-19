@@ -160,6 +160,11 @@ class _FileIndexer:
         # so the untracked-preview sweep can run once as a batch instead of
         # per-photo (avoids O(N × M) directory walks on large rescans).
         self.invalidated_photo_ids: set[int] = set()
+        # Hashes whose sidecar read failed earlier in this scan. A sibling
+        # cataloged after a deferred row must not fire the group-wide
+        # resolver, which would exclude the deferred row's forthcoming
+        # keywords when the retry path finally merges them onto the winner.
+        self._deferred_hashes: set[str] = set()
         # Photo IDs that already own cached derivative files, for the
         # recycled-rowid check on insert. Snapshotted once (lazily, on the
         # first insert) for the same batching reason as the sweep above.
@@ -282,8 +287,16 @@ class _FileIndexer:
                 # The retry path in _reuse_existing_row imports these keywords
                 # and fires resolution; running it now would reject this row
                 # with its sidecar still unread, stranding its keywords on the
-                # loser once the retry finally imports them.
+                # loser once the retry finally imports them. Normalize the
+                # stored mtime to NULL so the retry path's prior-NULL check
+                # correctly recognizes the deferred state even when a prior
+                # successful scan left a non-NULL acknowledgement behind.
                 sidecar_import_deferred = True
+                if item.row_already_existed:
+                    db.scanning.set_xmp_mtime(photo_id, None)
+                    db.commit_with_retry()
+                if file_hash is not None:
+                    self._deferred_hashes.add(file_hash)
         # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
         # This path runs whenever the file is new or changed, which is also
         # when such a write lands: it rewrites the file, not a sidecar.
@@ -291,8 +304,15 @@ class _FileIndexer:
 
         # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
         # are committed. add_photo was called without the hash, so the hook
-        # there was a no-op — we own firing it here.
-        if file_hash is not None and not sidecar_import_deferred:
+        # there was a no-op — we own firing it here. A sibling earlier in
+        # this scan that deferred its sidecar read suppresses this call too:
+        # firing it would reject the deferred row before its keywords are
+        # available for the winner's metadata merge.
+        if (
+            file_hash is not None
+            and not sidecar_import_deferred
+            and file_hash not in self._deferred_hashes
+        ):
             db.check_and_resolve_duplicates_for_hash(file_hash)
 
         self.tally.report_cataloged(
