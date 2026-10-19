@@ -1,7 +1,7 @@
 // Settings page values, schema controls, and separately checked shared APIs.
 type SettingsValue = null | boolean | number | string | SettingsValue[] | {[key:string]:SettingsValue};
 interface SettingsSpec {type:string;scope?:string;label:string;desc?:string;category?:string;enum?:string[];enum_labels?:Record<string,string>;nullable?:boolean;null_label?:string;step?:number;min?:number;max?:number;items_enum?:string[]}
-interface SettingsValues {workspace:Record<string,SettingsValue>;global:Record<string,SettingsValue>;default:Record<string,SettingsValue>}
+interface SettingsValues {workspace_id?:number|null;workspace:Record<string,SettingsValue>;global:Record<string,SettingsValue>;default:Record<string,SettingsValue>}
 interface SettingsRule {field?:string;op?:string;value?:SettingsValue;mode?:string;rules?:SettingsRule[]}
 interface SettingsShortcut {id:string;label:string;group:string;rules:SettingsRule}
 interface SettingsFieldSpec {key:string;label?:string;type:string;ops:string[];values?:(string|number)[];labels?:Record<string,string>;category?:string;enum?:string[];pages?:string[];min?:number;max?:number;step?:number}
