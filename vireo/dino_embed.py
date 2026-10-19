@@ -93,11 +93,11 @@ def _fetch_dinov2_pair(variant, tmp_path, tmp_data_path, progress_callback):
     # than the pre-fix behaviour.
     try:
         pinned_rev = HfApi().model_info(ONNX_REPO).sha
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001  # broad: the HF API raises a wide set; the default branch is the fallback
         log.info(
             "Could not resolve HF revision for %s (%s); "
             "falling back to default branch",
-            ONNX_REPO, e,
+            ONNX_REPO, e, exc_info=True,
         )
         pinned_rev = None
 
@@ -142,7 +142,7 @@ def _promote_dinov2_pair(
     try:
         replace_file(tmp_data_path, data_path)
         replace_file(tmp_path, model_path)
-    except Exception:
+    except Exception:  # broad: restore the prior sidecar on any failure, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(data_path)
         if had_prior_sidecar:
@@ -237,7 +237,7 @@ def _hf_download_dinov2_weights(variant, progress_callback=None):
                 model_path, data_path, tmp_path, tmp_data_path,
                 data_backup_path, had_prior_sidecar,
             )
-        except Exception as e:
+        except Exception as e:  # broad: remove the partial downloads on any failure, then re-raise with the reason
             import contextlib
 
             with contextlib.suppress(OSError):

@@ -457,7 +457,7 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
         except _BackfillCancelled:
             result["cancelled"] = True
             break
-        except Exception as exc:
+        except Exception as exc:  # broad: per-label-set boundary; the failure is listed in the job's errors
             log.warning("Could not re-query label list for %s", label_set["fingerprint"], exc_info=True)
             result["errors"].append(
                 f"{os.path.basename(meta['labels_file'])}: {exc}"
@@ -492,7 +492,7 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
             )
         except _BackfillCancelled:
             result["cancelled"] = True
-        except Exception as exc:
+        except Exception as exc:  # broad: the legacy consensus pass reads remote lists; the failure is listed in the job's errors
             log.warning("Could not complete legacy label-list consensus", exc_info=True)
             result["errors"].append(f"Legacy label-list consensus: {exc}")
         else:

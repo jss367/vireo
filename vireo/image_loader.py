@@ -731,8 +731,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
             img.thumbnail((max_size, max_size), Image.LANCZOS)
 
         return img
-    except Exception as e:
-        log.warning("Failed to load image: %s — %s", file_path, e)
+    except Exception as e:  # broad: decoders raise a wide set on bad files; callers treat None as unreadable
+        log.warning("Failed to load image: %s — %s", file_path, e, exc_info=True)
         return None
 
 
@@ -746,7 +746,7 @@ def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     """
     try:
         return _load_raw(path, max_size, raw_decode=raw_decode)
-    except Exception as e:
+    except Exception as e:  # broad: anything but a transient LibRawIOError re-raises unchanged
         # Identify libraw I/O errors by class name so we don't have to
         # import rawpy at module scope (it's only present when a RAW
         # actually loads). The class is rawpy._rawpy.LibRawIOError.
@@ -776,8 +776,8 @@ def _load_standard(path, max_size):
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
         return img
-    except Exception as e:
-        log.warning("Failed to load standard image: %s — %s", path, e)
+    except Exception as e:  # broad: PIL raises a wide set on bad files; callers treat None as unreadable
+        log.warning("Failed to load standard image: %s — %s", path, e, exc_info=True)
         return None
 
 
@@ -1055,14 +1055,14 @@ def extract_working_copy(
             if on_publish is not None:
                 try:
                     on_publish(output_path)
-                except Exception:
+                except Exception:  # broad: a caller's callback must not undo a published working copy
                     log.warning(
                         "extract_working_copy on_publish callback raised for %s",
                         output_path, exc_info=True,
                     )
         tmp_path = None
         return True
-    except Exception:
+    except Exception:  # broad: decoders raise a wide set; extraction reports failure and the caller falls back
         log.warning("Failed to extract working copy from %s", source_path,
                     exc_info=True)
         return False
@@ -1076,9 +1076,10 @@ def extract_working_copy(
                     tmp_path, exc_info=True,
                 )
         if img is not None:
-            # Cleanup in ``finally`` must not replace the extraction result.
-            with contextlib.suppress(Exception):
+            try:
                 img.close()
+            except Exception:  # broad: cleanup in ``finally`` must not replace the extraction result
+                log.debug("Could not close the decoded image for %s", source_path, exc_info=True)
 
 
 def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
@@ -1178,7 +1179,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
-        except Exception as e:
+        except Exception as e:  # broad: libraw raises undocumented errors; the embedded JPEG is the fallback, else re-raise
             if raw_decode == RAW_DECODE_LINEAR:
                 # A failed unpack leaves this LibRaw handle refusing further
                 # calls (LibRawOutOfOrderCallError), so extract_thumb() on it
@@ -1191,6 +1192,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                     "libraw cannot decode %s (%s); using embedded JPEG "
                     "(%dx%d%s)",
                     path, e, embedded.size[0], embedded.size[1], qualifier,
+                    exc_info=True,
                 )
                 return embedded
             raise
@@ -1202,7 +1204,8 @@ def _extract_embedded_jpeg(raw):
     try:
         thumb = raw.extract_thumb()
     except Exception:
-        # rawpy raises LibRawError subclasses for files without a preview.
+        # broad: rawpy raises LibRawError subclasses for files without a
+        # preview; this runs before decoding, so nothing else may block it.
         log.debug("RAW file has no extractable embedded preview", exc_info=True)
         return None
     if thumb.format != rawpy.ThumbFormat.JPEG:
@@ -1215,7 +1218,7 @@ def _extract_embedded_jpeg(raw):
         # (which is common in embedded JPEGs) would be returned sideways.
         img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
-    except Exception:
+    except Exception:  # broad: PIL raises a wide set on a corrupt embedded preview
         log.debug("Could not decode the embedded RAW preview", exc_info=True)
         return None
 

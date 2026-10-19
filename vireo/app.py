@@ -769,7 +769,7 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
                     f"Finder Trash timed out after "
                     f"{_FINDER_TRASH_TIMEOUT_SECS}s"
                 )
-        except Exception as exc:
+        except Exception as exc:  # broad: Finder's AppleScript bridge raises undocumented errors; every file gets the reason
             log.warning("Finder Trash failed for a file batch", exc_info=True)
             for filepath in finder_batch:
                 run.send_errors[filepath] = str(exc) or "Finder Trash failed"
@@ -896,7 +896,7 @@ class _TrashRun:
                 self.successful.add(filepath)
                 self.moved += 1
                 self.report_processed(filepath)
-            except BaseException as exc:
+            except BaseException as exc:  # broad: per-file boundary; platform Trash APIs raise undocumented errors, recorded per file
                 if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                     raise
                 # Some platform Trash APIs can complete the move and still
@@ -913,6 +913,7 @@ class _TrashRun:
                     self.moved += 1
                     self.report_processed(filepath)
                     continue
+                log.warning("Trash failed for %s", filepath, exc_info=True)
                 self.send_errors[filepath] = str(exc)
                 if sys.platform == "darwin":
                     self.finder_candidates.append(filepath)
@@ -1022,7 +1023,7 @@ class _TrashRun:
                 self.send_errors[path] = (
                     "Finder existence check timed out"
                 )
-        except Exception as exc:
+        except Exception as exc:  # broad: Finder's AppleScript bridge raises undocumented errors
             # Fail safe: every path in the batch is reported as a
             # send error, so nothing is pruned on a failed recheck.
             log.warning("Finder existence recheck failed", exc_info=True)
@@ -2494,7 +2495,7 @@ def _create_app_or_exit(args, api_token):
         # registered by _reserve_single_instance_or_exit releases the single-instance lock and runtime.json
         # on this exit, so a retry isn't blocked by a stale reservation.
         _emit_incompatible_database_exit(e)
-    except Exception as e:
+    except Exception as e:  # broad: startup boundary; any failure becomes the structured startup_failed exit
         # Any other failure to build the app is still a fatal startup error
         # (corrupt-but-not-stale DB, missing/locked resource, an unexpected
         # bug, ...). Emit the same structured signal the lock-fault path uses

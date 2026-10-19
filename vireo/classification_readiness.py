@@ -77,7 +77,7 @@ def classification_readiness(db):
                 os.path.exists(ls.get("labels_file", "")) for ls in active_sets
             )
         except Exception:
-            # Readiness is a status probe; an unreadable label selection
+            # broad: readiness is a status probe; an unreadable label selection
             # reports "not ready" rather than failing the page.
             log.warning("Could not load the active species labels for readiness", exc_info=True)
             labels_ready = False

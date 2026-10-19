@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -339,7 +340,7 @@ def search_places(query):
         req = urllib.request.Request(url, headers={"User-Agent": "Vireo/1.0"})
         with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
             data = json.loads(resp.read())
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
         log.warning(
             "Failed to search iNaturalist places for '%s'", query, exc_info=True
         )
@@ -389,7 +390,7 @@ def _fetch_species_counts_page(url, page, group_name, group_prefix,
             with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
                 data = json.loads(resp.read())
             break
-        except Exception:
+        except (OSError, ValueError, http.client.HTTPException):
             log.warning(
                 "Fetch attempt %d failed for page %d of %s",
                 attempt + 1,
@@ -669,7 +670,7 @@ def _atomic_write_text(path, text):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         replace_file(tmp_path, path)
-    except Exception:
+    except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise
