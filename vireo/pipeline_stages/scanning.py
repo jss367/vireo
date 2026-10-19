@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -132,7 +133,7 @@ def scanner_stage(
         from scanner import scan as do_scan
 
         scan.run_all(cfg, do_scan, ScanCancelled)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; a failure is recorded as this stage's fatal error, a cancel as cancelled
         if isinstance(e, ScanCancelled) and scan.cancel_requested():
             run.abort.set()
             scan.mark_scan_cancelled()
@@ -427,7 +428,7 @@ class _ScanPass:
             for scanned_root in self.scanned_roots:
                 try:
                     invalidate_new_images_after_scan(self.thread_db, scanned_root)
-                except Exception:
+                except Exception:  # broad: cache invalidation is best-effort; the scan already finished
                     log.exception(
                         "Failed to invalidate new-images cache for %s",
                         scanned_root,
@@ -443,7 +444,7 @@ class _ScanPass:
                 if self.hooks.missing_originals_invalidator is not None:
                     try:
                         self.hooks.missing_originals_invalidator()
-                    except Exception:
+                    except Exception:  # broad: cache invalidation is best-effort; the scan already finished
                         log.exception(
                             "Failed to invalidate missing-originals "
                             "cache for %s",
@@ -543,7 +544,7 @@ class _ScanPass:
             return path
         try:
             filenames = thread_db.photos.get_filenames([photo_id])
-        except Exception:
+        except sqlite3.Error:
             log.exception(
                 "Failed to resolve canonical filename for photo %s", photo_id,
             )
@@ -556,7 +557,7 @@ class _ScanPass:
             return path
         try:
             folder = thread_db.folders.get(folder_id)
-        except Exception:
+        except sqlite3.Error:
             log.exception(
                 "Failed to resolve folder %s for photo %s", folder_id, photo_id,
             )
@@ -1072,7 +1073,7 @@ class _ScanPass:
                 status="completed",
                 summary=summary,
             )
-        except Exception as e:
+        except Exception as e:  # broad: preflight boundary; any failure stops the run with the reason on the storage step
             log.exception("Pipeline local-storage preflight failed")
             self._bail_storage(str(e))
             return False
@@ -1803,7 +1804,7 @@ def collection_stage(
     # completing with every downstream stage "Skipped".
     try:
         _collection_stage_body()
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[collection] Fatal: {e}")
         log.exception("Pipeline collection stage failed")
         run.abort.set()

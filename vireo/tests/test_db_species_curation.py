@@ -1339,7 +1339,7 @@ def test_life_list_preference_eligibility(db, cur):
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still forwarders on ``Database``: ``KeywordRepository`` and
+# Still forwarders on ``Database``: ``KeywordTreeRepository`` and
 # ``KeywordProvenanceRepository`` bind these from the façade by name
 # (``FACADE_METHODS``), so patches of the ``Database`` methods reach the
 # keyword renames and merges that call them.

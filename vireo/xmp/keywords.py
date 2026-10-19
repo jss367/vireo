@@ -295,6 +295,10 @@ class _KeywordEdits:
         it before writing the clean form; without this it would delete and
         re-append the identical entry it already found, and a sidecar that
         already says the right thing would never look unchanged.
+
+        Returns True when the keyword bags changed: an entry was removed, or
+        (under ``keep_exact``) a qualified variant was rewritten in place to
+        the canonical spelling.
         """
         if not self.document.readable():
             return False
@@ -330,6 +334,7 @@ class _KeywordEdits:
             else {}
         )
         removed = []
+        rewritten = False
         parent_map = _build_parent_map(self.document.root) if keep_exact else None
 
         for bag in _photo_scoped_bags(self.document.root, f"{{{NS_DC}}}subject"):
@@ -348,6 +353,7 @@ class _KeywordEdits:
                         if canonical and _update_simple_property_value(
                             li, canonical,
                         ):
+                            rewritten = True
                             self.document.dirty = True
                         continue
                     removed.append(value)
@@ -366,7 +372,7 @@ class _KeywordEdits:
         if removed:
             self.document.dirty = True
             log.info("Removed keywords from %s: %s", self.document.path, removed)
-        return bool(removed)
+        return bool(removed) or rewritten
 
     def _remove_hierarchical_keyword_entries(
         self, remove_keys, exact, keep_exact, parent_map,

@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from repositories.job_history import JobHistoryRepository
     from repositories.keyword_merges import KeywordMergeRepository
     from repositories.keyword_provenance import KeywordProvenanceRepository
+    from repositories.keyword_taxa import KeywordTaxonRepository
+    from repositories.keyword_tree import KeywordTreeRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
@@ -46,9 +48,11 @@ if TYPE_CHECKING:
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
+    from repositories.photo_keywords import PhotoKeywordRepository
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
+    from repositories.photo_species import PhotoSpeciesRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
     from repositories.pipeline_features import PipelineFeaturesRepository
@@ -2290,7 +2294,7 @@ class Database:
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             transfer_gps_review=self.moves_merge.transfer_gps_review,
-            transfer_embedded_offered=self.keywords.transfer_embedded_offered_keys,
+            transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -3257,33 +3261,19 @@ class Database:
         ("rating", "p.rating IS NOT NULL AND p.rating > 0"),
     ]
 
-    def _coverage_select_fragment(self):
-        parts = [
-            f"SUM(CASE WHEN {pred} THEN 1 ELSE 0 END) AS {key}"
-            for key, pred in self._COVERAGE_PHOTO_COLUMNS
-        ]
-        return ",\n                ".join(parts)
-
-    def _stats_repository(self, *, require_workspace=True):
+    def _stats_repository(self):
         """Build the stats repository on this connection.
 
         It receives ``self._ws_id`` uncalled, and each workspace-scoped read
-        resolves it before running any SQL. ``require_workspace=True`` (the
-        default, used by the coordinated counters below) also resolves it
-        here, so those methods still raise ``RuntimeError`` with no active
-        workspace before they read config or stage a photo scope.
-        ``require_workspace=False`` serves the ``db.stats`` accessor and the
-        readers that take an explicit workspace id (the classification
-        inventory).
+        resolves it before running any SQL, so building it never raises.
         """
         from repositories.stats import StatsRepository
 
-        if require_workspace:
-            self._ws_id()
         return StatsRepository(
             self.conn,
             self._ws_id,
             coverage_photo_columns=self._COVERAGE_PHOTO_COLUMNS,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
     @property
@@ -3297,126 +3287,10 @@ class Database:
         ``stage_scope_ids`` and the readers taking an explicit workspace id
         (``classification_inventory_counts``, ``sampled_top1_medians``) work
         with none active. The counters that resolve config or a photo scope
-        first stay on ``Database`` (``count_*``, ``get_coverage_stats``, ...).
+        first live in ``services/stage_counts.py`` (``count_*``) and
+        ``services/dashboard_stats.py`` (``get_coverage_stats``, ...).
         """
-        return self._stats_repository(require_workspace=False)
-
-    def _dashboard_scope_clause(
-        self,
-        folder_id=None,
-        collection_id=None,
-        date_from=None,
-        date_to=None,
-        table_alias="p",
-    ):
-        """Return an ``AND ...`` clause for Dashboard-scoped photo queries.
-
-        Unlike :meth:`_scope_clause`, this stays composable and does not
-        materialize every matching photo id in Python.  That matters for a
-        date-scoped dashboard over a million-photo workspace.  Collection
-        rules are embedded as a subquery using the same rule compiler as
-        Browse, so Dashboard and Browse agree about collection membership.
-        """
-        conditions = []
-        params = []
-
-        if folder_id is not None:
-            if not self._stats_repository().folder_linked(folder_id):
-                raise ValueError("folder not found in active workspace")
-            subtree = self.get_folder_subtree_ids(folder_id)
-            placeholders = ",".join("?" for _ in subtree)
-            conditions.append(f"{table_alias}.folder_id IN ({placeholders})")
-            params.extend(subtree)
-
-        if collection_id is not None:
-            # Dashboard scope keeps offline photos in totals, so the collection
-            # subquery must not filter them out via the Browse-oriented
-            # ``f.status IN ('ok', 'partial')`` join. Callers that need the
-            # accessible-only view apply that filter in their outer query
-            # (e.g. get_coverage_stats), so it's fine to be permissive here.
-            parts = self.collections._build_collection_query(
-                collection_id, include_offline_folders=True,
-            )
-            if parts is None:
-                raise ValueError("collection not found in active workspace")
-            folder_join, join_clause, where, collection_params = parts
-            collection_query = (
-                "SELECT DISTINCT p.id FROM photos p "
-                f"{folder_join} {join_clause} {where}"
-            )
-            conditions.append(f"{table_alias}.id IN ({collection_query})")
-            params.extend(collection_params)
-
-        if date_from is not None:
-            conditions.append(f"{table_alias}.timestamp >= ?")
-            params.append(date_from)
-        if date_to is not None:
-            conditions.append(f"{table_alias}.timestamp <= ?")
-            params.append(_inclusive_date_to(date_to))
-
-        if not conditions:
-            return "", []
-        return " AND " + " AND ".join(conditions), params
-
-    def get_coverage_stats(
-        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
-    ):
-        """Return per-stage coverage counts for the active workspace.
-
-        ``total`` is the number of photos in active (status ``'ok'`` or
-        ``'partial'``) folders of the workspace. Each other key is the count of those photos for which
-        the named pipeline stage has produced output. ``detected`` and
-        ``classified`` are joined from the detections/predictions tables;
-        everything else is a simple NOT NULL check on ``photos``.
-        """
-        repo = self._stats_repository()
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        scope_sql, scope_params = self._dashboard_scope_clause(
-            folder_id, collection_id, date_from, date_to,
-        )
-        return repo.get_coverage(
-            min_conf, scope_sql, scope_params, self._coverage_select_fragment(),
-        )
-
-    def get_folder_coverage_stats(
-        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
-    ):
-        """Return a list of per-folder coverage counts for the active workspace.
-
-        One row per folder that is linked to the workspace and has
-        ``status`` of ``'ok'`` or ``'partial'``. Each row carries ``folder_id``, ``path``, ``name``,
-        ``total`` (photos in that folder only — descendants are NOT rolled
-        in), and the same coverage keys as :meth:`get_coverage_stats`.
-        Folders with zero photos are included so the dashboard can still
-        show them as 0 / 0 if it chooses.
-        """
-        repo = self._stats_repository()
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        scope_sql, scope_params = self._dashboard_scope_clause(
-            folder_id, collection_id, date_from, date_to,
-        )
-        # Date and collection constraints belong on the LEFT JOIN so folders
-        # with zero matching photos remain visible as 0 / 0. Folder scope is
-        # different: it controls which folder rows are enumerated, so keep it
-        # as an outer WHERE condition on ``f.id``.
-        photo_scope_sql, photo_scope_params = self._dashboard_scope_clause(
-            None, collection_id, date_from, date_to,
-        )
-        subtree = None
-        if folder_id is not None:
-            if not repo.folder_linked(folder_id):
-                raise ValueError("folder not found in active workspace")
-            subtree = self.get_folder_subtree_ids(folder_id)
-        return repo.get_folder_coverage(
-            min_conf, scope_sql, scope_params, photo_scope_sql,
-            photo_scope_params, subtree, self._coverage_select_fragment(),
-        )
+        return self._stats_repository()
 
     def workspace_unlinked_folder_count(self, folder_paths):
         """Count distinct paths in ``folder_paths`` whose folders are not
@@ -3443,506 +3317,6 @@ class Database:
         if not unique:
             return 0
         return self._workspace_folder_repository().unlinked_folder_count(ws, unique)
-
-    def _scope_clause(self, photo_ids, table_alias="p"):
-        """Build a (clause, params) pair to scope a query to photo_ids.
-
-        Returns ('', []) when photo_ids is None (whole-workspace scope).
-        Returns (' AND p.id IN (NULL)', []) for an empty set, which is the
-        intentional "no photos in scope" sentinel — callers asked for
-        "this collection" and the collection resolved to zero photos.
-
-        Scopes larger than one parameter chunk are staged in a
-        connection-local temp table instead of inline placeholders, which
-        would exceed SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds) for
-        big collections. The staged scope is only valid for the query the
-        caller runs immediately after this call — the next large-scope call
-        overwrites it.
-        """
-        if photo_ids is None:
-            return "", []
-        ids = list(photo_ids)
-        if not ids:
-            return f" AND {table_alias}.id IN (NULL)", []
-        if len(ids) <= _SQLITE_PARAM_CHUNK_SIZE:
-            placeholders = ",".join("?" for _ in ids)
-            return f" AND {table_alias}.id IN ({placeholders})", ids
-        self.stats.stage_scope_ids("scope_ids", ids)
-        return f" AND {table_alias}.id IN (SELECT id FROM scope_ids)", []
-
-    def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
-        """Count (photos_with_real_dets, total_real_dets) for the workspace.
-
-        "Real" excludes detector_model='full-image' synthetic anchors.
-        ``photo_ids`` scopes to a collection (set/list of ids); None = whole
-        workspace.
-
-        Used by the pipeline plan to compute classify scope.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_real_detections_in_scope(min_conf, scope_sql, scope_params)
-
-    def count_primary_detections_in_scope(self, photo_ids=None, min_conf=None):
-        """Count photos whose primary real detection is pipeline-classifiable.
-
-        The streaming pipeline classifies at most one detection per photo: the
-        highest-confidence non-full-image detection above the active threshold.
-        This mirrors that gate for the Pipeline page plan so secondary boxes
-        do not inflate pending classify work.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_primary_detections_in_scope(min_conf, scope_sql, scope_params)
-
-    def count_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
-    ):
-        """Count detections in scope that lack a classifier_runs row for
-        (classifier_model, labels_fingerprint).
-
-        Mirrors the gate in classify_job._classify_photos: a real detection
-        with no row in classifier_runs for the given (model, fp) is one
-        unit of pending work for the next classify run.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_classify_pending_pairs(
-            classifier_model, labels_fingerprint, min_conf, scope_sql,
-            scope_params,
-        )
-
-    def count_primary_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
-    ):
-        """Count primary detections lacking a classifier run for (model, fp).
-
-        Mirrors pipeline_job.classify_stage, which picks one primary detection
-        per photo rather than classifying every detection row.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_primary_classify_pending_pairs(
-            classifier_model, labels_fingerprint, min_conf, scope_sql,
-            scope_params,
-        )
-
-    def count_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
-    ):
-        """Count detections in scope that have a stale classifier_runs row
-        for ``classifier_model`` (some non-current fingerprint) AND no row
-        matching the current ``labels_fingerprint``.
-
-        A detection with a current-fp row is "done" (not stale). A
-        detection with no row at all is "never processed" (counted by
-        :meth:`count_classify_pending_pairs`, not here). The stale set is
-        their disjoint complement: previously processed under settings
-        that no longer match.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_classify_stale(
-            classifier_model, labels_fingerprint, min_conf, scope_sql,
-            scope_params,
-        )
-
-    def count_primary_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
-    ):
-        """Count stale classifier runs on primary detections only."""
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_primary_classify_stale(
-            classifier_model, labels_fingerprint, min_conf, scope_sql,
-            scope_params,
-        )
-
-    def count_full_image_fallback_photos(
-        self, photo_ids=None, detector_model="megadetector-v6",
-        min_conf=0,
-    ):
-        """Count photos eligible for full-image fallback classification.
-
-        These are photos in the active workspace where the detector has run
-        and produced no box the classifier could act on: either
-        ``box_count = 0`` or every non-full-image row is below ``min_conf``
-        (raw noise). Callers that want to mirror the runtime fallback gate
-        pass the workspace's ``detector_confidence``; the default of ``0``
-        preserves the pre-noise-fallback semantics where any real row
-        disqualified the photo.
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_full_image_fallback_photos(
-            detector_model, min_conf, scope_sql, scope_params,
-        )
-
-    def count_full_image_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, detector_model="megadetector-v6",
-        min_conf=0,
-    ):
-        """Count fallback photos lacking a classifier run for (model, fp).
-
-        ``min_conf`` mirrors the runtime fallback gate: a photo qualifies
-        when no non-full-image detection row is at or above the threshold,
-        so a MegaDetector run that produced only noise (< ``min_conf``)
-        counts alongside truly empty ``box_count = 0`` runs.
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_full_image_classify_pending_pairs(
-            classifier_model, labels_fingerprint, detector_model, min_conf,
-            scope_sql, scope_params,
-        )
-
-    def count_full_image_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, detector_model="megadetector-v6",
-        min_conf=0,
-    ):
-        """Count fallback anchors with stale runs and no current run.
-
-        ``min_conf`` mirrors ``count_full_image_fallback_photos`` so
-        photos whose only detections are noise (< ``min_conf``) join the
-        stale-anchor scope alongside the ``box_count = 0`` cases.
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_full_image_classify_stale(
-            classifier_model, labels_fingerprint, detector_model, min_conf,
-            scope_sql, scope_params,
-        )
-
-    def get_classification_inventory(self, workspace_id, min_conf=None,
-                                     median_sample_per_pair=2000):
-        """Per-(model × fingerprint) coverage stats for ``workspace_id``.
-
-        Returns::
-
-            {
-              "total_real_detections": int,
-              "pairs": [
-                {
-                  "classifier_model": str,
-                  "labels_fingerprint": str,
-                  "classified_dets": int,
-                  "photos_covered": int,
-                  "last_run": str | None,
-                  "predictions_count": int,
-                  "median_top1_conf": float | None,
-                  "median_sample_size": int,
-                }
-              ],
-              "total_predictions_rows": int,
-            }
-
-        Caller (the endpoint) is responsible for joining this against the
-        on-disk model registry / label files to identify never-run, stale,
-        and legacy combinations.
-        """
-        if min_conf is None:
-            import config as cfg
-            saved_active = self._active_workspace_id
-            try:
-                self._active_workspace_id = workspace_id
-                min_conf = self.get_effective_config(cfg.load()).get(
-                    "detector_confidence", 0.2,
-                )
-            finally:
-                self._active_workspace_id = saved_active
-
-        total_real_detections, pair_rows, pred_counts = (
-            self._stats_repository(require_workspace=False).classification_inventory_counts(
-                workspace_id, min_conf,
-            )
-        )
-
-        # Median top-1 confidence per pair, via a sampled top-1-per-detection set.
-        # Bounded by median_sample_per_pair to keep total work small.
-        medians = self.stats.sampled_top1_medians(
-            workspace_id, min_conf, median_sample_per_pair,
-        )
-
-        pairs = []
-        for r in pair_rows:
-            key = (r["classifier_model"], r["labels_fingerprint"])
-            med, sample_size = medians.get(key, (None, 0))
-            pairs.append({
-                "classifier_model": r["classifier_model"],
-                "labels_fingerprint": r["labels_fingerprint"],
-                "classified_dets": r["classified_dets"] or 0,
-                "photos_covered": r["photos_covered"] or 0,
-                "last_run": r["last_run"],
-                "predictions_count": pred_counts.get(key, 0),
-                "median_top1_conf": med,
-                "median_sample_size": sample_size,
-            })
-
-        total_pred_rows = sum(pred_counts.values())
-
-        return {
-            "total_real_detections": total_real_detections,
-            "pairs": pairs,
-            "total_predictions_rows": total_pred_rows,
-        }
-
-    def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
-                                   sam2_variant=None):
-        """Return (pending, eligible) for the extract-masks stage.
-
-        eligible = photos in scope with at least one real detection above the
-            workspace's effective detector_confidence
-        pending  = eligible photos whose mask_path IS NULL, or when
-            ``sam2_variant`` is supplied, whose ``photo_masks`` row for that
-            variant is missing/incomplete
-
-        The variant-aware mode mirrors extract_masks_stage's current per-photo
-        cache check: masks made by another SAM variant do not make the selected
-        variant complete.
-        """
-        repo = self._stats_repository()
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_photos_pending_masks(
-            min_conf, sam2_variant, scope_sql, scope_params,
-        )
-
-    def count_photos_missing_thumb(self, photo_ids=None):
-        """Return (eligible, pending) for the thumbnails substage.
-
-        eligible = photos in scope linked to the active workspace
-        pending  = eligible photos whose ``thumb_path IS NULL``
-
-        ``thumbnail_stage``'s per-photo gate is ``os.path.exists`` on
-        the cache file, but the photos.thumb_path column is the fast
-        proxy: app.py's startup backfill aligns the column with disk
-        reality (populates it for legacy rows that already have files,
-        clears it for rows whose file has since been deleted), so a
-        NULL value is a reliable "needs generating" signal.
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_photos_missing_thumb(scope_sql, scope_params)
-
-    def count_photos_missing_preview(self, size, photo_ids=None):
-        """Return (eligible, pending) for the previews substage at ``size``.
-
-        eligible = photos in scope linked to the active workspace
-        pending  = eligible photos with no ``preview_cache`` row at ``size``
-
-        ``previews_stage`` gates on ``os.path.exists`` of the cache
-        file, but writes (or refreshes) a ``preview_cache`` row for
-        every photo it processes — whether already-cached or freshly
-        generated. Eviction (``preview_cache_max_mb``) deletes the
-        file and the row together. So the table is a reliable index
-        for "preview present on disk at this size".
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_photos_missing_preview(size, scope_sql, scope_params)
-
-    def count_photos_missing_thumb_or_preview(self, size, photo_ids=None):
-        """Return (eligible, pending) where ``pending`` counts photos
-        missing a thumbnail OR a preview at ``size`` (or both) — i.e.
-        the union of the two substages' work sets.
-
-        The Thumbnails & Previews card needs the photo-level union for
-        its "Resume (N left)" framing: a photo missing only a thumb and
-        a different photo missing only a preview each represent one
-        photo the next pipeline run will touch. Falling back to
-        ``max(thumb_pending, preview_pending)`` undercounts whenever
-        the two missing-sets aren't strict subsets of each other.
-        """
-        repo = self._stats_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_photos_missing_thumb_or_preview(size, scope_sql, scope_params)
-
-    def count_extract_stale(self, sam2_variant, photo_ids=None,
-                             detector_confidence=None):
-        """Count photos in scope that "look done" (``photos.mask_path``
-        is set) but whose ``photo_masks`` row for ``sam2_variant`` has a
-        stored prompt that no longer matches the photo's primary
-        detection.
-
-        Reuses the staleness predicate from ``masks_features.find_stale`` — a
-        mask is fresh only when its stored ``(detector_model,
-        prompt_xywh)`` equals the selected non-full-image
-        detection on the same photo (with optional ``detector_confidence``
-        floor). Filtered by ``sam2_variant`` so a stale mask under a
-        different variant doesn't pollute the count for the currently
-        configured variant.
-
-        Photos without a current primary detection (no non-full-image
-        detection at or above ``detector_confidence``) are excluded:
-        they aren't eligible for the extract stage, so a leftover
-        ``photo_masks`` row from a prior detector run isn't "stale work
-        to redo" — it's just an orphan that storage cleanup handles.
-        Counting those would inflate ``detail.stale`` and keep the
-        stage flagged Outdated/Will run forever in mixed workspaces.
-
-        The active-mask and variant-path gates keep this count disjoint from
-        ``count_photos_pending_masks``'s ``pending``. Photos with no active
-        mask, no selected-variant row, or an incomplete selected-variant path
-        are already pending — they will be re-extracted regardless of whether
-        their ``photo_masks`` row's prompt matches — so counting them here
-        would double-count when a planner combines ``pending + stale`` as
-        total work.
-        """
-        import config as cfg
-        repo = self._stats_repository()
-        if detector_confidence is None:
-            detector_confidence = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_extract_stale(
-            sam2_variant, detector_confidence, scope_sql, scope_params,
-        )
-
-    def count_eye_keypoint_eligible(self, photo_ids=None):
-        """Count photos eligible for the eye-keypoint stage, ignoring the
-        ``eye_tenengrad IS NULL`` idempotency gate.
-
-        Eligibility = active mask present for the currently-selected
-        primary detection + at least one prediction on that detection.
-        Mirrors ``list_photos_for_eye_keypoint_stage``'s selected-primary
-        + active-mask predicates minus the "not yet processed" filter,
-        so the plan can distinguish "no eligible photos" from "all
-        eligible photos already processed". Counting on the loose
-        mask+detection+prediction join would include photos whose only
-        prediction sits on a non-primary detection — the stage cannot
-        produce eye keypoints for those, so review readiness would
-        repeatedly flag missing keypoints while the plan reported the
-        stage complete (Codex r4056621190).
-        """
-        import config as cfg
-        repo = self._stats_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_eye_keypoint_eligible(min_conf, scope_sql, scope_params)
-
-    def count_eye_keypoint_stale(self, photo_ids=None):
-        """Count photos in scope whose eye_tenengrad is set under a
-        non-current eye_kp_fingerprint. Mirrors
-        ``count_eye_keypoint_eligible``'s selected-primary + active-mask
-        join shape and adds the staleness predicate.
-
-        A NULL fingerprint on a row with eye_tenengrad set is treated as
-        stale — only the migration backfill should produce that state,
-        and even there the user is expected to re-run after a model
-        change to restamp.
-        """
-        import config as cfg
-        repo = self._stats_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_eye_keypoint_stale(min_conf, scope_sql, scope_params)
-
-    def count_eye_keypoint_attemptable(self, min_species_conf, photo_ids=None):
-        """Count photos whose top-routable prediction would actually be
-        attempted by the eye-keypoint stage under the current config.
-
-        Tighter than ``count_eye_keypoint_eligible``: eligible photos
-        include ones whose selected primary detection's top prediction
-        will be skipped at Gate 1 (classifier confidence below
-        ``min_species_conf``) or fail taxonomy routing (anything outside
-        the keys of ``pipeline._EYE_KEYPOINT_MODEL_FOR_CLASS``). Those
-        photos never get an ``eye_kp_fingerprint`` stamped — by design,
-        so a future config change can retry them — so they would
-        permanently inflate ``eye_target`` and trip the "computed
-        without eye keypoints" banner on every run.
-
-        Match ``list_photos_for_eye_keypoint_stage``'s selected-primary
-        + active-mask predicates and its "best routable row per photo"
-        selection so a taxonomy-bearing prediction wins over a
-        taxonomy-less one on the *same* selected detection (Codex
-        r4056621190). Predictions that route only via the scientific
-        name → taxa-table fallback are *not* counted here (the SQL
-        filter is taxonomy_class-only); those photos will still be
-        attempted by the stage but will be undercounted in the target,
-        which keeps ``attempts >= target`` and means the banner won't
-        lie — at worst it stays quiet when it could have surfaced.
-        """
-        import config as cfg
-        repo = self._stats_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.count_eye_keypoint_attemptable(
-            min_species_conf, min_conf, scope_sql, scope_params,
-        )
-
-    def get_dashboard_stats(
-        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
-    ):
-        """Return scoped aggregate statistics and actionable gaps.
-
-        Dashboard scope is metadata-only: photos remain countable while their
-        storage is offline.  Signals that require reading source files (such
-        as preview generation) separately restrict themselves to accessible
-        folders and expose that distinction through ``accessible_photos``.
-        """
-        repo = self._stats_repository()
-        # Hoisted: multiple queries below need the workspace-effective
-        # detector_confidence to keep classified_count / prediction_status /
-        # detected_count in sync as the threshold moves.
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
-        min_conf = effective.get("detector_confidence", 0.2)
-        preview_size = effective.get("preview_max_size", 1920)
-        scope_sql, scope_params = self._dashboard_scope_clause(
-            folder_id, collection_id, date_from, date_to,
-        )
-        location_conditions = []
-        self._append_location_status_filter(location_conditions, "none")
-        return repo.get_dashboard(
-            min_conf, preview_size, scope_sql, scope_params, location_conditions,
-        )
 
     @staticmethod
     def _append_location_status_filter(conditions, location_status):
@@ -4468,10 +3842,12 @@ class Database:
         reads and writes work in any workspace. Do not hold the returned
         repository across ``set_active_workspace``.
 
-        Work that reads the workspace config or the photo scope first stays
-        on ``Database`` (``set_active_mask_variant``, ``delete_stale_masks``,
-        ``sam_variant_rerun_warning``, ``get_photos_missing_masks``,
-        ``list_photos_for_eye_keypoint_stage``, ``upsert_photo_embedding``).
+        Work that reads the workspace config or the photo scope first lives
+        in ``services/subject_masks.py`` (``set_active_mask_variant``,
+        ``delete_stale_masks``, ``sam_variant_rerun_warning``,
+        ``get_photos_missing_masks``, ``list_photos_for_eye_keypoint_stage``);
+        ``upsert_photo_embedding`` stays on ``Database`` behind its workspace
+        guard.
         """
         return self._masks_features_repository()
 
@@ -4517,25 +3893,6 @@ class Database:
         hold the returned repository across a connection swap.
         """
         return self._culling_repository()
-
-    def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
-        """Mark `variant` as active for `photo_id` and denormalize its
-        fields into the photos row (mask_path + per-mask features) so
-        downstream readers (scoring, pipeline) see the active mask.
-
-        ``_commit=False`` lets bulk callers (e.g. the
-        ``/api/pipeline/active-mask-variant`` endpoint) batch many
-        per-photo updates into a single commit, instead of paying a WAL
-        fsync per photo. Bulk callers MUST call ``commit_with_retry``
-        themselves once the loop completes.
-        """
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
-        min_conf = effective.get("detector_confidence", 0.2)
-        self._masks_features_repository().set_active_variant(
-            photo_id, variant, min_conf, _commit,
-            weak_rescue_min_conf=weak_rescue_min_conf,
-        )
 
     def _masks_dir_real(self):
         """Realpath of the masks directory, used as the containment root
@@ -4585,137 +3942,11 @@ class Database:
         except OSError:
             log.warning("Failed to remove mask file %s", abs_path)
 
-    def delete_stale_masks(self, detector_confidence=None):
-        """Remove rows + files for masks whose prompt no longer matches
-        the current primary detection. Skips active variants (caller can
-        re-run them through the pipeline instead of dropping the
-        currently-displayed mask).
-
-        ``detector_confidence`` is forwarded to ``find_stale`` so the
-        deletion set matches the count the storage card shows.
-        """
-        repo = self._masks_features_repository()
-        stale = repo.find_stale(detector_confidence=detector_confidence)
-        return repo.delete_stale(stale)
-
-    def sam_variant_rerun_warning(
-        self,
-        sam2_variant,
-        photo_ids=None,
-        min_conf=None,
-        selected_max_ratio=0.25,
-        alternate_min_ratio=0.80,
-    ):
-        """Warn when selected SAM coverage is poor but another variant is high.
-
-        The target set matches the extract-masks stage's existing-photo
-        eligibility: active-workspace photos in scope with at least one real
-        detection above the workspace detector-confidence floor. This keeps a
-        workspace-level SAM configuration from looking empty just because a
-        different variant already produced masks for those same target photos.
-        """
-        if not sam2_variant or sam2_variant == "unknown":
-            return None
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-
-        # Resolve the workspace before staging the photo scope, as the
-        # eagerly scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        scope_sql, scope_params = self._scope_clause(photo_ids)
-        return repo.sam_variant_rerun_warning(
-            sam2_variant, min_conf, scope_sql, scope_params,
-            selected_max_ratio=selected_max_ratio,
-            alternate_min_ratio=alternate_min_ratio,
-        )
-
-    def get_photos_missing_masks(self, folder_ids=None):
-        """Get photos that have detections but no masks yet.
-
-        Returns photos that have at least one detection in the current workspace
-        but no mask_path set. Each row includes the selected primary
-        detection box.
-
-        Args:
-            folder_ids: optional list of folder IDs to filter by.
-                        If None, returns all workspace photos without masks.
-        Returns:
-            list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
-        """
-        import config as cfg
-        # Resolve the workspace before reading the config, as the eagerly
-        # scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        return repo.photos_missing_masks(folder_ids, min_conf)
-
-    def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
-        """Return photos eligible for the eye-focus keypoint stage.
-
-        Eligibility:
-          * photo is in the active workspace (via workspace_folders)
-          * mask_path is set (SAM2 produced a subject mask)
-          * has at least one non-synthetic detection (excludes full-image
-            rows that exist only to anchor predictions)
-          * has at least one prediction on that detection
-          * has not been attempted with the current keypoint model fingerprint
-            yet. The stage stamps eye_kp_fingerprint even when no trustworthy
-            eye is found, so no-eye photos do not rerun forever.
-          * (optional) photo.id is in ``photo_ids`` when provided — lets the
-            caller scope the stage to a collection so a pipeline run doesn't
-            touch unrelated photos elsewhere in the workspace
-
-        Returns one row per photo. Only the effective primary detection
-        can supply eye predictions, resolved with the same
-        threshold-aware ordering (``subjects.primary_order_sql``) that
-        mask extraction and ``set_active_mask_variant`` use: user
-        override in ``photo_subject_choices`` → subject-analysis quality
-        score → detector confidence. Anchoring on the current floor
-        (not the cached ``photo_subject_state``) means a workspace
-        raising ``detector_confidence`` above the previously stored
-        subject still surfaces the new primary for the eye stage.
-        Within the chosen detection, predictions carrying routable
-        taxonomy info (``taxonomy_class`` or ``scientific_name`` set)
-        rank ahead of predictions missing both, so a top-confidence but
-        taxonomy-less prediction never masks a routable one that
-        ``_resolve_keypoint_model`` could actually run. Each row is a
-        dict with the fields the eye stage needs to run without further
-        DB calls: id, folder_id, filename, width, height, mask_path,
-        box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
-        scientific_name, species.
-        """
-        import config as cfg
-        from pipeline import EYE_KP_FINGERPRINT_VERSION
-        # Resolve the workspace before reading the config or staging the
-        # photo scope (an empty scope returns early), as the eagerly scoped
-        # repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        if photo_ids is not None:
-            photo_ids = list(photo_ids)
-            if not photo_ids:
-                return []
-        extra_where, scope_params = self._scope_clause(photo_ids)
-        return repo.list_photos_for_eye_keypoint_stage(
-            min_conf, extra_where, scope_params,
-            eye_kp_fingerprint_version=EYE_KP_FINGERPRINT_VERSION,
-        )
-
     # -- Keywords --
 
     @property
     def keywords(self) -> KeywordRepository:
-        """Keyword rows and tagging reads: ``db.keywords.get_for_photo(photo_id)`` and friends.
+        """Keyword rows: ``db.keywords.name_of(keyword_id)``, ``db.keywords.ensure_default_genres()`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
@@ -4733,23 +3964,125 @@ class Database:
         passed as a resolver), so methods keep raising at the point they
         always did. Every façade method a moved body calls is handed over
         bound, under its ``Database`` name, so monkeypatches keep reaching
-        the moved code; the class attributes and ``db`` module names the
-        bodies read (``_chunks``, ``log``, ``resolve_import_alias``, the
-        keyword-type and sentinel constants) are read here, at call time.
+        the moved code; the ``db`` module names the bodies read
+        (``resolve_import_alias``, ``KEYWORD_TYPES``) are read here, at call
+        time.
         """
         from repositories.keywords import KeywordRepository
 
         return KeywordRepository(
             self.conn,
             self._ws_id,
-            chunks=_chunks,
             keyword_types=KEYWORD_TYPES,
-            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
-            taxon_lookup_variants=_taxon_lookup_variants,
             resolve_import_alias=resolve_import_alias,
-            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
             facade=self,
         )
+
+    def _keyword_taxon_repository(self) -> KeywordTaxonRepository:
+        """Build the keyword species-name and taxon-link repository on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. The façade
+        methods its bodies call are handed over bound, under their
+        ``Database`` names; the detection sentinel and the taxon-name variant
+        helper are read here, at call time.
+        """
+        from repositories.keyword_taxa import KeywordTaxonRepository
+
+        return KeywordTaxonRepository(
+            self.conn,
+            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
+            taxon_lookup_variants=_taxon_lookup_variants,
+            facade=self,
+        )
+
+    @property
+    def keyword_taxa(self) -> KeywordTaxonRepository:
+        """Species names and taxon links of keywords: ``db.keyword_taxa.mark_species(taxonomy)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_keyword_taxon_repository``. Catalog-wide,
+        so it needs no active workspace. The lookups other keyword
+        repositories bind by name (``detect_keyword_case_convention``,
+        ``resolve_species_display_name``, ``_species_root_name_for_taxon``,
+        ``_lookup_taxon_id_for_keyword``, ``_resolve_species_by_lineage``)
+        keep their ``Database`` wrappers.
+        """
+        return self._keyword_taxon_repository()
+
+    def _keyword_tree_repository(self) -> KeywordTreeRepository:
+        """Build the keyword-tree repository on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is
+        passed as a resolver). The façade methods its bodies call (the
+        duplicate-merge pass, the dependent-rename carry and the
+        species-curation renames) are handed over bound, under their
+        ``Database`` names, so monkeypatches keep reaching the moved code.
+        """
+        from repositories.keyword_tree import KeywordTreeRepository
+
+        return KeywordTreeRepository(
+            self.conn, self._ws_id, chunks=_chunks, facade=self,
+        )
+
+    @property
+    def keyword_tree(self) -> KeywordTreeRepository:
+        """The keyword hierarchy and its edits: ``db.keyword_tree.get_tree()``, ``db.keyword_tree.delete(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped methods resolve the workspace at use.
+        Do not retain one across a workspace switch.
+        """
+        return self._keyword_tree_repository()
+
+    def _photo_keyword_repository(self) -> PhotoKeywordRepository:
+        """Build the photo-keyword association reads on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. ``_chunks``,
+        ``KEYWORD_TYPES`` and the subject-filter chunk size are read here, at
+        call time.
+        """
+        from repositories.photo_keywords import PhotoKeywordRepository
+
+        return PhotoKeywordRepository(
+            self.conn,
+            chunks=_chunks,
+            keyword_types=KEYWORD_TYPES,
+            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
+        )
+
+    @property
+    def photo_keywords(self) -> PhotoKeywordRepository:
+        """Which keywords photos carry: ``db.photo_keywords.get_for_photo(photo_id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photo_keyword_repository``. The domain is
+        catalog-wide, so it needs no active workspace. ``untag_photo`` keeps
+        its ``Database`` wrapper beside ``tag_photo``.
+        """
+        return self._photo_keyword_repository()
+
+    def _photo_species_repository(self) -> PhotoSpeciesRepository:
+        """Build the photo-species reads on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is passed
+        as a resolver), so ``get_accepted_species`` raises at the point it
+        always did.
+        """
+        from repositories.photo_species import PhotoSpeciesRepository
+
+        return PhotoSpeciesRepository(self.conn, self._ws_id, chunks=_chunks)
+
+    @property
+    def photo_species(self) -> PhotoSpeciesRepository:
+        """The species photos carry: ``db.photo_species.get_species_for_photos(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped method resolves the workspace at use.
+        Do not retain one across a workspace switch.
+        ``get_photos_with_equivalent_species`` keeps its ``Database`` wrapper:
+        ``repositories/keyword_provenance.py`` binds it by name.
+        """
+        return self._photo_species_repository()
 
     def _keyword_provenance_repository(self):
         """Build the keyword-provenance repository on this connection.
@@ -4818,7 +4151,7 @@ class Database:
             'upper' if most are ALL CAPS
             None if not enough data to determine
         """
-        return self._keyword_repository().detect_case_convention()
+        return self._keyword_taxon_repository().detect_case_convention()
 
     def _apply_case_convention(self, name, convention):
         """Apply a casing convention to a species name."""
@@ -4910,7 +4243,7 @@ class Database:
         predicting where add_keyword will land but wrong to show a user as
         though a model or the catalog had said it.
         """
-        return self._keyword_repository().resolve_species_display(
+        return self._keyword_taxon_repository().resolve_species_display(
             name, apply_case_convention=apply_case_convention, case_convention=case_convention,
         )
 
@@ -4939,7 +4272,7 @@ class Database:
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
-        return self._keyword_repository().species_root_name_for_taxon(taxon_id)
+        return self._keyword_taxon_repository().species_root_name_for_taxon(taxon_id)
 
     def _lookup_taxon_id_for_keyword(
         self, name, prefer_species=False, species_only=False,
@@ -4984,7 +4317,7 @@ class Database:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        return self._keyword_repository().lookup_taxon_id(
+        return self._keyword_taxon_repository().lookup_taxon_id(
             name, prefer_species=prefer_species, species_only=species_only,
         )
 
@@ -5058,7 +4391,7 @@ class Database:
     def merge_taxonomy_root_twins(self):
         """Fold each top-level species twin into the row filed in the tree.
 
-        The pairs are ``KeywordRepository.taxonomy_root_twins``. Both rows
+        The pairs are ``KeywordTreeRepository.taxonomy_root_twins``. Both rows
         carry the same name, so the sidecars already hold the survivor's
         flat keyword and the merge queues no XMP change. All-or-nothing;
         returns the number of rows merged away.
@@ -5067,7 +4400,7 @@ class Database:
         with self.transaction():
             if not self.in_transaction:
                 self.begin_immediate()
-            for root_id, placed_id in self.keywords.taxonomy_root_twins():
+            for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
                 merged += self._merge_keyword_into(
                     root_id, placed_id, pending_source_only=True,
                 )
@@ -5359,7 +4692,7 @@ class Database:
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            rows = self._keyword_repository().duplicate_scope_rows(ws)
+            rows = self._keyword_tree_repository().duplicate_scope_rows(ws)
             grouped = {}
             for row in rows:
                 key = keyword_match_key(row["name"])
@@ -5400,12 +4733,12 @@ class Database:
                 # re-queries and picks a fresh survivor) and drop dead
                 # remove_ids so we don't UPDATE photo_keywords toward a
                 # non-existent FK target.
-                alive = self._keyword_repository().live_ids(all_ids)
+                alive = self._keyword_tree_repository().live_ids(all_ids)
                 if keep_id not in alive:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
-                self.keywords.normalize_row_name(keep_id)
+                self.keyword_tree.normalize_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(
                         rid, keep_id, pending_source_only=True,
@@ -5429,7 +4762,7 @@ class Database:
         ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
         change does not touch it. Caller commits.
         """
-        return self._keyword_repository().rename_dependents(keyword_id, old_name, new_name)
+        return self._keyword_tree_repository().rename_dependents(keyword_id, old_name, new_name)
 
 
 
@@ -5444,7 +4777,7 @@ class Database:
         writing the retired name into XMP and drops starred photos out of the
         highlight and life-list queries. Caller commits.
         """
-        return self._keyword_repository().reparent_disambiguated(child, dst_id, new_name)
+        return self._keyword_tree_repository().reparent_disambiguated(child, dst_id, new_name)
 
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -5606,7 +4939,7 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
+        return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
         self, photo_ids, keyword_id, exclude_keyword_ids=None,
@@ -5624,7 +4957,7 @@ class Database:
         the "already carries this species" answer must reflect only the rows
         that will survive the mutation.
         """
-        return self._keyword_repository().get_photos_with_equivalent_species(
+        return self._photo_species_repository().get_photos_with_equivalent_species(
             photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
         )
 
@@ -5706,7 +5039,7 @@ class Database:
         # 400. For NULL parents a cross-type peer is allowed to
         # coexist (mirrors add_keyword).
         if parent_id is not None:
-            cross = self._keyword_repository().cross_type_peer(
+            cross = self._keyword_tree_repository().cross_type_peer(
                 new_name, parent_id, keyword_id,
             )
             if cross is not None:
@@ -5753,7 +5086,7 @@ class Database:
         # would otherwise leave two same-name taxonomy rows — NULL parents
         # bypass UNIQUE(name, parent_id).
         if 'name' in updates or 'type' in updates:
-            current = self._keyword_repository().get_update_target(keyword_id)
+            current = self._keyword_tree_repository().get_update_target(keyword_id)
             if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
@@ -5788,7 +5121,7 @@ class Database:
                     # (name, parent_id, type), so a rename onto a
                     # different-type peer must NOT silently retag photos
                     # across types.
-                    peer = self._keyword_repository().same_type_peer(
+                    peer = self._keyword_tree_repository().same_type_peer(
                         new_name, parent_id, effective_type, keyword_id,
                     )
                     if peer:
@@ -5801,7 +5134,7 @@ class Database:
                         self._merge_keyword_into(
                             keyword_id, peer["id"], pending_source_only=True,
                         )
-                        self._keyword_repository().commit()
+                        self._keyword_tree_repository().commit()
                         return peer["id"]
                     self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
@@ -5813,7 +5146,7 @@ class Database:
                 if name_changed:
                     _apply_rename_retype(updates, cur_type, taxon_id)
 
-        self._keyword_repository().apply_update(keyword_id, updates)
+        self._keyword_tree_repository().apply_update(keyword_id, updates)
         return keyword_id
 
     # -- Predictions --
@@ -6684,7 +6017,7 @@ class Database:
         ws_id = self._ws_id()
         repo = self._detections_repository()
         where = repo.miss_where(category)
-        scope_clause, scope_params = self._scope_clause(photo_ids)
+        scope_clause, scope_params = self.stats.scope_clause(photo_ids)
         photos = repo.list_miss_photos(ws_id, where, since, scope_clause, scope_params)
         if not photos:
             return photos
@@ -6727,7 +6060,7 @@ class Database:
         repo = self._detections_repository()
         col = repo.miss_column(category)
         ws_id = self._ws_id()
-        scope_clause, scope_params = self._scope_clause(photo_ids)
+        scope_clause, scope_params = self.stats.scope_clause(photo_ids)
         return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
 
     def delete_detections_by_ids(self, detection_ids):
@@ -8125,7 +7458,7 @@ class Database:
         zero matches, or multiple matches all return ``None`` rather than
         permanently crediting the wrong Life List species/class.
         """
-        return self._keyword_repository().resolve_species_by_lineage(
+        return self._keyword_taxon_repository().resolve_species_by_lineage(
             species_name, expected_ancestors,
         )
 

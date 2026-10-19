@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/highlights.d.ts",
+    "../types/page-hooks.d.ts",
+    "../vireo/static/highlights/boot.js",
+    "../vireo/static/highlights/cards.js",
+    "../vireo/static/highlights/flag-changes.js",
+    "../vireo/static/highlights/lightbox.js",
+    "../vireo/static/highlights/loading.js",
+    "../vireo/static/highlights/ordering.js",
+    "../vireo/static/highlights/rejects.js",
+    "../vireo/static/highlights/render.js",
+    "../vireo/static/highlights/save.js",
+    "../vireo/static/highlights/scope.js",
+    "../vireo/static/highlights/shared.js",
+    "../vireo/static/highlights/species.js",
+    "../vireo/static/highlights/state.js"
+  ]
+}

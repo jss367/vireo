@@ -263,10 +263,10 @@ def test_add_and_remove_keyword(mcp):
     pid = db.photos.list_page()[2]["id"]
     added = call(server, "add_keyword", photo_ids=[pid], name="Great horned owl")
     keyword_id = added["keyword_id"]
-    assert "Great horned owl" in [k["name"] for k in db.keywords.get_for_photo(pid)]
+    assert "Great horned owl" in [k["name"] for k in db.photo_keywords.get_for_photo(pid)]
     call(server, "add_keyword", photo_ids=[pid], keyword_id=keyword_id)
     call(server, "remove_keyword", photo_ids=[pid], keyword_id=keyword_id)
-    assert "Great horned owl" not in [k["name"] for k in db.keywords.get_for_photo(pid)]
+    assert "Great horned owl" not in [k["name"] for k in db.photo_keywords.get_for_photo(pid)]
     assert "keyword name or keyword_id" in call_error(server, "add_keyword", photo_ids=[pid])
 
 

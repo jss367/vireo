@@ -265,7 +265,7 @@ def _has_own_non_language_qualifier(elem):
     Same as :func:`_has_own_value_qualifier`, except ANY ``xml:lang''
     (including a non-empty one) is skipped. Callers that already
     apply an effective-language check through the ancestor chain --
-    ``_bag``'s ``_prop_is_qualified`` walks
+    ``keywords._bag_occurrence_is_qualified`` walks
     :func:`_ancestor_carries_xml_qualifier` at the deepest reachable
     element -- must not also count language on the property or a
     wrapper as a standalone qualifier: otherwise

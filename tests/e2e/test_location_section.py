@@ -14,7 +14,33 @@ data without a live API call.
 
 import json
 
+import pytest
 from playwright.sync_api import expect
+
+
+@pytest.fixture(autouse=True)
+def _fail_closed_reverse_geocode(monkeypatch):
+    """Make the Google reverse-geocode provider raise if the server ever calls it.
+
+    These tests seed ``place_reverse_geocode_cache`` so the
+    ``/api/places/reverse-geocode`` proxy serves a hit without touching
+    Google. If a seeding regression — a coordinate, language, or cache-codec
+    drift — invalidates the seeded row, the route falls through to
+    ``places.reverse_geocode_for_language``; combined with the test suite's
+    configured ``test-key`` that would issue a real network request. Patch
+    the provider with a fake that raises so a fixture regression fails
+    locally and loudly instead of silently hitting Google.
+    """
+    import places
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "places.reverse_geocode_for_language called during an e2e "
+            "location test — a cache-seed regression let the server fall "
+            "through to the live Google provider."
+        )
+
+    monkeypatch.setattr(places, "reverse_geocode_for_language", _refuse)
 
 # Canned reverse-geocode response: shape matches what `places.reverse_geocode`
 # produces (see vireo/places.py). `_summarize_details` reads `name` plus the
@@ -57,9 +83,14 @@ def _seed_exif_photos(live_server, photo_ids, lat=40.785091, lng=-73.968285):
 
 
 def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
-    """Pre-populate `place_reverse_geocode_cache` so the proxy serves a hit."""
+    """Seed a current, language-matched cache entry so the proxy serves a hit."""
+    import config as cfg
+    import places
+    from services.gps_locations import encode_cached_reverse_geocode
+
     live_server["db"].reverse_geocode_cache_put(
-        lat, lng, place_id=place_id, response_json=json.dumps(details),
+        lat, lng, place_id=place_id,
+        response_json=encode_cached_reverse_geocode(details, places.result_language(cfg.load())),
     )
 
 

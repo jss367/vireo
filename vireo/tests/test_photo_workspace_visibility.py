@@ -4,6 +4,7 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
+from services import dashboard_stats
 
 
 def _photo(db, folder, name, content=b"photo"):
@@ -38,7 +39,7 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
         assert (destination in visible_folders) == keep_visible
         if keep_visible:
             assert next(row for row in db.folders.tree() if row["id"] == destination)["photo_count"] == 1
-            coverage = db.get_folder_coverage_stats()
+            coverage = dashboard_stats.get_folder_coverage_stats(db)
             assert next(row for row in coverage if row["folder_id"] == destination)["total"] == 1
         db.set_active_workspace(a)
     with Database(path) as reopened:
@@ -414,7 +415,7 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
     db.conn.commit()
     db.set_active_workspace(b)
     assert resolve_folder_id(db, folder) == folder
-    assert db.get_folder_coverage_stats(folder_id=folder)[0]['total'] == 1
+    assert dashboard_stats.get_folder_coverage_stats(db, folder_id=folder)[0]['total'] == 1
     assert db.collections.query_photo_ids([], folder_id=folder) == [photo]
     assert b in db.workspaces.ids_for_folders([folder])
     from web.pipeline import _PipelineLaunch

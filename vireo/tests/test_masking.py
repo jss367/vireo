@@ -11,6 +11,7 @@ import sys
 import numpy as np
 from PIL import Image
 from repositories.masks_features import PipelineFeatures
+from services import subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -91,7 +92,7 @@ def test_get_photos_missing_masks(tmp_path):
     ], detector_model="megadetector")
     db.masks_features.update_pipeline_features(pid3, PipelineFeatures(mask_path="/masks/3.png"))
 
-    photos = db.get_photos_missing_masks()
+    photos = subject_masks.get_photos_missing_masks(db)
     assert len(photos) == 1
     assert photos[0]["id"] == pid1
 
