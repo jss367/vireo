@@ -57,9 +57,14 @@ def _seed_exif_photos(live_server, photo_ids, lat=40.785091, lng=-73.968285):
 
 
 def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
-    """Pre-populate `place_reverse_geocode_cache` so the proxy serves a hit."""
+    """Seed a current, language-matched cache entry so the proxy serves a hit."""
+    import config as cfg
+    import places
+    from services.gps_locations import encode_cached_reverse_geocode
+
     live_server["db"].reverse_geocode_cache_put(
-        lat, lng, place_id=place_id, response_json=json.dumps(details),
+        lat, lng, place_id=place_id,
+        response_json=encode_cached_reverse_geocode(details, places.result_language(cfg.load())),
     )
 
 
