@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
+from services import stage_counts
 from subjects import analyze_photo, payload, select_primary
 
 
@@ -113,7 +114,7 @@ def test_stale_masks_follow_selected_subject(db, subject_photo):
     assert db.masks_features.find_stale() == []
     select_primary(db, photo_id, ids[0])
     assert len(db.masks_features.find_stale()) == 1
-    assert db.count_extract_stale("test") == 0
+    assert stage_counts.count_extract_stale(db, "test") == 0
 
 
 def test_unanalyzed_choice_does_not_inherit_previous_subject_score(db, subject_photo):

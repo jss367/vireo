@@ -1,7 +1,8 @@
-"""Behavior pins for the stats domain of ``Database``.
+"""Behavior pins for the stats domain.
 
 The behavior tests exercise the dashboard, coverage and per-stage
-pending/stale counters through the coordinated ``Database`` methods, and the
+pending/stale counters through the services that compose them
+(``services/dashboard_stats.py``, ``services/stage_counts.py``), and the
 scope staging and sampled medians through the ``db.stats`` accessor. They
 pin the exact counts over one seeded library that has an offline
 folder, a folder linked only to another workspace, secondary and noise
@@ -21,6 +22,7 @@ import config as cfg
 import pytest
 from db import Database
 from repositories.stats import StatsRepository
+from services import dashboard_stats, stage_counts
 
 MODEL = "bioclip"
 OTHER_MODEL = "other-model"
@@ -235,7 +237,7 @@ def test_coverage_stats_counts_accessible_workspace_photos(db, lib):
     # p4 sits in an offline folder and p5 in a folder linked only to the
     # other workspace, so the total is p1, p2, p3 and p6. ``detected`` and
     # ``classified`` count any detection at the floor, full-image included.
-    assert db.get_coverage_stats() == {
+    assert dashboard_stats.get_coverage_stats(db) == {
         "total": 4,
         **_coverage_keys(
             timestamp=3, exif=1, gps=1, file_hash=3, phash=1, thumbnail=1,
@@ -252,42 +254,42 @@ def test_coverage_stats_counts_label_embeddings_and_honors_the_floor(db, lib):
         "VALUES (?, 'clip', x'00')", (lib["p2"],),
     )
     db.conn.commit()
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats["label_embedding"] == 1
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     # Only full-image anchors (confidence 1.0) clear 0.95.
     assert (stats["detected"], stats["classified"]) == (3, 0)
 
 
 def test_coverage_stats_scopes(db, lib):
-    by_child = db.get_coverage_stats(folder_id=lib["f_child"])
+    by_child = dashboard_stats.get_coverage_stats(db, folder_id=lib["f_child"])
     assert (by_child["total"], by_child["detected"]) == (1, 1)
-    by_root = db.get_coverage_stats(folder_id=lib["f_root"])
+    by_root = dashboard_stats.get_coverage_stats(db, folder_id=lib["f_root"])
     assert (by_root["total"], by_root["detected"]) == (4, 3)
     # The collection (rating >= 5) holds p1, offline p4 and other-ws p5;
     # the outer accessible-folder join drops p4.
-    by_collection = db.get_coverage_stats(collection_id=lib["best"])
+    by_collection = dashboard_stats.get_coverage_stats(db, collection_id=lib["best"])
     assert (by_collection["total"], by_collection["classified"]) == (1, 1)
     # A date-only ``date_to`` is inclusive of that whole day (p2 at 18:05).
-    by_date = db.get_coverage_stats(date_from="2024-05-01", date_to="2024-05-20")
+    by_date = dashboard_stats.get_coverage_stats(db, date_from="2024-05-01", date_to="2024-05-20")
     assert (by_date["total"], by_date["timestamp"]) == (2, 2)
-    assert db.get_coverage_stats(date_to="2024-05-19")["total"] == 1
+    assert dashboard_stats.get_coverage_stats(db, date_to="2024-05-19")["total"] == 1
 
 
 def test_scope_rejects_unlinked_folder_and_unknown_collection(db, lib):
     with pytest.raises(ValueError, match="folder not found in active workspace"):
-        db.get_coverage_stats(folder_id=lib["f_other"])
+        dashboard_stats.get_coverage_stats(db, folder_id=lib["f_other"])
     with pytest.raises(ValueError, match="collection not found in active workspace"):
-        db.get_coverage_stats(collection_id=9999)
+        dashboard_stats.get_coverage_stats(db, collection_id=9999)
     with pytest.raises(ValueError, match="folder not found in active workspace"):
-        db.get_dashboard_stats(folder_id=lib["f_other"])
+        dashboard_stats.get_dashboard_stats(db, folder_id=lib["f_other"])
 
 
 def test_dashboard_scope_clause_shape(db, lib):
-    assert db._dashboard_scope_clause() == ("", [])
-    sql, params = db._dashboard_scope_clause(
-        folder_id=lib["f_root"], date_from="2024-01-01", date_to="2024-12-31",
+    assert dashboard_stats.dashboard_scope_clause(db) == ("", [])
+    sql, params = dashboard_stats.dashboard_scope_clause(
+        db, folder_id=lib["f_root"], date_from="2024-01-01", date_to="2024-12-31",
         table_alias="x",
     )
     assert sql == (
@@ -299,21 +301,21 @@ def test_dashboard_scope_clause_shape(db, lib):
     )
     assert params[3] == "2024-01-01"
     assert params[4] > "2024-12-31"  # widened to the end of the day
-    sql, params = db._dashboard_scope_clause(collection_id=lib["best"])
+    sql, params = dashboard_stats.dashboard_scope_clause(db, collection_id=lib["best"])
     assert sql.startswith(" AND p.id IN (SELECT DISTINCT p.id FROM photos p ")
 
 
 def test_dashboard_scope_clause_needs_no_workspace_until_folder_scoped(db, lib):
     db.set_active_workspace(None)
-    assert db._dashboard_scope_clause(date_from="2024-01-01") == (
+    assert dashboard_stats.dashboard_scope_clause(db, date_from="2024-01-01") == (
         " AND p.timestamp >= ?", ["2024-01-01"],
     )
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db._dashboard_scope_clause(folder_id=lib["f_root"])
+        dashboard_stats.dashboard_scope_clause(db, folder_id=lib["f_root"])
 
 
 def test_folder_coverage_stats_rows(db, lib):
-    rows = db.get_folder_coverage_stats()
+    rows = dashboard_stats.get_folder_coverage_stats(db)
     # Offline and other-workspace folders are left out; the empty folder
     # stays as 0 / 0. Rows are ordered by path and do not roll up children.
     assert [r["path"] for r in rows] == ["/lib", "/lib/a", "/lib/empty"]
@@ -335,19 +337,19 @@ def test_folder_coverage_stats_rows(db, lib):
 
 
 def test_folder_coverage_stats_scopes(db, lib):
-    rows = db.get_folder_coverage_stats(folder_id=lib["f_child"])
+    rows = dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_child"])
     assert [(r["path"], r["total"]) for r in rows] == [("/lib/a", 1)]
     # Date scope sits on the LEFT JOIN: every folder row survives at 0.
-    rows = db.get_folder_coverage_stats(date_from="2024-06-01")
+    rows = dashboard_stats.get_folder_coverage_stats(db, date_from="2024-06-01")
     assert [(r["path"], r["total"], r["detected"]) for r in rows] == [
         ("/lib", 0, 0), ("/lib/a", 1, 1), ("/lib/empty", 0, 0),
     ]
-    rows = db.get_folder_coverage_stats(collection_id=lib["best"])
+    rows = dashboard_stats.get_folder_coverage_stats(db, collection_id=lib["best"])
     assert [(r["path"], r["total"], r["classified"]) for r in rows] == [
         ("/lib", 1, 1), ("/lib/a", 0, 0), ("/lib/empty", 0, 0),
     ]
     with pytest.raises(ValueError, match="folder not found in active workspace"):
-        db.get_folder_coverage_stats(folder_id=lib["f_other"])
+        dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_other"])
 
 
 def test_folder_scope_composes_subtree_through_the_facade(db, lib, monkeypatch):
@@ -356,21 +358,21 @@ def test_folder_scope_composes_subtree_through_the_facade(db, lib, monkeypatch):
         db, "get_folder_subtree_ids", lambda fid: calls.append(fid) or [fid],
     )
     with pytest.raises(ValueError):
-        db.get_folder_coverage_stats(folder_id=lib["f_other"])
+        dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_other"])
     assert calls == []
-    rows = db.get_folder_coverage_stats(folder_id=lib["f_root"])
+    rows = dashboard_stats.get_folder_coverage_stats(db, folder_id=lib["f_root"])
     # Façade-patched subtree: only the root itself is enumerated, and both
     # the full scope clause and the folder filter asked for it.
     assert calls == [lib["f_root"], lib["f_root"]]
     assert [r["path"] for r in rows] == ["/lib"]
-    assert db.get_dashboard_stats(folder_id=lib["f_root"])["total_photos"] == 3
+    assert dashboard_stats.get_dashboard_stats(db, folder_id=lib["f_root"])["total_photos"] == 3
 
 
 # -- dashboard -------------------------------------------------------------------
 
 
 def test_dashboard_stats_whole_workspace(db, lib):
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     park, robin = stats["top_keywords"]
     assert stats == {
         "top_keywords": [
@@ -428,7 +430,7 @@ def test_dashboard_stats_whole_workspace(db, lib):
 def test_dashboard_stats_with_previews_disabled(db, lib):
     db.workspaces.update(lib["ws"], config_overrides={"preview_max_size": 0})
     statements = _trace(db)
-    attention = db.get_dashboard_stats()["attention"]
+    attention = dashboard_stats.get_dashboard_stats(db)["attention"]
     assert attention["missing_previews"] == 0
     assert attention["preview_size"] == 0
     assert attention["preview_enabled"] is False
@@ -436,16 +438,16 @@ def test_dashboard_stats_with_previews_disabled(db, lib):
 
 
 def test_dashboard_stats_scoped(db, lib):
-    stats = db.get_dashboard_stats(folder_id=lib["f_child"])
+    stats = dashboard_stats.get_dashboard_stats(db, folder_id=lib["f_child"])
     assert stats["total_photos"] == 1
     assert stats["top_keywords"][0]["name"] == "Park"
     assert stats["attention"]["duplicate_groups"] == 0
-    stats = db.get_dashboard_stats(collection_id=lib["best"])
+    stats = dashboard_stats.get_dashboard_stats(db, collection_id=lib["best"])
     # Dashboard collection scope keeps the offline photo in totals.
     assert (stats["total_photos"], stats["accessible_photos"]) == (2, 1)
     assert stats["classified_count"] == 2
     assert stats["attention"]["unclassified"] == 0
-    stats = db.get_dashboard_stats(date_from="2024-05-01", date_to="2024-05-31")
+    stats = dashboard_stats.get_dashboard_stats(db, date_from="2024-05-01", date_to="2024-05-31")
     assert stats["photos_by_month"] == [{"month": "2024-05", "count": 2}]
     assert stats["pending_changes"] == 1
 
@@ -454,135 +456,135 @@ def test_dashboard_stats_scoped(db, lib):
 
 
 def test_detection_counts(db, lib):
-    assert db.count_real_detections_in_scope() == {
+    assert stage_counts.count_real_detections_in_scope(db) == {
         "photos_with_dets": 2, "total_dets": 3,
     }
-    assert db.count_primary_detections_in_scope() == {
+    assert stage_counts.count_primary_detections_in_scope(db) == {
         "photos_with_dets": 2, "total_dets": 2,
     }
-    assert db.count_real_detections_in_scope(min_conf=0.05) == {
+    assert stage_counts.count_real_detections_in_scope(db, min_conf=0.05) == {
         "photos_with_dets": 3, "total_dets": 4,
     }
-    assert db.count_primary_detections_in_scope(photo_ids={lib["p1"]}) == {
+    assert stage_counts.count_primary_detections_in_scope(db, photo_ids={lib["p1"]}) == {
         "photos_with_dets": 1, "total_dets": 1,
     }
-    assert db.count_real_detections_in_scope(photo_ids=[]) == {
+    assert stage_counts.count_real_detections_in_scope(db, photo_ids=[]) == {
         "photos_with_dets": 0, "total_dets": 0,
     }
-    assert db.count_primary_detections_in_scope(min_conf=0.99) == {
+    assert stage_counts.count_primary_detections_in_scope(db, min_conf=0.99) == {
         "photos_with_dets": 0, "total_dets": 0,
     }
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.6})
-    assert db.count_real_detections_in_scope()["total_dets"] == 2
+    assert stage_counts.count_real_detections_in_scope(db)["total_dets"] == 2
 
 
 def test_classify_pending_and_stale(db, lib):
     # d1 has a current run; d1b only a stale one; d4's current run is
     # 'incomplete', so it is still pending but not stale.
-    assert db.count_classify_pending_pairs(MODEL, FP) == 2
-    assert db.count_primary_classify_pending_pairs(MODEL, FP) == 1
-    assert db.count_classify_stale(MODEL, FP) == 1
-    assert db.count_primary_classify_stale(MODEL, FP) == 0
-    assert db.count_classify_pending_pairs(MODEL, "new-fp") == 3
-    assert db.count_classify_stale(MODEL, "new-fp") == 3
-    assert db.count_primary_classify_stale(MODEL, "new-fp") == 2
-    assert db.count_classify_pending_pairs(
-        MODEL, FP, photo_ids=[lib["p4"]], min_conf=0.85,
+    assert stage_counts.count_classify_pending_pairs(db, MODEL, FP) == 2
+    assert stage_counts.count_primary_classify_pending_pairs(db, MODEL, FP) == 1
+    assert stage_counts.count_classify_stale(db, MODEL, FP) == 1
+    assert stage_counts.count_primary_classify_stale(db, MODEL, FP) == 0
+    assert stage_counts.count_classify_pending_pairs(db, MODEL, "new-fp") == 3
+    assert stage_counts.count_classify_stale(db, MODEL, "new-fp") == 3
+    assert stage_counts.count_primary_classify_stale(db, MODEL, "new-fp") == 2
+    assert stage_counts.count_classify_pending_pairs(
+        db, MODEL, FP, photo_ids=[lib["p4"]], min_conf=0.85,
     ) == 0
-    assert db.count_primary_classify_pending_pairs(
-        MODEL, FP, photo_ids=[lib["p4"]],
+    assert stage_counts.count_primary_classify_pending_pairs(
+        db, MODEL, FP, photo_ids=[lib["p4"]],
     ) == 1
-    assert db.count_primary_classify_stale(
-        MODEL, "new-fp", photo_ids=[], min_conf=0.1,
+    assert stage_counts.count_primary_classify_stale(
+        db, MODEL, "new-fp", photo_ids=[], min_conf=0.1,
     ) == 0
 
 
 def test_full_image_fallback_counts(db, lib):
     # p3 ran with box_count 0; p2's only real box is noise below 0.2; p6's
     # run claims boxes that are gone, so it is not a consistent empty run.
-    assert db.count_full_image_fallback_photos() == 1
-    assert db.count_full_image_fallback_photos(min_conf=0.2) == 2
-    assert db.count_full_image_fallback_photos(detector_model="other") == 0
-    assert db.count_full_image_classify_pending_pairs(MODEL, FP) == 1
-    assert db.count_full_image_classify_pending_pairs(MODEL, FP, min_conf=0.2) == 2
-    assert db.count_full_image_classify_pending_pairs(
-        MODEL, OLD_FP, min_conf=0.2,
+    assert stage_counts.count_full_image_fallback_photos(db) == 1
+    assert stage_counts.count_full_image_fallback_photos(db, min_conf=0.2) == 2
+    assert stage_counts.count_full_image_fallback_photos(db, detector_model="other") == 0
+    assert stage_counts.count_full_image_classify_pending_pairs(db, MODEL, FP) == 1
+    assert stage_counts.count_full_image_classify_pending_pairs(db, MODEL, FP, min_conf=0.2) == 2
+    assert stage_counts.count_full_image_classify_pending_pairs(
+        db, MODEL, OLD_FP, min_conf=0.2,
     ) == 1
-    assert db.count_full_image_classify_stale(MODEL, FP) == 0
-    assert db.count_full_image_classify_stale(MODEL, FP, min_conf=0.2) == 1
-    assert db.count_full_image_classify_stale(
-        MODEL, FP, photo_ids=[lib["p3"]], min_conf=0.2,
+    assert stage_counts.count_full_image_classify_stale(db, MODEL, FP) == 0
+    assert stage_counts.count_full_image_classify_stale(db, MODEL, FP, min_conf=0.2) == 1
+    assert stage_counts.count_full_image_classify_stale(
+        db, MODEL, FP, photo_ids=[lib["p3"]], min_conf=0.2,
     ) == 0
     # A fallback photo with no full-image anchor yet is pending, not stale.
     db.conn.execute("DELETE FROM detections WHERE id = ?", (lib["d3f"],))
     db.conn.commit()
-    assert db.count_full_image_classify_pending_pairs(MODEL, FP) == 1
-    assert db.count_full_image_classify_stale(MODEL, "x") == 0
+    assert stage_counts.count_full_image_classify_pending_pairs(db, MODEL, FP) == 1
+    assert stage_counts.count_full_image_classify_stale(db, MODEL, "x") == 0
 
 
 def test_mask_counts(db, lib):
-    assert db.count_photos_pending_masks() == {"eligible": 2, "pending": 0}
-    assert db.count_photos_pending_masks(sam2_variant="sam2-small") == {
+    assert stage_counts.count_photos_pending_masks(db) == {"eligible": 2, "pending": 0}
+    assert stage_counts.count_photos_pending_masks(db, sam2_variant="sam2-small") == {
         "eligible": 2, "pending": 0,
     }
     # p1's sam2-large row has an empty path; p4 has no sam2-large row.
-    assert db.count_photos_pending_masks(sam2_variant="sam2-large") == {
+    assert stage_counts.count_photos_pending_masks(db, sam2_variant="sam2-large") == {
         "eligible": 2, "pending": 2,
     }
     _set(db, lib["p1"], mask_path=None)
     db.conn.commit()
     # The mask stage does not filter on category: the 0.95 person box counts.
-    assert db.count_photos_pending_masks(photo_ids=[lib["p1"]], min_conf=0.99) == {
+    assert stage_counts.count_photos_pending_masks(db, photo_ids=[lib["p1"]], min_conf=0.99) == {
         "eligible": 0, "pending": 0,
     }
-    assert db.count_photos_pending_masks(photo_ids=[lib["p1"]]) == {
+    assert stage_counts.count_photos_pending_masks(db, photo_ids=[lib["p1"]]) == {
         "eligible": 1, "pending": 1,
     }
 
 
 def test_thumbnail_and_preview_counts(db, lib):
     # Offline p4 counts: these read the catalog, not the disk.
-    assert db.count_photos_missing_thumb() == {"eligible": 5, "pending": 3}
-    assert db.count_photos_missing_preview(1920) == {"eligible": 5, "pending": 3}
-    assert db.count_photos_missing_preview(640) == {"eligible": 5, "pending": 4}
-    assert db.count_photos_missing_thumb_or_preview(1920) == {
+    assert stage_counts.count_photos_missing_thumb(db) == {"eligible": 5, "pending": 3}
+    assert stage_counts.count_photos_missing_preview(db, 1920) == {"eligible": 5, "pending": 3}
+    assert stage_counts.count_photos_missing_preview(db, 640) == {"eligible": 5, "pending": 4}
+    assert stage_counts.count_photos_missing_thumb_or_preview(db, 1920) == {
         "eligible": 5, "pending": 4,
     }
-    assert db.count_photos_missing_thumb(photo_ids=[]) == {
+    assert stage_counts.count_photos_missing_thumb(db, photo_ids=[]) == {
         "eligible": 0, "pending": 0,
     }
-    assert db.count_photos_missing_thumb_or_preview(
-        1920, photo_ids=[lib["p1"], lib["p4"]],
+    assert stage_counts.count_photos_missing_thumb_or_preview(
+        db, 1920, photo_ids=[lib["p1"], lib["p4"]],
     ) == {"eligible": 2, "pending": 1}
 
 
 def test_extract_stale(db, lib):
     # p4's sam2-small prompt no longer matches its primary detection.
-    assert db.count_extract_stale("sam2-small") == 1
-    assert db.count_extract_stale("sam2-large") == 0
-    assert db.count_extract_stale("sam2-small", detector_confidence=0.85) == 0
-    assert db.count_extract_stale("sam2-small", photo_ids=[lib["p1"]]) == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 1
+    assert stage_counts.count_extract_stale(db, "sam2-large") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small", detector_confidence=0.85) == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small", photo_ids=[lib["p1"]]) == 0
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.85})
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_eye_keypoint_counts(db, lib):
-    assert db.count_eye_keypoint_eligible() == 1
-    assert db.count_eye_keypoint_stale() == 1
-    assert db.count_eye_keypoint_attemptable(0.5) == 1
-    assert db.count_eye_keypoint_attemptable(0.95) == 0
-    assert db.count_eye_keypoint_eligible(photo_ids=[lib["p4"]]) == 0
+    assert stage_counts.count_eye_keypoint_eligible(db) == 1
+    assert stage_counts.count_eye_keypoint_stale(db) == 1
+    assert stage_counts.count_eye_keypoint_attemptable(db, 0.5) == 1
+    assert stage_counts.count_eye_keypoint_attemptable(db, 0.95) == 0
+    assert stage_counts.count_eye_keypoint_eligible(db, photo_ids=[lib["p4"]]) == 0
     from pipeline import EYE_KP_FINGERPRINT_VERSION
     _set(db, lib["p1"], eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION)
     db.conn.commit()
-    assert db.count_eye_keypoint_stale() == 0
+    assert stage_counts.count_eye_keypoint_stale(db) == 0
     _set(db, lib["p1"], eye_kp_fingerprint="v0")
     db.conn.commit()
-    assert db.count_eye_keypoint_stale() == 1
+    assert stage_counts.count_eye_keypoint_stale(db) == 1
     db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
-    assert db.count_eye_keypoint_eligible() == 0
-    assert db.count_eye_keypoint_stale() == 0
-    assert db.count_eye_keypoint_attemptable(0.0) == 0
+    assert stage_counts.count_eye_keypoint_eligible(db) == 0
+    assert stage_counts.count_eye_keypoint_stale(db) == 0
+    assert stage_counts.count_eye_keypoint_attemptable(db, 0.0) == 0
 
 
 # -- classification inventory ------------------------------------------------------
@@ -598,7 +600,7 @@ def _pairs(inventory):
 
 
 def test_classification_inventory(db, lib):
-    inventory = db.get_classification_inventory(lib["ws"])
+    inventory = stage_counts.get_classification_inventory(db, lib["ws"])
     assert inventory["total_real_detections"] == 4
     assert inventory["total_predictions_rows"] == 7
     assert _pairs(inventory) == [
@@ -606,10 +608,10 @@ def test_classification_inventory(db, lib):
         (MODEL, OLD_FP, 1, 1, "2025-01-01 00:00:00", 3, pytest.approx(0.5), 2),
         (OTHER_MODEL, "fpX", 1, 1, "2025-01-01 00:00:00", 1, 0.7, 1),
     ]
-    other = db.get_classification_inventory(lib["other_ws"], min_conf=0.2)
+    other = stage_counts.get_classification_inventory(db, lib["other_ws"], min_conf=0.2)
     assert other["total_real_detections"] == 1
     assert _pairs(other) == [(MODEL, FP, 1, 1, "2025-01-01 00:00:00", 1, 0.9, 1)]
-    capped = db.get_classification_inventory(lib["ws"], median_sample_per_pair=1)
+    capped = stage_counts.get_classification_inventory(db, lib["ws"], median_sample_per_pair=1)
     assert {p[-1] for p in _pairs(capped)} == {1}
 
 
@@ -621,7 +623,7 @@ def test_classification_inventory_pair_without_predictions(db, lib):
         "labels_fingerprint) VALUES (?, 'empty-model', 'fpE')", (lib["d4"],),
     )
     db.conn.commit()
-    inventory = db.get_classification_inventory(lib["ws"], min_conf=0.2)
+    inventory = stage_counts.get_classification_inventory(db, lib["ws"], min_conf=0.2)
     empty = [p for p in inventory["pairs"] if p["classifier_model"] == "empty-model"]
     assert empty == [{
         "classifier_model": "empty-model", "labels_fingerprint": "fpE",
@@ -634,11 +636,11 @@ def test_classification_inventory_pair_without_predictions(db, lib):
 def test_classification_inventory_reads_the_target_workspace_floor(db, lib):
     db.workspaces.update(lib["other_ws"], config_overrides={"detector_confidence": 0.95})
     db.set_active_workspace(None)
-    other = db.get_classification_inventory(lib["other_ws"])
+    other = stage_counts.get_classification_inventory(db, lib["other_ws"])
     assert other["total_real_detections"] == 0
     assert db._active_workspace_id is None
     db.set_active_workspace(lib["ws"])
-    assert db.get_classification_inventory(lib["ws"])["total_real_detections"] == 4
+    assert stage_counts.get_classification_inventory(db, lib["ws"])["total_real_detections"] == 4
     assert db._active_workspace_id == lib["ws"]
 
 
@@ -653,14 +655,14 @@ def test_classification_inventory_restores_workspace_when_config_fails(
 
     monkeypatch.setattr(Database, "get_effective_config", boom)
     with pytest.raises(RuntimeError, match="config broke"):
-        db.get_classification_inventory(lib["other_ws"])
+        stage_counts.get_classification_inventory(db, lib["other_ws"])
     assert seen == [lib["other_ws"]]
     assert db._active_workspace_id == lib["ws"]
 
 
 def test_classification_inventory_needs_no_active_workspace(db, lib):
     db.set_active_workspace(None)
-    inventory = db.get_classification_inventory(lib["ws"], min_conf=0.2)
+    inventory = stage_counts.get_classification_inventory(db, lib["ws"], min_conf=0.2)
     assert inventory["total_real_detections"] == 4
 
 
@@ -682,10 +684,10 @@ def test_sampled_top1_medians(db, lib):
 
 
 def test_scope_clause_shapes(db):
-    assert db._scope_clause(None) == ("", [])
-    assert db._scope_clause([]) == (" AND p.id IN (NULL)", [])
-    assert db._scope_clause([3, 1], table_alias="x") == (" AND x.id IN (?,?)", [3, 1])
-    assert db._scope_clause(range(1, 900)) == (
+    assert db.stats.scope_clause(None) == ("", [])
+    assert db.stats.scope_clause([]) == (" AND p.id IN (NULL)", [])
+    assert db.stats.scope_clause([3, 1], table_alias="x") == (" AND x.id IN (?,?)", [3, 1])
+    assert db.stats.scope_clause(range(1, 900)) == (
         " AND p.id IN (SELECT id FROM scope_ids)", [],
     )
     assert db.conn.execute("SELECT COUNT(*) FROM temp.scope_ids").fetchone()[0] == 899
@@ -695,15 +697,15 @@ def test_large_scope_counts_match_inline_scope(db, lib):
     small = [lib["p1"], lib["p2"], lib["p3"], lib["p4"], lib["p6"]]
     big = list(range(1, 900))
     statements = _trace(db)
-    assert db.count_real_detections_in_scope(photo_ids=big) == \
-        db.count_real_detections_in_scope(photo_ids=small)
+    assert stage_counts.count_real_detections_in_scope(db, photo_ids=big) == \
+        stage_counts.count_real_detections_in_scope(db, photo_ids=small)
     assert "SAVEPOINT stage_read_scope" in statements
     assert any("IN (SELECT id FROM scope_ids)" in s for s in statements)
-    assert db.count_photos_missing_thumb_or_preview(1920, photo_ids=big) == \
-        db.count_photos_missing_thumb_or_preview(1920, photo_ids=small)
-    assert db.count_eye_keypoint_attemptable(0.5, photo_ids=big) == 1
-    assert db.count_full_image_classify_stale(
-        MODEL, FP, photo_ids=big, min_conf=0.2,
+    assert stage_counts.count_photos_missing_thumb_or_preview(db, 1920, photo_ids=big) == \
+        stage_counts.count_photos_missing_thumb_or_preview(db, 1920, photo_ids=small)
+    assert stage_counts.count_eye_keypoint_attemptable(db, 0.5, photo_ids=big) == 1
+    assert stage_counts.count_full_image_classify_stale(
+        db, MODEL, FP, photo_ids=big, min_conf=0.2,
     ) == 1
     assert not db.conn.in_transaction
 
@@ -769,12 +771,18 @@ SCOPED_READERS = [
 ]
 
 
+def _reader(name):
+    """The service function behind a scoped reader."""
+    module = dashboard_stats if hasattr(dashboard_stats, name) else stage_counts
+    return getattr(module, name)
+
+
 @pytest.mark.parametrize("name,args", SCOPED_READERS)
 def test_scoped_reader_requires_active_workspace(db, lib, name, args):
     db.set_active_workspace(None)
     statements = _trace(db)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        getattr(db, name)(*args)
+        _reader(name)(db, *args)
     assert statements == []
 
 
@@ -784,7 +792,7 @@ def test_scoped_reader_checks_the_workspace_before_config_or_scope(
 ):
     """With no workspace, a coordinated counter raises first thing.
 
-    ``_stats_repository`` resolves the workspace up front (as it did before
+    Each reader resolves the workspace up front (as ``Database`` did before
     the repository took a lazy resolver), so the workspace-effective config is
     never read and a large photo-id scope is never staged.
     """
@@ -793,22 +801,22 @@ def test_scoped_reader_checks_the_workspace_before_config_or_scope(
 
     monkeypatch.setattr(cfg, "load", no_config)
     kwargs = {}
-    if "photo_ids" in inspect.signature(getattr(Database, name)).parameters:
+    if "photo_ids" in inspect.signature(_reader(name)).parameters:
         kwargs["photo_ids"] = range(1, 900)
     db.set_active_workspace(None)
     statements = _trace(db)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        getattr(db, name)(*args, **kwargs)
+        _reader(name)(db, *args, **kwargs)
     assert statements == []
 
 
 @pytest.mark.parametrize("name,args", SCOPED_READERS)
 def test_scoped_reader_leaves_no_transaction_open(db, lib, name, args):
     kwargs = {}
-    if "photo_ids" in inspect.signature(getattr(Database, name)).parameters:
+    if "photo_ids" in inspect.signature(_reader(name)).parameters:
         kwargs["photo_ids"] = range(1, 900)  # staged through the temp table
     db.conn.commit()
-    getattr(db, name)(*args, **kwargs)
+    _reader(name)(db, *args, **kwargs)
     assert not db.conn.in_transaction
     # A second connection can take the write lock straight away.
     other = sqlite3.connect(db._db_path, timeout=0)
@@ -839,25 +847,26 @@ def test_reader_query_count(db, lib, monkeypatch, name, args, kwargs, expected):
     effective = db.get_effective_config(cfg.load())
     monkeypatch.setattr(db, "get_effective_config", lambda _cfg: effective)
     statements = _trace(db)
-    getattr(db, name)(*args, **kwargs)
+    _reader(name)(db, *args, **kwargs)
     assert len(statements) == expected, statements
 
 
 def test_classification_inventory_query_count(db, lib):
     statements = _trace(db)
-    db.get_classification_inventory(lib["ws"], min_conf=0.2)
+    stage_counts.get_classification_inventory(db, lib["ws"], min_conf=0.2)
     assert len(statements) == 4
     assert "ORDER BY RANDOM()" in statements[-1]
 
 
 # -- structure: the SQL lives in StatsRepository ---------------------------------
 #
-# The scope composition (``_scope_clause`` / ``_dashboard_scope_clause``) and the
-# workspace-effective config lookups stay on the façade; only the SQL moved.
+# The Dashboard scope composition (``dashboard_scope_clause``) and the
+# workspace-effective config lookups live in the services; the photo-id scope
+# (``StatsRepository.scope_clause``) and the SQL live in the repository.
 
 
 STATS_METHODS = [
-    "_dashboard_scope_clause",
+    "dashboard_scope_clause",
     "get_coverage_stats",
     "get_folder_coverage_stats",
     "count_real_detections_in_scope",
@@ -883,22 +892,28 @@ STATS_METHODS = [
 
 
 @pytest.mark.parametrize("name", STATS_METHODS)
-def test_stats_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
-    attrs = {
-        node.attr
+def test_stats_reader_delegates_to_repository(name):
+    fn = ast.parse(textwrap.dedent(inspect.getsource(_reader(name)))).body[0]
+    attrs = {node.attr for node in ast.walk(fn) if isinstance(node, ast.Attribute)}
+    called = {
+        node.func.id
         for node in ast.walk(fn)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to StatsRepository"
+        f"{name} touches a connection; move the SQL to StatsRepository"
     )
-    assert "_stats_repository" in attrs, (
-        f"Database.{name} no longer delegates to StatsRepository"
+    assert "stats" in attrs or "_scoped_stats" in called, (
+        f"{name} no longer delegates to StatsRepository"
     )
+
+
+@pytest.mark.parametrize(
+    "name", [*STATS_METHODS, "_dashboard_scope_clause", "_scope_clause", "_coverage_select_fragment"],
+)
+def test_stats_readers_left_database(name):
+    """The coordinated readers live in the services, not on the façade."""
+    assert not hasattr(Database, name), f"Database.{name} came back"
 
 
 # -- the ``db.stats`` accessor --------------------------------------------------
@@ -914,9 +929,9 @@ def test_has_quality_input_recipe_reads_the_workspace_scope(db, lib):
     assert db.stats.has_quality_input_recipe("", []) is False
     _set(db, lib["p2"], quality_input_recipe="{}")
     assert db.stats.has_quality_input_recipe("", []) is True
-    scope_sql, scope_params = db._scope_clause([lib["p1"]])
+    scope_sql, scope_params = db.stats.scope_clause([lib["p1"]])
     assert db.stats.has_quality_input_recipe(scope_sql, scope_params) is False
-    scope_sql, scope_params = db._scope_clause([lib["p1"], lib["p2"]])
+    scope_sql, scope_params = db.stats.scope_clause([lib["p1"], lib["p2"]])
     assert db.stats.has_quality_input_recipe(scope_sql, scope_params) is True
 
 

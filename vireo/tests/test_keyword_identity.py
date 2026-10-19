@@ -12,6 +12,7 @@ from keyword_identity import (
     reconcile_location,
     resolve_import_path,
 )
+from services import dashboard_stats
 
 
 @pytest.fixture
@@ -62,18 +63,18 @@ def test_identity_counts_filters_and_paths(catalog):
     assert group['photo_count'] == 3
     assert {m['id'] for m in group['members']} == {root, leaf}
     assert group['paths'] == [['Test bird'], ['Imported birds', 'Test Bird']]
-    stats = db.get_dashboard_stats(date_to='2024-06-30')['top_keywords']
+    stats = dashboard_stats.get_dashboard_stats(db, date_to='2024-06-30')['top_keywords']
     assert len(stats) == 1
     assert stats[0]['identity'] == group['identity']
     assert stats[0]['photo_count'] == 2
-    assert db.get_dashboard_stats()['keyword_count'] == 1
+    assert dashboard_stats.get_dashboard_stats(db)['keyword_count'] == 1
     assert db.keywords.count_in_workspace() == 1
     rules = [{'field': 'keyword_identity', 'op': 'equals', 'value': group['identity']},
              {'field': 'timestamp', 'op': '<=', 'value': '2024-06-30'}]
     assert set(db.collections.query_photo_ids(rules)) == set(photos[:2])
     db.conn.execute("UPDATE folders SET status = 'missing'")
     db.conn.commit()
-    assert db.get_dashboard_stats()['top_keywords'][0]['photo_count'] == 3
+    assert dashboard_stats.get_dashboard_stats(db)['top_keywords'][0]['photo_count'] == 3
 
 
 def test_unproven_same_names_and_conflicting_source_taxa_stay_separate(catalog):
@@ -82,13 +83,13 @@ def test_unproven_same_names_and_conflicting_source_taxa_stay_separate(catalog):
     db.conn.execute('UPDATE keywords SET source_taxon_id = 999 WHERE id = ?', (leaf,))
     for photo, kid in zip(photos, [root, leaf, db.add_keyword('Test bird', kw_type='general')], strict=True):
         db.tag_photo(photo, kid)
-    assert len(db.get_dashboard_stats()['top_keywords']) == 3
+    assert len(dashboard_stats.get_dashboard_stats(db)['top_keywords']) == 3
     parent = db.add_keyword('Another place')
     a = db.add_keyword('Springfield', kw_type='location')
     b = db.add_keyword('Springfield', parent_id=parent, kw_type='location')
     db.tag_photo(photos[0], a)
     db.tag_photo(photos[0], b)
-    assert len([k for k in db.get_dashboard_stats()['top_keywords'] if k['name'] == 'Springfield']) == 2
+    assert len([k for k in dashboard_stats.get_dashboard_stats(db)['top_keywords'] if k['name'] == 'Springfield']) == 2
 
 
 def test_dashboard_uses_a_label_tagged_in_the_selected_date_range(catalog):
@@ -96,7 +97,7 @@ def test_dashboard_uses_a_label_tagged_in_the_selected_date_range(catalog):
     root, leaf = species_pair(db)
     db.tag_photo(photos[0], root)
     db.tag_photo(photos[2], leaf)
-    entry, = db.get_dashboard_stats(date_from='2024-07-01')['top_keywords']
+    entry, = dashboard_stats.get_dashboard_stats(db, date_from='2024-07-01')['top_keywords']
     assert entry['name'] == 'Test Bird'
     assert entry['id'] == leaf
     assert entry['photo_count'] == 1
@@ -114,7 +115,7 @@ def test_dashboard_does_not_borrow_species_labels_from_other_workspaces(catalog)
     photo = db.add_photo(folder_id=folder, filename='other.jpg', extension='.jpg', file_size=10, file_mtime=1)
     db.tag_photo(photo, root)
     db.set_active_workspace(workspace)
-    entry, = db.get_dashboard_stats()['top_keywords']
+    entry, = dashboard_stats.get_dashboard_stats(db)['top_keywords']
     assert entry['id'] == leaf
     assert entry['name'] == 'Test Bird'
     assert entry['name'] == next(g for g in grouped_keywords(db) if g['identity'] == entry['identity'])['name']
