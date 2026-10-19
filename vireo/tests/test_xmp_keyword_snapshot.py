@@ -170,6 +170,7 @@ def _incremental_boundary(namespace, db):
     commits = []
     db.scanning = SimpleNamespace(set_xmp_mtime=lambda pid, value: existing.update(xmp_mtime=value))
     db.commit_with_retry = lambda: commits.append("commit")
+    db.check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(db=db, repair_missing_metadata=False,
                             tally=SimpleNamespace(credit_reused_row=lambda *args: None))
     namespace.update(RAW_EXTENSIONS=set(), EMPTY_FILE_SHA256="invented empty hash")
@@ -243,7 +244,8 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
     def add_photo(**values):
         inserted = not row["exists"]
         if inserted:
-            row.update(exists=True, xmp_mtime=values["xmp_mtime"])
+            row.update(exists=True, xmp_mtime=values["xmp_mtime"],
+                       file_mtime=values["file_mtime"], file_size=values["file_size"])
         return 731, inserted
 
     def set_mtime(photo_id, value):
@@ -258,7 +260,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
                 row["xmp_mtime"] = None
             else:
                 value = next(bindings)
-                if assignment in ("xmp_mtime=?", "file_mtime=?", "file_size=?"):
+                if assignment in ("xmp_mtime=?", "file_mtime=?", "file_size=?", "file_hash=?"):
                     row[assignment.removesuffix("=?")] = value
         assert list(bindings) == []
 
@@ -272,7 +274,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
         collections=SimpleNamespace(drop_inherited_collection_membership=lambda photo_id: None),
         tally=SimpleNamespace(credit_indexed=lambda photo_id: None, report_cataloged=lambda *args: None),
         fills=SimpleNamespace(take_pending_companion_fill=lambda *args: None),
-        _identity_column_updates=lambda item: ([], []),
+        _identity_column_updates=lambda item: (["file_hash=?"], [item.file_hash]) if item.file_hash is not None else ([], []),
         _heal_changed_content=lambda *args: None,
     )
     for name in ("_add_photo", "_write_photo_columns"):

@@ -231,6 +231,7 @@ class _IncrementalTriage:
             return True
 
         # XMP changed: re-import keywords
+        retry_duplicate_resolution = False
         if not xmp_unchanged and xmp_mtime is not None:
             # catalog_file defers duplicate auto-resolve when the sidecar
             # read failed on the initial pass (stored xmp_mtime stayed
@@ -240,8 +241,7 @@ class _IncrementalTriage:
             if _import_keywords_for_photo(db, existing["id"], str(xmp_path)):
                 db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
                 db.commit_with_retry()
-                if prior_mtime is None and existing["file_hash"]:
-                    db.check_and_resolve_duplicates_for_hash(existing["file_hash"])
+                retry_duplicate_resolution = prior_mtime is None
         elif not xmp_unchanged:
             # Sidecar deleted: clear the stored mtime so the row
             # converges instead of looking "XMP changed" on every
@@ -255,6 +255,9 @@ class _IncrementalTriage:
             and not metadata_missing
             and not hash_needs_repair
         ):
+            # Reprocessing must decide against the new hash, not this old one.
+            if retry_duplicate_resolution and existing_file_hash:
+                db.check_and_resolve_duplicates_for_hash(existing_file_hash)
             self.tally.credit_reused_row(
                 existing["id"], full_path_str,
                 existing["folder_id"], existing["filename"],
