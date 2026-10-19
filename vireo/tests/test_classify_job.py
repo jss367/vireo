@@ -250,17 +250,13 @@ def test_a_deleted_label_selection_falls_back_instead_of_blocking(tmp_path):
     (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
     (tmp_path / "tol_classes.json").write_bytes(b"[]")
 
-    class _StaleDb:
-        def get_workspace_active_labels(self):
-            return [str(tmp_path / "deleted.txt")]
-
     with patch("classify_job.label_loading.get_saved_labels", return_value=[]):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
             labels_file=None,
             labels_files=None,
-            db=_StaleDb(),
+            db=_StubDB([str(tmp_path / "deleted.txt")]),
             model_dir=str(tmp_path),
         )
     assert use_tol is True
@@ -317,13 +313,28 @@ def _params(labels_file=None, labels_files=None):
 
 
 class _StubDB:
-    """Minimal stand-in exposing only the workspace label lookup."""
+    """Minimal stand-in exposing only the active workspace's label overrides.
+
+    ``workspace_config.get_workspace_active_labels`` reads them from the
+    workspace row's ``config_overrides``.
+    """
 
     def __init__(self, active_labels=None):
-        self._active_labels = active_labels
+        overrides = (
+            json.dumps({"active_labels": active_labels})
+            if active_labels is not None else None
+        )
+        self._row = {"config_overrides": overrides}
 
-    def get_workspace_active_labels(self):
-        return self._active_labels
+    def require_workspace_id(self):
+        return 1
+
+    @property
+    def workspaces(self):
+        return self
+
+    def get(self, workspace_id):
+        return self._row
 
 
 def test_describe_label_source_names_workspace_sets():

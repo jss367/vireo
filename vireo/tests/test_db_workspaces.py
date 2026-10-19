@@ -577,10 +577,10 @@ def test_workspace_method_delegates_to_repository(name):
 
 
 def test_update_workspace_shares_the_unset_sentinel_with_the_repository():
-    import db as db_module
+    import repositories.workspaces as workspaces_module
     from repositories import UNSET
 
-    assert db_module._UNSET is UNSET
+    assert workspaces_module.UNSET is UNSET
     repo = inspect.signature(WorkspaceRepository.update).parameters
     assert list(repo) == [
         "self", "workspace_id", "name", "config_overrides", "ui_state",
