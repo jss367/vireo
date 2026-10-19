@@ -389,5 +389,9 @@ class _FolderCatalogRewrite:
             # key was hashed from.
             for new_child, relative in self.db.moves_merge.folder_paths_below(
                     developed_base):
-                old_child = _join_subtree_path(src_path, relative)
+                # POSIX backslashes belong to names, including at the end
+                # of the source root or inside the relative child path.
+                old_child = (src_path.rstrip("/") + "/" + relative
+                             if src_path.startswith("/")
+                             else _join_subtree_path(src_path, relative))
                 relocate_developed_dir(developed_dir, old_child, new_child)
