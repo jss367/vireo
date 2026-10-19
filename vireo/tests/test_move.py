@@ -3084,6 +3084,66 @@ def test_move_photos_companion_files(move_env):
     assert not (env["src"] / "bird1.nef").exists()
 
 
+def test_move_photos_reports_partial_copy_cleanup_failure(move_env, monkeypatch):
+    """A failed companion copy whose partial-copy cleanup also fails stays a
+    per-photo error: the rest of the batch moves, the errors already
+    collected are kept, and the error names the copy left at the destination.
+
+    Before the fix the cleanup's ``os.remove`` raised out of ``move_photos``,
+    aborting the batch with a raw exception and dropping every error it had
+    collected.
+    """
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    # bird0 is missing on disk, so the batch collects an error before bird1.
+    p0 = db.add_photo(folder_id=env["fid_src"], filename="bird0.jpg",
+                      extension=".jpg", file_size=10, file_mtime=0.5)
+    db.conn.execute("UPDATE photos SET companion_path = 'bird1.nef' WHERE id = ?",
+                    (env["p1"],))
+    db.conn.commit()
+    (env["src"] / "bird1.nef").write_bytes(b"\x00" * 50)
+
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_companion_copy(src, dst):
+        if os.path.basename(src) == "bird1.nef":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_companion_copy)
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["dst"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by antivirus")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=db, photo_ids=[p0, env["p1"], env["p2"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1  # bird2 still moved
+    assert (env["dst"] / "bird2.jpg").exists()
+    errors = result["errors"]
+    assert any("bird0.jpg: source file missing" in e for e in errors)
+    assert any("bird1.nef" in e and "companion copy failed" in e for e in errors)
+    leftover = [e for e in errors if "bird1.jpg" in e and "locked by antivirus" in e]
+    assert leftover, errors
+    assert str(env["dst"] / "bird1.jpg") in leftover[0]
+    # The original and its companion are untouched at the source, and the
+    # catalog still points there.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.nef").exists()
+    row = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?",
+                          (env["p1"],)).fetchone()
+    assert row["folder_id"] == env["fid_src"]
+
+
 def test_move_folder_copies_tree(move_env):
     """move_folder moves entire folder tree preserving structure."""
     from move import move_folder

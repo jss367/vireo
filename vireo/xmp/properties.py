@@ -6,7 +6,6 @@ from xmp.photo_scope import _plain_property_occurrences, _property_occurrences
 from xmp.rdf import (
     _ancestor_carries_xml_qualifier,
     _build_parent_map,
-    _is_plain_property_occurrence,
     _property_occurrence_score,
     _simple_prop_carries_qualifier,
     _update_simple_property_value,
@@ -206,8 +205,6 @@ class _SimpleProperties:
         if removed:
             self.document.dirty = True
         return removed
-
-    _is_plain_occurrence = staticmethod(_is_plain_property_occurrence)
 
     def set_plain_property_value(self, desc, name, value):
         """Set a simple property's value, landing only on plain occurrences.
