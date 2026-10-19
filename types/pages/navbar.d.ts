@@ -134,6 +134,8 @@ interface NavHistoryChange {
   undone?: string;
   redone?: string;
   edit_recipes?: Record<string, NavRecipe | null>;
+  /** The edit_history row id this undo/redo acted on. A later undo/redo with the same id is this entry's own inverse. */
+  entry_id?: number;
   /** Set when the change stands but Process Review's saved results could not follow it. */
   pipeline_cache_stale?: boolean;
   warning?: string;

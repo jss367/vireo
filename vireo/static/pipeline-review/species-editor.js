@@ -451,7 +451,7 @@ function registerPipelineReviewHistoryHooks() {
 
     /** @param {unknown} change */
     afterHistoryChange: async function(change) {
-      renderHistoryCacheStaleBanner(/** @type {{pipeline_cache_stale?: boolean}} */ (change));
+      renderHistoryCacheStaleBanner(/** @type {{pipeline_cache_stale?: boolean; undone?: string; redone?: string; entry_id?: number}} */ (change));
       var seq = ++reviewScopeRequestSeq;
       var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
       if (seq !== reviewScopeRequestSeq || !data || !data.results) return;

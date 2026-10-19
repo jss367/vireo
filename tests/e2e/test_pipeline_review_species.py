@@ -2379,6 +2379,33 @@ def test_pipeline_review_says_when_undo_cannot_update_its_results(
     expect(banner).to_contain_text("Redoing “Confirmed species")
 
 
+def test_pipeline_review_banner_clears_when_its_inverse_succeeds(
+    live_server, page, monkeypatch,
+):
+    """A failed Undo puts up the stale-cache banner; when the user clicks
+    Redo on the same entry and that refresh succeeds, the cache for those
+    photos is back in sync so the banner is misleading and comes down.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+    _fail_pipeline_cache_refresh(monkeypatch)
+
+    with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
+        page.locator("#historyUndoBtn").click()
+    undo_body = undo.value.json()
+    assert undo_body["pipeline_cache_stale"] is True
+    expect(banner).to_be_visible()
+
+    # Restore the real refresh so the next Redo resyncs the cache.
+    monkeypatch.undo()
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as redo:
+        page.locator("#historyRedoBtn").click()
+    redo_body = redo.value.json()
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+    expect(banner).to_be_hidden()
+
+
 def test_undo_elsewhere_warns_when_process_review_results_go_stale(
     live_server, page, monkeypatch,
 ):

@@ -26083,6 +26083,58 @@ def test_undo_redo_without_a_cache_failure_carry_no_warning(app_and_db):
         assert "pipeline_cache_stale" not in body
 
 
+def test_undo_redo_responses_carry_the_entry_id(app_and_db, monkeypatch):
+    """Undo and redo report ``entry_id`` so the Process Review banner can
+    detect its own inverse. The failed Undo and the Redo that reverses it
+    both act on the same ``edit_history`` row, so their ``entry_id`` match;
+    on that match the client drops the stale banner the Undo put up.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+    undo_body = client.post("/api/undo").get_json()
+    assert undo_body["pipeline_cache_stale"] is True
+    assert isinstance(undo_body["entry_id"], int)
+    monkeypatch.undo()
+
+    redo_body = client.post("/api/redo").get_json()
+    assert redo_body["ok"] is True
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+
+
+def test_undo_redo_entry_id_differs_across_separate_history_entries(app_and_db):
+    """A later undo/redo for a different edit carries a different
+    ``entry_id`` than an earlier one, so the client can tell "unrelated
+    successful edit" from "this failure's own inverse".
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids must not collide.
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    chat = db.add_keyword("Yellow-breasted Chat", is_species=True)
+    for pid in photo_ids[:1]:
+        db.tag_photo(pid, chat)
+    resp = client.post("/api/encounters/species", json={
+        "species": "Yellow-breasted Chat", "photo_ids": photo_ids[:1],
+        "burst_index": 0, "remove": False,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    first_undo = client.post("/api/undo").get_json()
+    second_undo = client.post("/api/undo").get_json()
+    assert first_undo["entry_id"] != second_undo["entry_id"]
+
+
 def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override(app_and_db):
     """Frames [A, X] and [A, Y]: removing A leaves the explicit-empty
     sentinel (nothing shared). Undo restores A; redo must restore the

@@ -132,12 +132,16 @@ def create_history_blueprint(
 
         A pipeline cache that could not be refreshed adds
         ``pipeline_cache_stale`` and a ``warning`` saying what it means;
-        the history change itself stands.
+        the history change itself stands. ``entry_id`` carries the
+        ``edit_history`` row id so the client can tell when a later
+        undo/redo is this entry's own inverse (its successful cache
+        refresh then resyncs the same photos a failed one left stale).
         """
         cache_refreshed = _refresh_pipeline_cache_species_from_edit(db, result)
         response = {
             "ok": True,
             "undone" if operation == "Undo" else "redone": result["description"],
+            "entry_id": result["id"],
             "flags_changed": _history_flags_changed(db, result),
         }
         if edit_recipe_updates is not None:

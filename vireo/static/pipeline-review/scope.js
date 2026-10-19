@@ -25,27 +25,45 @@ function dismissDegradedBanner() {
   /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
+// The edit_history row id of the undo/redo whose cache refresh failed and is
+// currently reflected in the on-screen banner. The next undo/redo on the
+// same id is this entry's own inverse — its successful refresh resyncs the
+// same photos the failed one left stale, so the banner is dropped. An
+// undo/redo on a different id is a different edit (different photos usually)
+// and the earlier staleness still stands, so the banner is left alone.
+/** @type {number | null} */ var _historyCacheStaleEntryId = null;
+
 /**
  * An undo or redo stood, but the saved review results could not follow it
  * (the server could not rewrite the pipeline cache's species). This page
  * reads those results, so say what is stale and what fixes it: a reload
  * reads the same stale file, while a Process run rebuilds the results from
- * the catalog. Stays up until the page is left.
- * @param {{pipeline_cache_stale?: boolean; undone?: string; redone?: string} | null | undefined} change
+ * the catalog. Stays up until the user leaves the page or the entry's own
+ * inverse succeeds (``_historyCacheStaleEntryId`` above).
+ * @param {{pipeline_cache_stale?: boolean; undone?: string; redone?: string; entry_id?: number} | null | undefined} change
  */
 function renderHistoryCacheStaleBanner(change) {
-  if (!change || !change.pipeline_cache_stale) return;
   var banner = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBanner'));
   var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
-  if (!banner || !text) return;
-  var undo = change.undone !== undefined;
-  var description = (undo ? change.undone : change.redone) || 'the last edit';
-  text.innerHTML = '<strong>These review results may be out of date.</strong> '
-    + escapeHtml((undo ? 'Undoing' : 'Redoing') + ' “' + description + '” was saved, but Vireo '
-    + 'could not update the review results to match, so they may still list the old species for '
-    + 'the photos it changed. Reloading this page will not fix that: run Process on these photos '
-    + 'again to rebuild the review from your catalog.');
-  banner.style.display = 'flex';
+  if (!banner || !text || !change) return;
+  if (change.pipeline_cache_stale) {
+    _historyCacheStaleEntryId = change.entry_id != null ? Number(change.entry_id) : null;
+    var undo = change.undone !== undefined;
+    var description = (undo ? change.undone : change.redone) || 'the last edit';
+    text.innerHTML = '<strong>These review results may be out of date.</strong> '
+      + escapeHtml((undo ? 'Undoing' : 'Redoing') + ' “' + description + '” was saved, but Vireo '
+      + 'could not update the review results to match, so they may still list the old species for '
+      + 'the photos it changed. Reloading this page will not fix that: run Process on these photos '
+      + 'again to rebuild the review from your catalog.');
+    banner.style.display = 'flex';
+    return;
+  }
+  if (_historyCacheStaleEntryId != null
+      && change.entry_id != null
+      && Number(change.entry_id) === _historyCacheStaleEntryId) {
+    _historyCacheStaleEntryId = null;
+    banner.style.display = 'none';
+  }
 }
 
 /** @param {ReviewCacheInfo | null} info */
