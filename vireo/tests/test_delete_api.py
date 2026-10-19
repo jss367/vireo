@@ -5,6 +5,7 @@ import os
 
 from page_scripts import page_with_scripts
 from PIL import Image
+from services import photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -367,8 +368,8 @@ def test_batch_delete_progress_marks_catalog_stage_partial_on_revalidation_skip(
     dest_folder = str(tmp_path / "dest")
     src_fid = db.add_folder(source_folder, name="source")
     dst_fid = db.add_folder(dest_folder, name="dest")
-    pid = db.add_photo(
-        folder_id=src_fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     os.makedirs(source_folder, exist_ok=True)
@@ -650,12 +651,12 @@ def test_api_batch_delete_disk_partial_failure_deletes_only_successes(
     client = app.test_client()
     folder_path = str(tmp_path / "partial")
     fid = db.add_folder(folder_path, name="partial")
-    success_id = db.add_photo(
-        folder_id=fid, filename="success.jpg", extension=".jpg",
+    success_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="success.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    failed_id = db.add_photo(
-        folder_id=fid, filename="failed.jpg", extension=".jpg",
+    failed_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="failed.jpg", extension=".jpg",
         file_size=10, file_mtime=2.0,
     )
     os.makedirs(folder_path, exist_ok=True)
@@ -713,8 +714,8 @@ def test_api_batch_delete_skips_row_whose_identity_changed_mid_delete(
     dest_folder = str(tmp_path / "dest")
     src_fid = db.add_folder(source_folder, name="source")
     dst_fid = db.add_folder(dest_folder, name="dest")
-    pid = db.add_photo(
-        folder_id=src_fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     os.makedirs(source_folder, exist_ok=True)
@@ -771,8 +772,8 @@ def test_api_batch_delete_treats_concurrently_deleted_row_as_completed(
     client = app.test_client()
     folder_path = str(tmp_path / "raced")
     fid = db.add_folder(folder_path, name="raced")
-    pid = db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     os.makedirs(folder_path, exist_ok=True)
@@ -888,8 +889,8 @@ def test_api_batch_delete_skips_row_whose_folder_path_changed_mid_delete(
     original_folder = str(tmp_path / "original")
     renamed_folder = str(tmp_path / "renamed")
     fid = db.add_folder(original_folder, name="original")
-    pid = db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     os.makedirs(renamed_folder, exist_ok=True)
@@ -947,8 +948,8 @@ def test_api_batch_delete_disk_revalidates_companion_pairing_before_delete(
     client = app.test_client()
     folder_path = str(tmp_path / "raw_pair")
     fid = db.add_folder(folder_path, name="raw_pair")
-    raw_id = db.add_photo(
-        folder_id=fid, filename="bird.nef", extension=".nef",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.nef", extension=".nef",
         file_size=10, file_mtime=1.0,
     )
     os.makedirs(folder_path, exist_ok=True)
@@ -1118,8 +1119,8 @@ def test_api_batch_delete_chunks_large_photo_id_lists(app_and_db, monkeypatch):
 
     fid = db.add_folder('/photos/bulk', name='bulk')
     bulk_ids = [
-        db.add_photo(
-            folder_id=fid,
+        photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=f"bulk{i}.jpg",
             extension='.jpg',
             file_size=10,
@@ -1168,8 +1169,8 @@ def test_api_batch_delete_chunked_loop_is_atomic_on_failure(app_and_db, monkeypa
 
     fid = db.add_folder('/photos/atomic', name='atomic')
     bulk_ids = [
-        db.add_photo(
-            folder_id=fid,
+        photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=f"atomic{i}.jpg",
             extension='.jpg',
             file_size=10,
@@ -1224,8 +1225,8 @@ def test_api_batch_delete_chunked_failure_preserves_pipeline_cache(
 
     fid = db.add_folder('/photos/pcache', name='pcache')
     bulk_ids = [
-        db.add_photo(
-            folder_id=fid,
+        photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=f"pcache{i}.jpg",
             extension='.jpg',
             file_size=10,
@@ -1312,8 +1313,8 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
 
     fid = db.add_folder('/photos/pchunk', name='pchunk')
     bulk_ids = [
-        db.add_photo(
-            folder_id=fid,
+        photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=f"pchunk{i}.jpg",
             extension='.jpg',
             file_size=10,
@@ -1321,8 +1322,8 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
         )
         for i in range(5)
     ]
-    survivor = db.add_photo(
-        folder_id=fid,
+    survivor = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="survivor.jpg",
         extension='.jpg',
         file_size=10,
@@ -1422,8 +1423,8 @@ def _photo_only_in_other_workspace(db, tmp_path):
     fid = db.add_folder(str(folder), name="other")
     path = folder / "theirs.jpg"
     Image.new("RGB", (10, 10)).save(str(path))
-    pid = db.add_photo(
-        folder_id=fid, filename="theirs.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="theirs.jpg", extension=".jpg",
         file_size=os.path.getsize(path), file_mtime=1.0,
     )
     db.set_active_workspace(home_ws)
@@ -1726,12 +1727,12 @@ def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
     for i in range(900):
         comp_name = f"img_{i:04d}.jpg.xmp"
         companion_filenames.append(comp_name)
-        pid = db.add_photo(
-            folder_id=fid, filename=f"img_{i:04d}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"img_{i:04d}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        db.add_photo(
-            folder_id=fid, filename=comp_name, extension=".xmp",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=comp_name, extension=".xmp",
             file_size=10, file_mtime=1.0,
         )
         primary_ids.append(pid)

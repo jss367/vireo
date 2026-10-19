@@ -11,10 +11,9 @@ import sys
 import numpy as np
 from PIL import Image
 from repositories.masks_features import PipelineFeatures
-from services import subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
+from services import photo_ingest, subject_masks
 
 # -- Schema migration --
 
@@ -44,7 +43,7 @@ def test_update_photo_pipeline_features(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="root")
-    pid = db.add_photo(fid, "bird.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     db.masks_features.update_pipeline_features(
         pid,
@@ -77,16 +76,16 @@ def test_get_photos_missing_masks(tmp_path):
     fid = db.add_folder(str(tmp_path), name="root")
 
     # Photo with detection, no mask — should appear
-    pid1 = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+    pid1 = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
     db.detections.save(pid1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9},
     ], detector_model="megadetector")
 
     # Photo with no detection — should NOT appear
-    pid2 = db.add_photo(fid, "b.jpg", ".jpg", 100, 1.0)
+    pid2 = photo_ingest.add_photo(db, fid, "b.jpg", ".jpg", 100, 1.0)
 
     # Photo with detection AND mask — should NOT appear
-    pid3 = db.add_photo(fid, "c.jpg", ".jpg", 100, 1.0)
+    pid3 = photo_ingest.add_photo(db, fid, "c.jpg", ".jpg", 100, 1.0)
     db.detections.save(pid3, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
     ], detector_model="megadetector")

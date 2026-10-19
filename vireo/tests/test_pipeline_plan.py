@@ -11,9 +11,9 @@ import sys
 
 import pytest
 from repositories.masks_features import PipelineFeatures
-from services import classify_preflight, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from services import classify_preflight, photo_ingest, stage_counts, subject_masks
 
 
 def _make_db(tmp_path, name="test.db"):
@@ -27,8 +27,8 @@ def _make_db(tmp_path, name="test.db"):
 
 def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
                                detector_model="megadetector-v6"):
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -74,9 +74,9 @@ def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid_a = db.add_folder("/cards/a")
     fid_b = db.add_folder("/cards/b")
-    pid_a1 = db.add_photo(folder_id=fid_a, filename="IMG_001.NEF",
+    pid_a1 = photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_001.NEF",
                           extension=".nef", file_size=1, file_mtime=1.0)
-    pid_b1 = db.add_photo(folder_id=fid_b, filename="IMG_900.JPG",
+    pid_b1 = photo_ingest.add_photo(db, folder_id=fid_b, filename="IMG_900.JPG",
                           extension=".jpg", file_size=1, file_mtime=1.0)
 
     result = db.photos.by_paths([
@@ -108,7 +108,7 @@ def test_photos_by_paths_ignores_workspace_membership(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/cards/a")
-    pid = db.add_photo(folder_id=fid, filename="x.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="x.jpg",
                        extension=".jpg", file_size=1, file_mtime=1.0)
     # Active workspace has no folders (the import target is a fresh ws).
     db._active_workspace_id = db.create_workspace("Other")
@@ -169,8 +169,8 @@ def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
     """
     db, folder_id = _make_db(tmp_path)
     pid_real, _ = _add_photo_with_detection(db, folder_id, "real.jpg")
-    pid_synth = db.add_photo(
-        folder_id=folder_id, filename="synth.jpg", extension=".jpg",
+    pid_synth = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="synth.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.detections.save(
@@ -211,8 +211,8 @@ def test_count_real_detections_scopes_to_photo_ids(tmp_path):
 
 def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
     db, folder_id = _make_db(tmp_path)
-    pid_empty = db.add_photo(
-        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+    pid_empty = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
@@ -259,8 +259,8 @@ def test_full_image_fallback_counts_noise_only_boxes_at_workspace_floor(
     done" while a full-image inference is still pending.
     """
     db, folder_id = _make_db(tmp_path)
-    pid_empty = db.add_photo(
-        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+    pid_empty = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
@@ -288,8 +288,8 @@ def test_full_image_fallback_counts_noise_only_boxes_at_workspace_floor(
 
 def test_full_image_fallback_counts_reject_torn_detector_run(tmp_path):
     db, folder_id = _make_db(tmp_path)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="torn.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="torn.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
@@ -399,8 +399,8 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
     count them as pending or stale.
     """
     db, folder_id = _make_db(tmp_path)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="multi.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -427,8 +427,8 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
 ):
     """Person and vehicle boxes suppress fallback but are not crop targets."""
     db, folder_id = _make_db(tmp_path)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="hiker.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="hiker.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.detections.save(
@@ -607,8 +607,8 @@ def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_p
     counted as eligible for mask extraction — the actual stage skips it.
     """
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="anchor_only.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="anchor_only.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.detections.save(
@@ -727,8 +727,8 @@ def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
     """
     from labels_fingerprint import TOL_SENTINEL
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # High-confidence primary at (0.1, 0.1, 0.5, 0.5); lower-confidence
@@ -924,8 +924,8 @@ def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
     run must not inflate ``count_extract_stale``, otherwise the stage
     stays flagged Outdated/Will run indefinitely in mixed workspaces."""
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="anchor.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="anchor.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.detections.save(
@@ -1082,8 +1082,8 @@ def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, mod
     from pipeline_plan import compute_plan
 
     db, folder_id = _make_db(tmp_path)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="multi.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -1286,8 +1286,8 @@ def test_classify_plan_counts_full_image_fallback_pending(tmp_path, monkeypatch)
     from pipeline_plan import compute_plan
 
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(pid, "megadetector-v6", box_count=0)
@@ -1317,8 +1317,8 @@ def test_classify_plan_done_prior_for_full_image_fallback(tmp_path, monkeypatch)
     from pipeline_plan import compute_plan
 
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(pid, "megadetector-v6", box_count=0)
@@ -1360,8 +1360,8 @@ def test_classify_plan_tracks_contextual_weak_crop_instead_of_fallback(
     db, folder_id = _make_db(tmp_path)
     detection_ids = []
     for index, confidence in enumerate((0.9, 0.18, 0.9)):
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"bird{index}.jpg",
             extension=".jpg",
             file_size=100,
@@ -1744,12 +1744,12 @@ def test_classify_plan_reclassify_suppresses_outdated(
 def test_count_photos_missing_thumb_basic(tmp_path):
     """One photo with thumb_path set, one without → eligible=2, pending=1."""
     db, folder_id = _make_db(tmp_path)
-    pid_done = db.add_photo(
-        folder_id=folder_id, filename="done.jpg", extension=".jpg",
+    pid_done = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="done.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=folder_id, filename="todo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="todo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1767,12 +1767,12 @@ def test_count_photos_missing_thumb_empty_workspace(tmp_path):
 def test_count_photos_missing_preview_basic(tmp_path):
     """preview_cache row at the requested size means 'already cached'."""
     db, folder_id = _make_db(tmp_path)
-    pid_a = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid_a, 1920, 100)
@@ -1786,8 +1786,8 @@ def test_count_photos_missing_preview_size_specific(tmp_path):
     must not count cross-size cache rows toward the configured size.
     """
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid, 1280, 100)
@@ -1806,20 +1806,20 @@ def test_count_photos_missing_thumb_or_preview_union(tmp_path):
     pins the union behaviour the Thumbnails & Previews pill needs.
     """
     db, folder_id = _make_db(tmp_path)
-    pid_thumb_only_missing = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid_thumb_only_missing = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    pid_preview_only_missing = db.add_photo(
-        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    pid_preview_only_missing = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    pid_both_done = db.add_photo(
-        folder_id=folder_id, filename="c.jpg", extension=".jpg",
+    pid_both_done = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="c.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    pid_both_missing = db.add_photo(
-        folder_id=folder_id, filename="d.jpg", extension=".jpg",
+    pid_both_missing = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="d.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     # b and c have a thumb on disk; a and d do not.
@@ -1848,12 +1848,12 @@ def test_previews_plan_pending_uses_union_not_max(tmp_path):
     """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    pid_thumb_only_missing = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid_thumb_only_missing = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    pid_preview_only_missing = db.add_photo(
-        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    pid_preview_only_missing = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1879,12 +1879,12 @@ def test_previews_plan_pending_uses_union_not_max(tmp_path):
 def test_previews_plan_done_prior_when_all_cached(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    pid_a = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    pid_b = db.add_photo(
-        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1911,12 +1911,12 @@ def test_previews_plan_will_run_with_pending_counts(tmp_path):
     """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    pid_done = db.add_photo(
-        folder_id=folder_id, filename="done.jpg", extension=".jpg",
+    pid_done = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="done.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=folder_id, filename="todo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="todo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1942,8 +1942,8 @@ def test_previews_plan_done_prior_when_full_resolution_and_thumbs_cached(tmp_pat
     """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1962,8 +1962,8 @@ def test_previews_plan_done_prior_when_full_resolution_and_thumbs_cached(tmp_pat
 def test_previews_plan_full_resolution_will_run_when_thumbs_pending(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     plan = compute_plan(
@@ -1986,8 +1986,8 @@ def test_previews_plan_size_change_invalidates_done_prior(tmp_path):
     """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -3300,9 +3300,9 @@ def test_import_plan_partial_overlap_counts_only_truly_new(tmp_path, monkeypatch
     _stub_models(monkeypatch)
     # Two existing photos in DB at /cards/A/...
     fid_card = db.add_folder("/cards/A")
-    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid_card, filename="IMG_002.NEF",
+    photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_002.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     paths = [
@@ -3333,7 +3333,7 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     db, folder_id = _make_db(tmp_path)
     _stub_models(monkeypatch)
     fid_card = db.add_folder("/cards/A")
-    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     # All-known with duplicates: same known path repeated must NOT count
@@ -3507,7 +3507,7 @@ def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     fid_card = db.add_folder("/cards/A")
-    db.add_photo(folder_id=fid_card, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid_card, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     plan = compute_plan(
@@ -3546,7 +3546,7 @@ def test_import_plan_all_known_but_folder_unlinked_to_active_workspace(tmp_path)
     ws_a = db.create_workspace("WorkspaceA")
     db._active_workspace_id = ws_a
     fid = db.add_folder("/cards/A")  # auto-linked to WorkspaceA
-    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     # Switch active workspace to a fresh B that has no link to /cards/A.
@@ -3580,7 +3580,7 @@ def test_import_plan_all_known_with_folder_linked_stays_done_prior(tmp_path):
     from pipeline_plan import compute_plan
     db, _ = _make_db(tmp_path)
     fid = db.add_folder("/cards/A")  # auto-links to active WS
-    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     plan = compute_plan(
@@ -3892,7 +3892,7 @@ def test_import_plan_hash_dup_also_known_at_path_not_double_counted(tmp_path, mo
     db, _ = _make_db(tmp_path)
     _stub_models(monkeypatch)
     fid = db.add_folder("/cards/A")
-    db.add_photo(folder_id=fid, filename="IMG_001.NEF",
+    photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
 
     plan = compute_plan(
@@ -3930,7 +3930,7 @@ def test_import_plan_hash_duplicate_does_not_link_source_folder(tmp_path, monkey
     # Photo lives at /library/2025 in WorkspaceA. Folder /cards/SD has
     # never been seen by the DB, so it would normally count as "unlinked".
     fid = db.add_folder("/library/2025")
-    db.add_photo(folder_id=fid, filename="dest.NEF",
+    photo_ingest.add_photo(db, folder_id=fid, filename="dest.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")
 
@@ -3970,7 +3970,7 @@ def test_import_plan_hash_duplicate_with_unlinked_source_folder(tmp_path, monkey
     # Existing photo at /cards/A/IMG_OLD.NEF — its folder is in WorkspaceA
     # only. Re-importing into WorkspaceB will link /cards/A here.
     fid_a = db.add_folder("/cards/A")
-    db.add_photo(folder_id=fid_a, filename="IMG_OLD.NEF",
+    photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_OLD.NEF",
                  extension=".nef", file_size=1, file_mtime=1.0)
     db._active_workspace_id = db.create_workspace("WorkspaceB")
 

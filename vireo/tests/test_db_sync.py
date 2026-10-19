@@ -25,6 +25,7 @@ import uuid
 import pytest
 from db import Database
 from repositories.sync import SyncRepository
+from services import photo_ingest
 
 
 def _visible_rows(db):
@@ -78,10 +79,10 @@ def lib(db):
     db.add_workspace_folder(other, f1)
     db.add_workspace_folder(other, f2)
     p = {
-        "a": db.add_photo(f1, "a.jpg", ".jpg", 1, 1.0),
-        "a_raw": db.add_photo(f1, "a.cr2", ".cr2", 1, 1.0),
-        "b": db.add_photo(f1, "b.jpg", ".jpg", 1, 1.0),
-        "c": db.add_photo(f2, "c.jpg", ".jpg", 1, 1.0),
+        "a": photo_ingest.add_photo(db, f1, "a.jpg", ".jpg", 1, 1.0),
+        "a_raw": photo_ingest.add_photo(db, f1, "a.cr2", ".cr2", 1, 1.0),
+        "b": photo_ingest.add_photo(db, f1, "b.jpg", ".jpg", 1, 1.0),
+        "c": photo_ingest.add_photo(db, f2, "c.jpg", ".jpg", 1, 1.0),
     }
     db.conn.commit()
     return {"db": db, "ws": ws, "other": other, "f1": f1, "f2": f2, **p}
@@ -389,8 +390,8 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
         lower.mkdir()
     fu = db.add_folder(str(upper), name="Dir")
     fl = db.add_folder(str(lower), name="dir")
-    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
-    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
+    pu = photo_ingest.add_photo(db, fu, "a.jpg", ".jpg", 1, 1.0)
+    pl = photo_ingest.add_photo(db, fl, "a.png", ".png", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     # Neither sidecar exists: samefile raises OSError, suppressed -> False
     # (unless the platform folds case, when the paths are simply equal).
@@ -406,9 +407,9 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     fu = db.add_folder(str(tmp_path / "Nope"), name="Nope")
     fl = db.add_folder(str(tmp_path / "nope"), name="nope")
     fx = db.add_folder(str(tmp_path / "elsewhere"), name="elsewhere")
-    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
-    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
-    px = db.add_photo(fx, "z.jpg", ".jpg", 1, 1.0)
+    pu = photo_ingest.add_photo(db, fu, "a.jpg", ".jpg", 1, 1.0)
+    pl = photo_ingest.add_photo(db, fl, "a.png", ".png", 1, 1.0)
+    px = photo_ingest.add_photo(db, fx, "z.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     _insert(db, px, "keyword_add", "Robin", ws)
     assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE

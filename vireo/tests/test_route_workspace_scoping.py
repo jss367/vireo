@@ -12,6 +12,7 @@ import os
 import time
 
 import pytest
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -28,8 +29,8 @@ def scoped(app_and_db, tmp_path):
     other_dir = tmp_path / "other"
     other_dir.mkdir()
     other_fid = db.add_folder(str(other_dir), name="other")
-    foreign_pid = db.add_photo(
-        folder_id=other_fid, filename="foreign.jpg", extension=".jpg",
+    foreign_pid = photo_ingest.add_photo(
+        db, folder_id=other_fid, filename="foreign.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     # Hand the "last opened" workspace back to Default so the per-request

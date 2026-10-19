@@ -2,6 +2,7 @@ import json
 import os
 
 import pytest
+from services import photo_ingest
 
 
 def test_editor_crop_ratio_persists_in_config(app_and_db):
@@ -257,8 +258,8 @@ def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
     other_workspace_id = db.create_workspace("Other review workspace")
     db.set_active_workspace(other_workspace_id)
     folder_id = db.add_folder("/photos/other-review", name="other-review")
-    hidden_id = db.add_photo(
-        folder_id=folder_id,
+    hidden_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="hidden-review.jpg",
         extension=".jpg",
         file_size=10,
@@ -703,8 +704,8 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
             str(tmp_path / "second-photos"), name="second-photos",
         )
         second_db.add_workspace_folder(second_ws, second_folder)
-        second_photo = second_db.add_photo(
-            folder_id=second_folder,
+        second_photo = photo_ingest.add_photo(
+            second_db, folder_id=second_folder,
             filename="second.jpg",
             extension=".jpg",
             file_size=10,

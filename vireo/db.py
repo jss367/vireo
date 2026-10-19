@@ -2895,8 +2895,9 @@ class Database:
         the workspace; the workspace-scoped reads (``list_page``,
         ``get_ids``, ``count``, the Best Batch rows ...) resolve the active
         one before any SQL and raise when none is active, so never hold one
-        across ``set_active_workspace``. Composition such as ``add_photo``,
-        ``delete_photos`` and ``get_browse_summary`` stays on ``Database``.
+        across ``set_active_workspace``. Composition such as ``delete_photos``
+        and ``get_browse_summary`` stays on ``Database``; ``add_photo`` lives in
+        ``services/photo_ingest.py``.
         """
         return self._photos_repository()
 
@@ -2931,59 +2932,6 @@ class Database:
             facade=self,
         )
 
-    def add_photo(
-        self,
-        folder_id,
-        filename,
-        extension,
-        file_size,
-        file_mtime,
-        timestamp=None,
-        width=None,
-        height=None,
-        xmp_mtime=None,
-        file_hash=None,
-        return_inserted=False,
-    ):
-        """Insert a photo. Returns the photo id.
-
-        If ``file_hash`` is provided and the insert creates a new row that
-        collides with an existing non-rejected photo sharing the same hash,
-        the duplicate auto-resolver runs and flags the loser(s) as rejected.
-        The hook is wrapped in try/except so resolver bugs never break
-        inserts.
-
-        With ``return_inserted=True`` returns ``(photo_id, inserted)`` instead;
-        ``inserted`` is False when another writer inserted the row first and
-        the INSERT OR IGNORE here was a no-op. Callers that would purge
-        state inherited from a recycled id must branch on this signal rather
-        than on their own pre-check SELECT, which cannot see a concurrent
-        insert.
-        """
-        photo_id, inserted = self._photos_repository().add(
-            folder_id,
-            filename,
-            extension,
-            file_size,
-            file_mtime,
-            timestamp=timestamp,
-            width=width,
-            height=height,
-            xmp_mtime=xmp_mtime,
-            file_hash=file_hash,
-        )
-
-        # Auto-resolve duplicates when we have a file_hash and >1 non-rejected
-        # rows share it. Most scanner-path callers leave file_hash=None here
-        # and set it later via an UPDATE; those callers must invoke
-        # check_and_resolve_duplicates_for_hash themselves after the UPDATE.
-        if file_hash:
-            self.check_and_resolve_duplicates_for_hash(file_hash)
-
-        if return_inserted:
-            return photo_id, inserted
-        return photo_id
-
     def _duplicates_repository(self):
         """Build the duplicates repository on this connection.
 
@@ -3003,76 +2951,20 @@ class Database:
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_duplicates_repository``, exactly as a forwarding
         wrapper called at that moment would. Every method is catalog-wide, so
-        it needs no active workspace. Resolution stays on ``Database``
-        (``apply_duplicate_resolution``, ``bulk_resolve_by_folder``,
-        ``check_and_resolve_duplicates_for_hash``) because it re-tags the
+        it needs no active workspace. Resolution lives in
+        ``services/duplicate_resolution.py`` (``apply_duplicate_resolution``,
+        ``bulk_resolve_by_folder``, ``keep_duplicate_copy``,
+        ``check_and_resolve_duplicates_for_hash``); the merge they share,
+        ``_apply_winner_loser_merge``, stays here because it re-tags the
         winner through ``tag_photo``.
         """
         return self._duplicates_repository()
 
-    def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
-        """Look up non-rejected photos sharing this hash; if >=2, resolve.
-
-        Returns the result dict from apply_duplicate_resolution when resolution
-        ran, or None when no resolution was needed. Failures are logged and
-        swallowed — this is a best-effort hook, not a correctness guarantee.
-        """
-        if not file_hash:
-            return None
-        try:
-            dup_ids = self._duplicates_repository().live_ids_for_hash(file_hash)
-            if len(dup_ids) > 1:
-                return self.apply_duplicate_resolution(dup_ids)
-        except sqlite3.Error as e:
-            logging.getLogger(__name__).warning(
-                "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
-            )
-        return None
-
-    def apply_duplicate_resolution(self, photo_ids):
-        """Resolve a group of photos sharing a file_hash.
-
-        Picks a winner using :func:`vireo.duplicates.resolve_duplicates`,
-        merges metadata (rating/keywords) from losers onto the winner, and
-        flags the losers as rejected. Runs in a single transaction.
-
-        Photos whose ``flag`` is already ``'rejected'`` are filtered out
-        before resolving — we never un-reject previously handled losers.
-
-        Returns ``{"winner_id": int|None, "loser_ids": [int], "rejected": int}``.
-        If fewer than 2 non-rejected candidates remain, returns the no-op
-        shape with ``winner_id=None``. When at least one candidate lives
-        on an offline volume, the resolver defers instead of picking a
-        winner: the return dict adds ``"deferred": True`` so callers can
-        tell deferrals apart from no-ops and keep the group visible.
-        """
-        from repositories.duplicates import DEFERRED_PLAN
-
-        plan = self._duplicates_repository().resolution_plan(photo_ids)
-        if plan is None:
-            return {"winner_id": None, "loser_ids": [], "rejected": 0}
-        if plan is DEFERRED_PLAN:
-            return {
-                "winner_id": None,
-                "loser_ids": [],
-                "rejected": 0,
-                "deferred": True,
-            }
-        winner_id, loser_ids = plan
-
-        self._apply_winner_loser_merge(winner_id, loser_ids)
-
-        return {
-            "winner_id": winner_id,
-            "loser_ids": list(loser_ids),
-            "rejected": len(loser_ids),
-        }
-
     def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None):
         """Merge rating/keywords from losers onto winner, then flag losers
         as rejected. Single transaction. Shared between the resolver-based
-        ``apply_duplicate_resolution`` and the user-driven
-        ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``.
+        ``duplicate_resolution.apply_duplicate_resolution`` and the
+        user-driven ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``.
 
         ``winner_flag``, when given, is written to the winner in the same
         transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
@@ -3124,102 +3016,6 @@ class Database:
             winner_id,
             loser_ids,
         )
-
-    def keep_duplicate_copy(self, photo_id):
-        """Make ``photo_id`` the one kept copy of its duplicate group.
-
-        The user's override of a decision the resolver (or an earlier choice)
-        made: the chosen copy is un-rejected if needed, every other kept copy
-        of the same file is rejected, and their rating and keywords merge
-        onto the chosen copy, all in one transaction. Copies already rejected
-        stay rejected. Refuses a copy that is missing on disk or on an
-        offline volume (see ``DuplicatesRepository.keep_copy_refusal``).
-
-        The plan is read under SQLite's writer lock and applied in the same
-        transaction, so two concurrent keeps in one group can't each reject
-        the old keeper and leave both chosen copies kept; the later one sees
-        the earlier one's keeper and rejects it. The disk checks run before
-        the lock, since a stat on a network volume can be slow.
-
-        Returns ``{"file_hash", "winner_id", "loser_ids", "rating", "flag"}``
-        or ``{"error": reason}``.
-        """
-        repo = self._duplicates_repository()
-        reason = repo.keep_copy_refusal(photo_id)
-        if reason is not None:
-            return {"error": reason}
-        self.begin_immediate()
-        try:
-            plan, reason = repo.keep_copy_plan(photo_id)
-            if reason is not None:
-                self.rollback()
-                return {"error": reason}
-            # Commits the transaction opened above.
-            self._apply_winner_loser_merge(
-                photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
-            )
-        except BaseException:
-            if self.in_transaction:
-                self.rollback()
-            raise
-        return {
-            "file_hash": plan["file_hash"],
-            "winner_id": photo_id,
-            "loser_ids": plan["loser_ids"],
-            "rating": repo.photo_metadata(photo_id).rating,
-            "flag": plan["winner_flag"],
-        }
-
-    def bulk_resolve_by_folder(self, file_hashes, keep_folder):
-        """Force-resolve many duplicate groups by keeping the photo whose
-        folder matches ``keep_folder``. Companion to the bulk-decide UI.
-
-        For each ``file_hash``: find non-rejected candidates, pick the one
-        whose folder path equals ``keep_folder`` as winner, mark every
-        other candidate as rejected, merge metadata. If multiple
-        candidates live in ``keep_folder`` (rare — typically only happens
-        when same-folder duplicates accumulate), runs the deterministic
-        resolver against just those to pick a single winner.
-
-        Skip reasons are surfaced rather than raised so a single bad hash
-        doesn't poison a 1000-hash batch:
-        - ``"no candidates"`` — file_hash has no DB rows (stale UI state)
-        - ``"fewer than 2 candidates"`` — only one row left, nothing to do
-        - ``"no candidate in keep_folder"`` — group exists but isn't
-          actionable from this folder choice
-        - ``"keep_folder candidate missing on disk"`` — the row(s) in
-          keep_folder point at files that no longer exist; promoting them
-          would reject the only surviving sibling (and, if the caller
-          chains a delete, trash it).
-
-        Returns ``{"resolved": [{"file_hash", "winner_id", "loser_ids"}],
-        "skipped": [{"file_hash", "reason"}]}``.
-        """
-        # Normalize once. The bucket UI derives folder paths from
-        # ``os.path.dirname(...)`` (never trailing-slashed), but
-        # ``folders.path`` rows can carry a trailing separator from
-        # manual relocation or legacy imports — a naive string compare
-        # silently no-ops the action for those users.
-        keep_folder_norm = os.path.normpath(keep_folder) if keep_folder else ""
-
-        repo = self._duplicates_repository()
-        resolved = []
-        skipped = []
-        for file_hash in file_hashes:
-            winner_id, loser_ids, reason = repo.keep_folder_plan(
-                file_hash, keep_folder_norm,
-            )
-            if reason is not None:
-                skipped.append({"file_hash": file_hash, "reason": reason})
-                continue
-            self._apply_winner_loser_merge(winner_id, loser_ids)
-            resolved.append({
-                "file_hash": file_hash,
-                "winner_id": winner_id,
-                "loser_ids": loser_ids,
-            })
-
-        return {"resolved": resolved, "skipped": skipped}
 
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,

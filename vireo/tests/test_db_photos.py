@@ -19,6 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
+from services import duplicate_resolution, photo_ingest
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def _photo(db, folder_id, filename, **kw):
     kw.setdefault("extension", "." + filename.rsplit(".", 1)[-1])
     kw.setdefault("file_size", 100)
     kw.setdefault("file_mtime", 1.0)
-    return db.add_photo(folder_id=folder_id, filename=filename, **kw)
+    return photo_ingest.add_photo(db, folder_id=folder_id, filename=filename, **kw)
 
 
 def _trace(db):
@@ -116,7 +117,8 @@ def test_add_photo_existing_row_returns_existing_id_without_update(db):
 def test_add_photo_runs_duplicate_resolution_only_with_hash(db, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        db, "check_and_resolve_duplicates_for_hash", calls.append,
+        duplicate_resolution, "check_and_resolve_duplicates_for_hash",
+        lambda _db, file_hash: calls.append(file_hash),
     )
     fid = db.add_folder("/p", name="p")
     _photo(db, fid, "x.jpg")
@@ -1369,7 +1371,7 @@ def test_count_catalog_photos_counts_every_folder_status(db, lib):
 # -- structure -----------------------------------------------------------------
 
 # Coordinated work that stays on ``Database`` and builds the repository itself.
-COORDINATED = ["add_photo", "get_browse_summary", "delete_photos"]
+COORDINATED = ["get_browse_summary", "delete_photos"]
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.photos`` now.
@@ -1455,9 +1457,25 @@ def test_composition_stays_on_the_facade():
         "photos", "invalidate_new_images_cache_for_folders",
         "prune_pipeline_cache_for_ids", "_ws_id",
     } <= _self_attrs("delete_photos")
-    assert "check_and_resolve_duplicates_for_hash" in _self_attrs("add_photo")
     assert "get_effective_config" in _self_attrs("get_browse_summary")
     assert {"_FILTER_SUBJECT_CHUNK", "_ws_id"} <= _self_attrs("_photos_repository")
+
+
+def test_add_photo_inserts_through_the_repository_then_runs_the_hook():
+    """``photo_ingest.add_photo`` composes the insert and the duplicate hook."""
+    tree = ast.parse(inspect.getsource(photo_ingest))
+    impl = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "add_photo"
+        and not any(
+            isinstance(d, ast.Name) and d.id == "overload" for d in node.decorator_list
+        )
+    ]
+    assert len(impl) == 1
+    attrs = {node.attr for node in ast.walk(impl[0]) if isinstance(node, ast.Attribute)}
+    assert {"photos", "add", "check_and_resolve_duplicates_for_hash"} <= attrs
+    assert "conn" not in attrs
+    assert not hasattr(Database, "add_photo")
 
 
 def test_photo_repository_routes_facade_calls_through_database(db):

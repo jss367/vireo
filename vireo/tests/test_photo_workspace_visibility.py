@@ -4,14 +4,14 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import dashboard_stats
+from services import dashboard_stats, photo_ingest
 
 
 def _photo(db, folder, name, content=b"photo"):
     folder.mkdir(exist_ok=True)
     (folder / name).write_bytes(content)
     fid = db.add_folder(str(folder))
-    pid = db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                        file_size=len(content), file_mtime=1)
     return fid, pid
 
@@ -374,7 +374,7 @@ def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
     with Database(str(tmp_path / 'db')) as db:
         b = db.create_workspace('Other')
         folder, jpeg = _photo(db, tmp_path / 'folder', 'IMG_001.jpg')
-        raw = db.add_photo(folder_id=folder, filename='IMG_001.cr3', extension='.cr3', file_size=2000, file_mtime=1)
+        raw = photo_ingest.add_photo(db, folder_id=folder, filename='IMG_001.cr3', extension='.cr3', file_size=2000, file_mtime=1)
         _, sibling = _photo(db, tmp_path / 'folder', 'unrelated.jpg', b'unrelated')
         db.photo_visibility.grant(b, [jpeg])
         db.conn.commit()

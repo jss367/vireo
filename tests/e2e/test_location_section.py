@@ -16,6 +16,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture(autouse=True)
@@ -1780,8 +1781,8 @@ def test_location_applies_to_selection_larger_than_batch_cap(live_server, page):
     db = live_server["db"]
     folder_id = db.add_folder("/photos/laguna", name="laguna")
     photo_ids = [
-        db.add_photo(
-            folder_id=folder_id, filename=f"laguna{i}.jpg", extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"laguna{i}.jpg", extension=".jpg",
             file_size=1000, file_mtime=1.0, timestamp="2024-05-01T09:00:00",
         )
         for i in range(1200)

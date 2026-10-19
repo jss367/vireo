@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import places
 import pytest
-from services import import_locations
+from services import import_locations, photo_ingest
 from services.gps_locations import (
     REVERSE_GEOCODE_CACHE_RESOLVER,
     encode_cached_reverse_geocode,
@@ -36,8 +36,8 @@ def fid(db):
 
 
 def _photo(db, fid, name, point=None):
-    pid = db.add_photo(
-        folder_id=fid, filename=name, extension=".jpg", file_size=10, file_mtime=1.0,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=".jpg", file_size=10, file_mtime=1.0,
     )
     if point is not None:
         db.conn.execute(

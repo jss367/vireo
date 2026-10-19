@@ -8,6 +8,7 @@ import numpy as np
 import panorama
 import pytest
 from PIL import Image
+from services import photo_ingest
 from wait import wait_for_job_via_client
 from web.background_jobs import JobCancelled
 
@@ -25,8 +26,8 @@ def panorama_env(db, tmp_path):
         path = folder / f"view{i}.png"
         Image.fromarray(pixels).save(path)
         ids.append(
-            db.add_photo(
-                folder_id=fid,
+            photo_ingest.add_photo(
+                db, folder_id=fid,
                 filename=path.name,
                 extension=".png",
                 file_size=path.stat().st_size,
@@ -183,7 +184,7 @@ def test_api_validation_and_workspace_boundaries(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     other_folder = db.add_folder("/other")
-    foreign_id = db.add_photo(folder_id=other_folder, filename="other.jpg", extension=".jpg", file_size=1, file_mtime=1)
+    foreign_id = photo_ingest.add_photo(db, folder_id=other_folder, filename="other.jpg", extension=".jpg", file_size=1, file_mtime=1)
     response = client.post("/api/jobs/panorama", json={"photo_ids": [1, foreign_id]})
     assert response.status_code == 400
     assert "current workspace" in response.json["error"]

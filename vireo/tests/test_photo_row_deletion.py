@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from repositories.photo_row_deletion import photo_row_deletion
+from services import photo_ingest
 from services.startup_tasks import StartupTasks
 
 VIREO_ROOT = Path(__file__).resolve().parents[1]
@@ -97,8 +98,8 @@ def test_delete_matcher_ignores_other_tables_and_prose(sql):
 
 
 def _photo(db, folder_id, filename, **kw):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename,
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension="." + filename.rsplit(".", 1)[1],
         file_size=kw.pop("file_size", 10), file_mtime=kw.pop("file_mtime", 1.0),
         **kw,

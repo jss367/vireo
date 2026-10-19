@@ -4,6 +4,7 @@ import os
 
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 
 
@@ -72,8 +73,8 @@ def test_extract_working_copy_for_large_jpeg(tmp_path, monkeypatch):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(folder))
-    photo_id = db.add_photo(
-        folder_id, "big.jpg", ".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=2000, height=1500,
@@ -115,8 +116,8 @@ def test_no_jpeg_working_copy_when_max_size_zero(tmp_path, monkeypatch):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(folder))
-    photo_id = db.add_photo(
-        folder_id, "big.jpg", ".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=2000, height=1500,
@@ -137,8 +138,8 @@ def _seed_large_jpeg(db, folder, filename):
     src = folder / filename
     _make_jpeg(str(src), 2000, 1500)
     folder_id = db.add_folder(str(folder))
-    return db.add_photo(
-        folder_id, filename, ".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id, filename, ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=2000, height=1500,
@@ -418,8 +419,8 @@ def test_no_working_copy_for_small_jpeg(tmp_path, monkeypatch):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(folder))
-    photo_id = db.add_photo(
-        folder_id, "small.jpg", ".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "small.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=800, height=600,
@@ -462,8 +463,8 @@ def test_candidate_count_excludes_small_jpegs(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(folder))
-    db.add_photo(
-        folder_id, "small.jpg", ".jpg",
+    photo_ingest.add_photo(
+        db, folder_id, "small.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=800, height=600,
@@ -488,8 +489,8 @@ def test_candidate_count_includes_large_jpeg(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(folder))
-    db.add_photo(
-        folder_id, "big.jpg", ".jpg",
+    photo_ingest.add_photo(
+        db, folder_id, "big.jpg", ".jpg",
         file_size=os.path.getsize(str(src)),
         file_mtime=os.path.getmtime(str(src)),
         width=2000, height=1500,
@@ -514,8 +515,8 @@ def test_candidate_count_includes_raw(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(folder))
-    db.add_photo(
-        folder_id, "shot.nef", ".nef",
+    photo_ingest.add_photo(
+        db, folder_id, "shot.nef", ".nef",
         file_size=os.path.getsize(str(raw)),
         file_mtime=os.path.getmtime(str(raw)),
         width=None, height=None,
@@ -625,8 +626,8 @@ def test_backfill_failure_marker_prevents_retry_loop(tmp_path, monkeypatch):
     # Register a row whose source file does NOT exist on disk —
     # extract_working_copy will fail.
     folder_id = db.add_folder(str(folder))
-    pid = db.add_photo(
-        folder_id, "missing.jpg", ".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
         width=2000, height=1500,
     )
@@ -674,8 +675,8 @@ def test_backfill_failure_retries_when_mtime_changes(tmp_path, monkeypatch):
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(folder))
-    pid = db.add_photo(
-        folder_id, "missing.jpg", ".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
         width=2000, height=1500,
     )
@@ -777,8 +778,8 @@ def test_backfill_failure_does_not_retry_within_grace_period(tmp_path, monkeypat
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(folder))
-    pid = db.add_photo(
-        folder_id, "missing.jpg", ".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id, "missing.jpg", ".jpg",
         file_size=1000, file_mtime=42.0,
         width=2000, height=1500,
     )
@@ -1158,8 +1159,8 @@ def _prepare_backfill_app(tmp_path, monkeypatch, filenames):
     for name in filenames:
         src = photos_dir / name
         _make_jpeg(str(src), 2000, 1500)
-        ids.append(db.add_photo(
-            folder_id, name, ".jpg",
+        ids.append(photo_ingest.add_photo(
+            db, folder_id, name, ".jpg",
             file_size=os.path.getsize(str(src)),
             file_mtime=os.path.getmtime(str(src)),
             width=2000, height=1500,
@@ -1330,8 +1331,8 @@ def test_backfill_skips_row_when_id_reused_during_pause(
     # identity guard flags the mismatch even if the two saves land in
     # the same coarse mtime bucket on this filesystem.
     _make_jpeg(replacement, 1600, 1200)
-    new_id = admin_db.add_photo(
-        folder_id, "replacement.jpg", ".jpg",
+    new_id = photo_ingest.add_photo(
+        admin_db, folder_id, "replacement.jpg", ".jpg",
         file_size=os.path.getsize(replacement),
         file_mtime=os.path.getmtime(replacement),
         width=1600, height=1200,
@@ -1531,8 +1532,8 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
     # identity guard flags the mismatch even if the two saves land in
     # the same coarse mtime bucket on this filesystem.
     _make_jpeg(replacement, 1600, 1200)
-    new_id = admin_db.add_photo(
-        folder_id, "replacement.jpg", ".jpg",
+    new_id = photo_ingest.add_photo(
+        admin_db, folder_id, "replacement.jpg", ".jpg",
         file_size=os.path.getsize(replacement),
         file_mtime=os.path.getmtime(replacement),
         width=1600, height=1200,
@@ -1585,8 +1586,8 @@ def _make_noisy_jpeg(path, width, height):
 
 
 def _photo_id_of_file(db, folder_id, filename, path):
-    return db.add_photo(
-        folder_id, filename, ".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id, filename, ".jpg",
         file_size=os.path.getsize(str(path)),
         file_mtime=os.path.getmtime(str(path)),
         width=2000, height=1500,
@@ -1837,8 +1838,8 @@ def test_capacity_deferral_does_not_mark_reused_photo_id(
                 pending_id = photo_ids[-1]
                 db.conn.execute("DELETE FROM photos WHERE id=?", (pending_id,))
                 db.conn.commit()
-                replacement_id = db.add_photo(
-                    folder_id, "replacement.jpg", ".jpg",
+                replacement_id = photo_ingest.add_photo(
+                    db, folder_id, "replacement.jpg", ".jpg",
                     file_size=321, file_mtime=999.0,
                     width=2000, height=1500,
                 )
@@ -2772,8 +2773,8 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
 
     replacement_src = os.path.join(photos_dir, "replacement.jpg")
     _make_jpeg(replacement_src, 1600, 1200)
-    new_id = admin_db.add_photo(
-        folder_id, "replacement.jpg", ".jpg",
+    new_id = photo_ingest.add_photo(
+        admin_db, folder_id, "replacement.jpg", ".jpg",
         file_size=os.path.getsize(replacement_src),
         file_mtime=os.path.getmtime(replacement_src),
         width=1600, height=1200,
@@ -2956,8 +2957,8 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
     # (still queued behind our guard, so ``working_copy_path`` NULL).
     replacement_src = os.path.join(photos_dir, "replacement.jpg")
     _make_jpeg(replacement_src, 1600, 1200)
-    new_id = admin_db.add_photo(
-        folder_id, "replacement.jpg", ".jpg",
+    new_id = photo_ingest.add_photo(
+        admin_db, folder_id, "replacement.jpg", ".jpg",
         file_size=os.path.getsize(replacement_src),
         file_mtime=os.path.getmtime(replacement_src),
         width=1600, height=1200,
@@ -4737,8 +4738,8 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
 
     replacement_src = os.path.join(photos_dir, "replacement.jpg")
     _make_jpeg(replacement_src, 1600, 1200)
-    new_id = admin_db.add_photo(
-        folder_id, "replacement.jpg", ".jpg",
+    new_id = photo_ingest.add_photo(
+        admin_db, folder_id, "replacement.jpg", ".jpg",
         file_size=os.path.getsize(replacement_src),
         file_mtime=os.path.getmtime(replacement_src),
         width=1600, height=1200,

@@ -2,6 +2,7 @@ import json
 import os
 from types import SimpleNamespace
 
+from services import photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -623,8 +624,8 @@ def test_capture_time_job_applies_per_photo_shifts(client_with_photo, monkeypatc
 
     second_path = os.path.join(photos_dir, "second.jpg")
     _Image.new("RGB", (800, 600), (40, 90, 180)).save(second_path, "JPEG", quality=85)
-    p2 = db.add_photo(
-        folder_id=photo["folder_id"],
+    p2 = photo_ingest.add_photo(
+        db, folder_id=photo["folder_id"],
         filename="second.jpg",
         extension=".jpg",
         file_size=os.path.getsize(second_path),

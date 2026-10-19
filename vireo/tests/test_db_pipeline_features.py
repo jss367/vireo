@@ -14,7 +14,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.pipeline_features import PipelineFeaturesRepository
-from services import detection_store
+from services import detection_store, photo_ingest
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def catalog(db, tmp_path):
     ws = db.require_workspace_id()
     folder = db.add_folder(str(tmp_path), name="Pipeline")
     photos = [
-        db.add_photo(folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
                      file_size=1, file_mtime=1, timestamp=f"2026-01-01T00:00:0{i}")
         for i in range(3)
     ]

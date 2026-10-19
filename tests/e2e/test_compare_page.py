@@ -1,4 +1,5 @@
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_server, page):
@@ -453,8 +454,8 @@ def test_compare_missing_prediction_filter_includes_subjectless_photos(live_serv
 
     db = live_server["db"]
     folder_id = live_server["data"]["folders"][0]
-    subjectless_pid = db.add_photo(
-        folder_id=folder_id, filename="subjectless.jpg", extension=".jpg",
+    subjectless_pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="subjectless.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0, timestamp="2024-03-10T09:00:00",
     )
     thumb_dir = live_server["app"].config["THUMB_CACHE_DIR"]
@@ -663,8 +664,8 @@ def test_compare_pages_the_queue_instead_of_rendering_the_collection(
     thumb_dir = live_server["app"].config["THUMB_CACHE_DIR"]
     extra_count = 60
     for index in range(extra_count):
-        pid = db.add_photo(
-            folder_id=folder_id, filename=f"paged{index:02d}.jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"paged{index:02d}.jpg",
             extension=".jpg", file_size=1000, file_mtime=1.0,
             timestamp=f"2024-04-01T09:{index:02d}:00",
         )
@@ -699,8 +700,8 @@ def test_compare_next_page_shows_different_rows(live_server, page):
     folder_id = live_server["data"]["folders"][0]
     thumb_dir = live_server["app"].config["THUMB_CACHE_DIR"]
     for index in range(4):
-        pid = db.add_photo(
-            folder_id=folder_id, filename=f"next{index:02d}.jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"next{index:02d}.jpg",
             extension=".jpg", file_size=1000, file_mtime=1.0,
             timestamp=f"2024-05-{index + 1:02d}T09:00:00",
         )

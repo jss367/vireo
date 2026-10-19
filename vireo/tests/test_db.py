@@ -4,9 +4,18 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import classify_preflight, dashboard_stats, detection_store, miss_flags, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from services import (
+    classify_preflight,
+    dashboard_stats,
+    detection_store,
+    duplicate_resolution,
+    miss_flags,
+    photo_ingest,
+    stage_counts,
+    subject_masks,
+)
 
 
 def test_create_tables(tmp_path):
@@ -200,8 +209,8 @@ def test_add_and_get_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename='DSC_0001.NEF',
         extension='.nef',
         file_size=25000000,
@@ -226,7 +235,7 @@ def test_get_photos_pagination(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     for i in range(25):
-        db.add_photo(folder_id=fid, filename=f'IMG_{i:04d}.jpg', extension='.jpg',
+        photo_ingest.add_photo(db, folder_id=fid, filename=f'IMG_{i:04d}.jpg', extension='.jpg',
                      file_size=1000, file_mtime=1700000000.0 + i)
 
     page1 = db.photos.list_page(page=1, per_page=10)
@@ -243,9 +252,9 @@ def test_get_photos_filter_by_folder(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     f1 = db.add_folder('/photos/a', name='a')
     f2 = db.add_folder('/photos/b', name='b')
-    db.add_photo(folder_id=f1, filename='a1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=f2, filename='b1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=f2, filename='b2.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=f1, filename='a1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=f2, filename='b1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=f2, filename='b2.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     results = db.photos.list_page(folder_id=f2)
     assert len(results) == 2
@@ -269,7 +278,7 @@ def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
     db.remove_workspace_folder(active_ws, a)
     db.add_workspace_folder(other_ws, a)
 
-    db.add_photo(folder_id=b, filename='b.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=b, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
 
     # Only A itself comes back (no expansion into B).
@@ -294,12 +303,12 @@ def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp
     db.remove_workspace_folder(active_ws, b)
     db.add_workspace_folder(other_ws, b)
 
-    db.add_photo(folder_id=a, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=a, filename='a.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=c, filename='c.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=c, filename='c.jpg', extension='.jpg',
                  file_size=100, file_mtime=2.0)
 
-    db.add_photo(folder_id=b, filename='hidden.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=b, filename='hidden.jpg', extension='.jpg',
                  file_size=100, file_mtime=3.0)
     # add_photo does not grant visibility back to the detached intermediate.
     assert db.get_folder_subtree_ids(a) == [a, c]
@@ -319,10 +328,10 @@ def test_get_photos_folder_filter_includes_descendants(tmp_path):
     leaf = db.add_folder('/photos/2024/01-15', name='01-15', parent_id=year)
     sibling = db.add_folder('/other', name='other')
 
-    db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=year, filename='mid.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
-    db.add_photo(folder_id=leaf, filename='deep.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
-    db.add_photo(folder_id=sibling, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=4.0)
+    photo_ingest.add_photo(db, folder_id=root, filename='top.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=year, filename='mid.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    photo_ingest.add_photo(db, folder_id=leaf, filename='deep.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+    photo_ingest.add_photo(db, folder_id=sibling, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=4.0)
 
     assert len(db.photos.list_page(folder_id=root)) == 3
     assert len(db.photos.list_page(folder_id=year)) == 2
@@ -336,8 +345,8 @@ def test_count_filtered_photos_folder_includes_descendants(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    photo_ingest.add_photo(db, folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=child, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
 
     assert db.photos.count_filtered(folder_id=root) == 2
     assert db.photos.count_filtered(folder_id=child) == 2
@@ -349,8 +358,8 @@ def test_browse_summary_folder_includes_descendants(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    photo_ingest.add_photo(db, folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=root, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
 
     summary = db.get_browse_summary(folder_id=root)
     assert summary['filtered_total'] == 2
@@ -365,7 +374,7 @@ def test_browse_summary_top_species_filters_to_latest_fingerprint(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg',
                        extension='.jpg', file_size=100, file_mtime=1.0)
     det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
@@ -401,9 +410,9 @@ def test_calendar_data_folder_includes_descendants(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=child, filename='x.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T00:00:00')
-    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=child, filename='y.jpg', extension='.jpg', file_size=100,
                  file_mtime=2.0, timestamp='2024-06-15T00:01:00')
 
     data = db.photos.get_calendar_data(year=2024, folder_id=root)
@@ -416,9 +425,9 @@ def test_geolocated_photos_folder_includes_descendants(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    pid1 = db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg',
+    pid1 = photo_ingest.add_photo(db, folder_id=child, filename='x.jpg', extension='.jpg',
                         file_size=100, file_mtime=1.0)
-    pid2 = db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg',
+    pid2 = photo_ingest.add_photo(db, folder_id=root, filename='y.jpg', extension='.jpg',
                         file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET latitude = 10.0, longitude = 20.0 WHERE id = ?", (pid1,))
     db.conn.execute("UPDATE photos SET latitude = 11.0, longitude = 21.0 WHERE id = ?", (pid2,))
@@ -433,8 +442,8 @@ def test_get_photos_filter_by_rating(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 3)
     db.photo_review.set_rating(p2, 5)
 
@@ -448,13 +457,13 @@ def test_get_photos_filter_by_flag(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    picked = db.add_photo(folder_id=fid, filename='pick.jpg', extension='.jpg',
+    picked = photo_ingest.add_photo(db, folder_id=fid, filename='pick.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0,
                           timestamp='2024-01-01T10:00:00')
-    rejected = db.add_photo(folder_id=fid, filename='reject.jpg', extension='.jpg',
+    rejected = photo_ingest.add_photo(db, folder_id=fid, filename='reject.jpg', extension='.jpg',
                             file_size=100, file_mtime=2.0,
                             timestamp='2024-01-02T10:00:00')
-    db.add_photo(folder_id=fid, filename='plain.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='plain.jpg', extension='.jpg',
                  file_size=100, file_mtime=3.0,
                  timestamp='2024-01-03T10:00:00')
     db.photo_review.set_flag(picked, 'flagged')
@@ -481,11 +490,11 @@ def test_get_photos_filter_by_date_range(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='jan.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='jan.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-15T10:00:00')
-    db.add_photo(folder_id=fid, filename='jun.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='jun.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T10:00:00')
-    db.add_photo(folder_id=fid, filename='dec.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='dec.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-12-15T10:00:00')
 
     results = db.photos.list_page(date_from='2024-03-01', date_to='2024-09-01')
@@ -498,9 +507,9 @@ def test_get_photos_sort(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-01T00:00:00')
-    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-01T00:00:00')
 
     by_name = db.photos.list_page(sort='name')
@@ -518,11 +527,11 @@ def test_get_photos_date_sort_puts_missing_timestamps_last(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp=None)
-    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-01T00:00:00')
-    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-01T00:00:00')
 
     by_date = db.photos.list_page(sort='date')
@@ -541,11 +550,11 @@ def test_sort_date_tiebreaker(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     # Insert in non-alphabetical order
-    db.add_photo(folder_id=fid, filename='IMG_003.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='IMG_003.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T14:30:00')
-    db.add_photo(folder_id=fid, filename='IMG_001.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='IMG_001.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T14:30:00')
-    db.add_photo(folder_id=fid, filename='IMG_002.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='IMG_002.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T14:30:00')
 
     by_date = db.photos.list_page(sort='date')
@@ -560,9 +569,9 @@ def test_date_filter_inclusive_with_subsec(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
-    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
     # Bare date bound should include both photos
@@ -604,7 +613,7 @@ def test_update_photo_rating(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(pid, 4)
     photo = db.photos.get(pid)
     assert photo['rating'] == 4
@@ -615,7 +624,7 @@ def test_update_photo_flag(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_flag(pid, 'flagged')
     photo = db.photos.get(pid)
     assert photo['flag'] == 'flagged'
@@ -632,7 +641,7 @@ def test_keyword_hierarchy(tmp_path):
     # Keywords need photos in the workspace to appear in the tree
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.tag_photo(pid, birds)
     db.tag_photo(pid, raptors)
@@ -650,7 +659,7 @@ def test_tag_and_untag_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     kid = db.add_keyword('Cardinal')
 
     db.tag_photo(pid, kid)
@@ -670,7 +679,7 @@ def test_pending_changes_queue(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     db.queue_change(pid, 'rating', '4')
     db.queue_change(pid, 'keyword_add', 'Cardinal')
@@ -699,8 +708,8 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
     db.set_active_workspace(ws_id)
     staging = db.add_folder('/staging/trip', name='trip')
     destination = db.add_folder('/nas/trip', name='trip')
-    pid = db.add_photo(
-        folder_id=staging, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(
+        db, folder_id=staging, filename='bird.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
 
@@ -739,12 +748,12 @@ def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
     ws2 = db.create_workspace('sibling')
     db.set_active_workspace(ws1)
     fid = db.add_folder('/photos', name='photos')
-    shared = db.add_photo(
-        folder_id=fid, filename='a.jpg', extension='.jpg',
+    shared = photo_ingest.add_photo(
+        db, folder_id=fid, filename='a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    other_only = db.add_photo(
-        folder_id=fid, filename='b.jpg', extension='.jpg',
+    other_only = photo_ingest.add_photo(
+        db, folder_id=fid, filename='b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
     db.queue_change(shared, "keyword_add", "Osprey")
@@ -784,8 +793,8 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(
-        folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename='a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
 
@@ -835,8 +844,8 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(
-        folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename='a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -866,8 +875,8 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(
-        folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename='a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
     total = _SQLITE_PARAM_CHUNK_SIZE + 5
@@ -890,8 +899,8 @@ def test_get_photos_keyword_search(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='cardinal.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='cardinal.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     k1 = db.add_keyword('Cardinal')
     k2 = db.add_keyword('Sparrow')
     db.tag_photo(p1, k1)
@@ -909,9 +918,9 @@ def test_get_photos_keyword_multi_token(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.tag_photo(p1, db.add_keyword('Red-billed leiothrix'))
     db.tag_photo(p2, db.add_keyword('Northern Cardinal'))
     # p3 holds each token in a *separate* keyword.
@@ -939,20 +948,20 @@ def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    western = db.add_photo(
-        folder_id=fid, filename='western-gull.jpg', extension='.jpg',
+    western = photo_ingest.add_photo(
+        db, folder_id=fid, filename='western-gull.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    common = db.add_photo(
-        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+    common = photo_ingest.add_photo(
+        db, folder_id=fid, filename='common-tern.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    file_only = db.add_photo(
-        folder_id=fid, filename='tern_001.jpg', extension='.jpg',
+    file_only = photo_ingest.add_photo(
+        db, folder_id=fid, filename='tern_001.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    eastern = db.add_photo(
-        folder_id=fid, filename='eastern-phoebe.jpg', extension='.jpg',
+    eastern = photo_ingest.add_photo(
+        db, folder_id=fid, filename='eastern-phoebe.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
     db.tag_photo(western, db.add_keyword('Western Gull'))
@@ -977,12 +986,12 @@ def test_get_photos_keyword_match_case(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(
-        folder_id=fid, filename='Common-Tern.jpg', extension='.jpg',
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename='Common-Tern.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename='common-tern.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
 
@@ -1037,8 +1046,8 @@ def test_collection_photos_rating_rule(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='bad.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 5)
     db.photo_review.set_rating(p2, 2)
 
@@ -1059,11 +1068,11 @@ def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp=None)
-    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-01T00:00:00')
-    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+    photo_ingest.add_photo(db, folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-01T00:00:00')
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
@@ -1089,13 +1098,13 @@ def test_collection_photo_ids_honors_sort(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p_a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p_a = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0,
                        timestamp='2024-06-01T00:00:00')
-    p_b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p_b = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0,
                        timestamp='2024-01-01T00:00:00')
-    p_c = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg',
+    p_c = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0,
                        timestamp='2024-03-01T00:00:00')
     db.photo_review.set_rating(p_a, 2)
@@ -1138,18 +1147,18 @@ def test_collection_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path)
     # a later-named member is the quality-ranked cover. Under sort=name the
     # unstacked ordering would insert the low-quality frame first; the
     # stack-projected list must invert that so the visible cover leads.
-    burst_soft = db.add_photo(
-        folder_id=fid, filename='burst-a.jpg', extension='.jpg',
+    burst_soft = photo_ingest.add_photo(
+        db, folder_id=fid, filename='burst-a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-01-01T00:00:00',
     )
-    burst_cover = db.add_photo(
-        folder_id=fid, filename='burst-b.jpg', extension='.jpg',
+    burst_cover = photo_ingest.add_photo(
+        db, folder_id=fid, filename='burst-b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-01-01T00:00:01',
     )
-    single_later = db.add_photo(
-        folder_id=fid, filename='zebra.jpg', extension='.jpg',
+    single_later = photo_ingest.add_photo(
+        db, folder_id=fid, filename='zebra.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-06-01T00:00:00',
     )
@@ -1209,18 +1218,18 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    burst_soft = db.add_photo(
-        folder_id=fid, filename='burst-a.jpg', extension='.jpg',
+    burst_soft = photo_ingest.add_photo(
+        db, folder_id=fid, filename='burst-a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-01-01T00:00:00',
     )
-    burst_cover = db.add_photo(
-        folder_id=fid, filename='burst-b.jpg', extension='.jpg',
+    burst_cover = photo_ingest.add_photo(
+        db, folder_id=fid, filename='burst-b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-01-01T00:00:01',
     )
-    single_later = db.add_photo(
-        folder_id=fid, filename='zebra.jpg', extension='.jpg',
+    single_later = photo_ingest.add_photo(
+        db, folder_id=fid, filename='zebra.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
         timestamp='2024-06-01T00:00:00',
     )
@@ -1275,8 +1284,8 @@ def _seed_position_photos(db, folder_id, count=9):
     prediction sorts do not mirror the sharpness pair."""
     ids = []
     for index in range(count):
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f'p-{index:02d}.jpg',
             extension='.jpg',
             file_size=100 + index,
@@ -1340,8 +1349,8 @@ def test_query_photo_position_is_scoped_like_the_grid(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     other = db.add_folder('/elsewhere', name='elsewhere')
     ids = _seed_position_photos(db, fid)
-    outsider = db.add_photo(
-        folder_id=other, filename='outsider.jpg', extension='.jpg',
+    outsider = photo_ingest.add_photo(
+        db, folder_id=other, filename='outsider.jpg', extension='.jpg',
         file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
     )
 
@@ -1425,12 +1434,12 @@ def test_query_photo_ids_stacked_folder_scoped(tmp_path):
     db.set_active_workspace(ws_id)
     fid_a = db.add_folder('/photos/a', name='a')
     fid_b = db.add_folder('/photos/b', name='b')
-    in_a = db.add_photo(
-        folder_id=fid_a, filename='in-a.jpg', extension='.jpg',
+    in_a = photo_ingest.add_photo(
+        db, folder_id=fid_a, filename='in-a.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
     )
-    in_b = db.add_photo(
-        folder_id=fid_b, filename='in-b.jpg', extension='.jpg',
+    in_b = photo_ingest.add_photo(
+        db, folder_id=fid_b, filename='in-b.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0, timestamp='2024-01-02T00:00:00',
     )
 
@@ -1449,8 +1458,8 @@ def test_collection_photos_keyword_rule(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     k1 = db.add_keyword('Red-tailed hawk')
     k2 = db.add_keyword('Song sparrow')
     db.tag_photo(p1, k1)
@@ -1474,11 +1483,11 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='good.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='good.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='ok.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='ok.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg',
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='bad.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 5)
     db.photo_review.set_rating(p2, 4)
@@ -1505,12 +1514,12 @@ def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
-    paired = db.add_photo(
-        folder_id=fid, filename="paired.nef", extension=".nef",
+    paired = photo_ingest.add_photo(
+        db, folder_id=fid, filename="paired.nef", extension=".nef",
         file_size=100, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=fid, filename="raw-only.nef", extension=".nef",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="raw-only.nef", extension=".nef",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -1581,8 +1590,8 @@ def test_collection_untagged_rule(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='untagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     kid = db.add_keyword('Bird')
     db.tag_photo(p1, kid)
 
@@ -1608,9 +1617,9 @@ def test_collection_recent_days_rule(tmp_path):
     recent_ts = (datetime.now() - timedelta(days=5)).isoformat()
     old_ts = (datetime.now() - timedelta(days=60)).isoformat()
 
-    db.add_photo(folder_id=fid, filename='recent.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='recent.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp=recent_ts)
-    db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='old.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp=old_ts)
 
     rules = [{"field": "timestamp", "op": "recent_days", "value": 30}]
@@ -1633,9 +1642,9 @@ def test_collection_timestamp_between_subsec(tmp_path):
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
 
-    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
-    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
     # Bare-date upper covers the full named day, including sub-second
@@ -1670,19 +1679,19 @@ def test_collection_timestamp_rules_match_ui_shape(tmp_path):
 
     # Five photos spanning more than 30 days, including ones on the bare
     # date boundaries the UI's <input type="date"> emits.
-    db.add_photo(folder_id=fid, filename='before.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='before.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0,
                  timestamp='2024-06-09T23:59:59')
-    db.add_photo(folder_id=fid, filename='start.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='start.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0,
                  timestamp='2024-06-10T00:00:01')
-    db.add_photo(folder_id=fid, filename='middle.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='middle.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0,
                  timestamp='2024-06-15T12:00:00')
-    db.add_photo(folder_id=fid, filename='end.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='end.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0,
                  timestamp='2024-06-20T23:59:59.500000')
-    db.add_photo(folder_id=fid, filename='after.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='after.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0,
                  timestamp='2024-06-21T00:00:01')
 
@@ -1701,9 +1710,9 @@ def test_collection_timestamp_rules_match_ui_shape(tmp_path):
     # number input + parseInt in saveCollection()).
     recent_ts = (datetime.now() - timedelta(days=3)).isoformat()
     old_ts = (datetime.now() - timedelta(days=20)).isoformat()
-    db.add_photo(folder_id=fid, filename='days_recent.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='days_recent.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp=recent_ts)
-    db.add_photo(folder_id=fid, filename='days_old.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='days_old.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp=old_ts)
 
     recent_rules = [{"field": "timestamp", "op": "recent_days", "value": 7}]
@@ -1722,9 +1731,9 @@ def test_collection_has_species_rule(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='classified.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='location_only.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='no_tags.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='classified.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='location_only.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='no_tags.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     k_species = db.add_keyword('Northern cardinal', is_species=True)
     k_location = db.add_keyword('The Park', is_species=False)
@@ -1754,9 +1763,9 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
@@ -1780,9 +1789,9 @@ def test_collection_wildlife_excluded_rule(tmp_path):
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='wild.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='wild.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='pet.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='pet.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.update_photo_wildlife_excluded(p2, True)
 
@@ -1806,11 +1815,11 @@ def test_default_needs_identification_excludes_not_wildlife(tmp_path, monkeypatc
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    needs_id = db.add_photo(folder_id=fid, filename='needs.jpg',
+    needs_id = photo_ingest.add_photo(db, folder_id=fid, filename='needs.jpg',
                             extension='.jpg', file_size=100, file_mtime=1.0)
-    not_wildlife = db.add_photo(folder_id=fid, filename='pet.jpg',
+    not_wildlife = photo_ingest.add_photo(db, folder_id=fid, filename='pet.jpg',
                                 extension='.jpg', file_size=100, file_mtime=1.0)
-    identified = db.add_photo(folder_id=fid, filename='identified.jpg',
+    identified = photo_ingest.add_photo(db, folder_id=fid, filename='identified.jpg',
                               extension='.jpg', file_size=100, file_mtime=1.0)
     db.update_photo_wildlife_excluded(not_wildlife, True)
     genre_kid = db.add_keyword("Landscape", kw_type="genre")
@@ -1841,9 +1850,9 @@ def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypa
     ws_id = db.create_workspace("ws")
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
@@ -1872,7 +1881,7 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
 
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # Tag with a genre keyword anyway — but with empty subject_types, no
     # type counts as identifying, so this photo still does not match.
@@ -1906,9 +1915,9 @@ def test_has_subject_rule_counts_legacy_is_species_when_taxonomy_in_subject_type
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy"]})
 
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     # Plant a legacy-shaped species keyword on p1: is_species=1, type='general'.
@@ -1960,7 +1969,7 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
     db.workspaces.update(ws_id, config_overrides={"subject_types": ["genre"]})
 
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     cur = db.conn.execute(
@@ -2026,9 +2035,9 @@ def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, m
     db.workspaces.update(ws_id, config_overrides={"subject_types": []})
 
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                  file_size=200, file_mtime=2.0)
 
     cid = db.collections.add(
@@ -2531,12 +2540,12 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
         ("springfield-missouri-abcdefgh", 37.21, -93.29, springfield_missouri),
     )
     fid = db.add_folder("/photos", name="photos")
-    photo_a = db.add_photo(
-        folder_id=fid, filename="springfield-il.jpg", extension=".jpg",
+    photo_a = photo_ingest.add_photo(
+        db, folder_id=fid, filename="springfield-il.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    photo_b = db.add_photo(
-        folder_id=fid, filename="springfield-mo.jpg", extension=".jpg",
+    photo_b = photo_ingest.add_photo(
+        db, folder_id=fid, filename="springfield-mo.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -3016,12 +3025,12 @@ def test_merge_keyword_into_preserves_manual_association_source(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    both = db.add_photo(
-        folder_id=fid, filename="both.jpg", extension=".jpg",
+    both = photo_ingest.add_photo(
+        db, folder_id=fid, filename="both.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    source_only = db.add_photo(
-        folder_id=fid, filename="source.jpg", extension=".jpg",
+    source_only = photo_ingest.add_photo(
+        db, folder_id=fid, filename="source.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     keep_id = db.add_keyword("Wildlife", kw_type="genre")
@@ -3791,16 +3800,16 @@ def test_default_gps_without_location_keyword_collection_matches_expected_photos
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    needs_location = db.add_photo(
-        folder_id=fid, filename='gps-no-location.jpg',
+    needs_location = photo_ingest.add_photo(
+        db, folder_id=fid, filename='gps-no-location.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
-    no_gps = db.add_photo(
-        folder_id=fid, filename='no-gps.jpg',
+    no_gps = photo_ingest.add_photo(
+        db, folder_id=fid, filename='no-gps.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
-    has_location = db.add_photo(
-        folder_id=fid, filename='gps-with-location.jpg',
+    has_location = photo_ingest.add_photo(
+        db, folder_id=fid, filename='gps-with-location.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -3828,20 +3837,20 @@ def test_has_location_keyword_rule_and_no_location_information_definition(tmp_pa
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    no_location = db.add_photo(
-        folder_id=fid, filename='no-location.jpg',
+    no_location = photo_ingest.add_photo(
+        db, folder_id=fid, filename='no-location.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
-    gps_no_keyword = db.add_photo(
-        folder_id=fid, filename='gps-no-keyword.jpg',
+    gps_no_keyword = photo_ingest.add_photo(
+        db, folder_id=fid, filename='gps-no-keyword.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
-    no_gps_with_keyword = db.add_photo(
-        folder_id=fid, filename='keyword-only.jpg',
+    no_gps_with_keyword = photo_ingest.add_photo(
+        db, folder_id=fid, filename='keyword-only.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
-    gps_with_keyword = db.add_photo(
-        folder_id=fid, filename='gps-keyword.jpg',
+    gps_with_keyword = photo_ingest.add_photo(
+        db, folder_id=fid, filename='gps-keyword.jpg',
         extension='.jpg', file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -3889,9 +3898,9 @@ def test_all_photos_collection_returns_all_photos(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
-    db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+    photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
 
     db.collections.create_defaults()
     all_photos = next(c for c in db.collections.list_all() if c['name'] == 'All Photos')
@@ -3917,8 +3926,8 @@ def _make_workspace_with_photos(tmp_path, photo_overrides=None):
     overrides = photo_overrides or [{}]
     photo_ids = []
     for i, ov in enumerate(overrides):
-        pid = db.add_photo(
-            folder_id=fid,
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=ov.get('filename', f'IMG_{i:04d}.jpg'),
             extension='.jpg',
             file_size=1000,
@@ -4011,16 +4020,16 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
     db.add_workspace_folder(ws_id, park)
     db.add_workspace_folder(ws_id, yard)
 
-    march = db.add_photo(
-        folder_id=park, filename="march.jpg", extension=".jpg",
+    march = photo_ingest.add_photo(
+        db, folder_id=park, filename="march.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
     )
-    june_park = db.add_photo(
-        folder_id=park, filename="june-park.jpg", extension=".jpg",
+    june_park = photo_ingest.add_photo(
+        db, folder_id=park, filename="june-park.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
     )
-    june_yard = db.add_photo(
-        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+    june_yard = photo_ingest.add_photo(
+        db, folder_id=yard, filename="june-yard.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
     )
     collection_id = db.collections.add(
@@ -4068,12 +4077,12 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
     db.add_workspace_folder(ws_id, ok_folder)
     db.add_workspace_folder(ws_id, gone_folder)
 
-    visible = db.add_photo(
-        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+    visible = photo_ingest.add_photo(
+        db, folder_id=ok_folder, filename="here.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
     )
-    offline = db.add_photo(
-        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+    offline = photo_ingest.add_photo(
+        db, folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
     )
     collection_id = db.collections.add(
@@ -4212,14 +4221,14 @@ def test_coverage_stats_scoped_to_active_workspace(tmp_path):
     db.set_active_workspace(ws1)
     fid1 = db.add_folder('/ws1', name='ws1')
     db.add_workspace_folder(ws1, fid1)
-    db.add_photo(folder_id=fid1, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid1, filename='a.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(ws2)
     fid2 = db.add_folder('/ws2', name='ws2')
     db.add_workspace_folder(ws2, fid2)
-    db.add_photo(folder_id=fid2, filename='b.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid2, filename='b.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid2, filename='c.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid2, filename='c.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(ws1)
     assert dashboard_stats.get_coverage_stats(db)['total'] == 1
@@ -4237,13 +4246,13 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     fid_b = db.add_folder('/B', name='B')
     db.add_workspace_folder(ws_id, fid_a)
     db.add_workspace_folder(ws_id, fid_b)
-    pa = db.add_photo(folder_id=fid_a, filename='1.jpg', extension='.jpg',
+    pa = photo_ingest.add_photo(db, folder_id=fid_a, filename='1.jpg', extension='.jpg',
                       file_size=1, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET thumb_path = '/t/1.jpg', "
                     "phash = 'x' WHERE id = ?", (pa,))
-    db.add_photo(folder_id=fid_b, filename='2.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid_b, filename='2.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid_b, filename='3.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid_b, filename='3.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     db.conn.commit()
 
@@ -4268,12 +4277,12 @@ def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
     folder_b = db.add_folder("/B", name="B")
     db.add_workspace_folder(ws_id, folder_a)
     db.add_workspace_folder(ws_id, folder_b)
-    db.add_photo(
-        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_a, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
     )
-    db.add_photo(
-        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_b, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
     )
 
@@ -4802,7 +4811,7 @@ def test_move_folders_moves_prediction_review(tmp_path):
     db.add_workspace_folder(ws_src, fid)
 
     db._active_workspace_id = ws_src
-    pid = db.add_photo(fid, "a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, fid, "a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
@@ -5076,10 +5085,10 @@ def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
     db.add_workspace_folder(ws_b, fb)
 
     db._active_workspace_id = ws_a
-    pa = db.add_photo(fa, "x.jpg", extension=".jpg",
+    pa = photo_ingest.add_photo(db, fa, "x.jpg", extension=".jpg",
                       file_size=100, file_mtime=1.0)
     db._active_workspace_id = ws_b
-    pb = db.add_photo(fb, "y.jpg", extension=".jpg",
+    pb = photo_ingest.add_photo(db, fb, "y.jpg", extension=".jpg",
                       file_size=100, file_mtime=2.0)
 
     # Both photos have detections.
@@ -5253,11 +5262,11 @@ def _make_calendar_db(tmp_path):
     fid = db.add_folder('/photos/2024', name='2024')
     fid2 = db.add_folder('/photos/2024/January', name='January', parent_id=fid)
 
-    p1 = db.add_photo(folder_id=fid, filename='bird1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='bird1.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-01-15T10:00:00')
-    p2 = db.add_photo(folder_id=fid2, filename='bird2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid2, filename='bird2.jpg', extension='.jpg',
                       file_size=2000, file_mtime=2.0, timestamp='2024-01-20T14:00:00')
-    p3 = db.add_photo(folder_id=fid, filename='bird3.jpg', extension='.jpg',
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='bird3.jpg', extension='.jpg',
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
     db.photo_review.set_rating(p1, 3)
@@ -5304,9 +5313,9 @@ def test_get_geolocated_photos_excludes_null_coords(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='geo.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='nogeo.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='nogeo.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # Set GPS on p1 only
     db.conn.execute("UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?", (p1,))
@@ -5324,7 +5333,7 @@ def test_get_geolocated_photos_workspace_scoped(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5341,9 +5350,9 @@ def test_get_geolocated_photos_filters(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0, timestamp='2024-01-15T10:00:00')
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0, timestamp='2024-06-15T10:00:00')
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
@@ -5368,9 +5377,9 @@ def test_get_geolocated_photos_keyword_search_options(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='western.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='western.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='tern.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='tern.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
@@ -5396,7 +5405,7 @@ def test_get_geolocated_photos_with_species(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5417,7 +5426,7 @@ def test_get_geolocated_photos_no_prediction_species_null(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='mystery.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='mystery.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5433,9 +5442,9 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='heron.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
@@ -5468,7 +5477,7 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='both.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5501,7 +5510,7 @@ def test_get_geolocated_photos_falls_back_to_keyword_coords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(folder_id=fid, filename='no_gps.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='no_gps.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     # No EXIF GPS — leave latitude/longitude as NULL.
 
@@ -5533,7 +5542,7 @@ def test_get_geolocated_photos_prefers_exif_over_keyword(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='both.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=?, longitude=? WHERE id=?",
                     (37.7749, -122.4194, pid))
@@ -5566,11 +5575,11 @@ def test_get_geolocated_photos_excludes_photos_with_neither(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
     # Photo 1: no GPS, no keyword link at all.
-    p1 = db.add_photo(folder_id=fid, filename='lonely.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='lonely.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # Photo 2: no GPS, has a location keyword but the keyword has no coords
     # (free-text fallback).
-    p2 = db.add_photo(folder_id=fid, filename='free_text.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='free_text.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     cur = db.conn.execute(
         "INSERT INTO keywords (name, type) VALUES (?, 'location')",
@@ -5596,7 +5605,7 @@ def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(folder_id=fid, filename='partial.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='partial.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     # Partial EXIF: latitude present, longitude missing (sometimes seen on
     # corrupt EXIF or when only one half of GPS lat/lng was decoded).
@@ -5631,7 +5640,7 @@ def test_get_effective_photo_location_prefers_exif(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='both.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
@@ -5659,7 +5668,7 @@ def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='assigned.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='assigned.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET latitude=?, longitude=NULL WHERE id=?",
@@ -5688,16 +5697,16 @@ def test_get_effective_photo_locations_returns_bulk_mapping(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p_exif = db.add_photo(
-        folder_id=fid, filename='exif.jpg', extension='.jpg',
+    p_exif = photo_ingest.add_photo(
+        db, folder_id=fid, filename='exif.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    p_keyword = db.add_photo(
-        folder_id=fid, filename='keyword.jpg', extension='.jpg',
+    p_keyword = photo_ingest.add_photo(
+        db, folder_id=fid, filename='keyword.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
-    p_empty = db.add_photo(
-        folder_id=fid, filename='empty.jpg', extension='.jpg',
+    p_empty = photo_ingest.add_photo(
+        db, folder_id=fid, filename='empty.jpg', extension='.jpg',
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -5732,7 +5741,7 @@ def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='geo.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
@@ -5753,9 +5762,9 @@ def test_get_accepted_species(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='heron.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # Both photos need GPS to appear in species list
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
@@ -5784,7 +5793,7 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # p1 has no GPS coordinates
     det_ids = db.detections.save(p1, [
@@ -5806,7 +5815,7 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5825,7 +5834,7 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
@@ -5853,7 +5862,7 @@ def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # No EXIF GPS — only a location keyword with coords.
     loc_id = db.conn.execute(
@@ -5886,7 +5895,7 @@ def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # Free-text location keyword: no coords.
     loc_id = db.conn.execute(
@@ -5915,11 +5924,11 @@ def test_count_photos_without_gps(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='geo.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='nogeo1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='nogeo1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='nogeo2.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='nogeo2.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE filename='geo.jpg'")
     db.conn.commit()
@@ -5937,13 +5946,13 @@ def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
     db.add_workspace_folder(db._active_workspace_id, fid)
 
     # Photo 1: full EXIF GPS — definitely plottable.
-    db.add_photo(folder_id=fid, filename='exif.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='exif.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE filename='exif.jpg'"
     )
     # Photo 2: no EXIF, but tagged with a coord-bearing location keyword.
-    p2 = db.add_photo(folder_id=fid, filename='via_keyword.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='via_keyword.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     cur = db.conn.execute(
         "INSERT INTO keywords (name, type, latitude, longitude) "
@@ -5955,7 +5964,7 @@ def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
         (p2, kid),
     )
     # Photo 3: no EXIF, tagged with a free-text (coordless) location keyword.
-    p3 = db.add_photo(folder_id=fid, filename='free_text.jpg', extension='.jpg',
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='free_text.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     cur = db.conn.execute(
         "INSERT INTO keywords (name, type) VALUES ('the dog park', 'location')",
@@ -5966,7 +5975,7 @@ def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
         (p3, free_kid),
     )
     # Photo 4: nothing — truly without GPS.
-    db.add_photo(folder_id=fid, filename='lonely.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='lonely.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
     db.conn.commit()
 
@@ -6092,7 +6101,7 @@ def test_keyword_tree_includes_type(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     kid = db.add_keyword('Cardinal', is_species=True)
     db.tag_photo(pid, kid)
@@ -6108,7 +6117,7 @@ def test_photo_keywords_includes_type(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     # Use a name that isn't pre-seeded as a default genre keyword.
     kid = db.add_keyword('MyTag')
@@ -6164,9 +6173,9 @@ def test_get_photos_with_embedding_excludes_other_workspaces(tmp_path):
     fid_a = db.add_folder('/a', name='a')
     db.set_active_workspace(ws_b)
     fid_b = db.add_folder('/b', name='b')
-    pid_a = db.add_photo(folder_id=fid_a, filename='a.jpg', extension='.jpg',
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename='a.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid_b, filename='b.jpg', extension='.jpg',
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename='b.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
     emb = np.zeros(8, dtype=np.float32).tobytes()
     detection_store.upsert_photo_embedding(db, pid_a, "BioCLIP", emb)
@@ -6191,7 +6200,7 @@ def _make_db_with_photos(tmp_path, n=3):
     fid = db.add_folder('/photos', name='photos')
     pids = []
     for i in range(n):
-        pid = db.add_photo(folder_id=fid, filename=f'IMG_{i:04d}.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=f'IMG_{i:04d}.jpg',
                            extension='.jpg', file_size=1000,
                            file_mtime=1700000000.0 + i)
         pids.append(pid)
@@ -6399,8 +6408,8 @@ def test_update_photo_eye_fields_roundtrip(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="eye.jpg",
         extension=".jpg",
         file_size=1000,
@@ -6428,8 +6437,8 @@ def test_update_photo_eye_fields_accept_null(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="eye.jpg",
         extension=".jpg",
         file_size=1000,
@@ -6473,8 +6482,8 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
 
-    pid = db.add_photo(
-        fid,
+    pid = photo_ingest.add_photo(
+        db, fid,
         "mammal.jpg",
         ".jpg",
         1000,
@@ -6533,8 +6542,8 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
 
-    pid = db.add_photo(
-        fid,
+    pid = photo_ingest.add_photo(
+        db, fid,
         "bird.jpg",
         ".jpg",
         1000,
@@ -6589,7 +6598,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     ws_id = db._active_workspace_id
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
-    pid = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
+    pid = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
     det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
     ], detector_model="MegaDetector")[0]
@@ -6640,11 +6649,11 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
 
-    pid_a = db.add_photo(
-        fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600,
+    pid_a = photo_ingest.add_photo(
+        db, fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600,
     )
-    pid_b = db.add_photo(
-        fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
+    pid_b = photo_ingest.add_photo(
+        db, fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
     )
     for pid in (pid_a, pid_b):
         det_ids = db.detections.save(
@@ -6829,7 +6838,7 @@ def test_save_detections(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     detections = [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
@@ -6853,7 +6862,7 @@ def test_save_detections_replaces_existing(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
 
     det_a = {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     det_b = {"box": {"x": 0.2, "y": 0.2, "w": 0.5, "h": 0.5}, "confidence": 0.7, "category": "animal"}
@@ -6880,7 +6889,7 @@ def test_save_detections_is_global(tmp_path):
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_a, folder_id)
     db.add_workspace_folder(ws_b, folder_id)
-    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
 
     db._active_workspace_id = ws_a
     db.detections.save(photo_id,
@@ -6909,8 +6918,8 @@ def test_get_detections_threshold_filter(tmp_path, monkeypatch):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
     db.detections.save(
         photo_id,
@@ -6945,8 +6954,8 @@ def test_get_detections_cross_workspace_read(tmp_path):
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_a, folder_id)
     db.add_workspace_folder(ws_b, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
 
     db._active_workspace_id = ws_a
@@ -6975,8 +6984,8 @@ def test_get_detections_for_photos_threshold_filter(tmp_path, monkeypatch):
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_a, fid)
     db.add_workspace_folder(ws_b, fid)
-    p1 = db.add_photo(fid, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(fid, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
+    p1 = photo_ingest.add_photo(db, fid, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, fid, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
 
     db._active_workspace_id = ws_a
     db.detections.save(p1, [
@@ -7016,7 +7025,7 @@ def test_get_detections_for_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     detections = [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
     ]
@@ -7032,9 +7041,9 @@ def test_get_detections_for_photos_batch(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
-    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg", file_size=100, file_mtime=3.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename="c.jpg", extension=".jpg", file_size=100, file_mtime=3.0)
     db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
@@ -7068,7 +7077,7 @@ def test_get_detections_for_photos_is_global(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
     db.add_workspace_folder(db._ws_id(), fid)
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -7090,8 +7099,8 @@ def test_get_predictions_for_detection_filters(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
     det_id = db.detections.save(photo_id, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
@@ -7123,7 +7132,7 @@ def test_clear_detections(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -7144,7 +7153,7 @@ def test_add_prediction_with_detection(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -7170,7 +7179,7 @@ def test_get_predictions_includes_photo_and_box(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -7186,7 +7195,7 @@ def test_accept_prediction_tags_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -7206,7 +7215,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos")
-    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     stale = db.add_keyword("Sparrow", is_species=True)
@@ -7248,7 +7257,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos")
-    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     stale = db.add_keyword("Sparrow", is_species=True)
@@ -7309,7 +7318,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
         ],
     )
     fid = db.add_folder("/photos")
-    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "verdin.jpg", ".jpg", 100, 1.0)
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Desert Verdin", parent_id=parent)
     db.conn.execute(
@@ -7410,7 +7419,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
         ],
     )
     fid = db.add_folder("/photos")
-    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "robin.jpg", ".jpg", 100, 1.0)
 
     # Two distinct linked species keywords share the NOCASE match key
     # "robin" but resolve to different taxa. add_keyword dedupes case-
@@ -7484,7 +7493,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
         ],
     )
     fid = db.add_folder("/photos")
-    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "robin.jpg", ".jpg", 100, 1.0)
 
     # An unlinked legacy species keyword — this is the accept target.
     legacy_target = db.conn.execute(
@@ -7541,8 +7550,8 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder("/photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     wigeon_id = db.add_keyword("American Wigeon", is_species=True)
@@ -7604,8 +7613,8 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     wigeon = db.add_keyword("American Wigeon", is_species=True)
@@ -7661,8 +7670,8 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # The photo carries a stale species tag left over from when the neighbour
@@ -7731,8 +7740,8 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries the neighbour's species under the normalized (clean)
@@ -7790,8 +7799,8 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries a stale species tag whose only backing on the neighbour
@@ -7853,8 +7862,8 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries a stale species tag whose only backing on the neighbour
@@ -7912,8 +7921,8 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     wigeon = db.add_keyword("American Wigeon", is_species=True)
@@ -8059,8 +8068,8 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ducks.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries the neighbour's species AND a broader family taxonomy
@@ -8145,8 +8154,8 @@ def test_accept_prediction_queues_normalized_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(pid, [
@@ -8183,8 +8192,8 @@ def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="elk.jpg",
         extension=".jpg",
         file_size=100,
@@ -8237,8 +8246,8 @@ def test_accept_prediction_out_of_scope_row_mutates_nothing(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="elk.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="elk.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_id = db.detections.save(pid, [
@@ -8291,8 +8300,8 @@ def test_accept_prediction_grouped_leaves_out_of_scope_entry_row_alone(tmp_path)
     fid = db.add_folder("/photos")
 
     def _seed(filename, alt=False):
-        photo_id = db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(photo_id, [
@@ -8359,8 +8368,8 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
     fid = db.add_folder("/photos")
 
     def _seed(filename):
-        photo_id = db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(photo_id, [
@@ -8420,11 +8429,11 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
-    torn = db.add_photo(folder_id=fid, filename="torn.jpg", extension=".jpg",
+    torn = photo_ingest.add_photo(db, folder_id=fid, filename="torn.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
-    empty = db.add_photo(folder_id=fid, filename="empty.jpg", extension=".jpg",
+    empty = photo_ingest.add_photo(db, folder_id=fid, filename="empty.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    ok = db.add_photo(folder_id=fid, filename="ok.jpg", extension=".jpg",
+    ok = photo_ingest.add_photo(db, folder_id=fid, filename="ok.jpg", extension=".jpg",
                       file_size=100, file_mtime=1.0)
 
     # Torn: run recorded with boxes, but detections cleared (simulates a
@@ -8467,8 +8476,8 @@ def test_write_detection_batch_is_atomic_under_commit_failure(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8538,8 +8547,8 @@ def test_write_detection_batch_writes_both_tables_atomically(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8577,8 +8586,8 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8605,12 +8614,12 @@ def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_a = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_a = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    photo_b = db.add_photo(
-        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    photo_b = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=200, file_mtime=2.0,
     )
 
@@ -8650,8 +8659,8 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8712,8 +8721,8 @@ def test_runtime_change_retires_unreviewed_detector_output(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     first = {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
@@ -8762,8 +8771,8 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
     for ws in (ws_a, ws_b):
         db.add_workspace_folder(ws, folder_id)
     db._active_workspace_id = ws_a
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     first = {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
@@ -8835,8 +8844,8 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     detections = [
@@ -8888,8 +8897,8 @@ def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8934,8 +8943,8 @@ def test_write_detection_batch_deduplicates_same_batch_ids(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -8984,9 +8993,9 @@ def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, fid)
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
                            file_size=1, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
@@ -9037,9 +9046,9 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, fid)
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
                            file_size=1, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
@@ -9179,9 +9188,9 @@ def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, fid)
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
                            file_size=1, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
@@ -9220,7 +9229,7 @@ def test_multiple_predictions_per_detection(tmp_path):
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws_id, fid)
-    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
@@ -9248,7 +9257,7 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws_id, fid)
-    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
@@ -9396,7 +9405,7 @@ def test_get_missing_folders(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/gone/folder", name="gone")
-    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
     db.conn.commit()
@@ -9445,9 +9454,9 @@ def test_get_missing_photos_returns_photos_with_missing_source(tmp_path):
 
     here = folder / "present.jpg"
     here.write_bytes(b"x")
-    pid_present = db.add_photo(folder_id=fid, filename="present.jpg",
+    pid_present = photo_ingest.add_photo(db, folder_id=fid, filename="present.jpg",
                                extension=".jpg", file_size=1, file_mtime=1.0)
-    pid_gone = db.add_photo(folder_id=fid, filename="gone.NEF",
+    pid_gone = photo_ingest.add_photo(db, folder_id=fid, filename="gone.NEF",
                             extension=".nef", file_size=1, file_mtime=1.0,
                             timestamp="2024-03-08T10:00:00")
 
@@ -9469,7 +9478,7 @@ def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/gone/folder", name="gone")
-    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
     db.conn.commit()
@@ -9497,7 +9506,7 @@ def test_get_missing_photos_skips_folder_whose_root_is_offline(tmp_path):
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (fid,)
     ).fetchone()["status"] == "ok"
-    db.add_photo(folder_id=fid, filename="bird.NEF", extension=".nef",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.NEF", extension=".nef",
                  file_size=1, file_mtime=1.0)
 
     assert db.get_missing_photos() == []
@@ -9517,12 +9526,12 @@ def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
 
     db.set_active_workspace(ws_a)
     fid_a = db.add_folder(str(folder_a), name="a")
-    db.add_photo(folder_id=fid_a, filename="ghost_a.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_a, filename="ghost_a.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     db.set_active_workspace(ws_b)
     fid_b = db.add_folder(str(folder_b), name="b")
-    db.add_photo(folder_id=fid_b, filename="ghost_b.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_b, filename="ghost_b.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     db.set_active_workspace(ws_a)
@@ -9557,9 +9566,9 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
     for i in range(50):
         name = f"present_{i:03d}.jpg"
         (folder / name).write_bytes(b"x")
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename="gone.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="gone.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     real_exists = os.path.exists
@@ -9595,7 +9604,7 @@ def test_get_missing_photos_ignores_progress_callback_errors(tmp_path):
     folder = tmp_path / "shoot"
     folder.mkdir()
     fid = db.add_folder(str(folder), name="shoot")
-    db.add_photo(folder_id=fid, filename="gone.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="gone.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     def broken_progress(_payload):
@@ -9618,7 +9627,7 @@ def test_get_missing_photos_reports_periodic_photo_progress(tmp_path):
     folder.mkdir()
     fid = db.add_folder(str(folder), name="shoot")
     for i in range(401):
-        db.add_photo(folder_id=fid, filename=f"gone_{i:03d}.jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"gone_{i:03d}.jpg",
                      extension=".jpg", file_size=1, file_mtime=1.0)
 
     events = []
@@ -9660,7 +9669,7 @@ def test_get_missing_photos_handles_unicode_normalization(tmp_path):
     # File on disk: NFD bytes.
     (folder / nfd_name).write_bytes(b"x")
     # DB row: NFC bytes.
-    db.add_photo(folder_id=fid, filename=nfc_name, extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename=nfc_name, extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     assert db.get_missing_photos() == []
@@ -9689,7 +9698,7 @@ def test_get_missing_photos_defers_case_to_filesystem(tmp_path):
     fid = db.add_folder(str(folder), name="shoot")
 
     (folder / "IMG_1234.nef").write_bytes(b"x")
-    db.add_photo(folder_id=fid, filename="IMG_1234.NEF", extension=".nef",
+    photo_ingest.add_photo(db, folder_id=fid, filename="IMG_1234.NEF", extension=".nef",
                  file_size=1, file_mtime=1.0)
 
     fs_case_insensitive = os.path.exists(str(folder / "IMG_1234.NEF"))
@@ -9732,9 +9741,9 @@ def test_get_missing_photos_distinguishes_case_on_case_sensitive_fs(tmp_path):
         pytest.skip("filesystem is case-insensitive; case-distinct names alias")
 
     (folder / "shot.jpg").write_bytes(b"x")  # lower-case file present
-    db.add_photo(folder_id=fid, filename="shot.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="shot.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename="SHOT.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="SHOT.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
     # Only the genuinely-absent SHOT.jpg should surface; the lower-case row
@@ -9766,7 +9775,7 @@ def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
     target.write_bytes(b"x")
     link_path = folder / "raw_001.NEF"
     os.symlink(str(target), str(link_path))
-    db.add_photo(folder_id=fid, filename="raw_001.NEF", extension=".nef",
+    photo_ingest.add_photo(db, folder_id=fid, filename="raw_001.NEF", extension=".nef",
                  file_size=1, file_mtime=1.0)
 
     # Symlink target intact: photo present.
@@ -9890,12 +9899,12 @@ def test_relocate_folder_merge_into_existing(tmp_path):
 
     # Add photos to both folders
     # Missing folder: photo_a.jpg (exists on disk), photo_b.jpg (duplicate), photo_d.jpg (NOT on disk)
-    pid_a = db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
-    pid_b_missing = db.add_photo(fid_missing, "photo_b.jpg", ".jpg", 1000, 1.0)
-    pid_d = db.add_photo(fid_missing, "photo_d.jpg", ".jpg", 1000, 1.0)
+    pid_a = photo_ingest.add_photo(db, fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    pid_b_missing = photo_ingest.add_photo(db, fid_missing, "photo_b.jpg", ".jpg", 1000, 1.0)
+    pid_d = photo_ingest.add_photo(db, fid_missing, "photo_d.jpg", ".jpg", 1000, 1.0)
     # Existing folder has photo_b.jpg (will win) and photo_c.jpg
-    pid_b_existing = db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
-    pid_c = db.add_photo(fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
+    pid_b_existing = photo_ingest.add_photo(db, fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
+    pid_c = photo_ingest.add_photo(db, fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
 
     cascaded = db.folders.relocate(fid_missing, existing_path)
 
@@ -9990,8 +9999,8 @@ def test_relocate_folder_merge_updates_photo_count(tmp_path):
     # Create files on disk so they survive the existence check
     (tmp_path / "existing" / "photo_a.jpg").write_bytes(b"\xff\xd8")
 
-    db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
 
     db.folders.relocate(fid_missing, existing_path)
 
@@ -10226,7 +10235,7 @@ def test_delete_folder(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/delete/me", name="me")
-    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
 
     result = db.delete_folder(fid)
@@ -10249,7 +10258,7 @@ def test_delete_folder_with_descendants(tmp_path):
     child = db.add_folder("/tree/sub", name="sub", parent_id=parent)
     grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child)
     pids = [
-        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
                      file_size=1000, file_mtime=1.0)
         for fid in (parent, child, grand)
     ]
@@ -10288,13 +10297,13 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_b, child, is_root=True)
 
-    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+    pid_parent = photo_ingest.add_photo(db, folder_id=parent, filename="p.jpg", extension=".jpg",
                               file_size=1000, file_mtime=1.0)
-    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+    pid_child = photo_ingest.add_photo(db, folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
-    pid_grand = db.add_photo(folder_id=grand, filename="g.jpg", extension=".jpg",
+    pid_grand = photo_ingest.add_photo(db, folder_id=grand, filename="g.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
-    pid_other = db.add_photo(folder_id=other, filename="o.jpg", extension=".jpg",
+    pid_other = photo_ingest.add_photo(db, folder_id=other, filename="o.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
     # Prime A's new-images cache: the delete changes what A can see (kept
@@ -10354,9 +10363,9 @@ def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
     db.add_workspace_folder(ws_b, parent, is_root=True)
     db.add_workspace_folder(ws_b, child, is_root=False)
 
-    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+    pid_parent = photo_ingest.add_photo(db, folder_id=parent, filename="p.jpg", extension=".jpg",
                               file_size=1000, file_mtime=1.0)
-    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+    pid_child = photo_ingest.add_photo(db, folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
     # Prime A's new-images cache: the unlink-only path must still drop it,
@@ -10416,7 +10425,7 @@ def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp
     db.add_workspace_folder(ws_b, parent, is_root=True)
     db.add_workspace_folder(ws_b, child, is_root=False)
 
-    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+    pid_child = photo_ingest.add_photo(db, folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
     # Workspace A deletes /photos/2024 — B still sees it via its /photos root.
@@ -10471,7 +10480,7 @@ def test_delete_folder_includes_path_only_descendants(tmp_path):
     ).fetchone()["parent_id"] is None
 
     pids = [
-        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
                      file_size=1000, file_mtime=1.0)
         for fid in (parent, child)
     ]
@@ -10505,9 +10514,9 @@ def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_b, child, is_root=True)
 
-    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+    pid_parent = photo_ingest.add_photo(db, folder_id=parent, filename="p.jpg", extension=".jpg",
                               file_size=1000, file_mtime=1.0)
-    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+    pid_child = photo_ingest.add_photo(db, folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
     result = db.delete_folder(parent)
@@ -10540,9 +10549,9 @@ def test_missing_folder_photos_hidden_from_browse(tmp_path):
 
     fid_ok = db.add_folder("/ok/folder", name="ok")
     fid_gone = db.add_folder("/gone/folder", name="gone")
-    db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
-    db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
     # Both visible before marking missing
@@ -10574,9 +10583,9 @@ def test_count_photos_in_workspace_includes_missing(tmp_path):
 
     fid_ok = db.add_folder("/ok/folder", name="ok")
     fid_gone = db.add_folder("/gone/folder", name="gone")
-    db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
-    db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
 
     assert db.photos.count() == 2
@@ -10603,7 +10612,7 @@ def test_count_keywords_in_workspace_includes_missing(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     k1 = db.add_keyword("Cardinal")
     k2 = db.add_keyword("Sparrow")
@@ -10632,7 +10641,7 @@ def test_count_photos_in_workspace_scoped_to_active_workspace(tmp_path):
 
     db.set_active_workspace(ws_a)
     fid = db.add_folder("/some/folder", name="folder")
-    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
 
     assert db.photos.count_in_workspace() == 1
@@ -10653,10 +10662,10 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     db.set_active_workspace(ws)
 
     fid = db.add_folder("/photos", name="photos")
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0,
                       timestamp="2024-01-15T12:00:00")
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0,
                       timestamp="2024-02-15T12:00:00")
     db.photo_review.set_rating(p1, 4)
@@ -10839,9 +10848,9 @@ def test_missing_folder_hidden_from_collection(tmp_path):
 
     fid_ok = db.add_folder("/ok/folder", name="ok")
     fid_gone = db.add_folder("/gone/folder", name="gone")
-    p1 = db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
-    p2 = db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
     # Create a collection that matches all photos
@@ -10919,8 +10928,8 @@ def test_batch_update_photo_folder(db):
     """moves_merge.batch_update_photo_folder moves photos to a new folder in one transaction."""
     fid1 = db.add_folder("/src", name="src")
     fid2 = db.add_folder("/dst", name="dst")
-    p1 = db.add_photo(folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
     db.moves_merge.batch_update_photo_folder([p1, p2], fid2)
     photo1 = db.photos.get(p1)
     photo2 = db.photos.get(p2)
@@ -10981,7 +10990,7 @@ def test_startup_repairs_stale_folder_parent(tmp_path, startup):
                                parent_id=month)
         child = seed.add_folder("/photos/2026/2026-07-12/edits", name="edits",
                                 parent_id=date)
-        pid = seed.add_photo(folder_id=date, filename="bird.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(seed, folder_id=date, filename="bird.jpg", extension=".jpg",
                              file_size=100, file_mtime=1.0)
         photo_before = dict(seed.photos.get(pid))
         folders_before = {r["id"]: dict(r) for r in seed.conn.execute("SELECT * FROM folders")}
@@ -11076,7 +11085,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
 
     huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
@@ -11119,7 +11128,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
 def test_get_photo_filenames_returns_folder_and_name_for_existing_ids(db):
     """Sync resolves sidecar paths from two columns, skipping deleted photos."""
     fid = db.add_folder("/pics", name="pics")
-    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=10, file_mtime=1.0)
 
     assert db.photos.get_filenames([]) == {}
@@ -11172,7 +11181,7 @@ def test_merge_staged_tree_new_subfolders(db):
     base_id = db.add_folder("/arch/USA", name="USA")
     old_id = db.add_folder("/arch/USA/2025/2025-01-01", name="2025-01-01",
                            parent_id=base_id)
-    db.add_photo(folder_id=old_id, filename="old.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=old_id, filename="old.raf", extension=".raf",
                  file_size=100, file_mtime=1.0)
     db.add_workspace_folder(ws, base_id, is_root=True)
 
@@ -11185,7 +11194,7 @@ def test_merge_staged_tree_new_subfolders(db):
                                parent_id=stage_root, workspace_root=False)
     stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
                                parent_id=stage_year, workspace_root=False)
-    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=200, file_mtime=2.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
@@ -11251,7 +11260,7 @@ def test_merge_staged_tree_downgrades_staged_root_leaf(db):
                                parent_id=stage_root, workspace_root=False)
     stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
                                parent_id=stage_year, workspace_root=True)
-    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=200, file_mtime=2.0)
 
     # Precondition: the staged leaf really IS a workspace root before the merge,
@@ -11310,9 +11319,9 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     year_id = db.add_folder(str(arch / "2026"), name="2026", parent_id=base_id)
     date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=year_id)
-    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=date_id, filename="dup.raf", extension=".raf",
                  file_size=12, file_mtime=1.0, file_hash="DUPHASH")
-    db.add_photo(folder_id=date_id, filename="keep.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=date_id, filename="keep.raf", extension=".raf",
                  file_size=13, file_mtime=1.0, file_hash="KEEPHASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
 
@@ -11325,10 +11334,10 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
     stage_leaf = db.add_folder(str(stage / "2026" / "2026-06-30"),
                                name="2026-06-30",
                                parent_id=stage_year, workspace_root=False)
-    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+    dup_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="dup.raf",
                            extension=".raf", file_size=12, file_mtime=2.0,
                            file_hash="DUPHASH")
-    db.add_photo(folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
                  file_size=200, file_mtime=2.0, file_hash="FRESHHASH")
 
     # Attach a keyword to the COLLIDED staged photo so the delete must clear
@@ -11379,7 +11388,7 @@ def test_merge_staged_tree_links_archive_to_active_workspace(db):
     base_id = db.add_folder("/arch/USA", name="USA")
     date_id = db.add_folder("/arch/USA/2025-06-30", name="2025-06-30",
                             parent_id=base_id, workspace_root=False)
-    db.add_photo(folder_id=date_id, filename="prior.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=date_id, filename="prior.raf", extension=".raf",
                  file_size=100, file_mtime=1.0)
 
     # Switch to a fresh workspace — the one running the pipeline.
@@ -11399,7 +11408,7 @@ def test_merge_staged_tree_links_archive_to_active_workspace(db):
     stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
     stage_leaf = db.add_folder("/stage/USA/2025-06-30", name="2025-06-30",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+    new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf",
                            extension=".raf", file_size=200, file_mtime=2.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
@@ -11475,7 +11484,7 @@ def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
                                workspace_root=False)
     stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30", name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+    new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf",
                            extension=".raf", file_size=200, file_mtime=2.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/arch/NewShoot")
@@ -11527,7 +11536,7 @@ def test_merge_staged_tree_ancestor_base_stays_non_root(db):
     stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
     stage_leaf = db.add_folder("/stage/USA/2026-06-30", name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=200, file_mtime=2.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/Photos/USA")
@@ -11575,7 +11584,7 @@ def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
     stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30",
                                name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=100, file_mtime=1.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/NewShoot")
@@ -11639,7 +11648,7 @@ def test_merge_staged_tree_intermediate_insert_survives_race(db):
 
     # Staged tree that will land at /Photos/2026/A after rsync.
     stage_root = db.add_folder("/stage/A", name="A", workspace_root=False)
-    db.add_photo(folder_id=stage_root, filename="a.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=stage_root, filename="a.raf", extension=".raf",
                  file_size=100, file_mtime=1.0)
 
     # Simulate the race: the walk-up probe above has already snapshotted
@@ -11717,7 +11726,7 @@ def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
 
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=base_id)
-    stale_pid = db.add_photo(folder_id=date_id, filename="missing.raf",
+    stale_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="missing.raf",
                              extension=".raf", file_size=100, file_mtime=1.0,
                              file_hash="STALEHASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -11727,7 +11736,7 @@ def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(folder_id=stage_leaf, filename="missing.raf",
+    new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="missing.raf",
                            extension=".raf", file_size=200, file_mtime=2.0,
                            file_hash="NEWHASH")
 
@@ -11782,7 +11791,7 @@ def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-06-30",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+    phantom_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="collide.raf",
                                extension=".raf", file_size=100,
                                file_mtime=1.0, file_hash="STALEHASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -11791,7 +11800,7 @@ def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+    new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="collide.raf",
                            extension=".raf", file_size=200, file_mtime=2.0,
                            file_hash="NEWHASH")
 
@@ -11845,7 +11854,7 @@ def test_merge_staged_tree_defaults_to_phantom_when_hashes_missing(
     # Phantom row: no file_hash (older catalog row that pre-dates
     # hashing) and a recorded size that HAPPENS to equal the freshly-
     # copied staged file's size.
-    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+    phantom_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="collide.raf",
                                extension=".raf", file_size=100,
                                file_mtime=1.0)
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -11855,7 +11864,7 @@ def test_merge_staged_tree_defaults_to_phantom_when_hashes_missing(
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
     # Staged photo also lacks a recorded hash (the unhashed-scan case).
-    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+    new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="collide.raf",
                            extension=".raf", file_size=100,
                            file_mtime=2.0)
 
@@ -11904,7 +11913,7 @@ def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-06-30",
                             parent_id=base_id)
-    archived_pid = db.add_photo(folder_id=date_id, filename="IMG.RAF",
+    archived_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="IMG.RAF",
                                 extension=".raf", file_size=100,
                                 file_mtime=1.0, file_hash="SAMEBYTES")
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -11920,7 +11929,7 @@ def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
     # honest: mismatched hashes would (correctly) be treated as a phantom
     # row now, so a case-alias test with fake mismatching hashes would not
     # represent the production invariant it's asserting.
-    staged_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+    staged_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="img.raf",
                               extension=".raf", file_size=100,
                               file_mtime=2.0, file_hash="SAMEBYTES")
 
@@ -12002,10 +12011,10 @@ def test_merge_staged_tree_intra_staged_case_alias_collision(
     # describes bytes that never landed. Even if the file hashes matched,
     # only one on-disk file can exist on a case-insensitive volume so a
     # second catalog row is still wrong.
-    first_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+    first_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="IMG.RAF",
                              extension=".raf", file_size=100,
                              file_mtime=1.0, file_hash="FIRSTBYTES")
-    second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+    second_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="img.raf",
                               extension=".raf", file_size=200,
                               file_mtime=2.0, file_hash="OTHERBYTES")
 
@@ -12057,10 +12066,10 @@ def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
-    upper_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+    upper_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="IMG.RAF",
                              extension=".raf", file_size=100,
                              file_mtime=1.0, file_hash="UPPERBYTES")
-    lower_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+    lower_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="img.raf",
                              extension=".raf", file_size=200,
                              file_mtime=2.0, file_hash="LOWERBYTES")
 
@@ -12103,7 +12112,7 @@ def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-06-30",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(folder_id=date_id, filename="Collide.raf",
+    phantom_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="Collide.raf",
                                extension=".raf", file_size=999,
                                file_mtime=1.0, file_hash="STALE_HASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12118,10 +12127,10 @@ def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
     # hashes model the realistic case where the two source files carry
     # distinct bytes -- rsync writes only one of them and the other
     # describes bytes that never landed.
-    first_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+    first_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="collide.raf",
                              extension=".raf", file_size=100,
                              file_mtime=2.0, file_hash="STAGED_A")
-    second_pid = db.add_photo(folder_id=stage_leaf, filename="COLLIDE.raf",
+    second_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="COLLIDE.raf",
                               extension=".raf", file_size=200,
                               file_mtime=3.0, file_hash="STAGED_B")
     # A pending edit on the second staged row makes the FK violation
@@ -12202,7 +12211,7 @@ def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
     base_id = db.add_folder("/arch/USA", name="USA")
     existing_date_id = db.add_folder("/arch/USA/2025-12-25",
                                      name="2025-12-25", parent_id=base_id)
-    db.add_photo(folder_id=existing_date_id, filename="old.raf",
+    photo_ingest.add_photo(db, folder_id=existing_date_id, filename="old.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
     db.add_workspace_folder(ws, base_id, is_root=True)
 
@@ -12214,15 +12223,15 @@ def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
     # the ``_case_insensitive_root`` probe.
     stage_root = db.add_folder("/stage/USA", name="USA",
                                workspace_root=False)
-    staged_root_pid = db.add_photo(
-        folder_id=stage_root, filename="root_new.raf",
+    staged_root_pid = photo_ingest.add_photo(
+        db, folder_id=stage_root, filename="root_new.raf",
         extension=".raf", file_size=150, file_mtime=1.5,
     )
     stage_leaf = db.add_folder("/stage/USA/2025-12-25",
                                name="2025-12-25", parent_id=stage_root,
                                workspace_root=False)
-    staged_leaf_pid = db.add_photo(
-        folder_id=stage_leaf, filename="leaf_new.raf",
+    staged_leaf_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="leaf_new.raf",
         extension=".raf", file_size=200, file_mtime=2.0,
     )
 
@@ -12310,13 +12319,13 @@ def test_merge_staged_tree_new_folder_reparent_rolls_back_on_later_error(
                                workspace_root=False)
     stage_new = db.add_folder("/stage/USA/new_leaf", name="new_leaf",
                               parent_id=stage_root, workspace_root=False)
-    stage_new_pid = db.add_photo(folder_id=stage_new, filename="new.raf",
+    stage_new_pid = photo_ingest.add_photo(db, folder_id=stage_new, filename="new.raf",
                                  extension=".raf",
                                  file_size=100, file_mtime=1.0)
     stage_existing = db.add_folder("/stage/USA/existing_leaf",
                                    name="existing_leaf",
                                    parent_id=stage_root, workspace_root=False)
-    db.add_photo(folder_id=stage_existing, filename="dup.raf",
+    photo_ingest.add_photo(db, folder_id=stage_existing, filename="dup.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
     # Poison ``_case_insensitive_root`` to succeed on the first call (else
@@ -12383,7 +12392,7 @@ def test_merge_staged_tree_restores_missing_archive_base_status(db):
 
     stage_root = db.add_folder("/stage/USA", name="USA",
                                workspace_root=False)
-    db.add_photo(folder_id=stage_root, filename="new.raf",
+    photo_ingest.add_photo(db, folder_id=stage_root, filename="new.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
@@ -12418,7 +12427,7 @@ def test_merge_staged_tree_restores_missing_target_folder_status(
                                workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    db.add_photo(folder_id=stage_leaf, filename="fresh.raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="fresh.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
     db.merge_staged_tree_into_archive(stage_root, str(arch))
@@ -12442,7 +12451,7 @@ def test_merge_staged_tree_partial_archive_base_status_preserved(db):
 
     stage_root = db.add_folder("/stage/USA", name="USA",
                                workspace_root=False)
-    db.add_photo(folder_id=stage_root, filename="new.raf",
+    photo_ingest.add_photo(db, folder_id=stage_root, filename="new.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
     db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
@@ -12476,7 +12485,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_collisions(
     # claim (hash) has to match the staged photo's for the drop to be
     # safe in the post-copy path. See merge_staged_tree_into_archive's
     # hash-only invariant.
-    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+    photo_ingest.add_photo(db, folder_id=date_id, filename="dup.raf", extension=".raf",
                  file_size=8, file_mtime=1.0, file_hash="DUPHASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
 
@@ -12485,7 +12494,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_collisions(
                                workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+    dup_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="dup.raf",
                            extension=".raf", file_size=8, file_mtime=2.0,
                            file_hash="DUPHASH")
 
@@ -12512,7 +12521,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_phantom_target(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(folder_id=date_id, filename="dup.raf",
+    phantom_pid = photo_ingest.add_photo(db, folder_id=date_id, filename="dup.raf",
                                extension=".raf",
                                file_size=8, file_mtime=1.0)
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12522,7 +12531,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_phantom_target(
                                workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+    photo_ingest.add_photo(db, folder_id=stage_leaf, filename="dup.raf",
                  extension=".raf", file_size=8, file_mtime=2.0)
 
     counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
@@ -12555,8 +12564,8 @@ def test_merge_staged_tree_preserves_pending_edits_on_real_collision(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12565,8 +12574,8 @@ def test_merge_staged_tree_preserves_pending_edits_on_real_collision(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
 
@@ -12619,8 +12628,8 @@ def test_merge_staged_tree_preserves_pending_edits_on_phantom_target(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12629,8 +12638,8 @@ def test_merge_staged_tree_preserves_pending_edits_on_phantom_target(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
 
@@ -12680,8 +12689,8 @@ def test_merge_staged_tree_preserved_off_staging_only_on_real_collision(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12689,8 +12698,8 @@ def test_merge_staged_tree_preserved_off_staging_only_on_real_collision(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute(
@@ -12728,8 +12737,8 @@ def test_merge_staged_tree_preserves_location_on_real_collision(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12737,8 +12746,8 @@ def test_merge_staged_tree_preserves_location_on_real_collision(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     # The staged photo carries the location-type keyword the user picked;
@@ -12799,8 +12808,8 @@ def test_merge_staged_tree_preserves_location_on_phantom_target(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12808,8 +12817,8 @@ def test_merge_staged_tree_preserves_location_on_phantom_target(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     # The phantom carries the "right" location tag the user picked; the
@@ -12876,8 +12885,8 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_real_collision(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12885,8 +12894,8 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_real_collision(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     older_kw = db.conn.execute(
@@ -12957,8 +12966,8 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_phantom_target(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -12966,8 +12975,8 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_phantom_target(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     older_kw = db.conn.execute(
@@ -13029,8 +13038,8 @@ def test_merge_staged_tree_location_same_second_prefers_later_queue_row(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13038,8 +13047,8 @@ def test_merge_staged_tree_location_same_second_prefers_later_queue_row(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     survivor_kw = db.conn.execute(
@@ -13102,8 +13111,8 @@ def test_merge_staged_tree_takes_newer_staged_location_over_survivor_change(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13111,8 +13120,8 @@ def test_merge_staged_tree_takes_newer_staged_location_over_survivor_change(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     older_kw = db.conn.execute(
@@ -13173,8 +13182,8 @@ def test_merge_staged_tree_takes_newer_phantom_location_over_staged_change(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13182,8 +13191,8 @@ def test_merge_staged_tree_takes_newer_phantom_location_over_staged_change(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     older_kw = db.conn.execute(
@@ -13244,8 +13253,8 @@ def test_merge_staged_tree_location_same_second_prefers_deleted_row_if_later(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13253,8 +13262,8 @@ def test_merge_staged_tree_location_same_second_prefers_deleted_row_if_later(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     survivor_kw = db.conn.execute(
@@ -13327,8 +13336,8 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_add(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13336,8 +13345,8 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_add(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     """The remap lands both rows' keyword changes on one photo, where
@@ -13367,8 +13376,8 @@ def test_merge_staged_tree_newer_staged_keyword_add_beats_older_remove(db, tmp_p
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13376,8 +13385,8 @@ def test_merge_staged_tree_newer_staged_keyword_add_beats_older_remove(db, tmp_p
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     """Mirror: the staged row holds the newer intent, so its addition wins
@@ -13404,8 +13413,8 @@ def test_merge_staged_tree_keeps_existing_keyword_rename_pair(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13413,8 +13422,8 @@ def test_merge_staged_tree_keeps_existing_keyword_rename_pair(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     """An add + remove already queued on ONE photo is a normalization
@@ -13455,8 +13464,8 @@ def test_merge_staged_tree_keyword_rename_pair_exemption_is_workspace_scoped(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13464,8 +13473,8 @@ def test_merge_staged_tree_keyword_rename_pair_exemption_is_workspace_scoped(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -13518,8 +13527,8 @@ def test_merge_staged_tree_rename_pair_reconciles_against_newer_remove_on_other_
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13527,8 +13536,8 @@ def test_merge_staged_tree_rename_pair_reconciles_against_newer_remove_on_other_
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     # Losing (staged) photo carries a legitimate same-workspace rename pair
@@ -13571,8 +13580,8 @@ def test_merge_staged_tree_rename_pair_wins_over_older_opposing_remove(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13580,8 +13589,8 @@ def test_merge_staged_tree_rename_pair_wins_over_older_opposing_remove(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     # Older opposing remove on the losing photo.
@@ -13620,8 +13629,8 @@ def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13629,8 +13638,8 @@ def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -13665,8 +13674,8 @@ def test_merge_staged_tree_drops_older_opposing_row_on_winning_photo(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13674,8 +13683,8 @@ def test_merge_staged_tree_drops_older_opposing_row_on_winning_photo(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_a = db.create_workspace("SiblingA")
@@ -13726,8 +13735,8 @@ def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13735,8 +13744,8 @@ def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     kw = db.add_keyword("Birds")
@@ -13771,8 +13780,8 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13780,8 +13789,8 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     _queue_keyword_change(db, phantom_pid, "keyword_add", "Birds",
@@ -13810,8 +13819,8 @@ def test_merge_staged_tree_carries_queued_rating_onto_survivor(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13819,8 +13828,8 @@ def test_merge_staged_tree_carries_queued_rating_onto_survivor(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute("UPDATE photos SET rating = 2 WHERE id = ?",
@@ -13857,8 +13866,8 @@ def test_merge_staged_tree_newest_queued_rating_wins_and_older_row_goes(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13866,8 +13875,8 @@ def test_merge_staged_tree_newest_queued_rating_wins_and_older_row_goes(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?",
@@ -13910,8 +13919,8 @@ def test_merge_staged_tree_carries_queued_flag_onto_survivor(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13919,8 +13928,8 @@ def test_merge_staged_tree_carries_queued_flag_onto_survivor(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute("UPDATE photos SET flag = 'none' WHERE id = ?",
@@ -13953,8 +13962,8 @@ def test_merge_staged_tree_carries_queued_rating_on_phantom_target(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -13962,8 +13971,8 @@ def test_merge_staged_tree_carries_queued_rating_on_phantom_target(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     db.conn.execute("UPDATE photos SET rating = 1 WHERE id = ?", (new_pid,))
@@ -13992,8 +14001,8 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
     arch = tmp_path / "arch" / "USA"
     arch.mkdir(parents=True)
     folder_id = db.add_folder(str(arch), name="USA")
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.raf", extension=".raf",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="AHASH",
     )
     kw = db.conn.execute(
@@ -14048,8 +14057,8 @@ def test_merge_staged_tree_carries_keyword_add_association(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14057,8 +14066,8 @@ def test_merge_staged_tree_carries_keyword_add_association(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     kw = db.add_keyword("Birds")
@@ -14088,8 +14097,8 @@ def test_merge_staged_tree_carries_keyword_remove_association(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14097,8 +14106,8 @@ def test_merge_staged_tree_carries_keyword_remove_association(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     kw = db.add_keyword("Birds")
@@ -14128,8 +14137,8 @@ def test_merge_staged_tree_keyword_association_follows_chronology(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14137,8 +14146,8 @@ def test_merge_staged_tree_keyword_association_follows_chronology(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     kw = db.add_keyword("Birds")
@@ -14177,8 +14186,8 @@ def test_merge_staged_tree_carries_queued_edit_recipe(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14186,8 +14195,8 @@ def test_merge_staged_tree_carries_queued_edit_recipe(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute(
@@ -14227,8 +14236,8 @@ def test_merge_staged_tree_cleared_edit_recipe_clears_survivor_row(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14236,8 +14245,8 @@ def test_merge_staged_tree_cleared_edit_recipe_clears_survivor_row(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute(
@@ -14274,8 +14283,8 @@ def test_merge_staged_tree_flag_conflict_spans_workspaces(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14283,8 +14292,8 @@ def test_merge_staged_tree_flag_conflict_spans_workspaces(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -14332,8 +14341,8 @@ def test_merge_staged_tree_edit_recipe_conflict_spans_workspaces(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14341,8 +14350,8 @@ def test_merge_staged_tree_edit_recipe_conflict_spans_workspaces(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -14398,8 +14407,8 @@ def test_merge_staged_tree_scalar_conflict_spans_workspaces(db, tmp_path):
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14407,8 +14416,8 @@ def test_merge_staged_tree_scalar_conflict_spans_workspaces(db, tmp_path):
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -14453,8 +14462,8 @@ def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
     second.mkdir(parents=True)
     first_id = db.add_folder(str(first), name="USA")
     second_id = db.add_folder(str(second), name="Canada")
-    pid = db.add_photo(
-        folder_id=first_id, filename="a.raf", extension=".raf",
+    pid = photo_ingest.add_photo(
+        db, folder_id=first_id, filename="a.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="AHASH",
     )
     sibling_ws = db.create_workspace("Sibling")
@@ -14497,15 +14506,15 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     # Unrelated archive-side photo in the same folder. The sibling
     # workspace must NOT gain visibility on it.
     (date_dir / "other.raf").write_bytes(b"unrelated")
-    other_pid = db.add_photo(
-        folder_id=date_id, filename="other.raf", extension=".raf",
+    other_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="other.raf", extension=".raf",
         file_size=9, file_mtime=1.0, file_hash="OTHERHASH",
     )
     db.set_active_workspace(ws)
@@ -14514,8 +14523,8 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     db.conn.execute(
@@ -14588,8 +14597,8 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    phantom_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    phantom_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="STALEHASH",
     )
     db.set_active_workspace(ws)
@@ -14598,8 +14607,8 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    new_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    new_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="NEWHASH",
     )
     db.conn.execute(
@@ -14650,8 +14659,8 @@ def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
     arch = tmp_path / "arch"
     arch.mkdir()
     folder_id = db.add_folder(str(arch), name="arch")
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.raf", extension=".raf",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.raf", extension=".raf",
         file_size=1, file_mtime=1.0, file_hash="H1",
     )
     assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is True
@@ -14673,8 +14682,8 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
     arch = tmp_path / "arch"
     arch.mkdir()
     folder_id = db.add_folder(str(arch), name="arch")
-    pid = db.add_photo(
-        folder_id=folder_id, filename="a.raf", extension=".raf",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.raf", extension=".raf",
         file_size=1, file_mtime=1.0, file_hash="H1",
     )
     db.set_active_workspace(sibling_ws)
@@ -14703,8 +14712,8 @@ def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
     base_id = db.add_folder(str(arch), name="USA")
     date_id = db.add_folder(str(date_dir), name="2026-01-01",
                             parent_id=base_id)
-    survivor_pid = db.add_photo(
-        folder_id=date_id, filename="dup.raf", extension=".raf",
+    survivor_pid = photo_ingest.add_photo(
+        db, folder_id=date_id, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=1.0, file_hash="DUPHASH",
     )
     db.add_workspace_folder(ws, base_id, is_root=True)
@@ -14712,8 +14721,8 @@ def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
                                parent_id=stage_root, workspace_root=False)
-    dup_pid = db.add_photo(
-        folder_id=stage_leaf, filename="dup.raf", extension=".raf",
+    dup_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="dup.raf", extension=".raf",
         file_size=8, file_mtime=2.0, file_hash="DUPHASH",
     )
     # Two rows on the same staged photo, one in each workspace. Only the
@@ -14769,11 +14778,11 @@ def test_merge_staged_tree_intra_staged_non_ascii_case_alias(
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
     # Two staged rows differing only in non-ASCII case.
-    winner_pid = db.add_photo(
-        folder_id=stage_leaf, filename="Ä.raf", extension=".raf",
+    winner_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="Ä.raf", extension=".raf",
         file_size=100, file_mtime=1.0, file_hash="WINBYTES")
-    later_pid = db.add_photo(
-        folder_id=stage_leaf, filename="ä.raf", extension=".raf",
+    later_pid = photo_ingest.add_photo(
+        db, folder_id=stage_leaf, filename="ä.raf", extension=".raf",
         file_size=200, file_mtime=2.0, file_hash="OTHERBYTES")
     db.conn.execute(
         "INSERT INTO pending_changes "
@@ -14817,7 +14826,7 @@ def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, mon
     f_us = db.add_folder("/photos/my_dir", name="my_dir")
     f_usx = db.add_folder("/photos/myXdir", name="myXdir")
     for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c"), (f_us, "d"), (f_usx, "e")]:
-        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
                      file_size=100, file_mtime=1.0)
 
     under_2023 = [{"field": "folder", "op": "under", "value": "/photos/2023"}]
@@ -14847,7 +14856,7 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
     f_sub = db.add_folder("C:\\Photos\\2023\\trip", name="trip", parent_id=f_root)
     f_sib = db.add_folder("C:\\Photos\\2023-trip", name="2023-trip")
     for fid, name in [(f_root, "a"), (f_sub, "b"), (f_sib, "c")]:
-        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
                      file_size=100, file_mtime=1.0)
 
     # Forward-slash rule value still applies to a Windows library because
@@ -14883,7 +14892,7 @@ def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
     f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
     f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
     for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c")]:
-        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
                      file_size=100, file_mtime=1.0)
 
     legacy_is = [{"field": "folder", "op": "is", "value": "/photos/2023"}]
@@ -14908,8 +14917,8 @@ def test_check_filename_collisions(db):
     """moves_merge.filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")
     fid2 = db.add_folder("/dst", name="dst")
-    db.add_photo(folder_id=fid1, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    p_dst = db.add_photo(folder_id=fid2, filename="bird.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    photo_ingest.add_photo(db, folder_id=fid1, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p_dst = photo_ingest.add_photo(db, folder_id=fid2, filename="bird.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
     p_src = db.conn.execute("SELECT id FROM photos WHERE folder_id = ? AND filename = 'bird.jpg'", (fid1,)).fetchone()["id"]
     collisions = db.moves_merge.filename_collisions([p_src], fid2)
     assert len(collisions) == 1
@@ -14926,8 +14935,8 @@ def test_get_highlights_candidates(tmp_path):
     fid = db.add_folder('/test/folder', name='folder')
     # Insert photos with varying quality scores
     for i, qs in enumerate([0.9, 0.7, 0.5, 0.3, None]):
-        pid = db.add_photo(
-            folder_id=fid, filename=f'img{i}.jpg', extension='.jpg',
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f'img{i}.jpg', extension='.jpg',
             file_size=1000, file_mtime=1000.0,
         )
         db.conn.execute(
@@ -14973,9 +14982,9 @@ def test_get_highlights_candidates_includes_descendants(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    p1 = db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=root, filename='top.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=child, filename='deep.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=child, filename='deep.jpg', extension='.jpg',
                       file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
     db.conn.commit()
@@ -14991,9 +15000,9 @@ def test_get_highlights_candidates_skips_missing_descendants(tmp_path):
     root = db.add_folder('/p', name='p')
     ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
     missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
-    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+    p_ok = photo_ingest.add_photo(db, folder_id=ok_child, filename='a.jpg', extension='.jpg',
                         file_size=100, file_mtime=1.0)
-    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+    p_gone = photo_ingest.add_photo(db, folder_id=missing_child, filename='b.jpg', extension='.jpg',
                           file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
@@ -15011,13 +15020,13 @@ def test_get_highlights_candidates_excludes_rejected(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/test/folder', name='folder')
-    good_pid = db.add_photo(
-        folder_id=fid, filename='good.jpg', extension='.jpg',
+    good_pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename='good.jpg', extension='.jpg',
         file_size=1000, file_mtime=1000.0,
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (good_pid,))
-    bad_pid = db.add_photo(
-        folder_id=fid, filename='bad.jpg', extension='.jpg',
+    bad_pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename='bad.jpg', extension='.jpg',
         file_size=1000, file_mtime=1000.0,
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.9, flag = 'rejected' WHERE id = ?", (bad_pid,))
@@ -15039,9 +15048,9 @@ def test_get_highlights_candidates_workspace_wide(tmp_path):
     # Two sibling folders, both in the active workspace, each with a scored photo.
     f1 = db.add_folder('/shoot/2024-01-15', name='2024-01-15')
     f2 = db.add_folder('/shoot/2024-01-16', name='2024-01-16')
-    p1 = db.add_photo(folder_id=f1, filename='day1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=f1, filename='day1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=f2, filename='day2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=f2, filename='day2.jpg', extension='.jpg',
                       file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
     db.conn.commit()
@@ -15056,9 +15065,9 @@ def test_get_highlights_candidates_photo_id_restricts_query(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     f = db.add_folder('/shoot', name='shoot')
-    p1 = db.add_photo(folder_id=f, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=f, filename='a.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=f, filename='b.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=f, filename='b.jpg', extension='.jpg',
                       file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)",
                     (p1, p2))
@@ -15085,9 +15094,9 @@ def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
     f_other = db.add_folder('/other', name='other')
     db.remove_workspace_folder(active_ws, f_other)
     db.add_workspace_folder(other_ws, f_other)
-    p_active = db.add_photo(folder_id=f_active, filename='a.jpg', extension='.jpg',
+    p_active = photo_ingest.add_photo(db, folder_id=f_active, filename='a.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
-    p_other = db.add_photo(folder_id=f_other, filename='b.jpg', extension='.jpg',
+    p_other = photo_ingest.add_photo(db, folder_id=f_other, filename='b.jpg', extension='.jpg',
                            file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)",
                     (p_active, p_other))
@@ -15105,11 +15114,11 @@ def test_get_highlights_candidates_workspace_wide_respects_min_quality_and_rejec
     f1 = db.add_folder('/a', name='a')
     f2 = db.add_folder('/b', name='b')
     # Above threshold in f1; below threshold in f2; rejected in f1.
-    p_keep = db.add_photo(folder_id=f1, filename='keep.jpg', extension='.jpg',
+    p_keep = photo_ingest.add_photo(db, folder_id=f1, filename='keep.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    p_low = db.add_photo(folder_id=f2, filename='low.jpg', extension='.jpg',
+    p_low = photo_ingest.add_photo(db, folder_id=f2, filename='low.jpg', extension='.jpg',
                          file_size=100, file_mtime=2.0)
-    p_reject = db.add_photo(folder_id=f1, filename='reject.jpg', extension='.jpg',
+    p_reject = photo_ingest.add_photo(db, folder_id=f1, filename='reject.jpg', extension='.jpg',
                             file_size=100, file_mtime=3.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (p_keep,))
     db.conn.execute("UPDATE photos SET quality_score = 0.2 WHERE id = ?", (p_low,))
@@ -15128,7 +15137,7 @@ def test_get_highlights_candidates_returns_predicted_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.6 WHERE id = ?", (pid,))
     did = db.conn.execute(
@@ -15156,7 +15165,7 @@ def test_get_highlights_candidates_predicted_picks_highest_confidence(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    pid = db.add_photo(folder_id=fid, filename='two.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='two.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
     d1 = db.conn.execute(
@@ -15190,7 +15199,7 @@ def test_get_highlights_candidates_predicted_excludes_rejected(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    pid = db.add_photo(folder_id=fid, filename='r.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='r.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
     did = db.conn.execute(
@@ -15222,7 +15231,7 @@ def test_get_highlights_candidates_predicted_uses_latest_fingerprint(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    pid = db.add_photo(folder_id=fid, filename='reclass.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='reclass.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
     did = db.conn.execute(
@@ -15259,15 +15268,15 @@ def test_get_folders_with_quality_data(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     # Folder with quality data
     fid1 = db.add_folder('/scored', name='scored')
-    pid1 = db.add_photo(
-        folder_id=fid1, filename='a.jpg', extension='.jpg',
+    pid1 = photo_ingest.add_photo(
+        db, folder_id=fid1, filename='a.jpg', extension='.jpg',
         file_size=1000, file_mtime=1000.0,
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid1,))
     # Folder without quality data
     fid2 = db.add_folder('/noscores', name='noscores')
-    db.add_photo(
-        folder_id=fid2, filename='b.jpg', extension='.jpg',
+    photo_ingest.add_photo(
+        db, folder_id=fid2, filename='b.jpg', extension='.jpg',
         file_size=1000, file_mtime=1000.0,
     )
     db.conn.commit()
@@ -15285,7 +15294,7 @@ def test_get_folders_with_quality_data_rolls_up_subtree(tmp_path):
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
     # Scored photo lives only in the child
-    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=child, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
     db.conn.commit()
@@ -15306,7 +15315,7 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     other_ws = db.create_workspace('Other')
     root = db.add_folder('/p', name='p')
     child = db.add_folder('/p/c', name='c', parent_id=root)
-    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=child, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
     # Move the child folder to the other workspace only.
@@ -15335,7 +15344,7 @@ def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path)
     a = db.add_folder('/a', name='a')
     b = db.add_folder('/a/b', name='b', parent_id=a)
     c = db.add_folder('/a/b/c', name='c', parent_id=b)
-    pid = db.add_photo(folder_id=c, filename='x.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=c, filename='x.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
     # Detach B from the active workspace.
@@ -15359,9 +15368,9 @@ def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
     root = db.add_folder('/p', name='p')
     ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
     missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
-    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+    p_ok = photo_ingest.add_photo(db, folder_id=ok_child, filename='a.jpg', extension='.jpg',
                         file_size=100, file_mtime=1.0)
-    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+    p_gone = photo_ingest.add_photo(db, folder_id=missing_child, filename='b.jpg', extension='.jpg',
                           file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
@@ -15388,7 +15397,7 @@ def test_set_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(pid, 'red')
     assert db.photo_labels.get(pid) == 'red'
 
@@ -15398,7 +15407,7 @@ def test_set_color_label_replaces(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(pid, 'red')
     db.photo_labels.set(pid, 'blue')
     assert db.photo_labels.get(pid) == 'blue'
@@ -15409,7 +15418,7 @@ def test_remove_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(pid, 'green')
     db.photo_labels.remove(pid)
     assert db.photo_labels.get(pid) is None
@@ -15421,7 +15430,7 @@ def test_color_label_invalid_color(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     with pytest.raises(ValueError):
         db.photo_labels.set(pid, 'orange')
 
@@ -15431,7 +15440,7 @@ def test_color_label_workspace_scoped(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     # Default workspace
     ws1 = db._active_workspace_id
@@ -15515,8 +15524,8 @@ def test_batch_set_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set_many([p1, p2], 'yellow')
     assert db.photo_labels.get(p1) == 'yellow'
     assert db.photo_labels.get(p2) == 'yellow'
@@ -15527,8 +15536,8 @@ def test_batch_remove_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set_many([p1, p2], 'yellow')
     db.photo_labels.set_many([p1, p2], None)
     assert db.photo_labels.get(p1) is None
@@ -15540,9 +15549,9 @@ def test_get_photos_filter_by_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(p1, 'red')
     db.photo_labels.set(p2, 'blue')
 
@@ -15556,8 +15565,8 @@ def test_count_filtered_photos_with_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(p1, 'green')
 
     count = db.photos.count_filtered(color_label='green')
@@ -15569,9 +15578,9 @@ def test_get_photos_filter_color_label_combined_with_rating(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p1, 4)
     db.photo_review.set_rating(p2, 4)
     db.photo_review.set_rating(p3, 2)
@@ -15594,8 +15603,8 @@ def test_collection_color_label_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(p1, 'red')
     db.photo_labels.set(p2, 'blue')
 
@@ -15613,9 +15622,9 @@ def test_collection_color_label_not_equals_rule(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(p1, 'red')
     db.photo_labels.set(p2, 'blue')
 
@@ -15636,9 +15645,9 @@ def test_collection_group_any_and_none_rules(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='five.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='pick.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='five.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='pick.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (p1,))
     db.conn.execute("UPDATE photos SET flag = 'flagged' WHERE id = ?", (p2,))
     db.conn.commit()
@@ -15677,8 +15686,8 @@ def test_collection_vireo_native_fields(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='match.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='miss.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='match.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='miss.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
     db.conn.execute(
         "UPDATE photos SET quality_score = 0.91, mask_path = ?, "
@@ -15730,7 +15739,7 @@ def test_undo_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
@@ -15745,7 +15754,7 @@ def test_redo_color_label(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
@@ -15770,7 +15779,7 @@ def test_update_photo_embeddings_stores_variant(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
 
     blob = np.ones(1024, dtype=np.float32).tobytes()
     db.masks_features.update_embeddings(
@@ -15791,7 +15800,7 @@ def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
 
     db.masks_features.update_embeddings(
         pid,
@@ -15839,8 +15848,8 @@ def test_preview_cache_insert_and_touch(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     # Need a real photo row due to FK
     folder_id = db.add_folder("/tmp/test")
-    photo_id = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
 
     t0 = time.time()
@@ -15868,11 +15877,11 @@ def test_preview_cache_total_bytes(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder("/tmp/test")
-    p1 = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p1 = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p2 = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p2 = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
 
     assert db.caches.preview_total_bytes() == 0
@@ -15886,8 +15895,8 @@ def test_preview_cache_delete(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder("/tmp/test")
-    p1 = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p1 = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
     db.caches.preview_insert(p1, 1920, 100)
     db.caches.preview_delete(p1, 1920)
@@ -15901,11 +15910,11 @@ def test_preview_cache_oldest_first(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder("/tmp/test")
-    p1 = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p1 = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p2 = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p2 = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
 
     db.caches.preview_insert(p1, 1920, 100)
@@ -15935,8 +15944,8 @@ def test_record_detector_run_and_lookup(tmp_path):
     folder_id = db.add_folder("/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -15963,8 +15972,8 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
     ws_b = db.create_workspace("B")
     db.add_workspace_folder(ws_a, folder_id)
     db.add_workspace_folder(ws_b, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 
@@ -15990,8 +15999,8 @@ def test_record_classifier_run_and_lookup(tmp_path):
     folder_id = db.add_folder("/tmp/p")
     db._active_workspace_id = db.create_workspace("WS")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Need a detection row to reference:
@@ -16044,8 +16053,8 @@ def test_review_status_absence_is_pending(tmp_path):
     ws = db.create_workspace("WS")
     db._active_workspace_id = ws
     db.add_workspace_folder(ws, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -16118,11 +16127,11 @@ def test_list_misses_returns_flagged_photos_only(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p1 = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p1 = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p2 = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    p2 = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
     )
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22' "
@@ -16140,11 +16149,11 @@ def test_list_misses_filters_by_category(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p_clip = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p_clip = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p_oof = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    p_oof = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
     )
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_clip,))
     db.conn.execute("UPDATE photos SET miss_oof=1     WHERE id=?", (p_oof,))
@@ -16158,8 +16167,8 @@ def test_clear_miss_flag_on_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1, miss_oof=1 WHERE id=?", (p,)
@@ -16178,11 +16187,11 @@ def test_bulk_reject_category_sets_flag_rejected(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p1 = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p1 = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p2 = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    p2 = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
     )
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)", (p1, p2)
@@ -16209,11 +16218,11 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p_miss = db.add_photo(
-        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p_miss = photo_ingest.add_photo(
+        db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p_already = db.add_photo(
-        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    p_already = photo_ingest.add_photo(
+        db, folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
     )
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
@@ -16245,11 +16254,11 @@ def test_list_misses_since_filter(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p_old = db.add_photo(
-        folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0
+    p_old = photo_ingest.add_photo(
+        db, folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0
     )
-    p_new = db.add_photo(
-        folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0
+    p_new = photo_ingest.add_photo(
+        db, folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0
     )
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-20T00:00:00+00:00' "
@@ -16283,13 +16292,13 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
 
     db.set_active_workspace(ws_a)
     fa = db.add_folder("/tmp/a", name="a")
-    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_a = photo_ingest.add_photo(db, fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
     db.conn.commit()
 
     db.set_active_workspace(ws_b)
     fb = db.add_folder("/tmp/b", name="b")
-    p_b = db.add_photo(fb, "b.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_b = photo_ingest.add_photo(db, fb, "b.jpg", ".jpg", file_size=100, file_mtime=2.0)
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_b,))
     db.conn.commit()
 
@@ -16326,7 +16335,7 @@ def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p = photo_ingest.add_photo(db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p,))
     db.conn.commit()
     # Two detections; the primary is the higher-confidence one.
@@ -16354,7 +16363,7 @@ def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
-    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p = photo_ingest.add_photo(db, folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET miss_no_subject=1 WHERE id=?", (p,))
     db.conn.commit()
 
@@ -16372,8 +16381,8 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
 
-    p_old = db.add_photo(folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0)
-    p_new = db.add_photo(folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_old = photo_ingest.add_photo(db, folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_new = photo_ingest.add_photo(db, folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0)
     db.conn.execute(
         "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
         ("2026-04-10T00:00:00+00:00", p_old),
@@ -16417,9 +16426,9 @@ def test_bulk_reject_miss_category_preserves_null_flag_in_old_value(tmp_path):
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
 
-    p_null = db.add_photo(folder_id, "null.jpg", ".jpg", file_size=100, file_mtime=1.0)
-    p_none = db.add_photo(folder_id, "none.jpg", ".jpg", file_size=100, file_mtime=2.0)
-    p_flagged = db.add_photo(folder_id, "flagged.jpg", ".jpg", file_size=100, file_mtime=3.0)
+    p_null = photo_ingest.add_photo(db, folder_id, "null.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_none = photo_ingest.add_photo(db, folder_id, "none.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_flagged = photo_ingest.add_photo(db, folder_id, "flagged.jpg", ".jpg", file_size=100, file_mtime=3.0)
 
     # p_null forced to NULL flag (add_photo defaults the column to 'none');
     # p_none explicitly "none"; p_flagged "flagged".
@@ -16455,8 +16464,8 @@ def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
     N = 1100
     photo_ids = []
     for i in range(N):
-        pid = db.add_photo(
-            folder_id, f"p{i:04d}.jpg", ".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id, f"p{i:04d}.jpg", ".jpg",
             file_size=100, file_mtime=float(i + 1),
         )
         photo_ids.append(pid)
@@ -16491,7 +16500,7 @@ def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
 
     db.set_active_workspace(ws_a)
     fa = db.add_folder("/tmp/a", name="a")
-    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_a = photo_ingest.add_photo(db, fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
     db.conn.commit()
 
@@ -16873,9 +16882,9 @@ def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
     db.set_active_workspace(db.create_workspace("ws"))
 
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     gen_kid = db.add_keyword("note", kw_type="general")
@@ -16894,9 +16903,9 @@ def test_filter_out_wildlife_excluded_drops_marked_photos(tmp_path):
     db.set_active_workspace(ws)
     fid = db.add_folder('/photos', name='photos')
     db.add_workspace_folder(ws, fid)
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     db.update_photo_wildlife_excluded(p1, True)
@@ -16911,7 +16920,7 @@ def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     assert db.photo_keywords.filter_out_subject_tagged([p1], set()) == [p1]
 
@@ -16933,11 +16942,11 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     # Insert several photos; we'll then ask filter_out_subject_tagged
     # to keep them all (no subject tags) but in a specific input order.
-    p_a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p_a = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    p_b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p_b = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    p_c = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg',
+    p_c = photo_ingest.add_photo(db, folder_id=fid, filename='c.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
 
     # No subject-tagged photos here — all three should be kept.
@@ -17005,8 +17014,8 @@ def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
     genre_kid = db.add_keyword("Landscape", kw_type="genre")
     pids = []
     for i in range(25):
-        p = db.add_photo(
-            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+        p = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=float(i),
         )
         pids.append(p)
@@ -17033,9 +17042,9 @@ def test_filter_out_subject_tagged_excludes_legacy_is_species_when_taxonomy_requ
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     # Plant a legacy species keyword on p1 (is_species=1, type='general').
@@ -17065,7 +17074,7 @@ def test_filter_out_subject_tagged_ignores_legacy_is_species_when_taxonomy_exclu
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     cur = db.conn.execute(
@@ -17093,7 +17102,7 @@ def test_tag_photo_with_taxonomy_keyword_does_not_add_wildlife_genre(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     species_kid = db.add_keyword("Northern cardinal", is_species=True)
 
@@ -17125,8 +17134,8 @@ def test_manual_keyword_add_stamps_durable_provenance(tmp_path):
     db.set_active_workspace(ws)
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    p1 = db.add_photo(
-        folder_id=fid, filename="p1.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="p1.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     kid = db.add_keyword("House Sparrow", is_species=True)
@@ -17153,8 +17162,8 @@ def test_manual_keyword_add_stamps_durable_provenance(tmp_path):
 
     # And the omitted-source path is the fail-safe one: a call site that never
     # declares provenance produces a row retirement refuses to delete.
-    p2 = db.add_photo(
-        folder_id=fid, filename="p2.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="p2.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.tag_photo(p2, kid)
@@ -17169,7 +17178,7 @@ def test_pending_keyword_removal_keys_distinguish_flat_and_hierarchical(tmp_path
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.queue_change(p1, "keyword_remove_flat", "Wildlife")
     db.queue_change(p1, "keyword_remove", "House Sparrow")
@@ -17188,7 +17197,7 @@ def test_tag_photo_legacy_species_does_not_add_wildlife_genre(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
     cur = db.conn.execute(
@@ -17217,7 +17226,7 @@ def test_tag_photo_multiple_species_store_only_taxonomy_terms(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     sp_a = db.add_keyword("Robin", is_species=True)
     db.tag_photo(p1, sp_a)
@@ -17248,7 +17257,7 @@ def test_tag_photo_no_op_retag_keeps_single_taxonomy_association(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     sp = db.add_keyword("Robin", is_species=True)
 
@@ -17875,8 +17884,8 @@ def test_upsert_place_chain_shares_parents_across_leaves(db):
 def _make_photo(db, filename="loc.jpg"):
     """Helper: create a folder + a single photo, return its id."""
     fid = db.add_folder(f"/photos/{filename}-folder", name="loc")
-    return db.add_photo(
-        folder_id=fid, filename=filename, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=fid, filename=filename, extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
 
@@ -18685,7 +18694,7 @@ def test_update_keyword_rename_general_to_matching_taxon_visible_to_species_quer
     _seed_taxa(db, [(7000, "Aythya affinis", "Lesser Scaup")])
 
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     kid = db.add_keyword("Lesser scaub")  # typo, no taxon match
     db.tag_photo(pid, kid)
@@ -18710,7 +18719,7 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     db = Database(str(tmp_path / "test.db"))
 
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     kid = db.add_keyword("Lesser Scaup")
     db.tag_photo(pid, kid)
@@ -18738,7 +18747,7 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     db.conn.commit()
 
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     birds = db.add_keyword("1Birds")
     family = db.add_keyword("Penduline tits", parent_id=birds)
@@ -18769,8 +18778,8 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Penduline tits")
@@ -18806,8 +18815,8 @@ def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_pat
         ],
     )
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Two intentionally-distinct linked species keywords share the NOCASE
@@ -18859,8 +18868,8 @@ def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(19001, "Turdus migratorius", "American Robin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Distinct linked taxonomy row that intentionally shares the match key
@@ -18886,8 +18895,8 @@ def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
 
     # If the same photo actually carries the legacy target row, that
     # exact-row match is still recognized.
-    other = db.add_photo(
-        folder_id=fid, filename="b.jpg", extension=".jpg",
+    other = photo_ingest.add_photo(
+        db, folder_id=fid, filename="b.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.tag_photo(other, legacy_target)
@@ -18959,8 +18968,8 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Penduline tits")
@@ -18995,8 +19004,8 @@ def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Create the sibling root first so it has the lower id and would win a
@@ -19029,8 +19038,8 @@ def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Something")
@@ -19069,8 +19078,8 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Penduline tits")
@@ -19103,8 +19112,8 @@ def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
     db.set_active_workspace(ws_id)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Root alias (attached to the photo) must survive dedup; ``add_keyword``
@@ -19179,8 +19188,8 @@ def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
         ],
     )
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # ``add_keyword`` collapses NOCASE duplicates through its typed
@@ -19217,8 +19226,8 @@ def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Something")
@@ -19712,12 +19721,12 @@ def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path)
     try:
         # Simulate a real folder + photos so tag rows are well-formed.
         fid = db.add_folder("/photos", name="photos")
-        pid_src = db.add_photo(
-            folder_id=fid, filename="a.jpg", extension=".jpg",
+        pid_src = photo_ingest.add_photo(
+            db, folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_dst = db.add_photo(
-            folder_id=fid, filename="b.jpg", extension=".jpg",
+        pid_dst = photo_ingest.add_photo(
+            db, folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -19788,12 +19797,12 @@ def test_update_keyword_retype_legacy_general_is_species_does_not_leak(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     try:
         fid = db.add_folder("/photos", name="photos")
-        pid_src = db.add_photo(
-            folder_id=fid, filename="a.jpg", extension=".jpg",
+        pid_src = photo_ingest.add_photo(
+            db, folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_dst = db.add_photo(
-            folder_id=fid, filename="b.jpg", extension=".jpg",
+        pid_dst = photo_ingest.add_photo(
+            db, folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -19869,12 +19878,12 @@ def test_merge_keyword_into_retargets_edit_history(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     try:
         fid = db.add_folder("/photos", name="photos")
-        pid = db.add_photo(
-            folder_id=fid, filename="a.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_replace = db.add_photo(
-            folder_id=fid, filename="b.jpg", extension=".jpg",
+        pid_replace = photo_ingest.add_photo(
+            db, folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -19962,8 +19971,8 @@ def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     try:
         fid = db.add_folder("/photos", name="photos")
-        pid = db.add_photo(
-            folder_id=fid, filename="a.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -20011,8 +20020,8 @@ def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     try:
         fid = db.add_folder("/photos", name="photos")
-        pid = db.add_photo(
-            folder_id=fid, filename="a.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -20070,12 +20079,12 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
         ws = db.ensure_default_workspace()
         db.set_active_workspace(ws)
         fid = db.add_folder("/photos", name="photos")
-        pid_had_both = db.add_photo(
-            folder_id=fid, filename="both.jpg", extension=".jpg",
+        pid_had_both = photo_ingest.add_photo(
+            db, folder_id=fid, filename="both.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_only_src = db.add_photo(
-            folder_id=fid, filename="src.jpg", extension=".jpg",
+        pid_only_src = photo_ingest.add_photo(
+            db, folder_id=fid, filename="src.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -20152,12 +20161,12 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
         ws = db.ensure_default_workspace()
         db.set_active_workspace(ws)
         fid = db.add_folder("/photos", name="photos")
-        pid_had_both = db.add_photo(
-            folder_id=fid, filename="both.jpg", extension=".jpg",
+        pid_had_both = photo_ingest.add_photo(
+            db, folder_id=fid, filename="both.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_only_src = db.add_photo(
-            folder_id=fid, filename="src.jpg", extension=".jpg",
+        pid_only_src = photo_ingest.add_photo(
+            db, folder_id=fid, filename="src.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         keep_id = db.add_keyword("Robin", kw_type="general")
@@ -20227,12 +20236,12 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
         ws = db.ensure_default_workspace()
         db.set_active_workspace(ws)
         fid = db.add_folder("/photos", name="photos")
-        pid_had_both = db.add_photo(
-            folder_id=fid, filename="both.jpg", extension=".jpg",
+        pid_had_both = photo_ingest.add_photo(
+            db, folder_id=fid, filename="both.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        pid_only_src = db.add_photo(
-            folder_id=fid, filename="src.jpg", extension=".jpg",
+        pid_only_src = photo_ingest.add_photo(
+            db, folder_id=fid, filename="src.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         keep_id = db.add_keyword("Robin", kw_type="general")
@@ -20315,8 +20324,8 @@ def test_add_photo_retries_on_database_is_locked(tmp_path):
 
     db.conn = _LockyExecuteConn(real_conn)
     try:
-        pid = db.add_photo(
-            folder_id=fid,
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid,
             filename="DSC_0001.NEF",
             extension=".nef",
             file_size=1000,
@@ -20370,13 +20379,13 @@ def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
-    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg",
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename="c.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
 
@@ -20424,8 +20433,8 @@ def test_count_classifier_runs_chunks_large_id_lists(tmp_path):
     # for (BioCLIP-2.5, fp-a). Above the 999 SQLite variable cap.
     photo_ids = []
     for i in range(1500):
-        pid = db.add_photo(
-            folder_id=fid, filename=f"p_{i:05d}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"p_{i:05d}.jpg", extension=".jpg",
             file_size=1, file_mtime=1.0, timestamp=None,
             width=1, height=1,
         )
@@ -20443,13 +20452,13 @@ def test_count_classifier_runs_uses_full_image_not_below_threshold_crop(tmp_path
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
-    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg",
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename="c.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
 
@@ -20483,10 +20492,10 @@ def test_count_classifier_runs_ignores_non_animal_detections(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0, timestamp=None,
                      width=1, height=1)
 
@@ -20534,16 +20543,16 @@ def test_get_classifier_run_cache_hits_returns_matched_photo_ids(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p_cached = db.add_photo(
-        folder_id=fid, filename="cached.jpg", extension=".jpg",
+    p_cached = photo_ingest.add_photo(
+        db, folder_id=fid, filename="cached.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_partial = db.add_photo(
-        folder_id=fid, filename="partial.jpg", extension=".jpg",
+    p_partial = photo_ingest.add_photo(
+        db, folder_id=fid, filename="partial.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_none = db.add_photo(
-        folder_id=fid, filename="none.jpg", extension=".jpg",
+    p_none = photo_ingest.add_photo(
+        db, folder_id=fid, filename="none.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
 
@@ -20573,8 +20582,8 @@ def test_get_classifier_run_cache_hits_requires_usable_prediction(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    photo_id = db.add_photo(
-        folder_id=fid, filename="run-only.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="run-only.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     detection_id = _add_one_detection(db, photo_id)
@@ -20622,16 +20631,16 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
 
-    p_stale = db.add_photo(
-        folder_id=fid, filename="stale.jpg", extension=".jpg",
+    p_stale = photo_ingest.add_photo(
+        db, folder_id=fid, filename="stale.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_legacy = db.add_photo(
-        folder_id=fid, filename="legacy.jpg", extension=".jpg",
+    p_legacy = photo_ingest.add_photo(
+        db, folder_id=fid, filename="legacy.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_current = db.add_photo(
-        folder_id=fid, filename="current.jpg", extension=".jpg",
+    p_current = photo_ingest.add_photo(
+        db, folder_id=fid, filename="current.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
 
@@ -20743,12 +20752,12 @@ def test_get_classifier_run_cache_hits_uses_fresh_runtime_candidates(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p_processed = db.add_photo(
-        folder_id=fid, filename="processed.jpg", extension=".jpg",
+    p_processed = photo_ingest.add_photo(
+        db, folder_id=fid, filename="processed.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_failed = db.add_photo(
-        folder_id=fid, filename="failed.jpg", extension=".jpg",
+    p_failed = photo_ingest.add_photo(
+        db, folder_id=fid, filename="failed.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
 
@@ -20799,16 +20808,16 @@ def test_get_classifier_run_cache_hits_includes_noise_full_image_anchor(
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p_noise = db.add_photo(
-        folder_id=fid, filename="noise.jpg", extension=".jpg",
+    p_noise = photo_ingest.add_photo(
+        db, folder_id=fid, filename="noise.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_person = db.add_photo(
-        folder_id=fid, filename="person.jpg", extension=".jpg",
+    p_person = photo_ingest.add_photo(
+        db, folder_id=fid, filename="person.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_detector_failure = db.add_photo(
-        folder_id=fid, filename="detector-failure.jpg", extension=".jpg",
+    p_detector_failure = photo_ingest.add_photo(
+        db, folder_id=fid, filename="detector-failure.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
 
@@ -20854,8 +20863,8 @@ def test_fresh_preflight_reloads_omitted_contextual_weak_candidate(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    photo_id = db.add_photo(
-        folder_id=fid, filename="weak.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="weak.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     weak_detection_id = _add_one_detection(
@@ -20902,12 +20911,12 @@ def test_get_classifier_run_cache_hits_includes_contextual_weak(tmp_path):
     # normal 0.2 threshold neither has any qualifying detection, so the
     # legacy preflight would omit both from ``cached_est``. Under the
     # weak 0.12 floor only ``p_weak_cached`` has a matching run key.
-    p_weak_cached = db.add_photo(
-        folder_id=fid, filename="weak_cached.jpg", extension=".jpg",
+    p_weak_cached = photo_ingest.add_photo(
+        db, folder_id=fid, filename="weak_cached.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_weak_uncached = db.add_photo(
-        folder_id=fid, filename="weak_uncached.jpg", extension=".jpg",
+    p_weak_uncached = photo_ingest.add_photo(
+        db, folder_id=fid, filename="weak_uncached.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     d_weak_cached = _add_one_detection(
@@ -20942,12 +20951,12 @@ def test_get_classifier_run_cache_hits_weak_scoped_per_photo(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p_normal_weak_only = db.add_photo(
-        folder_id=fid, filename="normal.jpg", extension=".jpg",
+    p_normal_weak_only = photo_ingest.add_photo(
+        db, folder_id=fid, filename="normal.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
-    p_weak = db.add_photo(
-        folder_id=fid, filename="weak.jpg", extension=".jpg",
+    p_weak = photo_ingest.add_photo(
+        db, folder_id=fid, filename="weak.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     d_normal_low = _add_one_detection(
@@ -20986,8 +20995,8 @@ def test_get_classifier_run_cache_hits_weak_matches_top_detection_only(tmp_path)
     # p_lower_cached: two weak-threshold detections. The higher-
     # confidence (0.18) has no run key; the lower (0.13) does. Runtime
     # infers the top one, so preflight must NOT count this photo.
-    p_lower_cached = db.add_photo(
-        folder_id=fid, filename="lower.jpg", extension=".jpg",
+    p_lower_cached = photo_ingest.add_photo(
+        db, folder_id=fid, filename="lower.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _ = _add_one_detection(
@@ -21000,8 +21009,8 @@ def test_get_classifier_run_cache_hits_weak_matches_top_detection_only(tmp_path)
 
     # p_top_cached: same shape, but the run key is on the TOP box —
     # runtime cache-hits, preflight counts it.
-    p_top_cached = db.add_photo(
-        folder_id=fid, filename="top.jpg", extension=".jpg",
+    p_top_cached = photo_ingest.add_photo(
+        db, folder_id=fid, filename="top.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     d_top = _add_one_detection(
@@ -21029,8 +21038,8 @@ def test_get_classifier_run_cache_hits_weak_ties_break_by_id(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p = db.add_photo(
-        folder_id=fid, filename="tie.jpg", extension=".jpg",
+    p = photo_ingest.add_photo(
+        db, folder_id=fid, filename="tie.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     d_first = _add_one_detection(
@@ -21086,8 +21095,8 @@ def test_get_classifier_run_cache_hits_weak_ignores_foreign_detector(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
-    p = db.add_photo(
-        folder_id=fid, filename="foreign_top.jpg", extension=".jpg",
+    p = photo_ingest.add_photo(
+        db, folder_id=fid, filename="foreign_top.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     # Foreign detector weak row: higher confidence, would rank #1 if the
@@ -21133,30 +21142,30 @@ def test_get_unclassifiable_photos_keeps_noise_fallback_as_work(tmp_path):
     fid = db.add_folder("/photos", name="photos")
 
     # Above threshold — classifiable, should NOT be flagged.
-    p_ok = db.add_photo(
-        folder_id=fid, filename="ok.jpg", extension=".jpg",
+    p_ok = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ok.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _add_one_detection(db, p_ok, conf=0.5)
 
     # Below threshold, not contextual weak — full-image fallback at runtime.
-    p_skip = db.add_photo(
-        folder_id=fid, filename="skip.jpg", extension=".jpg",
+    p_skip = photo_ingest.add_photo(
+        db, folder_id=fid, filename="skip.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _add_one_detection(db, p_skip, conf=0.15)
 
     # No real detections at all — goes to full-image fallback, not the
     # skip branch. Must NOT be flagged.
-    p_empty = db.add_photo(
-        folder_id=fid, filename="empty.jpg", extension=".jpg",
+    p_empty = photo_ingest.add_photo(
+        db, folder_id=fid, filename="empty.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
 
     # Below threshold BUT in the contextual-weak set — the runtime lowers
     # the floor for it, so it classifies rather than skips.
-    p_weak_rescued = db.add_photo(
-        folder_id=fid, filename="rescued.jpg", extension=".jpg",
+    p_weak_rescued = photo_ingest.add_photo(
+        db, folder_id=fid, filename="rescued.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _add_one_detection(db, p_weak_rescued, conf=0.15)
@@ -21178,8 +21187,8 @@ def test_get_unclassifiable_photos_flags_confident_non_animal_boxes(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
 
-    p_person_only = db.add_photo(
-        folder_id=fid, filename="person.jpg", extension=".jpg",
+    p_person_only = photo_ingest.add_photo(
+        db, folder_id=fid, filename="person.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     db.conn.execute(
@@ -21204,8 +21213,8 @@ def test_get_unclassifiable_photos_uses_fresh_detections_when_provided(tmp_path)
     # A photo whose DB rows (both stale legacy AND fresh) sit above the
     # floor — the fresh set contains a qualifying box, so the photo
     # must NOT be flagged unclassifiable.
-    p_still_classifiable = db.add_photo(
-        folder_id=fid, filename="still.jpg", extension=".jpg",
+    p_still_classifiable = photo_ingest.add_photo(
+        db, folder_id=fid, filename="still.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _add_one_detection(
@@ -21217,8 +21226,8 @@ def test_get_unclassifiable_photos_uses_fresh_detections_when_provided(tmp_path)
 
     # A stale animal row makes the DB-only view classifiable, but the current
     # detector map contains only a confident person box, so runtime skips it.
-    p_fresh_person = db.add_photo(
-        folder_id=fid, filename="fresh-person.jpg", extension=".jpg",
+    p_fresh_person = photo_ingest.add_photo(
+        db, folder_id=fid, filename="fresh-person.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     _add_one_detection(
@@ -21266,8 +21275,8 @@ def test_get_unclassifiable_photos_db_fallback_for_unprocessed_photos(tmp_path):
     fid = db.add_folder("/photos", name="photos")
 
     # Detector completed successfully with a confident person box.
-    p_processed_person = db.add_photo(
-        folder_id=fid, filename="person.jpg", extension=".jpg",
+    p_processed_person = photo_ingest.add_photo(
+        db, folder_id=fid, filename="person.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     db.conn.execute(
@@ -21281,8 +21290,8 @@ def test_get_unclassifiable_photos_db_fallback_for_unprocessed_photos(tmp_path):
     # Detector RAISED on this photo (missing from ``processed_ids`` AND
     # from ``fresh_detections_by_photo``). DB still holds a prior
     # confident person row from a previous run, so runtime's DB fallback skips.
-    p_detector_failed = db.add_photo(
-        folder_id=fid, filename="failed.jpg", extension=".jpg",
+    p_detector_failed = photo_ingest.add_photo(
+        db, folder_id=fid, filename="failed.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     db.conn.execute(
@@ -22294,11 +22303,11 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
     db.add_workspace_folder(ws_in, f_in)
     db.add_workspace_folder(ws_out, f_out)
 
-    p1 = db.add_photo(folder_id=f_in, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=f_in, filename="a.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=f_in, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=f_in, filename="b.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
-    p3 = db.add_photo(folder_id=f_out, filename="c.jpg", extension=".jpg",
+    p3 = photo_ingest.add_photo(db, folder_id=f_out, filename="c.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
 
     db.masks_features.upsert_mask(p1, "sam2-small", "/p/a.small.png",
@@ -22437,13 +22446,13 @@ def test_get_workspace_extensions_returns_distinct_lowercased(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='b.JPG', extension='.JPG',
+    photo_ingest.add_photo(db, folder_id=fid, filename='b.JPG', extension='.JPG',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='c.nef', extension='.nef',
+    photo_ingest.add_photo(db, folder_id=fid, filename='c.nef', extension='.nef',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='d.cr2', extension='.cr2',
+    photo_ingest.add_photo(db, folder_id=fid, filename='d.cr2', extension='.cr2',
                  file_size=1, file_mtime=1.0)
 
     exts = db.get_workspace_extensions()
@@ -22457,13 +22466,13 @@ def test_get_workspace_extensions_scoped_to_active_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     default_ws = db._active_workspace_id
     f_default = db.add_folder('/a', name='a')
-    db.add_photo(folder_id=f_default, filename='x.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=f_default, filename='x.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
 
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     f_other = db.add_folder('/b', name='b')
-    db.add_photo(folder_id=f_other, filename='y.nef', extension='.nef',
+    photo_ingest.add_photo(db, folder_id=f_other, filename='y.nef', extension='.nef',
                  file_size=1, file_mtime=1.0)
 
     # Active = other_ws
@@ -22478,7 +22487,7 @@ def test_get_workspace_extensions_skips_null_and_empty(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/p', name='p')
-    db.add_photo(folder_id=fid, filename='ok.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='ok.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     # Force a NULL/empty row directly — add_photo doesn't normally let
     # this happen but historical scans may have produced rows with no
@@ -22510,11 +22519,11 @@ def test_collection_extension_rule_matches_case_insensitively(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    db.add_photo(folder_id=fid, filename='lower.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='lower.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
+    photo_ingest.add_photo(db, folder_id=fid, filename='upper.JPG', extension='.JPG',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
+    photo_ingest.add_photo(db, folder_id=fid, filename='raw.nef', extension='.nef',
                  file_size=1, file_mtime=1.0)
 
     cid = db.collections.add(
@@ -22535,14 +22544,14 @@ def _raw_jpeg_pair_db(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pair = db.add_photo(folder_id=fid, filename='_D854674.NEF', extension='.nef',
+    pair = photo_ingest.add_photo(db, folder_id=fid, filename='_D854674.NEF', extension='.nef',
                         file_size=1, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET companion_path = ? WHERE id = ?",
                     ('_D854674.JPG', pair))
     db.conn.commit()
-    db.add_photo(folder_id=fid, filename='lone.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='lone.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='lone.nef', extension='.nef',
+    photo_ingest.add_photo(db, folder_id=fid, filename='lone.nef', extension='.nef',
                  file_size=1, file_mtime=1.0)
     return db
 
@@ -22606,9 +22615,9 @@ def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid_ok = db.add_folder('/ok', name='ok')
     fid_gone = db.add_folder('/gone', name='gone')
-    db.add_photo(folder_id=fid_ok, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid_ok, filename='a.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid_gone, filename='b.cr2', extension='.cr2',
+    photo_ingest.add_photo(db, folder_id=fid_gone, filename='b.cr2', extension='.cr2',
                  file_size=1, file_mtime=1.0)
 
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
@@ -22640,7 +22649,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
 
     pids = []
     for i in range(2):
-        pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
+        pid = photo_ingest.add_photo(db, fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
                            width=800, height=600)
         det_ids = db.detections.save(
             pid,
@@ -22676,7 +22685,7 @@ def test_get_predictions_chunks_large_photo_id_list(tmp_path):
     fid = db.add_folder('/photos', name='photos')
 
     def make_photo(name, conf):
-        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         det = db.detections.save(
             pid,
@@ -22706,7 +22715,7 @@ def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     kid = db.add_keyword("Robin", kw_type="general")
     db.tag_photo(pid, kid)
@@ -22727,7 +22736,7 @@ def test_delete_photos_chunks_large_resolve_list(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pids = [
-        db.add_photo(folder_id=fid, filename=f"p{i}.jpg", extension='.jpg',
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"p{i}.jpg", extension='.jpg',
                      file_size=100, file_mtime=1.0)
         for i in range(3)
     ]
@@ -22748,13 +22757,13 @@ def test_apply_duplicate_resolution_chunks_large_group(tmp_path):
     # 1100 photos in one group: 1099 losers > the legacy 999-var cap, so
     # the rejected-flag UPDATE must chunk too.
     pids = [
-        db.add_photo(folder_id=fid, filename=f"dup{i:04d}.jpg", extension='.jpg',
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"dup{i:04d}.jpg", extension='.jpg',
                      file_size=100, file_mtime=float(i + 1))
         for i in range(1100)
     ]
 
     _cap_sqlite_vars(db)
-    result = db.apply_duplicate_resolution(pids)
+    result = duplicate_resolution.apply_duplicate_resolution(db, pids)
     assert result["winner_id"] in pids
     assert result["rejected"] == 1099
     flagged = db.conn.execute(
@@ -22772,9 +22781,9 @@ def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                       file_size=100, file_mtime=2.0)
 
     ids = [p1, p2] + list(range(1_000_000, 1_001_200))
@@ -22799,7 +22808,7 @@ def test_get_inat_submissions_returns_newest_and_chunks(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.conn.execute(
         "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
@@ -23008,9 +23017,9 @@ def test_life_list_taxon_ids_scope(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00')
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                       file_size=1, file_mtime=2.0, timestamp='2024-01-02T00:00:00')
     # Matched species keyword (linked to Song Sparrow taxon)
     k1 = db.add_keyword('Song Sparrow')
@@ -23039,7 +23048,7 @@ def test_life_list_taxon_ids_excludes_non_species_matches(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     # Tag with a keyword that links to the Melospiza *genus*, not a species.
     k = db.add_keyword('Melospiza sp.')
@@ -23060,12 +23069,12 @@ def test_life_list_uncounted_suppresses_redundant_ancestor_per_photo(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    species_photo = db.add_photo(
-        folder_id=fid, filename='species.jpg', extension='.jpg',
+    species_photo = photo_ingest.add_photo(
+        db, folder_id=fid, filename='species.jpg', extension='.jpg',
         file_size=1, file_mtime=1.0,
     )
-    broad_photo = db.add_photo(
-        folder_id=fid, filename='broad.jpg', extension='.jpg',
+    broad_photo = photo_ingest.add_photo(
+        db, folder_id=fid, filename='broad.jpg', extension='.jpg',
         file_size=1, file_mtime=2.0,
     )
     family_kw = db.add_keyword('New World sparrows', kw_type='taxonomy')
@@ -23120,16 +23129,16 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    broad_photo = db.add_photo(
-        folder_id=fid, filename='broad.jpg', extension='.jpg',
+    broad_photo = photo_ingest.add_photo(
+        db, folder_id=fid, filename='broad.jpg', extension='.jpg',
         file_size=1, file_mtime=1.0,
     )
-    species_photo = db.add_photo(
-        folder_id=fid, filename='species.jpg', extension='.jpg',
+    species_photo = photo_ingest.add_photo(
+        db, folder_id=fid, filename='species.jpg', extension='.jpg',
         file_size=1, file_mtime=2.0,
     )
-    rejected_photo = db.add_photo(
-        folder_id=fid, filename='rejected.jpg', extension='.jpg',
+    rejected_photo = photo_ingest.add_photo(
+        db, folder_id=fid, filename='rejected.jpg', extension='.jpg',
         file_size=1, file_mtime=3.0,
     )
     family_kw = db.add_keyword('New World sparrows', kw_type='taxonomy')
@@ -23171,7 +23180,7 @@ def test_life_list_taxon_ids_excludes_rejected(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -23223,9 +23232,9 @@ def test_best_photo_by_taxon(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p1 = db.add_photo(folder_id=fid, filename='low.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='low.jpg', extension='.jpg',
                       file_size=1, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='high.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='high.jpg', extension='.jpg',
                       file_size=1, file_mtime=2.0)
     # No update_photo_quality_score helper in db.py; set the column directly.
     db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.2, p1))
@@ -23249,7 +23258,7 @@ def test_best_photo_by_taxon_chunks_large_id_list(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -23288,8 +23297,8 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
         ws_id = db.ensure_default_workspace()
         db.set_active_workspace(ws_id)
         fid = db.add_folder('/photos', name='photos')
-        pid = db.add_photo(
-            folder_id=fid, filename='a.jpg', extension='.jpg',
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename='a.jpg', extension='.jpg',
             file_size=100, file_mtime=1.0,
         )
         db.conn.execute(
@@ -24130,8 +24139,8 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -24202,8 +24211,8 @@ def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path
         (7000, "Turdus migratorius", "American Robin"),
     ])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -24270,8 +24279,8 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
         (30002, "Erithacus rubecula", "European Robin"),
     ])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -24355,8 +24364,8 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
         (7000, "Turdus migratorius", "American Robin"),
     ])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries only a Verdin hierarchy leaf.
@@ -24407,8 +24416,8 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
         (40002, "Erithacus rubecula", "European Robin"),
     ])
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.conn.execute(
@@ -24502,8 +24511,8 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     ).fetchone()["id"]
 
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # A pre-existing keyword row named "Puma" bound to the genus (as if
@@ -24579,8 +24588,8 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._ws_id()
     fid = db.add_folder("/photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Two DISTINCT NULL-taxon species keyword rows differing only by
@@ -24670,9 +24679,9 @@ def _filter_db(tmp_path):
 
 def test_universal_filter_numeric_fields_and_between(tmp_path):
     db, fid = _filter_db(tmp_path)
-    small = db.add_photo(folder_id=fid, filename='small.jpg', extension='.jpg',
+    small = photo_ingest.add_photo(db, folder_id=fid, filename='small.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    big = db.add_photo(folder_id=fid, filename='big.jpg', extension='.jpg',
+    big = photo_ingest.add_photo(db, folder_id=fid, filename='big.jpg', extension='.jpg',
                        file_size=9000, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET width=8640, height=5760, focal_length=600, "
@@ -24698,9 +24707,9 @@ def test_universal_filter_numeric_fields_and_between(tmp_path):
 
 def test_universal_filter_filename_text_ops(tmp_path):
     db, fid = _filter_db(tmp_path)
-    db.add_photo(folder_id=fid, filename='Owl_2101.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='Owl_2101.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename='eagle_2102.cr3', extension='.cr3',
+    photo_ingest.add_photo(db, folder_id=fid, filename='eagle_2102.cr3', extension='.cr3',
                  file_size=100, file_mtime=1.0)
 
     count = db.collections.count_photos_for_rules
@@ -24723,9 +24732,9 @@ def test_universal_filter_flag_null_is_unflagged(tmp_path):
     """Legacy rows store NULL for unflagged; the Unflagged chip must still
     return them (plan step 4 regression guard)."""
     db, fid = _filter_db(tmp_path)
-    null_flag = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+    null_flag = photo_ingest.add_photo(db, folder_id=fid, filename='legacy.jpg', extension='.jpg',
                              file_size=100, file_mtime=1.0)
-    picked = db.add_photo(folder_id=fid, filename='picked.jpg', extension='.jpg',
+    picked = photo_ingest.add_photo(db, folder_id=fid, filename='picked.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET flag=NULL WHERE id=?", (null_flag,))
     db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (picked,))
@@ -24741,11 +24750,11 @@ def test_universal_filter_flag_null_is_unflagged(tmp_path):
 
 def test_universal_filter_in_not_in_enums(tmp_path):
     db, fid = _filter_db(tmp_path)
-    red = db.add_photo(folder_id=fid, filename='red.jpg', extension='.jpg',
+    red = photo_ingest.add_photo(db, folder_id=fid, filename='red.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    yellow = db.add_photo(folder_id=fid, filename='yellow.cr3', extension='.cr3',
+    yellow = photo_ingest.add_photo(db, folder_id=fid, filename='yellow.cr3', extension='.cr3',
                           file_size=100, file_mtime=1.0)
-    plain = db.add_photo(folder_id=fid, filename='plain.nef', extension='.nef',
+    plain = photo_ingest.add_photo(db, folder_id=fid, filename='plain.nef', extension='.nef',
                          file_size=100, file_mtime=1.0)
     ws = db._ws_id()
     db.conn.execute(
@@ -24772,7 +24781,7 @@ def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
     """Constant-true/false leaves must stay in their group; dropping them
     would invert any/none semantics (prototype review regression)."""
     db, fid = _filter_db(tmp_path)
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(p, 5)
 
@@ -24791,9 +24800,9 @@ def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
 def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
     from datetime import UTC, datetime, timedelta
     db, fid = _filter_db(tmp_path)
-    fresh = db.add_photo(folder_id=fid, filename='fresh.jpg', extension='.jpg',
+    fresh = photo_ingest.add_photo(db, folder_id=fid, filename='fresh.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    old = db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+    old = photo_ingest.add_photo(db, folder_id=fid, filename='old.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     now = datetime.now(UTC)
     # Scanner writes ``datetime.isoformat()``, so timestamps carry the ``T``
@@ -24830,11 +24839,11 @@ def test_universal_filter_timestamp_precise_upper_bounds_stay_exact(tmp_path):
     named day so the UI's ``<input type="date">`` output stays inclusive.
     """
     db, fid = _filter_db(tmp_path)
-    early = db.add_photo(folder_id=fid, filename='early.jpg', extension='.jpg',
+    early = photo_ingest.add_photo(db, folder_id=fid, filename='early.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    on_second = db.add_photo(folder_id=fid, filename='on.jpg', extension='.jpg',
+    on_second = photo_ingest.add_photo(db, folder_id=fid, filename='on.jpg', extension='.jpg',
                              file_size=100, file_mtime=1.0)
-    subsec = db.add_photo(folder_id=fid, filename='subsec.jpg', extension='.jpg',
+    subsec = photo_ingest.add_photo(db, folder_id=fid, filename='subsec.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
                     ('2024-01-01T11:59:59', early))
@@ -24872,7 +24881,7 @@ def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
     """
     from datetime import UTC, datetime, timedelta
     db, fid = _filter_db(tmp_path)
-    boundary = db.add_photo(folder_id=fid, filename='boundary.jpg',
+    boundary = photo_ingest.add_photo(db, folder_id=fid, filename='boundary.jpg',
                             extension='.jpg', file_size=100, file_mtime=1.0)
     # 5-days-ago at 00:05 UTC. The ``recent 5 days`` cutoff lands 5 days
     # ago at the *current* clock time — so the photo is on the cutoff day
@@ -24909,9 +24918,9 @@ def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
 def test_universal_filter_species_any_match(tmp_path):
     """A multi-species photo matches when ANY of its species matches."""
     db, fid = _filter_db(tmp_path)
-    multi = db.add_photo(folder_id=fid, filename='multi.jpg', extension='.jpg',
+    multi = photo_ingest.add_photo(db, folder_id=fid, filename='multi.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    single = db.add_photo(folder_id=fid, filename='single.jpg', extension='.jpg',
+    single = photo_ingest.add_photo(db, folder_id=fid, filename='single.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     heron = db.add_keyword('Great Blue Heron', is_species=True)
     egret = db.add_keyword('Snowy Egret', is_species=True)
@@ -24939,7 +24948,7 @@ def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path)
     metacharacters; species did not, so a client could bypass the filter
     by passing a wildcard."""
     db, fid = _filter_db(tmp_path)
-    only = db.add_photo(folder_id=fid, filename='only.jpg', extension='.jpg',
+    only = photo_ingest.add_photo(db, folder_id=fid, filename='only.jpg', extension='.jpg',
                         file_size=100, file_mtime=1.0)
     heron = db.add_keyword('Great Blue Heron', is_species=True)
     db.tag_photo(only, heron)
@@ -24964,9 +24973,9 @@ def test_universal_filter_keyword_contains_escapes_like_metacharacters(tmp_path)
     every keyworded photo — the exact wildcard-bypass hole the registry now
     advertises to clients through ``/api/filters/fields``."""
     db, fid = _filter_db(tmp_path)
-    tagged = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg',
+    tagged = photo_ingest.add_photo(db, folder_id=fid, filename='tagged.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    untagged = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg',
+    untagged = photo_ingest.add_photo(db, folder_id=fid, filename='untagged.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
     k = db.add_keyword('Red-tailed hawk')
     db.tag_photo(tagged, k)
@@ -24994,9 +25003,9 @@ def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_p
     Compare, and life-list views."""
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+    other = photo_ingest.add_photo(db, folder_id=fid, filename='other.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     # A photo tagged only with a hierarchy leaf whose taxon links to the
     # top-level root "Verdin". Leaf spelling ("Auriparus flaviceps") is
@@ -25032,11 +25041,11 @@ def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_p
 
 def test_universal_filter_workflow_fields(tmp_path):
     db, fid = _filter_db(tmp_path)
-    edited = db.add_photo(folder_id=fid, filename='edited.jpg', extension='.jpg',
+    edited = photo_ingest.add_photo(db, folder_id=fid, filename='edited.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    indexed = db.add_photo(folder_id=fid, filename='indexed.jpg', extension='.jpg',
+    indexed = photo_ingest.add_photo(db, folder_id=fid, filename='indexed.jpg', extension='.jpg',
                            file_size=100, file_mtime=1.0)
-    burst = db.add_photo(folder_id=fid, filename='burst.jpg', extension='.jpg',
+    burst = photo_ingest.add_photo(db, folder_id=fid, filename='burst.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     db.set_photo_edit_recipe(edited, {"rotation": 90})
     db.conn.execute(
@@ -25103,11 +25112,11 @@ def test_is_duplicate_sees_cross_workspace_partners(tmp_path):
     db.remove_workspace_folder(active_ws, other_folder)
     db.add_workspace_folder(other_ws, other_folder)
 
-    here = db.add_photo(folder_id=active_folder, filename='here.jpg',
+    here = photo_ingest.add_photo(db, folder_id=active_folder, filename='here.jpg',
                         extension='.jpg', file_size=100, file_mtime=1.0)
-    there = db.add_photo(folder_id=other_folder, filename='there.jpg',
+    there = photo_ingest.add_photo(db, folder_id=other_folder, filename='there.jpg',
                          extension='.jpg', file_size=100, file_mtime=2.0)
-    lone = db.add_photo(folder_id=active_folder, filename='lone.jpg',
+    lone = photo_ingest.add_photo(db, folder_id=active_folder, filename='lone.jpg',
                         extension='.jpg', file_size=100, file_mtime=3.0)
     db.conn.execute("UPDATE photos SET file_hash='shared' WHERE id IN (?, ?)",
                     (here, there))
@@ -25140,7 +25149,7 @@ def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
     """
     db, fid = _filter_db(tmp_path)
     ws_id = db._ws_id()
-    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+    photo = photo_ingest.add_photo(db, folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
@@ -25201,7 +25210,7 @@ def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path,
     db, fid = _filter_db(tmp_path)
     # Photo A: above-threshold detection carrying a current prediction —
     # should match every advertised prediction rule.
-    a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    a = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
     det_a = db.detections.save(a, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
@@ -25216,7 +25225,7 @@ def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path,
     # Photo B: ONLY a below-threshold detection with an otherwise-matching
     # prediction — Browse hides the detection at threshold=0.5, so the
     # prediction filters must hide the photo too.
-    b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    b = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
     det_b = db.detections.save(b, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05,
@@ -25252,7 +25261,7 @@ def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
     """
     db, fid = _filter_db(tmp_path)
     ws_id = db._ws_id()
-    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+    photo = photo_ingest.add_photo(db, folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
@@ -25308,7 +25317,7 @@ def test_prediction_confidence_filter_moves_when_alternative_becomes_rejected(tm
     r4013497441)."""
     db, fid = _filter_db(tmp_path)
     ws_id = db._ws_id()
-    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+    photo = photo_ingest.add_photo(db, folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
@@ -25368,7 +25377,7 @@ def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(
     would match every classified photo — the wildcard-bypass hole the
     registry now advertises to clients through ``/api/filters/fields``."""
     db, fid = _filter_db(tmp_path)
-    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+    photo = photo_ingest.add_photo(db, folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
@@ -25543,7 +25552,7 @@ def test_browse_editor_numeric_ops_all_compile(tmp_path):
 def test_query_photos_sort_and_paging(tmp_path):
     db, fid = _filter_db(tmp_path)
     for i, (name, rating) in enumerate([('a.jpg', 1), ('b.jpg', 5), ('c.jpg', 3)]):
-        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0,
                            timestamp=f'2024-01-0{i + 1} 10:00:00')
         db.photo_review.set_rating(pid, rating)
@@ -25563,8 +25572,8 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
         "duplicate-a.jpg", "duplicate-best.jpg", "overlap-single.jpg",
         "burst-a.jpg", "burst-best.jpg", "single.jpg",
     ):
-        ids[name] = db.add_photo(
-            folder_id=fid, filename=name, extension=".jpg",
+        ids[name] = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
 
@@ -25633,8 +25642,8 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
 
 def _timed_photo(db, folder_id, filename, timestamp, *keyword_ids):
     """Add a photo with a capture time and optional keyword links."""
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute(
@@ -25819,8 +25828,8 @@ def test_browse_stacks_skip_frames_without_a_capture_time(tmp_path):
     db, fid = _filter_db(tmp_path)
     a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
     b = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:01")
-    undated = db.add_photo(
-        folder_id=fid, filename="c.jpg", extension=".jpg",
+    undated = photo_ingest.add_photo(
+        db, folder_id=fid, filename="c.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.commit()
@@ -25909,12 +25918,12 @@ def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
 
 def test_visual_stack_cover_prefers_zero_rating_over_null(tmp_path):
     db, fid = _filter_db(tmp_path)
-    zero_id = db.add_photo(
-        folder_id=fid, filename="zero.jpg", extension=".jpg",
+    zero_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="zero.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    null_id = db.add_photo(
-        folder_id=fid, filename="null.jpg", extension=".jpg",
+    null_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="null.jpg", extension=".jpg",
         file_size=999, file_mtime=1.0,
     )
     db.conn.execute(
@@ -25940,12 +25949,12 @@ def test_visual_stack_cover_prefers_zero_rating_over_null(tmp_path):
 
 def test_browse_stack_rating_sort_puts_zero_before_null(tmp_path):
     db, fid = _filter_db(tmp_path)
-    unrated_id = db.add_photo(
-        folder_id=fid, filename="a-unrated.jpg", extension=".jpg",
+    unrated_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a-unrated.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    zero_id = db.add_photo(
-        folder_id=fid, filename="z-zero.jpg", extension=".jpg",
+    zero_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="z-zero.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     db.conn.execute("UPDATE photos SET rating = NULL WHERE id = ?", (unrated_id,))
@@ -25963,16 +25972,16 @@ def test_browse_stack_sharpness_asc_preserves_null_member(tmp_path):
     # the head — otherwise MIN(sharpness) ignores the NULL and Stacks
     # silently buries the unscored frame behind scored singles.
     db, fid = _filter_db(tmp_path)
-    stack_null_id = db.add_photo(
-        folder_id=fid, filename="burst-a.jpg", extension=".jpg",
+    stack_null_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="burst-a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    stack_scored_id = db.add_photo(
-        folder_id=fid, filename="burst-b.jpg", extension=".jpg",
+    stack_scored_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="burst-b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    scored_single_id = db.add_photo(
-        folder_id=fid, filename="single-scored.jpg", extension=".jpg",
+    scored_single_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="single-scored.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     # Consecutive frames one second apart are a burst; the single sits an
@@ -26064,8 +26073,8 @@ def _metric_sort_db(tmp_path, column, specs):
             sequence[group] = 0
         seq = sequence[group]
         sequence[group] += 1
-        photo_id = db.add_photo(
-            folder_id=folders[group], filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folders[group], filename=filename, extension=".jpg",
             file_size=1, file_mtime=1.0,
         )
         ids[filename] = photo_id
@@ -26294,8 +26303,8 @@ def _confidence_sort_db(tmp_path):
     ids = {}
     for index, (name, confidence) in enumerate(
             [("a.jpg", 0.9), ("b.jpg", 0.3), ("c.jpg", None), ("d.jpg", 0.6)]):
-        photo_id = db.add_photo(
-            folder_id=fid, filename=name, extension='.jpg',
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension='.jpg',
             file_size=1, file_mtime=1.0,
             timestamp=f"2024-01-0{index + 1}T00:00:00",
         )
@@ -26358,9 +26367,9 @@ def test_prediction_confidence_sort_ignores_hidden_detections(tmp_path):
     else in Browse, so the prediction hanging off it must not position a
     card either (Codex P2 on PR #1670)."""
     db, fid = _filter_db(tmp_path)
-    visible = db.add_photo(folder_id=fid, filename='visible.jpg',
+    visible = photo_ingest.add_photo(db, folder_id=fid, filename='visible.jpg',
                            extension='.jpg', file_size=1, file_mtime=1.0)
-    hidden = db.add_photo(folder_id=fid, filename='hidden.jpg',
+    hidden = photo_ingest.add_photo(db, folder_id=fid, filename='hidden.jpg',
                           extension='.jpg', file_size=1, file_mtime=1.0)
     for photo_id, detector_conf, species_conf in (
             (visible, 0.9, 0.4), (hidden, 0.05, 0.99)):
@@ -26383,7 +26392,7 @@ def test_prediction_confidence_sort_ignores_alternative_rows(tmp_path):
     """Runner-up rows stored as ``alternative`` are dropped from top-level
     prediction results, so they cannot be the score a card ranks on."""
     db, fid = _filter_db(tmp_path)
-    photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    photo_id = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                             file_size=1, file_mtime=1.0)
     det_ids = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
@@ -26410,9 +26419,9 @@ def test_prediction_confidence_sort_ignores_detection_only_rows(tmp_path):
     """A detection with no species is not a species guess, so a photo that
     has only detections stays unscored rather than borrowing a confidence."""
     db, fid = _filter_db(tmp_path)
-    scored = db.add_photo(folder_id=fid, filename='scored.jpg',
+    scored = photo_ingest.add_photo(db, folder_id=fid, filename='scored.jpg',
                           extension='.jpg', file_size=1, file_mtime=1.0)
-    bare = db.add_photo(folder_id=fid, filename='bare.jpg', extension='.jpg',
+    bare = photo_ingest.add_photo(db, folder_id=fid, filename='bare.jpg', extension='.jpg',
                         file_size=1, file_mtime=1.0)
     for photo_id in (scored, bare):
         det_ids = db.detections.save(photo_id, [{
@@ -26433,9 +26442,9 @@ def test_prediction_confidence_sort_reads_the_current_label_set(tmp_path):
     higher-scoring row the previous one left behind — the same fingerprint
     pin ``get_top_prediction_for_photo`` applies."""
     db, fid = _filter_db(tmp_path)
-    stale = db.add_photo(folder_id=fid, filename='stale.jpg', extension='.jpg',
+    stale = photo_ingest.add_photo(db, folder_id=fid, filename='stale.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
-    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+    other = photo_ingest.add_photo(db, folder_id=fid, filename='other.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
     det_ids = db.detections.save(stale, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
@@ -26462,7 +26471,7 @@ def test_prediction_confidence_rejection_is_workspace_scoped(tmp_path):
     """``prediction_review`` is per-workspace, so rejecting a guess in one
     workspace must not drop the photo's confidence in another."""
     db, fid = _filter_db(tmp_path)
-    photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    photo_id = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                             file_size=1, file_mtime=1.0)
     det_ids = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
@@ -26491,7 +26500,7 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
         ('a.jpg', 'Sony A1', 5), ('b.jpg', 'Sony A1', 1),
         ('c.jpg', 'Canon R5', 5), ('d.jpg', None, 5),
     ]:
-        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         db.photo_review.set_rating(pid, rating)
         if model:
@@ -26548,7 +26557,7 @@ def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
         ('nikon_hi.jpg', 'Nikon Z9', 5),    # matches both branches
         ('nomodel.jpg', None, 5),           # matches branch A, NULL camera
     ]:
-        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         db.photo_review.set_rating(pid, rating)
         if model:
@@ -26591,13 +26600,13 @@ def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
     month = db.add_folder('/photos/2024/01', name='01', parent_id=year)
     other = db.add_folder('/vacation', name='vacation')
     # /photos itself has NO direct photos; only descendants.
-    db.add_photo(folder_id=year, filename='y1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=year, filename='y1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=month, filename='m1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=month, filename='m1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=month, filename='m2.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=month, filename='m2.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=other, filename='v1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=other, filename='v1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
 
     values = {v["value"]: v["count"] for v in db.collections.get_filter_field_values("folder")}
@@ -26646,7 +26655,7 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     # Photo p_leaf: tagged only with a hierarchy leaf linked to Verdin taxon.
-    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+    p_leaf = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     parent = db.add_keyword("Penduline tits")
     leaf = db.add_keyword("Desert Verdin", parent_id=parent)
@@ -26654,7 +26663,7 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
         "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
         "WHERE id=?", (taxa["Verdin"], leaf))
     # Photo p_root: tagged with the top-level root directly (auto-links).
-    p_root = db.add_photo(folder_id=fid, filename='root.jpg', extension='.jpg',
+    p_root = photo_ingest.add_photo(db, folder_id=fid, filename='root.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     root_kid = db.add_keyword("Verdin", is_species=True)
     db.tag_photo(p_leaf, leaf)
@@ -26699,12 +26708,12 @@ def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_pa
         (taxa["American Crow"], root_late),
     )
     # Photo tagged with the LATE (non-MIN-id) root only.
-    p_late = db.add_photo(folder_id=fid, filename='late.jpg', extension='.jpg',
+    p_late = photo_ingest.add_photo(db, folder_id=fid, filename='late.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     db.tag_photo(p_late, root_late)
     # Photo tagged with a hierarchy leaf under the same taxon — still
     # canonicalizes to the MIN(id) root (existing behavior).
-    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+    p_leaf = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     parent = db.add_keyword("Corvids")
     leaf = db.add_keyword("Northeastern Crow", parent_id=parent)
@@ -26742,9 +26751,9 @@ def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
     db.set_active_workspace(ws_id)
     literal = db.add_folder('/photos/my_dir', name='my_dir')
     look_alike = db.add_folder('/photos/myXdir', name='myXdir')
-    db.add_photo(folder_id=literal, filename='a.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=literal, filename='a.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=look_alike, filename='b.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=look_alike, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
 
     values = {v["value"]: v["count"] for v in db.collections.get_filter_field_values("folder")}
@@ -26776,11 +26785,11 @@ def test_get_filter_field_values_folder_root_with_trailing_separator(tmp_path):
     # POSIX root stored with trailing '/', descendants without.
     root = db.add_folder('/', name='root')
     child = db.add_folder('/dcim', name='dcim', parent_id=root)
-    db.add_photo(folder_id=root, filename='at_root.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=root, filename='at_root.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=child, filename='d1.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=child, filename='d1.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=child, filename='d2.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=child, filename='d2.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0)
 
     values = {v["value"]: v["count"] for v in db.collections.get_filter_field_values("folder")}
@@ -26810,7 +26819,7 @@ def test_get_filter_field_values_camera_folds_case(tmp_path):
         ('a.jpg', 'Sony A1'), ('b.jpg', 'sony a1'), ('c.jpg', 'SONY A1'),
         ('d.jpg', 'Canon R5'),
     ]:
-        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
         db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
         ids.append(pid)
@@ -26853,7 +26862,7 @@ def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
     """
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    pid = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='v.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     root_kw = db.add_keyword("Verdin", is_species=True)
     parent = db.add_keyword("Penduline tits")
@@ -26897,9 +26906,9 @@ def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
     """
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='leaf.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+    other = photo_ingest.add_photo(db, folder_id=fid, filename='other.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
     parent = db.add_keyword("Penduline tits")
     leaf = db.add_keyword("Desert Verdin", parent_id=parent)
@@ -26964,11 +26973,11 @@ def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path
         "WHERE id=?", (taxa["Verdin"], leaf))
     db.conn.commit()
 
-    p_verdin = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+    p_verdin = photo_ingest.add_photo(db, folder_id=fid, filename='v.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
-    p_sci = db.add_photo(folder_id=fid, filename='s.jpg', extension='.jpg',
+    p_sci = photo_ingest.add_photo(db, folder_id=fid, filename='s.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    p_leaf = db.add_photo(folder_id=fid, filename='l.jpg', extension='.jpg',
+    p_leaf = photo_ingest.add_photo(db, folder_id=fid, filename='l.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     db.tag_photo(p_verdin, verdin_root)
     db.tag_photo(p_sci, sci_root)
@@ -27005,11 +27014,11 @@ def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
     """
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    p_legacy = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+    p_legacy = photo_ingest.add_photo(db, folder_id=fid, filename='legacy.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
-    p_flag = db.add_photo(folder_id=fid, filename='flag.jpg', extension='.jpg',
+    p_flag = photo_ingest.add_photo(db, folder_id=fid, filename='flag.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    p_none = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
+    p_none = photo_ingest.add_photo(db, folder_id=fid, filename='none.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
     legacy_kw = db.add_keyword("Verdin")
@@ -27065,13 +27074,13 @@ def test_universal_filter_species_count(tmp_path):
     verdin_leaf = _species_kw("Verdin", taxa["Verdin"], parent_id=birds)
     tucson = db.add_keyword("Tucson")
 
-    none_p = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
+    none_p = photo_ingest.add_photo(db, folder_id=fid, filename='none.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
-    one_p = db.add_photo(folder_id=fid, filename='one.jpg', extension='.jpg',
+    one_p = photo_ingest.add_photo(db, folder_id=fid, filename='one.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    two_p = db.add_photo(folder_id=fid, filename='two.jpg', extension='.jpg',
+    two_p = photo_ingest.add_photo(db, folder_id=fid, filename='two.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    dupe_p = db.add_photo(folder_id=fid, filename='dupe.jpg', extension='.jpg',
+    dupe_p = photo_ingest.add_photo(db, folder_id=fid, filename='dupe.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
 
     db.tag_photo(none_p, tucson)          # keyword, but no species
@@ -27117,7 +27126,7 @@ def test_universal_filter_species_count_unlinked_keywords(tmp_path):
     db, fid = _filter_db(tmp_path)
     robin = db.add_keyword("Robin", is_species=True)
     wren = db.add_keyword("Wren", is_species=True)
-    pid = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='legacy.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.tag_photo(pid, robin)
     assert db.collections.count_photos_for_rules(
@@ -27184,7 +27193,7 @@ def _located_photo(db, tmp_path, filename, chain, *, folder_id=None):
     """Add a photo plus a location keyword chain; returns (photo_id, leaf_id)."""
     if folder_id is None:
         folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename=filename, extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename=filename, extension=".jpg",
                        file_size=1, file_mtime=0)
     parent_id = None
     for name in chain:
@@ -27205,7 +27214,7 @@ def test_get_photo_location_paths_returns_the_whole_chain(tmp_path):
     pid, _leaf, folder_id = _located_photo(
         db, tmp_path, "a.jpg", ["United States", "California", "Kumeyaay Lake"],
     )
-    untagged = db.add_photo(folder_id=folder_id, filename="b.jpg", extension=".jpg",
+    untagged = photo_ingest.add_photo(db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
                             file_size=1, file_mtime=0)
 
     paths = db.get_photo_location_paths([pid, untagged])
@@ -27248,7 +27257,7 @@ def test_get_photo_location_paths_prefers_coordinate_bearing_over_text_only(
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
                        file_size=1, file_mtime=0)
     # Older coord-bearing chain (id lower) and a newer coord-less text
     # location the user added afterwards. The newer id would win under
@@ -27291,7 +27300,7 @@ def test_get_photo_location_paths_falls_back_to_text_only_when_no_coordinates(
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
                        file_size=1, file_mtime=0)
     text_only = db.conn.execute(
         "INSERT INTO keywords (name, parent_id, type) "
@@ -27319,7 +27328,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
     second, _leaf2, _folder = _located_photo(
         db, tmp_path, "b.jpg", ["France", "Pont de Gau"], folder_id=folder_id,
     )
-    db.add_photo(folder_id=folder_id, filename="c.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=folder_id, filename="c.jpg", extension=".jpg",
                  file_size=1, file_mtime=0)
 
     assert db.locations.count_photos_with_location() == 2

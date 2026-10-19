@@ -17,6 +17,7 @@ from urllib.request import urlopen
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.module_pages import expose_page_modules
 from e2e.viewport_test_support import install_viewport_test_helpers
@@ -337,8 +338,8 @@ def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, 
     folder_id = data["folders"][0]
     extras = []
     for i in range(8):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"extra-hawk-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -635,8 +636,8 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
     # has_more=true (3 seeded hawks + 25 extras = 28 > 20).
     extras = []
     for i in range(25):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"pageable-hawk-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -735,8 +736,8 @@ def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
     # caps at 20 per bucket, so has_more starts true and the loaded window
     # is exactly 20.
     for i in range(25):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"windowed-hawk-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -845,8 +846,8 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     # low_hawk below. That guarantees low_hawk is only visible because
     # picked_first promotes it.
     for i in range(25):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"filler-hawk-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -865,8 +866,8 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     # The eviction target: a hawk with a much lower base score than every
     # other hawk. Without picked_first it sits at the bottom of the
     # sorted-by-score list, past the initial 20-photo window.
-    low_hawk = db.add_photo(
-        folder_id=folder_id,
+    low_hawk = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="low-score-hawk.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1059,8 +1060,8 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
-    pid = db.add_photo(
-        folder_id=data["folders"][0],
+    pid = photo_ingest.add_photo(
+        db, folder_id=data["folders"][0],
         filename="low-conf-bird.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1122,8 +1123,8 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
     # Add a prediction-only photo that lands in the same "Red-tailed Hawk"
     # bucket (predicted confidence above the default 0.70 threshold) so the
     # bucket mixes keyword-confirmed and prediction-only photos.
-    pid = db.add_photo(
-        folder_id=data["folders"][0],
+    pid = photo_ingest.add_photo(
+        db, folder_id=data["folders"][0],
         filename="predicted-hawk.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1287,8 +1288,8 @@ def test_highlights_api_limits_initial_bucket_and_loads_more(live_server):
     ).fetchone()["id"]
     folder_id = data["folders"][0]
     for i in range(25):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"extra-hawk-{i}.jpg",
             extension=".jpg",
             file_size=1000,

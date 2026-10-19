@@ -8,6 +8,7 @@ import traceback
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -56,8 +57,8 @@ def _second_photo(db, photo_id):
     ).fetchone()["path"]
     path = os.path.join(folder, "second.jpg")
     Image.new("RGB", (80, 60), "blue").save(path)
-    return db.add_photo(
-        folder_id=photo["folder_id"], filename="second.jpg", extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=photo["folder_id"], filename="second.jpg", extension=".jpg",
         file_size=os.path.getsize(path), file_mtime=os.path.getmtime(path),
         width=80, height=60,
     )
@@ -1072,8 +1073,8 @@ def test_import_photos_checkpoints_before_after_import_chain(
     photo_path = folder / "landed.jpg"
     Image.new("RGB", (8, 8), "red").save(photo_path)
     folder_id = db.add_folder(str(folder), name="archive")
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="landed.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="landed.jpg", extension=".jpg",
         file_size=os.path.getsize(photo_path),
         file_mtime=os.path.getmtime(photo_path),
         width=8, height=8,

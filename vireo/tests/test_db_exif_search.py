@@ -17,6 +17,7 @@ import time
 import pytest
 from db import Database
 from repositories.exif_search import ExifSearchRepository
+from services import photo_ingest
 
 
 def _text(db, photo_id):
@@ -29,7 +30,7 @@ def _text(db, photo_id):
 @pytest.fixture
 def photo(db):
     folder = db.add_folder("/photos/Coast", name="Coast")
-    pid = db.add_photo(folder_id=folder, filename="curlew.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename="curlew.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     return db, pid
 
@@ -74,7 +75,7 @@ def test_text_follows_rewrites_renumbering_and_deletes(photo):
 
 def test_backfill_indexes_photos_in_batches(db):
     folder = db.add_folder("/photos/Backlog", name="Backlog")
-    pids = [db.add_photo(folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
+    pids = [photo_ingest.add_photo(db, folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0) for i in range(5)]
     for pid in pids:
         db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
@@ -109,7 +110,7 @@ def test_changed_definition_rebuilds_triggers_and_empties_table(tmp_path):
     path = str(tmp_path / "stamp.db")
     db = Database(path)
     folder = db.add_folder("/photos/x", name="x")
-    pid = db.add_photo(folder_id=folder, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.conn.execute("DROP TRIGGER trg_photo_exif_search_text_update")
     db.conn.execute("UPDATE db_meta SET value='stale' WHERE key='exif_search_text_definition'")
@@ -141,7 +142,7 @@ def test_startup_backfill_job_indexes_unindexed_photos(tmp_path, monkeypatch):
     os.makedirs(thumb_dir)
     db = Database(db_path)
     folder = db.add_folder("/photos/x", name="x")
-    pid = db.add_photo(folder_id=folder, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
                     (json.dumps({"EXIF": {"Model": "Z9"}}), pid))

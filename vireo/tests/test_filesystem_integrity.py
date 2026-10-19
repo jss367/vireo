@@ -24,6 +24,7 @@ import pytest
 import staged_copy
 from db import Database
 from PIL import Image
+from services import duplicate_resolution, photo_ingest
 
 # The racer unlinks our O_EXCL placeholder while we still hold it open. Windows
 # refuses to delete an open file, so that interleaving cannot happen there.
@@ -519,8 +520,8 @@ def three_photo_move(tmp_path):
     ids = []
     for i in (1, 2, 3):
         path = _jpeg(src / f"IMG_{i}.JPG", color=("red", "green", "blue")[i - 1])
-        ids.append(db.add_photo(
-            folder_id=fid, filename=path.name, extension=".jpg",
+        ids.append(photo_ingest.add_photo(
+            db, folder_id=fid, filename=path.name, extension=".jpg",
             file_size=path.stat().st_size, file_mtime=float(i),
         ))
     return db, src, dst, ids
@@ -580,8 +581,8 @@ def test_move_photos_carries_uppercase_xmp_sidecar(tmp_path):
     db.add_folder(str(dst), name="dst")
     photo = _jpeg(src / "IMG_9.JPG")
     (src / "IMG_9.XMP").write_text("<x/>")
-    pid = db.add_photo(
-        folder_id=fid, filename="IMG_9.JPG", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_9.JPG", extension=".jpg",
         file_size=photo.stat().st_size, file_mtime=1.0,
     )
 
@@ -604,8 +605,8 @@ def _paired_db(tmp_path, raw_meta, jpeg_meta):
     fid = db.add_folder(str(tmp_path / "day"))
     ids = {}
     for name, meta in (("IMG_0001.CR3", raw_meta), ("IMG_0001.JPG", jpeg_meta)):
-        ids[name] = db.add_photo(
-            folder_id=fid, filename=name,
+        ids[name] = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name,
             extension=os.path.splitext(name)[1].lower(),
             file_size=1, file_mtime=1.0, timestamp=meta.get("timestamp"),
         )
@@ -1048,8 +1049,8 @@ def test_ingest_adopts_zero_byte_pair_at_anchored_suffix(tmp_path):
 
 
 def _dup_add(db, folder_id, filename, file_hash):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename,
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension=os.path.splitext(filename)[1], file_size=1000,
         file_mtime=100.0, file_hash=file_hash,
     )
@@ -1307,7 +1308,7 @@ def test_resolution_plan_defers_when_any_candidate_offline(tmp_path, monkeypatch
     )
 
     photo_ids = [r["id"] for r in db.conn.execute("SELECT id FROM photos")]
-    result = db.apply_duplicate_resolution(photo_ids)
+    result = duplicate_resolution.apply_duplicate_resolution(db, photo_ids)
     assert result == {
         "winner_id": None,
         "loser_ids": [],
@@ -1423,8 +1424,8 @@ def test_ingest_filtered_card_sibling_still_forces_suffix_on_survivor(tmp_path):
     other.mkdir()
     (other / "IMG_0001.CR3").write_bytes(card_raw.read_bytes())
     folder_id = db.add_folder(str(other))
-    db.add_photo(
-        folder_id=folder_id, filename="IMG_0001.CR3", extension=".CR3",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="IMG_0001.CR3", extension=".CR3",
         file_size=card_raw.stat().st_size,
         file_mtime=card_raw.stat().st_mtime,
         file_hash=card_raw_hash,

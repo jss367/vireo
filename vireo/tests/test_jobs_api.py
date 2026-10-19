@@ -11,7 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
-from services import subject_masks
+from services import photo_ingest, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2170,13 +2170,13 @@ def test_find_broken_metadata_folders_filters_missing_files(app_and_db, tmp_path
     Image.new("RGB", (640, 480)).save(str(present), "JPEG")
 
     fid = db.add_folder(str(real_dir), name="photos")
-    p_present = db.add_photo(
-        folder_id=fid, filename="present.jpg", extension=".jpg",
+    p_present = photo_ingest.add_photo(
+        db, folder_id=fid, filename="present.jpg", extension=".jpg",
         file_size=present.stat().st_size, file_mtime=present.stat().st_mtime,
         timestamp=None,
     )
-    p_missing = db.add_photo(
-        folder_id=fid, filename="ghost.jpg", extension=".jpg",
+    p_missing = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ghost.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None,
     )
     db.conn.commit()
@@ -2292,8 +2292,8 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
 
     fid = db.add_folder(str(photos_root), name="real_photos")
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(
-        folder_id=fid, filename="broken.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="broken.jpg", extension=".jpg",
         file_size=image_file.stat().st_size,
         file_mtime=image_file.stat().st_mtime,
         timestamp=None, width=160, height=120,
@@ -2370,8 +2370,8 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
 
     fid = db.add_folder(str(photos_root), name="real_photos")
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(
-        folder_id=fid, filename="tracked.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="tracked.jpg", extension=".jpg",
         file_size=tracked.stat().st_size,
         file_mtime=tracked.stat().st_mtime,
     )
@@ -2493,8 +2493,8 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
 
     fid = db.add_folder(str(photos_root), name="real_photos")
     db.add_workspace_folder(db._active_workspace_id, fid)
-    pid = db.add_photo(
-        folder_id=fid, filename="broken.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="broken.jpg", extension=".jpg",
         file_size=image_file.stat().st_size,
         file_mtime=image_file.stat().st_mtime,
         timestamp=None, width=160, height=120,
@@ -2705,7 +2705,7 @@ def _seed_photo_with_detection(db, tmp_path, filename, box, model):
         folder_id = existing["id"]
     else:
         folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, filename, ".jpg", 1000, 1.0)
+    pid = photo_ingest.add_photo(db, folder_id, filename, ".jpg", 1000, 1.0)
     Image.new("RGB", (16, 16), "black").save(
         os.path.join(folder_path, filename)
     )
@@ -3903,8 +3903,8 @@ def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db)
     )
     db.conn.commit()
     db.add_workspace_folder(db._active_workspace_id, legacy_id, is_root=False)
-    legacy_photo = db.add_photo(
-        folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
+    legacy_photo = photo_ingest.add_photo(
+        db, folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
         file_size=42, file_mtime=42.0,
     )
     with app.test_client() as client:
@@ -4142,8 +4142,8 @@ def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
         sub = db.add_folder(
             f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
         )
-        pid = db.add_photo(
-            folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
             file_size=100 + i, file_mtime=100.0 + i,
         )
         photo_ids.append(pid)
@@ -4843,8 +4843,8 @@ def test_import_readiness_surfaces_and_starts_metadata_repair(
     source = photos / "repair.jpg"
     Image.new("RGB", (32, 24), "green").save(source)
     folder_id = db.add_folder(str(photos), name="repair-photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=source.name,
         extension=".jpg",
         file_size=source.stat().st_size,
@@ -4948,8 +4948,8 @@ def test_import_readiness_counts_photos_in_stale_missing_folders(
     source = photos / "needs-repair.jpg"
     Image.new("RGB", (32, 24), "green").save(source)
     folder_id = db.add_folder(str(photos), name="reconnected")
-    db.add_photo(
-        folder_id=folder_id,
+    photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=source.name,
         extension=".jpg",
         file_size=source.stat().st_size,
@@ -5005,8 +5005,8 @@ def test_import_readiness_excludes_offline_root_photos_from_repair_count(
     reach_src = reachable / "ok.jpg"
     Image.new("RGB", (32, 24), "green").save(reach_src)
     reach_fid = db.add_folder(str(reachable), name="reachable-drive")
-    reach_pid = db.add_photo(
-        folder_id=reach_fid,
+    reach_pid = photo_ingest.add_photo(
+        db, folder_id=reach_fid,
         filename=reach_src.name,
         extension=".jpg",
         file_size=reach_src.stat().st_size,
@@ -5021,8 +5021,8 @@ def test_import_readiness_excludes_offline_root_photos_from_repair_count(
     # disk (drive unplugged). The photo under it has NULL EXIF.
     offline_path = str(tmp_path / "unplugged-drive")
     off_fid = db.add_folder(offline_path, name="unplugged-drive")
-    db.add_photo(
-        folder_id=off_fid,
+    photo_ingest.add_photo(
+        db, folder_id=off_fid,
         filename="orphan.jpg",
         extension=".jpg",
         file_size=1024,
@@ -5066,8 +5066,8 @@ def test_import_readiness_excludes_deleted_originals_from_repair_count(
     photos = tmp_path / "reachable-with-deleted-original"
     photos.mkdir()
     folder_id = db.add_folder(str(photos), name=photos.name)
-    db.add_photo(
-        folder_id=folder_id,
+    photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="deleted.jpg",
         extension=".jpg",
         file_size=1024,
@@ -5934,7 +5934,7 @@ def test_pending_archive_separates_this_workspace_from_the_others(app_and_db, tm
     # Queued on a photo already on the NAS: not this transfer's problem.
     elsewhere = tmp_path / "already-on-nas"
     elsewhere.mkdir()
-    outside = db.add_photo(db.add_folder(str(elsewhere), name="already-on-nas"),
+    outside = photo_ingest.add_photo(db, db.add_folder(str(elsewhere), name="already-on-nas"),
                            "elsewhere.jpg", ".jpg", 10, 0)
     db.queue_change(outside, "keyword_add", "Elsewhere")
     assert item()["unsynced_photos"] == 0
@@ -9849,8 +9849,8 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
     Image.new("RGB", (16, 16), "red").save(raw, "JPEG")
     Image.new("RGB", (16, 16), "blue").save(companion, "JPEG")
     root_id = db.add_folder(str(root), name="registered")
-    raw_id = db.add_photo(
-        root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
+    raw_id = photo_ingest.add_photo(
+        db, root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
     )
     snap_id = db.workspaces.create_new_images_snapshot([str(companion)])
 
@@ -14099,8 +14099,8 @@ def _collect_in_place(db, scan_target):
 
 
 def _add_photo(db, folder_id, filename):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
 

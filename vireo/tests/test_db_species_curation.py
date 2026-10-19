@@ -25,6 +25,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.species_curation import SpeciesCurationRepository
+from services import photo_ingest
 
 
 def _visible(db, sql, params=()):
@@ -112,8 +113,8 @@ def cur(db):
         [("robin1", fid), ("robin2", sub), ("card1", fid), ("card2", fid),
          ("puma", sub), ("plain", fid), ("rejected", fid), ("outside", other_folder)]
     ):
-        p[name] = db.add_photo(
-            folder, f"{name}.jpg", ".jpg", 100 + i, float(i),
+        p[name] = photo_ingest.add_photo(
+            db, folder, f"{name}.jpg", ".jpg", 100 + i, float(i),
             timestamp=f"2024-01-0{i + 1}T00:00:00",
         )
     db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?",

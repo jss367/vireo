@@ -8,6 +8,7 @@ import numpy as np
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from services import photo_ingest
 
 
 def _setup_db(tmp_path):
@@ -24,8 +25,8 @@ def _setup_db(tmp_path):
 
     for i in range(6):
         ts = base + timedelta(seconds=i * 2)
-        pid = db.add_photo(
-            fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
+        pid = photo_ingest.add_photo(
+            db, fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
             timestamp=ts.isoformat(), width=4000, height=3000,
         )
         db.masks_features.update_pipeline_features(

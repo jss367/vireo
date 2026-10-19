@@ -3,6 +3,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.test_browse_filterbar import _open_browse, _wait_total
 
@@ -62,7 +63,7 @@ def test_classifier_picker_uses_models_in_predictions(live_server, page):
 def test_folder_picker_hierarchy_search_and_subtree(live_server, page):
     db = live_server['db']
     child = db.add_folder('/photos/park/nest', parent_id=live_server['data']['folders'][0], name='nest')
-    db.add_photo(folder_id=child, filename='nest.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    photo_ingest.add_photo(db, folder_id=child, filename='nest.jpg', extension='.jpg', file_size=1, file_mtime=1)
     _open_browse(page, live_server)
     picker = _add_picker(page, 'folder')
     expect(picker.get_by_role('radio', name='nest', exact=True)).to_be_visible()

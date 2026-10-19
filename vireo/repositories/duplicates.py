@@ -10,9 +10,10 @@ candidates, the disk-cleanup summary). Every method is catalog-wide
 
 Callers reach it as ``db.duplicates`` (a fresh repository per access, see
 ``Database.duplicates``); the reads and ``reopen`` have no forwarding
-wrappers on ``Database``. Resolution goes through ``Database``
-(``apply_duplicate_resolution`` and friends), not the plan and ``reject``
-methods here.
+wrappers on ``Database``. Resolution goes through
+``services/duplicate_resolution.py`` (``apply_duplicate_resolution`` and
+friends) and ``Database._apply_winner_loser_merge``, not the plan and
+``reject`` methods here.
 
 Not to be confused with the top-level ``duplicates`` module, the pure
 resolver this repository feeds.
@@ -372,7 +373,7 @@ class DuplicatesRepository:
         ``keep_folder_norm`` is already ``os.path.normpath``-ed (or ``""``).
         Returns ``(winner_id, loser_ids, None)`` when the group is
         actionable, else ``(None, None, reason)`` with the skip reasons
-        documented on ``Database.bulk_resolve_by_folder``. Writes nothing.
+        documented on ``duplicate_resolution.bulk_resolve_by_folder``. Writes nothing.
         """
         from duplicates import DupCandidate, resolve_duplicates
 

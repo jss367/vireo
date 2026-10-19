@@ -10,6 +10,7 @@ from e2e.navbar_modules import install_navbar_exposure
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
+from services import photo_ingest
 
 
 def _seed_classifier_model(home_dir):
@@ -60,8 +61,8 @@ def seed_e2e_data(db, thumb_dir):
         (f2, "robin1.jpg", "2024-06-15T10:00:00"),
         (f2, "robin2.jpg", "2024-06-15T10:01:00"),
     ]:
-        pid = db.add_photo(
-            folder_id=fid, filename=name, extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension=".jpg",
             file_size=1000, file_mtime=1.0, timestamp=ts,
         )
         photos.append(pid)

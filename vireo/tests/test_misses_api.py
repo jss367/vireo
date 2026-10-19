@@ -9,6 +9,7 @@ import os
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -33,16 +34,16 @@ def db_with_misses(tmp_path, monkeypatch):
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos/fake", name="fake")
 
-    p_ns = db.add_photo(
-        folder_id=fid, filename="ns.jpg", extension=".jpg",
+    p_ns = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ns.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
-    p_clip = db.add_photo(
-        folder_id=fid, filename="clip.jpg", extension=".jpg",
+    p_clip = photo_ingest.add_photo(
+        db, folder_id=fid, filename="clip.jpg", extension=".jpg",
         file_size=100, file_mtime=2.0, timestamp="2026-04-22T10:00:01",
     )
-    p_oof = db.add_photo(
-        folder_id=fid, filename="oof.jpg", extension=".jpg",
+    p_oof = photo_ingest.add_photo(
+        db, folder_id=fid, filename="oof.jpg", extension=".jpg",
         file_size=100, file_mtime=3.0, timestamp="2026-04-22T10:00:02",
     )
 
@@ -415,8 +416,8 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos/birds", name="birds")
-    pid = db.add_photo(
-        fid, "weak-bird.jpg", extension=".jpg", file_size=100,
+    pid = photo_ingest.add_photo(
+        db, fid, "weak-bird.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
     det_id = db.detections.save(
@@ -565,8 +566,8 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos/birds", name="birds")
-    pid = db.add_photo(
-        fid, "weak-bird.jpg", extension=".jpg", file_size=100,
+    pid = photo_ingest.add_photo(
+        db, fid, "weak-bird.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
     det_id = db.detections.save(

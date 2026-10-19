@@ -2,6 +2,7 @@ import json
 import re
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def test_move_folder_button_shows_preflight_progress(live_server, page):
@@ -254,8 +255,8 @@ def test_move_folder_preserves_untouched_name_with_surrounding_spaces(
     """
     db = live_server["db"]
     fid = db.add_folder("/photos/ shoot ", name=" shoot ")
-    db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0, timestamp="2024-04-01T10:00:00",
     )
     db.folders.update_counts()

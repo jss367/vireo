@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import pytest
 from db import Database
 from PIL import Image
+from services import photo_ingest
 
 
 @pytest.fixture(autouse=True)
@@ -265,11 +266,11 @@ def app_and_db(tmp_path, monkeypatch):
     fid = db.add_folder('/photos/2024', name='2024')
     fid2 = db.add_folder('/photos/2024/January', name='January', parent_id=fid)
 
-    p1 = db.add_photo(folder_id=fid, filename='bird1.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='bird1.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-01-15T10:00:00')
-    p2 = db.add_photo(folder_id=fid2, filename='bird2.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid2, filename='bird2.jpg', extension='.jpg',
                       file_size=2000, file_mtime=2.0, timestamp='2024-01-20T14:00:00')
-    p3 = db.add_photo(folder_id=fid, filename='bird3.jpg', extension='.jpg',
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename='bird3.jpg', extension='.jpg',
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
     db.photo_review.set_rating(p1, 3)
@@ -333,8 +334,8 @@ def client_with_photo(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src),
         file_mtime=os.path.getmtime(src),
         width=800, height=600,

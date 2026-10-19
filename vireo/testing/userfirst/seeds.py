@@ -13,6 +13,8 @@ _VIREO_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 if _VIREO_DIR not in sys.path:
     sys.path.insert(0, _VIREO_DIR)
 
+from services import photo_ingest  # noqa: E402
+
 
 def _make_thumb(thumb_dir, photo_id):
     """Create a 100x100 placeholder JPEG thumbnail for *photo_id*."""
@@ -100,8 +102,8 @@ def browse_seed(db_path, thumb_dir, photos_root):
     ]
 
     for folder_id, fname, ext, size, mtime, ts, rating, flag in specs:
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=fname,
             extension=ext,
             file_size=size,
@@ -220,8 +222,8 @@ def misses_seed(db_path, thumb_dir, photos_root):
 
     photos = []
     for _cat, fname, photo_ts, flags in specs:
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=fname,
             extension=".jpg",
             file_size=4000,
@@ -288,8 +290,8 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
         (child_id, "archive2024_01.jpg", "2024-01-15T10:00:00"),
         (linked_root_id, "inbox_01.jpg", "2024-11-01T09:00:00"),
     ):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=fname,
             extension=".jpg",
             file_size=5000,

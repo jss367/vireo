@@ -1,5 +1,7 @@
 """The photo the user clicked stays on screen when the window is resized."""
 
+from services import photo_ingest
+
 from e2e.stack_seed import seed_browse_stack
 
 CARD_VISIBILITY = """
@@ -39,8 +41,8 @@ def _seed_extra_photos(live_server, count):
     thumb_dir = live_server["app"].config["THUMB_CACHE_DIR"]
     folder_id = live_server["data"]["folders"][0]
     for i in range(count):
-        pid = db.add_photo(
-            folder_id=folder_id, filename=f"extra{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"extra{i}.jpg", extension=".jpg",
             file_size=1000, file_mtime=1.0,
             timestamp=f"2024-03-11T{8 + i // 60:02d}:{i % 60:02d}:00",
         )

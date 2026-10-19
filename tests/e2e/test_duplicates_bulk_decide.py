@@ -6,6 +6,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
@@ -28,9 +29,9 @@ def _seed_scan_with_buckets(db, folder_a, folder_b, n_groups=3):
             fh.write(b"x")
         with open(os.path.join(folder_b, name), "wb") as fh:
             fh.write(b"x")
-        p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
+        p_a = photo_ingest.add_photo(db, folder_id=a_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
-        p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
+        p_b = photo_ingest.add_photo(db, folder_id=b_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
         db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
         proposals.append({
@@ -331,9 +332,9 @@ def test_bulk_decide_scopes_action_to_visible_groups_under_filter(
         for folder in (folder_a, folder_b):
             with open(os.path.join(folder, name), "wb") as fh:
                 fh.write(b"x")
-        p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
+        p_a = photo_ingest.add_photo(db, folder_id=a_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
-        p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
+        p_b = photo_ingest.add_photo(db, folder_id=b_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
         db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
         proposals.append({

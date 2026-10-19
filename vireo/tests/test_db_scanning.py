@@ -22,13 +22,14 @@ from repositories.companion_pairing import CompanionPairingRepository
 from repositories.keyword_provenance import KeywordProvenanceRepository
 from repositories.scanning import ScanningRepository
 from repositories.working_copies import WorkingCopyRepository
+from services import photo_ingest
 
 VIREO = Path(__file__).resolve().parents[1]
 
 
 def _photo(db, folder_id, filename, **columns):
-    pid = db.add_photo(
-        folder_id=folder_id, filename=filename,
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension="." + filename.rsplit(".", 1)[1].lower(),
         file_size=columns.pop("file_size", 100),
         file_mtime=columns.pop("file_mtime", 1.0),

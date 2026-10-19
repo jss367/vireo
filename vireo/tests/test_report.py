@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from db import Database
 from PIL import Image
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -30,8 +31,8 @@ def app_and_db(tmp_path, monkeypatch):
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos/2024", name="2024")
 
-    p1 = db.add_photo(
-        folder_id=fid, filename="bird1.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00",
     )
     Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{p1}.jpg"))

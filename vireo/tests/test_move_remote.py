@@ -14,6 +14,7 @@ import config as cfg
 import move as move_mod
 import pytest
 from db import Database
+from services import photo_ingest
 
 # --------------------------------------------------------------------------
 # Pure helpers — no SSH/rsync needed.
@@ -230,9 +231,9 @@ def remote_env(tmp_path, monkeypatch):
     (src / "a.nef").write_bytes(b"\x00" * 50)
     (src / "b.nef").write_bytes(b"\x00" * 60)
     fid = db.add_folder(str(src), name="trip")
-    db.add_photo(folder_id=fid, filename="a.nef", extension=".nef",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a.nef", extension=".nef",
                  file_size=50, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename="b.nef", extension=".nef",
+    photo_ingest.add_photo(db, folder_id=fid, filename="b.nef", extension=".nef",
                  file_size=60, file_mtime=2.0)
 
     remote = {

@@ -21,6 +21,7 @@ import textwrap
 
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
+from services import photo_ingest
 
 
 def _visible(db, sql, params=()):
@@ -70,8 +71,8 @@ def cat(db, tmp_path, monkeypatch):
     ws = db._active_workspace_id
     fid = db.add_folder("/pred", name="pred")
     other_folder = db.add_folder("/elsewhere", name="elsewhere", link_to_workspace=False)
-    photos = [db.add_photo(fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
-    outside = db.add_photo(other_folder, "out.jpg", ".jpg", 99, 9.0)
+    photos = [photo_ingest.add_photo(db, fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
+    outside = photo_ingest.add_photo(db, other_folder, "out.jpg", ".jpg", 99, 9.0)
     return {"ws": ws, "fid": fid, "p": photos, "outside": outside}
 
 

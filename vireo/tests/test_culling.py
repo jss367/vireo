@@ -15,7 +15,6 @@ from datetime import datetime
 
 import numpy as np
 import pytest
-from services import detection_store
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -28,6 +27,7 @@ from culling import (
     _scene_label,
     analyze_for_culling,
 )
+from services import detection_store, photo_ingest
 
 # ---------------------------------------------------------------------------
 # _cluster_photos  (single-linkage embedding clustering)
@@ -550,7 +550,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
         img = Image.new("RGB", (100, 100), color=(i * 60, i * 60, i * 60))
         img.save(os.path.join(folder_path, fname))
         ts = f"2024-01-01T10:00:{i * 10:02d}"
-        pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0, timestamp=ts)
+        pid = photo_ingest.add_photo(db, fid, fname, ".jpg", 1000, 1.0, timestamp=ts)
         photo_ids.append(pid)
 
     # Add detections and predictions (all same species)
@@ -678,7 +678,7 @@ def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
     os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
     Image.new("RGB", (100, 100), color=(50, 120, 80)).save(wc_abs)
 
-    pid = db.add_photo(fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    pid = photo_ingest.add_photo(db, fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
     db.conn.execute(
         "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
     )
@@ -713,7 +713,7 @@ def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
     with open(os.path.join(folder_path, fname), "wb") as f:
         f.write(b"not a real raw file")
 
-    pid = db.add_photo(fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    pid = photo_ingest.add_photo(db, fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
@@ -763,7 +763,7 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
     with open(wc_abs, "wb") as f:
         f.write(b"not a real jpeg")
 
-    pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    pid = photo_ingest.add_photo(db, fid, fname, ".jpg", 1000, 1.0, timestamp="2024-01-01T10:00:00")
     db.conn.execute(
         "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
     )
@@ -805,8 +805,8 @@ def test_phash_backfill_commits_per_photo(tmp_path):
         Image.new("RGB", (50, 50), color=(50 + i * 30, 120, 80)).save(
             os.path.join(folder_path, fname)
         )
-        pid = db.add_photo(
-            fid, fname, ".jpg", 1000, 1.0,
+        pid = photo_ingest.add_photo(
+            db, fid, fname, ".jpg", 1000, 1.0,
             timestamp=f"2024-01-01T10:00:0{i}",
         )
         det_ids = db.detections.save(pid, [
@@ -879,7 +879,7 @@ def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
     Image.new("RGB", (50, 50), color=(50, 120, 80)).save(
         os.path.join(folder_path, fname)
     )
-    pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0,
+    pid = photo_ingest.add_photo(db, fid, fname, ".jpg", 1000, 1.0,
                        timestamp="2024-01-01T10:00:00")
     det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},

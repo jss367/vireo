@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from offline_cache import cache_photo_original, release_photo_original, resolve_original_path
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -192,7 +193,7 @@ def test_release_cancel_keeps_unprocessed_copies(client_with_photo, monkeypatch)
     folder_id = db.photos.get(pid)["folder_id"]
     second = source.with_name("second.jpg")
     second.write_bytes(source.read_bytes())
-    second_id = db.add_photo(folder_id, second.name, ".jpg", file_size=second.stat().st_size, file_mtime=second.stat().st_mtime)
+    second_id = photo_ingest.add_photo(db, folder_id, second.name, ".jpg", file_size=second.stat().st_size, file_mtime=second.stat().st_mtime)
     cache_photo_original(db, db.photos.get(second_id), str(base), {folder_id: str(source.parent)})
     push = app._job_runner.push_event
 
@@ -316,8 +317,8 @@ def test_release_caps_kept_reasons_sample_but_keeps_total_count(
     photo_ids = [pid]
     for i in range(extras):
         photo_ids.append(
-            db.add_photo(
-                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            photo_ingest.add_photo(
+                db, folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
             )
         )
 
@@ -354,8 +355,8 @@ def test_release_caps_error_reasons_sample_but_keeps_total_count(
     photo_ids = [pid]
     for i in range(extras):
         photo_ids.append(
-            db.add_photo(
-                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            photo_ingest.add_photo(
+                db, folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
             )
         )
 
@@ -394,8 +395,8 @@ def test_release_cancellation_after_cap_still_publishes_errors_total(
     photo_ids = [pid]
     for i in range(extras):
         photo_ids.append(
-            db.add_photo(
-                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            photo_ingest.add_photo(
+                db, folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
             )
         )
 
@@ -440,7 +441,7 @@ def test_release_folder_includes_cached_descendants_only(client_with_photo):
     image = child / "nested.jpg"
     image.write_bytes(source.read_bytes())
     folder_id = db.add_folder(str(child), parent_id=root_id)
-    second_id = db.add_photo(folder_id, image.name, ".jpg", file_size=image.stat().st_size, file_mtime=image.stat().st_mtime)
+    second_id = photo_ingest.add_photo(db, folder_id, image.name, ".jpg", file_size=image.stat().st_size, file_mtime=image.stat().st_mtime)
     cache_photo_original(db, db.photos.get(second_id), str(base), {folder_id: str(child)})
     job = run_release(app, {"folder_id": root_id})
     assert job["result"]["released"] == 2

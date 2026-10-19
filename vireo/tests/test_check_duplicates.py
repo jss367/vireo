@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from db import Database
 from PIL import Image
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -137,8 +138,8 @@ def test_check_duplicates_metadata_match_without_hashing(
     exif[ExifBase.DateTimeOriginal] = "2026:05:01 10:15:30"
     img.save(str(source / "IMG_0001.jpg"), exif=exif)
 
-    db.add_photo(
-        folder_id=fid,
+    photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="IMG_0001.jpg",
         extension=".jpg",
         file_size=os.path.getsize(str(source / "IMG_0001.jpg")),
@@ -179,8 +180,8 @@ def test_check_duplicates_verify_by_hash_flag(app_and_db, tmp_path):
     exif[ExifBase.DateTimeOriginal] = "2026:05:01 10:15:30"
     img.save(str(source / "renamed.jpg"), exif=exif)
 
-    db.add_photo(
-        folder_id=fid,
+    photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="IMG_0001.jpg",
         extension=".jpg",
         file_size=os.path.getsize(str(source / "renamed.jpg")),
@@ -369,8 +370,8 @@ def test_check_duplicates_ignores_zero_byte_images(app_and_db, tmp_path):
     from scanner import EMPTY_FILE_SHA256
 
     # Historical DB state: older scans could store the empty-file hash.
-    db.add_photo(
-        folder_id=fid,
+    photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="empty.NEF",
         extension=".nef",
         file_size=0,
@@ -1325,8 +1326,8 @@ def _pair_unrecovered_companions(db, fid, library, count):
     for i in range(count):
         jpeg = library / f"PAIR_{i}.jpg"
         Image.new("RGB", (40, 40), color=(i * 40, 0, 0)).save(str(jpeg))
-        pid = db.add_photo(
-            folder_id=fid, filename=f"PAIR_{i}.nef", extension=".nef",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"PAIR_{i}.nef", extension=".nef",
             file_size=10, file_mtime=1,
         )
         db.conn.execute(
