@@ -63,7 +63,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
-from services import workspace_config
+from services import browse_queries, workspace_config
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from web.app_hooks import claim_search_lane
@@ -2078,8 +2078,8 @@ class _PhotosQuery:
         db = self.db
         try:
             if self.stacks:
-                ids = db.query_photo_ids_stacked(
-                    self.rules, sort=self.sort,
+                ids = browse_queries.query_photo_ids_stacked(
+                    db, self.rules, sort=self.sort,
                     collection_id=self.collection_id, folder_id=self.folder_id,
                     stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
                 )

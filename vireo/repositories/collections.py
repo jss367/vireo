@@ -21,11 +21,12 @@ points the original code called it, so a malformed rule tree still raises
 ``ValueError`` before a missing workspace raises ``RuntimeError``. The façade
 methods the rules engine consults (``get_effective_config``,
 ``get_subject_types``, ``get_folder_subtree_ids``) arrive as bound methods so
-monkeypatches of ``Database`` keep reaching this code. Methods with no SQL of
-their own (``rules_resolvable``, ``query_photo_position``,
+monkeypatches of ``Database`` keep reaching this code. The compositions with
+no SQL of their own (``rules_resolvable``, ``query_photo_position``,
 ``query_browse_stack_position``, ``count_browse_stacks``, the ``*_stacked``
-id lists, ``create_default_collections_for_all_workspaces``) stay on
-``Database`` and call through the accessor. ``_build_query_from_rules`` and
+id lists) live in ``services/browse_queries.py`` and
+``create_default_collections_for_all_workspaces`` in
+``services/workspace_config.py``; they call through the accessor. ``_build_query_from_rules`` and
 ``_top_prediction_confidence_params`` keep one-line ``Database`` forwarders
 because ``PredictionRepository`` binds them from the façade by name
 (``repositories.predictions.FACADE_METHODS``).

@@ -20,6 +20,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
+from services import browse_queries
+
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Iterable, Sequence
@@ -176,7 +178,7 @@ def collection_rules_state(db: Database, rules_json: str | None) -> tuple[RuleTr
         parsed_rules = json.loads(cast("str", rules_json))
     except (TypeError, ValueError):
         return None, True
-    return parsed_rules, not db.rules_resolvable(parsed_rules)
+    return parsed_rules, not browse_queries.rules_resolvable(db, parsed_rules)
 
 
 class VisualScope:

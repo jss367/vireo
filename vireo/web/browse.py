@@ -22,7 +22,7 @@ import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
-from services import workspace_config
+from services import browse_queries, workspace_config
 from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
 from web.app_hooks import claim_search_lane
@@ -531,8 +531,8 @@ def create_browse_blueprint(
         except ValueError as e:
             return json_error(str(e), 400)
         try:
-            summary = db.get_browse_summary(
-                folder_id=folder_id,
+            summary = browse_queries.get_browse_summary(
+                db, folder_id=folder_id,
                 collection_id=collection_id,
                 rules=rules,
             )

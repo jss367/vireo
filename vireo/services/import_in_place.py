@@ -560,7 +560,7 @@ def _resolve_snapshot_paths(
     """
     from new_images import exclude_snapshot_folders
 
-    snap = db.get_new_images_snapshot(source_snapshot_id)
+    snap = db.workspaces.get_new_images_snapshot(source_snapshot_id)
     if snap is None:
         return None, None, None, ImportFailure(
             f"source_snapshot_id {source_snapshot_id} not found",

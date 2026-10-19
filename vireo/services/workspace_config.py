@@ -3,6 +3,8 @@
 Browse's stack settings and the active label files are read off the active
 workspace's effective config (or its raw overrides); the mask-storage floor
 is the most permissive ``detector_confidence`` any workspace would apply.
+``create_default_collections_for_all_workspaces`` seeds each workspace's
+default collections at startup.
 ``Database.get_effective_config`` and ``get_subject_types`` stay on
 ``Database``: repositories bind them by name (``FACADE_METHODS`` and the
 collections factory).
@@ -114,3 +116,9 @@ def set_workspace_active_labels(db: Database, labels_files: list[str]) -> None:
             overrides = {}
     overrides["active_labels"] = labels_files
     db.workspaces.update(db.require_workspace_id(), config_overrides=overrides)
+
+
+def create_default_collections_for_all_workspaces(db: Database) -> None:
+    """Create missing default smart collections in every workspace."""
+    for ws in db.workspaces.list_all():
+        db.collections.create_defaults(workspace_id=ws["id"])

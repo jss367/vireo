@@ -15,7 +15,7 @@ import json
 import config as cfg
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
-from services import workspace_config
+from services import browse_queries, workspace_config
 from services.visual_scope import (
     collection_row,
     collection_rules_state,
@@ -546,8 +546,8 @@ def create_collections_blueprint(get_db, json_error):
         stacks = request_bool_arg("stacks")
         try:
             if stacks:
-                photo_ids = db.get_collection_photo_ids_stacked(
-                    collection_id, sort=sort,
+                photo_ids = browse_queries.get_collection_photo_ids_stacked(
+                    db, collection_id, sort=sort,
                     stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
                 )
             else:

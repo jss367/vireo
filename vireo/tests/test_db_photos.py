@@ -19,7 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
-from services import duplicate_resolution, photo_ingest
+from services import browse_queries, duplicate_resolution, photo_ingest
 
 
 @pytest.fixture
@@ -588,7 +588,7 @@ def test_listing_collection_restriction(db, lib):
     assert db.photos.count_filtered(collection_id=cid) == 1
     assert db.photos.get_position(lib["a"], collection_id=cid) == 0
     assert db.photos.get_position(lib["b"], collection_id=cid) is None
-    summary = db.get_browse_summary(collection_id=cid)
+    summary = browse_queries.get_browse_summary(db, collection_id=cid)
     assert summary["total"] == 3
     assert summary["filtered_total"] == 1
     assert db.photos.get_calendar_data(2024, collection_id=cid)["days"] == {
@@ -597,8 +597,10 @@ def test_listing_collection_restriction(db, lib):
 
 
 def _listing(db, method):
-    """``get_browse_summary`` stays on the façade; the rest are on ``db.photos``."""
-    return getattr(db, method) if method == "get_browse_summary" else getattr(db.photos, method)
+    """``get_browse_summary`` lives in ``services/browse_queries.py``; the rest are on ``db.photos``."""
+    if method == "get_browse_summary":
+        return lambda *args, **kwargs: browse_queries.get_browse_summary(db, *args, **kwargs)
+    return getattr(db.photos, method)
 
 
 @pytest.mark.parametrize("method,args", [
@@ -659,7 +661,7 @@ def test_listing_routes_through_facade_helpers(db, lib, monkeypatch):
     db.photos.get_ids(folder_id=lib["root"], collection_id=cid)
     db.photos.count_filtered(folder_id=lib["root"], collection_id=cid)
     db.photos.get_position(lib["a"], folder_id=lib["root"], collection_id=cid)
-    db.get_browse_summary(folder_id=lib["root"], collection_id=cid)
+    browse_queries.get_browse_summary(db, folder_id=lib["root"], collection_id=cid)
     db.photos.get_calendar_data(2024, folder_id=lib["root"], collection_id=cid)
     root = lib["root"]
     assert calls == [
@@ -736,7 +738,7 @@ def test_get_browse_summary(db, lib, isolated_config):
         "VALUES (?, ?, 'rejected')", (rejected, db._active_workspace_id),
     )
     db.conn.commit()
-    summary = db.get_browse_summary()
+    summary = browse_queries.get_browse_summary(db)
     assert summary == {
         "total": 3,
         "filtered_total": 3,
@@ -754,12 +756,12 @@ def test_get_browse_summary(db, lib, isolated_config):
             "with_quality": 0, "with_eye": 0, "with_misses": 0,
         },
     }
-    by_folder = db.get_browse_summary(folder_id=lib["child"])
+    by_folder = browse_queries.get_browse_summary(db, folder_id=lib["child"])
     assert by_folder["filtered_total"] == 1
     assert by_folder["top_species"] == []
     db.photo_review.set_rating(lib["a"], 5)
-    ruled = db.get_browse_summary(
-        rules=[{"field": "rating", "op": ">=", "value": 5}],
+    ruled = browse_queries.get_browse_summary(
+        db, rules=[{"field": "rating", "op": ">=", "value": 5}],
     )
     assert ruled["total"] == 3
     assert ruled["filtered_total"] == 1
@@ -780,7 +782,7 @@ def test_get_browse_summary_reads_detector_floor_from_effective_config(
         return out
 
     monkeypatch.setattr(db, "get_effective_config", effective)
-    summary = db.get_browse_summary()
+    summary = browse_queries.get_browse_summary(db)
     assert seen == [True]
     assert summary["classified"] == 0
     assert summary["unclassified"] == 3
@@ -789,7 +791,7 @@ def test_get_browse_summary_reads_detector_floor_from_effective_config(
 
 def test_get_browse_summary_rejects_malformed_rules(db, lib, isolated_config):
     with pytest.raises(ValueError):
-        db.get_browse_summary(rules=[{"field": "no-such-field", "value": 1}])
+        browse_queries.get_browse_summary(db, rules=[{"field": "no-such-field", "value": 1}])
 
 
 # -- count_photos_with_companions ------------------------------------------------
@@ -1371,7 +1373,7 @@ def test_count_catalog_photos_counts_every_folder_status(db, lib):
 # -- structure -----------------------------------------------------------------
 
 # Coordinated work that stays on ``Database`` and builds the repository itself.
-COORDINATED = ["get_browse_summary", "delete_photos"]
+COORDINATED = ["delete_photos"]
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.photos`` now.
@@ -1457,7 +1459,9 @@ def test_composition_stays_on_the_facade():
         "photos", "invalidate_new_images_cache_for_folders",
         "prune_pipeline_cache_for_ids", "_ws_id",
     } <= _self_attrs("delete_photos")
-    assert "get_effective_config" in _self_attrs("get_browse_summary")
+    summary = textwrap.dedent(inspect.getsource(browse_queries.get_browse_summary))
+    assert "db.get_effective_config" in summary and "db.photos.get_browse_summary" in summary
+    assert not hasattr(Database, "get_browse_summary")
     assert {"_FILTER_SUBJECT_CHUNK", "_ws_id"} <= _self_attrs("_photos_repository")
 
 

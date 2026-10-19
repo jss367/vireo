@@ -22,7 +22,7 @@ from db import (
     NEEDS_IDENTIFICATION_RULES,
     Database,
 )
-from services import photo_ingest
+from services import browse_queries, photo_ingest
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +266,7 @@ def test_rules_engine_rejects_malformed_trees(db):
     ]
     for rule, message in bad:
         rules = rule if "mode" in rule else [rule]
-        assert db.rules_resolvable(rules) is False
+        assert browse_queries.rules_resolvable(db, rules) is False
         with pytest.raises(ValueError, match=message):
             db.collections.count_photos_for_rules(rules)
 
@@ -765,7 +765,7 @@ def test_offline_photos_stay_single_in_stacks(db, folder, tmp_path):
 
 def test_private_helpers_stay_callable_on_the_facade(db, folder):
     a = _photo(db, folder, "a.jpg", timestamp="2024-01-01T00:00:00")
-    assert db.rules_resolvable([{"field": "all"}]) is True
+    assert browse_queries.rules_resolvable(db, [{"field": "all"}]) is True
     assert db.collections._stack_sort_spec("bogus") == db.collections._stack_sort_spec("date")
     assert db.collections._stack_sort_clause("name") == "_stack_lead_filename ASC, _stack_lead_id ASC"
     assert db.collections._append_folder_restriction(None, "WHERE x", [1]) == ("WHERE x", [1])
@@ -974,16 +974,17 @@ _DELEGATING_COLLECTION_METHODS = (
     "_top_prediction_confidence_params",
 )
 
-# No SQL of their own: they compose collection reads, so class-level patches
-# of the repository methods (``query_photo_position_first``, ...) still apply.
-_COMPOSING_COLLECTION_METHODS = {
-    "rules_resolvable": "_build_query_from_rules",
-    "query_photo_position": "query_photo_position_first",
-    "query_browse_stack_position": "query_browse_stack_position_first",
-    "count_browse_stacks": "browse_stack_totals",
-    "get_collection_photo_ids_stacked": "_stacked_photo_ids",
-    "query_photo_ids_stacked": "_stacked_photo_ids",
-    "create_default_collections_for_all_workspaces": "create_defaults",
+# No SQL of their own: services compose collection reads, so class-level
+# patches of the repository methods (``query_photo_position_first``, ...) still
+# apply. ``rules_resolvable`` compiles through the façade forwarder.
+_COMPOSING_COLLECTION_FUNCTIONS = {
+    ("browse_queries", "rules_resolvable"): "_build_query_from_rules",
+    ("browse_queries", "query_photo_position"): "query_photo_position_first",
+    ("browse_queries", "query_browse_stack_position"): "query_browse_stack_position_first",
+    ("browse_queries", "count_browse_stacks"): "browse_stack_totals",
+    ("browse_queries", "get_collection_photo_ids_stacked"): "_stacked_photo_ids",
+    ("browse_queries", "query_photo_ids_stacked"): "_stacked_photo_ids",
+    ("workspace_config", "create_default_collections_for_all_workspaces"): "create_defaults",
 }
 
 
@@ -1044,7 +1045,7 @@ def test_collections_has_no_forwarding_wrappers_on_database():
     }
     assert "_collection_repository" in attrs
     assert "conn" not in attrs
-    for name in _COMPOSING_COLLECTION_METHODS.values():
+    for name in _COMPOSING_COLLECTION_FUNCTIONS.values():
         assert callable(getattr(CollectionRepository, name)), name
 
 
@@ -1057,22 +1058,49 @@ def test_collections_is_a_fresh_repository_per_access(db):
     assert first.conn is db.conn
 
 
-def test_candidate_preference_case_delegates_to_repository():
+def test_candidate_preference_case_lives_on_the_repository():
     from repositories.collections import CollectionRepository
 
-    source = textwrap.dedent(inspect.getsource(Database._candidate_preference_case))
-    assert "CollectionRepository._candidate_preference_case" in source
-    assert Database._candidate_preference_case("id", [5, 7]) == (
-        CollectionRepository._candidate_preference_case("id", [5, 7])
-    ) == "CASE id WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END"
+    assert not hasattr(Database, "_candidate_preference_case")
+    assert CollectionRepository._candidate_preference_case("id", [5, 7]) == (
+        "CASE id WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END"
+    )
 
 
-@pytest.mark.parametrize("name, callee", sorted(_COMPOSING_COLLECTION_METHODS.items()))
-def test_collection_composition_stays_on_facade(name, callee):
-    attrs = _self_attrs(name)
-    assert "conn" not in attrs
-    assert "_collection_repository" not in attrs
-    assert callee in attrs | _accessor_calls(name)
+def _service_calls(fn):
+    """Attributes a service function reads off ``db`` or ``db.collections``."""
+    source = textwrap.dedent(inspect.getsource(fn))
+    tree = ast.parse(source)
+    direct = {
+        node.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == "db"
+    }
+    via_accessor = {
+        node.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "collections"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "db"
+    }
+    return direct, via_accessor
+
+
+@pytest.mark.parametrize(
+    "where, callee", sorted(_COMPOSING_COLLECTION_FUNCTIONS.items()),
+    ids=[name for (_module, name) in sorted(_COMPOSING_COLLECTION_FUNCTIONS)],
+)
+def test_collection_composition_lives_in_services(where, callee):
+    import importlib
+
+    module_name, name = where
+    fn = getattr(importlib.import_module(f"services.{module_name}"), name)
+    direct, via_accessor = _service_calls(fn)
+    assert "conn" not in direct
+    assert "_collection_repository" not in direct
+    assert callee in direct | via_accessor
+    assert not hasattr(Database, name), f"Database.{name} came back"
 
 
 def test_collection_repository_wiring(db, monkeypatch):
@@ -1120,7 +1148,7 @@ def test_collection_signatures_unchanged():
     from repositories.collections import CollectionRepository
 
     facade = {n: str(inspect.signature(getattr(Database, n)))
-              for n in (*_DELEGATING_COLLECTION_METHODS, *_COMPOSING_COLLECTION_METHODS)}
+              for n in _DELEGATING_COLLECTION_METHODS}
     assert facade["_build_query_from_rules"] == (
         "(self, rules, include_offline_folders=False, row_scoped=False)"
     )
@@ -1175,7 +1203,7 @@ def test_top_predicted_species_matches_summary(db, folder):
     assert _ids(db, rule("Hawk")) == [hawk]
     assert _ids(db, rule("Runner-up")) == []
     assert _ids(db, rule("Stale")) == []
-    for row in db.get_browse_summary(folder_id=folder)["top_species"]:
+    for row in browse_queries.get_browse_summary(db, folder_id=folder)["top_species"]:
         assert len(_ids(db, rule(row["species"]), folder_id=folder)) == row["count"]
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE species = 'Robin'").fetchone()[0]
     db.update_prediction_status(pred_id, "rejected")

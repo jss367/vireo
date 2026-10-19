@@ -1618,7 +1618,7 @@ def create_imports_blueprint(
         if db.active_workspace_id is None:
             abort(404)
         try:
-            snap = db.get_new_images_snapshot(snapshot_id)
+            snap = db.workspaces.get_new_images_snapshot(snapshot_id)
         except OverflowError:
             snap = None
         if snap is None:

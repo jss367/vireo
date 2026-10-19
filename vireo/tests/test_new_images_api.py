@@ -639,7 +639,7 @@ def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
         assert isinstance(data["snapshot_id"], int)
         assert str(folder) in data["folders"]
 
-    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    snap = db.workspaces.get_new_images_snapshot(data["snapshot_id"])
     assert snap["file_count"] == 2
 
 
@@ -690,7 +690,7 @@ def test_post_snapshot_reuses_live_navbar_cache_without_rewalk(app_and_db, monke
             f"expected snapshot of the advertised cached set, got {data!r}"
         )
 
-    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    snap = db.workspaces.get_new_images_snapshot(data["snapshot_id"])
     assert snap["file_paths"] == old_paths
     assert fresh_path not in snap["file_paths"]
 
@@ -816,7 +816,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
             assert data["file_count"] == 1
             assert extra_calls["n"] == 0
 
-        snap = db.get_new_images_snapshot(data["snapshot_id"])
+        snap = db.workspaces.get_new_images_snapshot(data["snapshot_id"])
         assert snap["file_paths"] == [old_path]
     finally:
         walk_release.set()
