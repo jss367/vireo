@@ -26007,6 +26007,140 @@ def test_encounter_species_remove_redo_refreshes_pipeline_cache(app_and_db):
     }
 
 
+def _remove_teal_from_cached_burst(app, db):
+    """Seed a confirmed-teal cache and remove teal from its first burst."""
+    app_client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    override = {
+        "species": "Green-winged Teal", "confirmed": True,
+        "species_list": ["Green-winged Teal"],
+    }
+    _seed_encounter_cache(
+        app, db, photo_ids, confirmed_species="Green-winged Teal",
+        bursts=[
+            {"photo_ids": photo_ids[:2], "species_predictions": [],
+             "species_override": dict(override)},
+            {"photo_ids": photo_ids[2:], "species_predictions": [],
+             "species_override": dict(override)},
+        ],
+    )
+    teal = db.add_keyword("Green-winged Teal", is_species=True)
+    for pid in photo_ids:
+        db.tag_photo(pid, teal)
+    resp = app_client.post("/api/encounters/species", json={
+        "species": "Green-winged Teal", "photo_ids": photo_ids[:2],
+        "burst_index": 0, "remove": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return photo_ids[:2]
+
+
+def test_undo_redo_report_a_failed_pipeline_cache_refresh(app_and_db, monkeypatch):
+    """A cache refresh that fails after undo/redo is a warning in the response.
+
+    Regression: the failure was only logged, so Process Review kept showing
+    the old species with nothing on screen saying why. The undo and redo
+    still succeed (the catalog change committed); the response says the
+    review results were not updated.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    burst_ids = _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+
+    resp = client.post("/api/undo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["undone"]
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Undo saved, but Vireo could not update")
+    assert "Process Review" in body["warning"]
+    assert "old species" in body["warning"]
+    for pid in burst_ids:
+        assert _species_names(db, pid) == ["Green-winged Teal"]
+
+    resp = client.post("/api/redo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Redo saved, but Vireo could not update")
+    for pid in burst_ids:
+        assert _species_names(db, pid) == []
+
+
+def test_undo_redo_without_a_cache_failure_carry_no_warning(app_and_db):
+    """A refresh that succeeds (or has nothing to do) keeps the old shape."""
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    for route in ("/api/undo", "/api/redo"):
+        body = client.post(route).get_json()
+        assert body["ok"] is True
+        assert "warning" not in body
+        assert "pipeline_cache_stale" not in body
+
+
+def test_undo_redo_responses_carry_the_entry_id(app_and_db, monkeypatch):
+    """Undo and redo report ``entry_id`` so the Process Review banner can
+    detect its own inverse. The failed Undo and the Redo that reverses it
+    both act on the same ``edit_history`` row, so their ``entry_id`` match;
+    on that match the client drops the stale banner the Undo put up.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+    undo_body = client.post("/api/undo").get_json()
+    assert undo_body["pipeline_cache_stale"] is True
+    assert isinstance(undo_body["entry_id"], int)
+    monkeypatch.undo()
+
+    redo_body = client.post("/api/redo").get_json()
+    assert redo_body["ok"] is True
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+
+
+def test_undo_redo_entry_id_differs_across_separate_history_entries(app_and_db):
+    """A later undo/redo for a different edit carries a different
+    ``entry_id`` than an earlier one, so the client can tell "unrelated
+    successful edit" from "this failure's own inverse".
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids must not collide.
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    chat = db.add_keyword("Yellow-breasted Chat", is_species=True)
+    for pid in photo_ids[:1]:
+        db.tag_photo(pid, chat)
+    resp = client.post("/api/encounters/species", json={
+        "species": "Yellow-breasted Chat", "photo_ids": photo_ids[:1],
+        "burst_index": 0, "remove": False,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    first_undo = client.post("/api/undo").get_json()
+    second_undo = client.post("/api/undo").get_json()
+    assert first_undo["entry_id"] != second_undo["entry_id"]
+
+
 def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override(app_and_db):
     """Frames [A, X] and [A, Y]: removing A leaves the explicit-empty
     sentinel (nothing shared). Undo restores A; redo must restore the
