@@ -264,3 +264,99 @@ def test_auto_short_input_preserves_caller_transaction_without_probes():
             assert trace == [] and conn.in_transaction and probes == [] and merges == []
             conn.rollback()
             assert conn.execute("SELECT * FROM notes").fetchall() == []
+
+
+def _run_original_apply_contract(name, test_source=None):
+    import __future__
+
+    import posixpath
+    import re
+    from pathlib import PurePosixPath
+
+    with _flow() as (conn, scan, db, repo, merges, trace, paths, probes):
+        # Original fixture rows/paths stay invented and only memory SQLite
+        # is used. Execute the actual candidate chunker and pure resolver.
+        conn.execute("DELETE FROM photos")
+        conn.execute("ALTER TABLE photos ADD COLUMN extension TEXT")
+        conn.execute("ALTER TABLE photos ADD COLUMN file_size INTEGER")
+        conn.commit()
+        scan.row_factory = sqlite3.Row
+        db.conn = conn
+        repo.chunk_size = 800
+        namespace = repo.resolution_preflight.__func__.__globals__
+        repo._chunks = MethodType(SUPPORT["_selected"](
+            "repositories/duplicates.py", "DuplicatesRepository", "_chunks", namespace,
+        ), repo)
+        pure = {"re": re, "Path": PurePosixPath}
+        tree = ast.parse((VIREO / "duplicates.py").read_text(encoding="utf-8"))
+        nodes = [n for n in tree.body if (
+            isinstance(n, ast.FunctionDef) and n.name in {"_has_dup_suffix", "resolve_duplicates"}
+        ) or (isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id in {"_ALWAYS_DUP_SUFFIX_RES", "_RELATIVE_DUP_SUFFIX_RES"} for t in n.targets
+        ))]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<pure resolver>", "exec",
+                     flags=__future__.annotations.compiler_flag), pure)
+        original_import = namespace["__builtins__"]["__import__"]
+        def imports(module, *args, **kwargs):
+            if module == "duplicates":
+                return SimpleNamespace(DupCandidate=lambda **kw: SimpleNamespace(**kw), resolve_duplicates=pure["resolve_duplicates"])
+            return original_import(module, *args, **kwargs)
+        namespace["__builtins__"]["__import__"] = imports
+        present = set()
+        def exists(path):
+            assert not conn.in_transaction
+            return path in present
+        paths.exists = exists
+        test_tree = ast.parse(test_source or (VIREO / "tests/test_db_duplicates.py").read_text(encoding="utf-8"))
+        nodes = [n for n in test_tree.body if (
+            isinstance(n, ast.ClassDef) and n.name == "_SqlRecorder"
+        ) or (isinstance(n, ast.FunctionDef) and n.name in {"_photo", "_flags", name})]
+        for node in nodes:
+            if isinstance(node, ast.FunctionDef):
+                node.decorator_list = []
+        reader = SimpleNamespace(execute=scan.execute, close=lambda: None)
+        test_namespace = {
+            "os": SimpleNamespace(path=posixpath), "_reader": lambda owner: reader,
+            "_touch": lambda path: present.add(path),
+            "_NOOP": {"winner_id": None, "loser_ids": [], "rejected": 0},
+            "duplicate_resolution": SimpleNamespace(apply_duplicate_resolution=db.auto.__func__),
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<original apply contract>", "exec"), test_namespace)
+        fn = test_namespace[name]
+        args = {"db": db, "folder": (1, "invented/keep"),
+                "monkeypatch": SimpleNamespace(setattr=setattr)}
+        if name == "test_apply_resolution_short_input_is_a_noop_without_sql":
+            for ids in (None, [], [1]):
+                fn(db, ids)
+        else:
+            fn(**{arg.arg: args[arg.arg] for arg in next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == name).args.args})
+
+
+def test_all_existing_apply_resolution_contracts_with_invented_memory_and_fake_disk():
+    tree = ast.parse((VIREO / "tests/test_db_duplicates.py").read_text(encoding="utf-8"))
+    names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_apply_resolution_")]
+    assert len(names) == 7
+    for name in names:
+        _run_original_apply_contract(name)
+
+
+def test_group_hash_lookup_and_revalidation_preserve_parameter_chunk_bound():
+    with _flow() as (conn, scan, db, repo, merges, trace, paths, probes):
+        conn.execute("DELETE FROM photos")
+        conn.executemany(
+            "INSERT INTO photos VALUES(?,1,?, ?,1,0,NULL,0)",
+            [(pid, f"invented-{pid}.jpg", f"hash-{pid}") for pid in range(1, 802)],
+        )
+        conn.commit()
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 800)
+        repo.chunk_size = 800
+        repo._chunks = MethodType(SUPPORT["_selected"](
+            "repositories/duplicates.py", "DuplicatesRepository", "_chunks", {},
+        ), repo)
+        trace.clear()
+        assert len(repo._resolution_rows(list(range(1, 802)))) == 801
+        for clause in ("WHERE p.id IN (", "WHERE p.file_hash IN ("):
+            queries = [sql for sql in trace if clause in sql]
+            sizes = [len(sql.split(clause, 1)[1].split(")", 1)[0].split(",")) for sql in queries]
+            assert sizes == [800, 1]
+        assert probes == [] and merges == [] and not conn.in_transaction
