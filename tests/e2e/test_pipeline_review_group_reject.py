@@ -1195,7 +1195,7 @@ def test_photo_context_menu_updates_rating_and_adds_keyword(live_server, page):
     expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
 
     assert "Process Review Shortlist" in {
-        keyword["name"] for keyword in db.keywords.get_for_photo(photo_id)
+        keyword["name"] for keyword in db.photo_keywords.get_for_photo(photo_id)
     }
 
 
@@ -1979,7 +1979,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
     assert results == [False, False]
     assert db.collections.get_photos(collection_id, per_page=100) == []
     assert "must-not-write" not in {
-        keyword["name"] for keyword in db.keywords.get_for_photo(photo_id)
+        keyword["name"] for keyword in db.photo_keywords.get_for_photo(photo_id)
     }
 
     # The action entry points are guarded as well, so native menu calls and
