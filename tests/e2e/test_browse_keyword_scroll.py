@@ -158,7 +158,7 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
     )]
     for photo_id in photo_ids:
         db.tag_photo(photo_id, old_keyword)
-        detection = db.save_detections(photo_id, [{
+        detection = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
             "confidence": 0.95, "category": "animal",
         }], detector_model="test-detector")[0]

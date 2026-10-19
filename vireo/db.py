@@ -863,7 +863,7 @@ _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC,
 # * ``species IS NOT NULL`` — a detection-only row ("animal", no species) is
 #   not a species guess and has no confidence to rank by.
 # * ``detector_confidence >= <workspace floor>`` — detections under the
-#   floor are hidden everywhere (``get_detections_for_photos``, the
+#   floor are hidden everywhere (``detection_store.get_detections_for_photos``, the
 #   dashboard counters, ``_prediction_exists``), so their predictions must
 #   not position a card either.
 # * status not ``rejected`` — a guess the user threw away must not keep the
@@ -3841,9 +3841,9 @@ class Database:
         Work that reads the workspace config or the photo scope first lives
         in ``services/subject_masks.py`` (``set_active_mask_variant``,
         ``delete_stale_masks``, ``sam_variant_rerun_warning``,
-        ``get_photos_missing_masks``, ``list_photos_for_eye_keypoint_stage``);
-        ``upsert_photo_embedding`` stays on ``Database`` behind its workspace
-        guard.
+        ``get_photos_missing_masks``, ``list_photos_for_eye_keypoint_stage``)
+        and ``services/detection_store.py`` (``upsert_photo_embedding``, behind
+        its workspace guard).
         """
         return self._masks_features_repository()
 
@@ -5321,26 +5321,6 @@ class Database:
         """
         return self._prediction_repository().ungroup(prediction_id, _commit=_commit)
 
-    def upsert_photo_embedding(self, photo_id, model, embedding_bytes,
-                               variant='', verify_workspace=False):
-        """Store an embedding blob for (photo_id, model, variant).
-
-        Replaces any existing row with the same primary key. ``model`` is
-        required because the storage philosophy keeps a per-model cache; a
-        missing model name has no key in the table.
-
-        Args:
-            verify_workspace: when True, raises ValueError if the photo is
-                not in the active workspace. Defaults to False because this
-                method is typically called from background classify jobs that
-                already iterate only over workspace-scoped photos.
-        """
-        if verify_workspace:
-            self._verify_photo_in_workspace(photo_id)
-        self._masks_features_repository().upsert_embedding(
-            photo_id, model, embedding_bytes, variant,
-        )
-
     def accept_prediction(
         self,
         prediction_id,
@@ -5463,7 +5443,7 @@ class Database:
         their ``is_pinned`` callback, so a patch of
         ``ModelRunsRepository.detector_run_is_pinned`` reaches them. The
         classify preflight reads that resolve the workspace's detector floor
-        stay on ``Database``.
+        live in ``services/classify_preflight.py``.
         """
         return self._model_runs_repository()
 
@@ -5486,197 +5466,6 @@ class Database:
         """
         return self._computation_cache_repository()
 
-    def get_classifier_run_cache_hits(
-        self,
-        photo_ids,
-        classifier_model,
-        labels_fingerprint,
-        *,
-        contextual_weak_photo_ids=None,
-        weak_confidence=None,
-        fresh_detections_by_photo=None,
-        fresh_processed_photo_ids=None,
-        expected_classifier_runtime_by_detector_runtime=None,
-    ):
-        """Return the SET of photo IDs from ``photo_ids`` that the classify
-        preflight would consider fully cached under
-        (classifier_model, labels_fingerprint).
-
-        Used by the streaming pipeline's classify stage to pre-flight how
-        many photos will hit the cache vs. require fresh inference — and,
-        because ``_classification_eta_progress`` reconciles the estimate
-        from observed misses, also to know WHICH photos the preflight
-        expected to be cached. Only observed misses on preflight-expected
-        photos deflate the projected cache hits; misses on photos the
-        preflight never counted are unrelated to the estimate and must
-        not scale it down (Codex #1468 P2).
-
-        Photo-scoped to match runtime accounting: the classify loop keeps
-        its ``cached`` bucket photo-scoped (see pipeline_job.py — a photo
-        lands there only if every processed detection is a cache hit; the
-        moment any detection runs fresh inference it is promoted to
-        ``count``). So the preflight only counts a photo as cached when
-        NO qualifying detection would need fresh inference — otherwise a
-        multi-subject photo with one cached and one uncached detection
-        would inflate ``cached_estimate`` up to ``total`` and the banner
-        would misread as "no work to classify" when there is real work
-        remaining.
-
-        Above-threshold animal detections must all have matching run keys.
-        Photos with no usable animal target and no confident non-animal box
-        count through their synthetic full-image anchor, including photos
-        whose only animal detections are below the workspace floor.
-
-        ``contextual_weak_photo_ids`` marks photos the classify loop will
-        rescue with a lowered ``weak_confidence`` floor. For those photos
-        the runtime picks one qualifying weak-threshold detection to
-        classify, so the preflight counts the photo when at least one of
-        its weak-threshold animal detections carries a matching run key.
-        Without this, a rerun over a cached weak tail is scored as pure
-        uncached work and the ETA can substantially overstate the time
-        remaining (Codex #1468 P2).
-
-        When the detector stage ran, ``fresh_detections_by_photo`` and
-        ``fresh_processed_photo_ids`` scope processed photos to the exact
-        in-memory candidates the classify runtime will consume. This avoids
-        stale rows from another detector either adding uncached work or hiding
-        a fresh uncached target. Photos the detector failed to process retain
-        the DB fallback, matching the classify loop.
-
-        ``expected_classifier_runtime_by_detector_runtime`` maps each
-        ``detections.runtime_fingerprint`` value present in this batch to the
-        classifier_runtime_fingerprint the runtime gate will accept for
-        classifier_runs rows anchored on that detection. When provided, the
-        preflight matches the runtime's per-detection gate: a
-        ``classifier_runs`` row counts only when its ``runtime_fingerprint``
-        equals the expected value for its detection's detector runtime, or is
-        the ``'legacy'`` sentinel, or the prediction carries a real
-        prediction_review override. Without this predicate the preflight
-        overcounts obsolete-runtime rows the runtime will reject and the
-        observation-based correction cannot deflate the estimate until those
-        rejected rows are actually visited — leading
-        ``_classification_eta_progress`` to report "finishing…" while
-        substantial inference work still remains (Codex #1468 P2). Passing
-        ``None`` retains the pre-Codex behaviour (no runtime filter); this
-        is the correct choice on reclassify runs, where the runtime gate is
-        bypassed anyway. Values may be ``None`` when the caller cannot
-        compute an expected fingerprint (e.g. portable identity not wired
-        up): matching detections then skip the runtime filter, mirroring
-        the unfiltered ``get_classifier_run_keys`` fallback the runtime
-        applies.
-        """
-        if not photo_ids:
-            return set()
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-        return self._model_runs_repository().get_classifier_run_cache_hits(
-            photo_ids,
-            classifier_model,
-            labels_fingerprint,
-            min_conf=min_conf,
-            contextual_weak_photo_ids=contextual_weak_photo_ids,
-            weak_confidence=weak_confidence,
-            fresh_detections_by_photo=fresh_detections_by_photo,
-            fresh_processed_photo_ids=fresh_processed_photo_ids,
-            expected_classifier_runtime_by_detector_runtime=expected_classifier_runtime_by_detector_runtime,
-        )
-
-    def count_classifier_runs(
-        self,
-        photo_ids,
-        classifier_model,
-        labels_fingerprint,
-        *,
-        contextual_weak_photo_ids=None,
-        weak_confidence=None,
-        fresh_detections_by_photo=None,
-        fresh_processed_photo_ids=None,
-        expected_classifier_runtime_by_detector_runtime=None,
-    ):
-        """Return ``len(get_classifier_run_cache_hits(...))``.
-
-        Retained as a thin count-only shim so callers that don't need the
-        photo-id set (or preexisting tests) keep working; the id set is
-        the newer surface the pipeline uses to scope its overcount
-        tracker.
-        """
-        return len(self.get_classifier_run_cache_hits(
-            photo_ids,
-            classifier_model,
-            labels_fingerprint,
-            contextual_weak_photo_ids=contextual_weak_photo_ids,
-            weak_confidence=weak_confidence,
-            fresh_detections_by_photo=fresh_detections_by_photo,
-            fresh_processed_photo_ids=fresh_processed_photo_ids,
-            expected_classifier_runtime_by_detector_runtime=(
-                expected_classifier_runtime_by_detector_runtime
-            ),
-        ))
-
-    def get_unclassifiable_photos(
-        self,
-        photo_ids,
-        *,
-        contextual_weak_photo_ids=None,
-        weak_confidence=None,
-        fresh_detections_by_photo=None,
-        fresh_processed_photo_ids=None,
-    ):
-        """Return photo IDs the classify runtime skips without inference.
-
-        Photos with no usable animal crop normally receive full-image
-        classification. The remaining deterministic skip is a photo with no
-        eligible animal target but a confident non-animal (person/vehicle)
-        detection. Excluding that tail keeps it out of the ETA's projected
-        inference work.
-
-        ``fresh_detections_by_photo`` is an in-memory ``{photo_id:
-        [detection_dict, ...]}`` map (the ``detect_state["detections"]``
-        that ``_detect_batch`` populated). When provided, the "any
-        animal detection >= floor?" predicate is answered from this
-        fresh set instead of the DB — mirroring what the runtime's
-        ``photo_dets`` filter actually sees. This matters whenever the
-        current detector pass replaces the runtime candidates while older
-        rows from another detector model remain in the DB. Without this
-        override, stale rows can make the preflight choose a different crop
-        or skip outcome than runtime (Codex #1468 P2).
-        Each detection dict must expose ``confidence`` (or
-        ``detector_confidence``) and ``category`` (defaulting to
-        ``"animal"`` when absent, matching ``_detect_batch``'s output).
-
-        ``fresh_processed_photo_ids`` is the ``detect_state["processed_ids"]``
-        set — the photos ``_detect_batch`` actually completed. When a
-        MegaDetector pass raises for a single image, ``_detect_batch``
-        leaves that photo out of both ``detections`` and
-        ``processed_ids`` and the runtime's per-photo classify body
-        falls back to ``db.get_detections()`` (see
-        ``pipeline_job.py`` ``photo_dets`` else branch). Treating a
-        missing entry in ``fresh_detections_by_photo`` as "no fresh
-        animal above the floor" would mark such a photo unclassifiable
-        even though runtime will infer, subtracting real work from the
-        ETA's ``remaining_uncached`` and reporting "finishing…"
-        prematurely. When both this set and ``fresh_detections_by_photo``
-        are provided, photos NOT in the processed set defer to the DB
-        predicate for that photo, matching what the runtime actually
-        sees (Codex #1468 P2).
-        """
-        if not photo_ids:
-            return set()
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
-        )
-        return self._model_runs_repository().get_unclassifiable_photos(
-            photo_ids,
-            min_conf=min_conf,
-            contextual_weak_photo_ids=contextual_weak_photo_ids,
-            weak_confidence=weak_confidence,
-            fresh_detections_by_photo=fresh_detections_by_photo,
-            fresh_processed_photo_ids=fresh_processed_photo_ids,
-        )
-
     def set_review_status(self, prediction_id, workspace_id, status,
                            individual=None, group_id=None):
         return self._prediction_repository().set_review_status(
@@ -5687,8 +5476,9 @@ class Database:
         """Build the detections repository on this connection.
 
         ``detections`` is catalog-wide, so the repository takes no workspace
-        id; the misses methods resolve ``_ws_id()`` and the scope clause and
-        pass them in, and the readers resolve their confidence floors here.
+        id; ``services/miss_flags.py`` resolves the workspace and the scope
+        clause and passes them in, and ``services/detection_store.py``
+        resolves the readers' confidence floors.
         """
         from repositories.detections import DetectionsRepository
 
@@ -5707,13 +5497,13 @@ class Database:
         the module's ``commit_with_retry`` are read per use. The table is
         catalog-wide, so the accessor needs no active workspace.
 
-        Work that adds a check, a config lookup or a second step stays on
-        ``Database``: ``save_detections`` / ``write_detection_batch`` (the
-        required-model check and the pinned-run lookup), ``get_detections``,
-        ``get_detections_for_photos`` and ``get_predictions_for_detection``
-        (the effective confidence floors), the misses methods (workspace and
-        filter scope) and ``delete_detections_by_ids`` (the primary-subject
-        re-sync). Call those, not the repository methods behind them.
+        Work that adds a config lookup or a second step lives in the
+        services: ``detection_store.write_detection_batch`` (the pinned-run
+        lookup), ``get_detections``, ``get_detections_for_photos`` and
+        ``get_predictions_for_detection`` (the effective confidence floors)
+        and ``delete_detections_by_ids`` (the primary-subject re-sync); the
+        misses functions in ``miss_flags`` (workspace and filter scope). Call
+        those, not the repository methods behind them.
         """
         return self._detections_repository()
 
@@ -5740,244 +5530,6 @@ class Database:
         ``pipeline``.
         """
         return self._pipeline_features_repository()
-
-    def save_detections(
-        self,
-        photo_id,
-        detections,
-        detector_model,
-        runtime_fingerprint="legacy",
-    ):
-        """Replace all detections for (photo_id, detector_model) with the given list.
-
-        Global: no workspace scoping. The model's output is a pure function of
-        (photo, model); any workspace re-running the same (photo, model) is a
-        bug — callers should short-circuit via `get_detector_run_photo_ids`.
-
-        IDs are content-addressed (see vireo.detection_id) so two pipelines
-        writing the same (photo, model, detections) produce identical rows
-        — the second writer's UPSERT is a no-op rather than a CASCADE-deleting
-        DELETE+INSERT.
-
-        Args:
-            photo_id: the photo
-            detections: list of dicts {box: {x,y,w,h}, confidence, category}
-            detector_model: required, e.g. "megadetector-v6"
-        Returns:
-            list of detection IDs (empty if detections was empty).
-        """
-        if detector_model is None:
-            raise ValueError("detector_model is required")
-        return self._detections_repository().save(
-            photo_id, detections, detector_model, runtime_fingerprint,
-        )
-
-    def write_detection_batch(
-        self,
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint="legacy",
-        input_fingerprint=None,
-        force_runtime_replace=False,
-    ):
-        """Atomically replace detections and record the detector_runs row.
-
-        Combines `save_detections` and `record_detector_run` under a single
-        transaction so readers never observe a torn state where one table
-        reflects the new run and the other still reflects the old one.
-        Callers in the detection write path (e.g. `_detect_batch`) should
-        prefer this over invoking the two methods separately.
-
-        Args:
-            photo_id: the photo
-            detector_model: required, e.g. "megadetector-v6"
-            detections: list of dicts {box: {x,y,w,h}, confidence, category}.
-                An empty list records an empty-scene run (box_count=0) and
-                clears any prior detection rows for the same (photo, model).
-        Returns:
-            list of new detection IDs (empty if detections was empty).
-        """
-        if detector_model is None:
-            raise ValueError("detector_model is required")
-        # The pin check stays on the façade (model-runs domain), so a patched
-        # ``model_runs.detector_run_is_pinned`` still applies inside the transaction.
-        return self._detections_repository().write_batch(
-            photo_id,
-            detector_model,
-            detections,
-            runtime_fingerprint,
-            input_fingerprint,
-            force_runtime_replace,
-            is_pinned=self.model_runs.detector_run_is_pinned,
-        )
-
-    def get_detections(self, photo_id, min_conf=None, detector_model=None):
-        """Return all boxes for a photo above `min_conf`, globally.
-
-        The detections table is global (no workspace_id). Threshold filtering
-        happens at read time so raw boxes stay cached across workspaces.
-
-        Args:
-            photo_id: the photo
-            min_conf: confidence floor. ``None`` pulls ``detector_confidence``
-                from the active workspace's effective config (default 0.2).
-                ``0`` returns raw rows with no filtering.
-            detector_model: optional — filter to a single detector model.
-        """
-        if min_conf is None:
-            import config as cfg
-            effective = self.get_effective_config(cfg.load())
-            min_conf = effective.get("detector_confidence", 0.2)
-        return self._detections_repository().get(photo_id, min_conf, detector_model)
-
-    def get_detections_for_photos(self, photo_ids, min_conf=None,
-                                  detector_model=None):
-        """Return {photo_id: [det_dict, ...]} for a batch of photos.
-
-        Each det_dict has keys: id, x, y, w, h, confidence, category, and
-        detector_model. Lists put the chosen primary first, then quality and
-        detector confidence. The detections
-        table is global — threshold filtering happens at read time. Photos
-        with no detections above ``min_conf`` are omitted from the result.
-
-        Args:
-            photo_ids: iterable of photo ids
-            min_conf: confidence floor. ``None`` resolves to the active
-                workspace's effective ``detector_confidence`` (default 0.2).
-                ``0`` returns raw rows.
-            detector_model: optional — filter to a single detector model.
-        """
-        if not photo_ids:
-            return {}
-        if min_conf is None:
-            import config as cfg
-            effective = self.get_effective_config(cfg.load())
-            min_conf = effective.get("detector_confidence", 0.2)
-        return self._detections_repository().get_for_photos(
-            photo_ids, min_conf, detector_model,
-        )
-
-    def get_predictions_for_detection(self, detection_id,
-                                        min_classifier_conf=None,
-                                        classifier_model=None,
-                                        labels_fingerprint=None):
-        """Return cached classifier predictions for a single detection.
-
-        Reads the global ``predictions`` table. Review status (accepted /
-        rejected / pending) lives in ``prediction_review`` and is joined in
-        by callers that need workspace-scoped review state.
-
-        Args:
-            detection_id: the detection whose predictions to fetch.
-            min_classifier_conf: confidence floor. ``None`` resolves to the
-                active workspace's effective ``classifier_confidence`` (0.0
-                if unset). ``0`` returns all rows.
-            classifier_model: optional — filter to a single classifier model.
-            labels_fingerprint: optional — filter to predictions produced
-                against a specific label set.
-        """
-        if min_classifier_conf is None:
-            import config as cfg
-            effective = self.get_effective_config(cfg.load())
-            min_classifier_conf = effective.get("classifier_confidence", 0.0)
-        return self._detections_repository().get_predictions(
-            detection_id, min_classifier_conf, classifier_model, labels_fingerprint,
-        )
-
-    def get_existing_detection_photo_ids(self, detector_model="megadetector-v6"):
-        """Back-compat shim — prefer ``db.model_runs.get_detector_run_photo_ids``."""
-        return self.model_runs.get_detector_run_photo_ids(detector_model)
-
-    def list_misses(self, category=None, since=None, photo_ids=None):
-        """Return photos flagged as misses in the active workspace.
-
-        category: None | "no_subject" | "clipped" | "oof"
-        since: optional ISO timestamp; if set, restricts to photos whose
-            miss_computed_at >= since. Used by the pipeline-review step to
-            scope results to the current run.
-        photo_ids: optional iterable restricting results to an already-resolved
-            collection or filter scope. An empty iterable matches no photos.
-
-        Excludes photos already flagged as rejected. Scoped to folders
-        linked to the active workspace. ``detection_box`` and
-        ``detection_conf`` are sourced from the selected primary
-        row in the ``detections`` table — the legacy ``photos`` columns are
-        not populated by normal pipeline runs. ``raw_detection_conf`` exposes
-        the best animal candidate even when it is below the effective detector
-        floor so the Misses UI can explain the decision. Ordered by timestamp
-        DESC.
-        """
-        ws_id = self._ws_id()
-        repo = self._detections_repository()
-        where = repo.miss_where(category)
-        scope_clause, scope_params = self.stats.scope_clause(photo_ids)
-        photos = repo.list_miss_photos(ws_id, where, since, scope_clause, scope_params)
-        if not photos:
-            return photos
-
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        return repo.attach_miss_detections(photos, min_conf)
-
-    def clear_miss_flag(self, photo_id, category):
-        """Set the given miss column to 0 on the given photo.
-
-        Raises ValueError if the photo is not in the active workspace, so
-        that `/api/misses/<id>/unflag` can't touch another workspace's photos.
-        """
-        self._verify_photo_in_workspace(photo_id)
-        self._detections_repository().clear_miss_flag(photo_id, category)
-
-    def bulk_reject_miss_category(self, category, since=None, photo_ids=None):
-        """Set flag='rejected' on every photo flagged with that miss category
-        in the active workspace and not already rejected.
-
-        ``since`` mirrors the filter on ``list_misses``: when set, only
-        photos whose ``miss_computed_at >= since`` are rejected. This
-        keeps bulk reject scoped to the /misses view the user is looking
-        at (e.g. the current pipeline run), so older misses not shown on
-        screen aren't silently rejected.
-
-        ``photo_ids`` further restricts the mutation to the collection and
-        Browse-style filters currently visible on the Misses page.
-
-        Returns a list of ``{"photo_id": int, "old_value": str}`` for each
-        photo whose flag was changed. The caller (``/api/misses/reject``)
-        uses this to write an ``edit_history`` entry so the bulk change is
-        undoable/auditable like the other batch flag routes; without it,
-        an accidental "Reject all" on /misses would be invisible to the
-        undo flow.
-        """
-        repo = self._detections_repository()
-        col = repo.miss_column(category)
-        ws_id = self._ws_id()
-        scope_clause, scope_params = self.stats.scope_clause(photo_ids)
-        return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
-
-    def delete_detections_by_ids(self, detection_ids):
-        """Delete specific detection rows by primary key.
-
-        Cascades to predictions via the FK constraint.  Does nothing if
-        the list is empty.  Used by reclassify to purge only the stale
-        rows for photos that have just been re-detected, without touching
-        detection rows that belong to models not included in the current run.
-
-        IDs are deleted in chunks of at most 900 to stay safely under
-        SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
-        typically 999 in production builds).
-        """
-        if not detection_ids:
-            return
-        repo = self._detections_repository()
-        affected_subject_photos = repo.delete_by_ids(detection_ids)
-        if affected_subject_photos:
-            from subjects import sync_primary
-            for photo_id in affected_subject_photos:
-                sync_primary(self, photo_id)
-        repo.commit()
 
     # -- Pending Changes --
 

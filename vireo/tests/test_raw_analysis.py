@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import raw_analysis as ra
 from PIL import Image
+from services import classify_preflight, detection_store
 
 
 def test_each_subject_gets_its_own_exposure():
@@ -305,11 +306,11 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder = db.add_folder(str(tmp_path))
     photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
-    db.save_detections(photo, [
+    db.detections.save(photo, [
         {"box": {"x": x, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.9, "category": "animal"}
         for x in (0.1, 0.6)
     ], detector_model="megadetector-v6")
-    for index, det in enumerate(db.get_detections(photo)):
+    for index, det in enumerate(detection_store.get_detections(db, photo)):
         db.masks_features.save_subject_raw_analysis(det["id"], {"recipe": ra.RECIPE, "exposure_ev": index})
     rows = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchall()
     assert sorted(json.loads(row[0])["exposure_ev"] for row in rows) == [0, 1]
@@ -331,7 +332,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
     workspace = db._active_workspace_id
     folder = db.add_folder(str(tmp_path))
     photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
-    detection = db.save_detections(photo, [{
+    detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -405,7 +406,7 @@ def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
     workspace = db._active_workspace_id
     folder = db.add_folder(str(tmp_path))
     photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
-    detection = db.save_detections(photo, [{
+    detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -434,7 +435,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     db = Database(str(tmp_path / "recipe.db"))
     folder = db.add_folder(str(tmp_path))
     photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
-    detection = db.save_detections(photo, [{
+    detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -447,9 +448,9 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     assert db.model_runs.get_classifier_run_keys(detection) == set()
     assert db.model_runs.get_classifier_run_keys(detection, "normal-runtime") == set()
     assert db.model_runs.get_classifier_run_key_gate(detection, "normal-runtime") == (set(), {("model", "legacy")})
-    assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == set()
+    assert classify_preflight.get_classifier_run_cache_hits(db, [photo], "model", "legacy") == set()
     # Normal runtime changes keep the existing manual-review exception.
     db.model_runs.record_classifier_run(detection, "model", "legacy", 1, runtime_fingerprint="normal-runtime")
     assert db.model_runs.get_classifier_run_key_gate(detection, "new-normal-runtime") == ({("model", "legacy")}, set())
-    assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == {photo}
+    assert classify_preflight.get_classifier_run_cache_hits(db, [photo], "model", "legacy") == {photo}
     db.close()

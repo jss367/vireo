@@ -4,7 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import dashboard_stats, stage_counts, subject_masks
+from services import classify_preflight, dashboard_stats, detection_store, miss_flags, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -367,7 +367,7 @@ def test_browse_summary_top_species_filters_to_latest_fingerprint(tmp_path):
     fid = db.add_folder('/p', name='p')
     pid = db.add_photo(folder_id=fid, filename='a.jpg',
                        extension='.jpg', file_size=100, file_mtime=1.0)
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     # Stale fingerprint — HIGHER confidence + 'Finch'.
@@ -1290,7 +1290,7 @@ def _seed_position_photos(db, folder_id, count=9):
              photo_id),
         )
         if index % 4 != 3:
-            det_ids = db.save_detections(photo_id, [{
+            det_ids = db.detections.save(photo_id, [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
                 "confidence": 0.9, "category": "animal",
             }], detector_model="MDV6")
@@ -3962,7 +3962,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     db.tag_photo(pids[1], kid)
 
     # Add a detection and prediction
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Robin', 0.95, 'test')
@@ -4115,7 +4115,7 @@ def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
         {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
         {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
     ])
-    det_ids = db.save_detections(pids[0], [{
+    det_ids = db.detections.save(pids[0], [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
         "confidence": 0.9,
         "category": "animal",
@@ -4174,9 +4174,9 @@ def test_get_coverage_stats_counts_each_stage(tmp_path):
         {},  # Nothing set
     ])
     # Classifier embedding lives in photo_embeddings now, not on photos.
-    db.upsert_photo_embedding(pids[0], 'test', b'e')
+    detection_store.upsert_photo_embedding(db, pids[0], 'test', b'e')
     # Add a detection + prediction for the first photo only.
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
@@ -4298,10 +4298,10 @@ def test_get_group_predictions(tmp_path):
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'quality_score': 0.9}, {'quality_score': 0.5},
     ])
-    det_ids0 = db.save_detections(pids[0], [
+    det_ids0 = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    det_ids1 = db.save_detections(pids[1], [
+    det_ids1 = db.detections.save(pids[1], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids0[0], species='Robin', confidence=0.95,
@@ -4323,10 +4323,10 @@ def test_get_group_predictions_includes_alternatives(tmp_path):
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'quality_score': 0.9}, {'quality_score': 0.5},
     ])
-    det0 = db.save_detections(pids[0], [
+    det0 = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    det1 = db.save_detections(pids[1], [
+    det1 = db.detections.save(pids[1], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det0[0], species='Robin', confidence=0.95, model='test', group_id='g1')
@@ -4348,7 +4348,7 @@ def test_get_group_predictions_includes_alternatives(tmp_path):
 def test_get_group_predictions_alternatives_filtered_by_model(tmp_path):
     """Alternatives from a different classifier model must not leak in."""
     db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
-    det = db.save_detections(pids[0], [
+    det = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
@@ -4367,7 +4367,7 @@ def test_get_group_predictions_handles_large_group(tmp_path):
     photos = [{'quality_score': 0.5} for _ in range(size)]
     db, pids = _make_workspace_with_photos(tmp_path, photos)
     for pid in pids:
-        det = db.save_detections(pid, [
+        det = db.detections.save(pid, [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
         ], detector_model="MDV6")
         db.predictions.add(det[0], species='Robin', confidence=0.9, model='test', group_id='g1')
@@ -4381,7 +4381,7 @@ def test_get_group_predictions_alternatives_keyed_by_detection_and_model(tmp_pat
     """If the same detection has primaries from multiple models in one group,
     each primary gets only its own model's alternatives."""
     db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
-    det = db.save_detections(pids[0], [
+    det = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
@@ -4397,7 +4397,7 @@ def test_get_group_predictions_alternatives_keyed_by_detection_and_model(tmp_pat
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.95, model='test')
@@ -4411,7 +4411,7 @@ def test_update_predictions_status_by_photo(tmp_path):
 def test_ungroup_prediction(tmp_path):
     """Removes a prediction from its group."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.95,
@@ -4427,7 +4427,7 @@ def test_ungroup_prediction(tmp_path):
 def test_get_existing_prediction_photo_ids(tmp_path):
     """Returns set of photo_ids that have predictions for a model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
@@ -4448,7 +4448,7 @@ def test_get_prediction_for_photo_keyed_by_fingerprint(tmp_path):
     propagate incorrect species metadata into downstream grouping.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     # Two predictions on the same detection, same model, different fingerprints.
@@ -4483,14 +4483,14 @@ def test_query_move_rule_matches_has_predictions_honors_threshold(tmp_path):
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
     # Photo 0: above-threshold detection + prediction → "has predictions" = True
-    det_a = db.save_detections(pids[0], [
+    det_a = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.predictions.add(det_a, species='Robin', confidence=0.9, model='bioclip')
 
     # Photo 1: ONLY a below-threshold detection (default 0.2) with a
     # prediction. Must NOT count as "has predictions".
-    det_b = db.save_detections(pids[1], [
+    det_b = db.detections.save(pids[1], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.predictions.add(det_b, species='Sparrow', confidence=0.9, model='bioclip')
@@ -4517,7 +4517,7 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
     # Photo 0 has a prediction; photo 1 does not.
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
@@ -4538,7 +4538,7 @@ def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_p
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
     # Photo A: high-confidence detection + current-fingerprint prediction.
-    det_a = db.save_detections(pids[0], [
+    det_a = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.conn.execute(
@@ -4559,7 +4559,7 @@ def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_p
     # Photo B: LOW-confidence detection (below default 0.2 threshold) with
     # its own current-fingerprint prediction — must be excluded by the
     # threshold filter.
-    det_b = db.save_detections(pids[1], [
+    det_b = db.detections.save(pids[1], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.conn.execute(
@@ -4595,7 +4595,7 @@ def test_clear_detections_also_clears_detector_runs(tmp_path):
     detection forever, leaving the photo without boxes.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.save_detections(pids[0], [
+    db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(pids[0], "megadetector-v6", box_count=1)
@@ -4616,7 +4616,7 @@ def test_clear_predictions_scopes_by_fingerprint(tmp_path):
     re-runs inference.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
@@ -4646,7 +4646,7 @@ def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
     leaves those photos permanently without predictions.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
@@ -4680,7 +4680,7 @@ def test_clear_predictions_clears_match_scores_when_preserving_run_keys(tmp_path
     Pipeline Inspector would keep reporting the previous run's verdict.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"}
     ], detector_model="MDV6")[0]
@@ -4723,7 +4723,7 @@ def test_clear_predictions_match_scores_respect_fingerprint_scope(tmp_path):
     label set without disturbing another workspace's cached data.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"}
     ], detector_model="MDV6")[0]
@@ -4762,7 +4762,7 @@ def test_get_predictions_filters_to_latest_fingerprint(tmp_path):
     duplicate/conflicting species after a label-set change.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     # Stale fingerprint with HIGHER confidence than current — confidence-only
@@ -4804,7 +4804,7 @@ def test_move_folders_moves_prediction_review(tmp_path):
     db._active_workspace_id = ws_src
     pid = db.add_photo(fid, "a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
@@ -4838,7 +4838,7 @@ def test_get_top_prediction_for_photo_scoped_to_current_fingerprint(tmp_path):
     a taxon from an old label set.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
     # Stale fingerprint wins by confidence but is from an old label set.
@@ -4875,7 +4875,7 @@ def test_get_top_prediction_for_photo_respects_detector_confidence(tmp_path):
     # with a LOWER-confidence prediction, one below with a HIGHER-
     # confidence prediction. Without the floor, the below-threshold
     # detection's species wins by confidence.
-    det_high_conf, det_low_conf = db.save_detections(pids[0], [
+    det_high_conf, det_low_conf = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 1, "y": 1, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")
@@ -4914,7 +4914,7 @@ def test_update_prediction_group_info_scoped_to_fingerprint(tmp_path):
     confidence on the same detection.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
 
@@ -4957,7 +4957,7 @@ def test_accept_prediction_sibling_rejection_scoped_to_fingerprint(tmp_path):
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
     ws = db._active_workspace_id
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
 
@@ -4989,7 +4989,7 @@ def test_get_group_predictions_alternatives_scoped_to_fingerprint(tmp_path):
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
     ws = db._active_workspace_id
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
 
@@ -5027,10 +5027,10 @@ def test_add_prediction_duplicate_does_not_corrupt_review(tmp_path):
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
     # Two distinct detections so we have two prediction ids to confuse.
-    det1 = db.save_detections(pids[0], [
+    det1 = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
-    det2 = db.save_detections(pids[1], [
+    det2 = db.detections.save(pids[1], [
         {"box": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5}, "confidence": 0.85, "category": "animal"}
     ], detector_model="MDV6")[0]
 
@@ -5083,10 +5083,10 @@ def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
                       file_size=100, file_mtime=2.0)
 
     # Both photos have detections.
-    db.save_detections(pa, [
+    db.detections.save(pa, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.save_detections(pb, [
+    db.detections.save(pb, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
 
@@ -5105,7 +5105,7 @@ def test_clear_predictions_without_collection_photo_ids(tmp_path):
     ?-count in the SQL would raise sqlite3.ProgrammingError.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pids[0],
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -5131,7 +5131,7 @@ def test_get_existing_prediction_photo_ids_keyed_by_fingerprint(tmp_path):
     leave stale predictions unprocessed.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     # Prediction was produced with label set fp="aaa"
@@ -5157,7 +5157,7 @@ def test_get_existing_prediction_photo_ids_keyed_by_fingerprint(tmp_path):
 def test_get_prediction_for_photo(tmp_path):
     """Returns species and confidence for a photo's prediction by model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
@@ -5175,7 +5175,7 @@ def test_get_and_upsert_photo_embedding(tmp_path):
 
     assert db.masks_features.get_embedding(pids[0], "BioCLIP") is None
 
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02\x03\x04')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\x01\x02\x03\x04')
 
     result = db.masks_features.get_embedding(pids[0], "BioCLIP")
     assert result == b'\x01\x02\x03\x04'
@@ -5185,8 +5185,8 @@ def test_upsert_photo_embedding_replaces_same_model(tmp_path):
     """Upsert with the same (model, variant) overwrites the previous blob."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
 
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02')
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x03\x04')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\x01\x02')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\x03\x04')
 
     assert db.masks_features.get_embedding(pids[0], "BioCLIP") == b'\x03\x04'
 
@@ -5195,8 +5195,8 @@ def test_photo_embeddings_per_model_isolation(tmp_path):
     """Two models for the same photo coexist; neither overwrites the other."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
 
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01')
-    db.upsert_photo_embedding(pids[0], "BioCLIP-2", b'\x02')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\x01')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP-2", b'\x02')
 
     assert db.masks_features.get_embedding(pids[0], "BioCLIP") == b'\x01'
     assert db.masks_features.get_embedding(pids[0], "BioCLIP-2") == b'\x02'
@@ -5206,8 +5206,8 @@ def test_photo_embeddings_variant_isolation(tmp_path):
     """Different variants for the same model coexist."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
 
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xaa', variant='v1')
-    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xbb', variant='v2')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\xaa', variant='v1')
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", b'\xbb', variant='v2')
 
     assert db.masks_features.get_embedding(pids[0], "BioCLIP", variant='v1') == b'\xaa'
     assert db.masks_features.get_embedding(pids[0], "BioCLIP", variant='v2') == b'\xbb'
@@ -5216,7 +5216,7 @@ def test_photo_embeddings_variant_isolation(tmp_path):
 def test_update_prediction_group_info(tmp_path):
     """Updates group info on an existing prediction."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_ids = db.save_detections(pids[0], [
+    det_ids = db.detections.save(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
@@ -5400,7 +5400,7 @@ def test_get_geolocated_photos_with_species(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5439,10 +5439,10 @@ def test_get_geolocated_photos_species_filter(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    det_ids1 = db.save_detections(p1, [
+    det_ids1 = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    det_ids2 = db.save_detections(p2, [
+    det_ids2 = db.detections.save(p2, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5472,7 +5472,7 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
@@ -5760,10 +5760,10 @@ def test_get_accepted_species(tmp_path):
     # Both photos need GPS to appear in species list
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    det_ids1 = db.save_detections(p1, [
+    det_ids1 = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    det_ids2 = db.save_detections(p2, [
+    det_ids2 = db.detections.save(p2, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5787,7 +5787,7 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # p1 has no GPS coordinates
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5810,7 +5810,7 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5830,7 +5830,7 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
     # Two detections for the same photo, each with different species
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
@@ -5867,7 +5867,7 @@ def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
     )
     db.conn.commit()
 
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -5899,7 +5899,7 @@ def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
     )
     db.conn.commit()
 
-    det_ids = db.save_detections(p1, [
+    det_ids = db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
@@ -6142,8 +6142,8 @@ def test_get_photos_with_embedding_filters_by_model(tmp_path):
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}, {}])
     emb1 = np.random.randn(512).astype(np.float32).tobytes()
     emb2 = np.random.randn(512).astype(np.float32).tobytes()
-    db.upsert_photo_embedding(pids[0], "BioCLIP", emb1)
-    db.upsert_photo_embedding(pids[1], "BioCLIP-2", emb2)
+    detection_store.upsert_photo_embedding(db, pids[0], "BioCLIP", emb1)
+    detection_store.upsert_photo_embedding(db, pids[1], "BioCLIP-2", emb2)
     # pids[2] has no embedding
 
     results = db.masks_features.photos_with_embedding("BioCLIP")
@@ -6169,8 +6169,8 @@ def test_get_photos_with_embedding_excludes_other_workspaces(tmp_path):
     pid_b = db.add_photo(folder_id=fid_b, filename='b.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
     emb = np.zeros(8, dtype=np.float32).tobytes()
-    db.upsert_photo_embedding(pid_a, "BioCLIP", emb)
-    db.upsert_photo_embedding(pid_b, "BioCLIP", emb)
+    detection_store.upsert_photo_embedding(db, pid_a, "BioCLIP", emb)
+    detection_store.upsert_photo_embedding(db, pid_b, "BioCLIP", emb)
 
     db.set_active_workspace(ws_a)
     results_a = db.masks_features.photos_with_embedding("BioCLIP")
@@ -6483,7 +6483,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         height=600,
     )
 
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
@@ -6543,7 +6543,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         height=600,
     )
 
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
@@ -6590,7 +6590,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     fid = db.add_folder(str(tmp_path), name="photos")
     db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
     ], detector_model="MegaDetector")[0]
     db.masks_features.upsert_mask(
@@ -6647,7 +6647,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
         fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
     )
     for pid in (pid_a, pid_b):
-        det_ids = db.save_detections(
+        det_ids = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
@@ -6834,7 +6834,7 @@ def test_save_detections(tmp_path):
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
     ]
-    ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
+    ids = db.detections.save(pid, detections, detector_model="MDV6-yolov9-c")
     assert len(ids) == 2
     rows = db.conn.execute(
         "SELECT * FROM detections WHERE photo_id = ?",
@@ -6859,11 +6859,11 @@ def test_save_detections_replaces_existing(tmp_path):
     det_b = {"box": {"x": 0.2, "y": 0.2, "w": 0.5, "h": 0.5}, "confidence": 0.7, "category": "animal"}
 
     # First run: two boxes
-    ids_v1 = db.save_detections(photo_id, [det_a, det_b], detector_model="megadetector-v6")
+    ids_v1 = db.detections.save(photo_id, [det_a, det_b], detector_model="megadetector-v6")
     assert len(ids_v1) == 2
 
     # Second run on same (photo, model): one box — the old rows should be gone
-    ids_v2 = db.save_detections(photo_id, [det_a], detector_model="megadetector-v6")
+    ids_v2 = db.detections.save(photo_id, [det_a], detector_model="megadetector-v6")
     rows = db.conn.execute(
         "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
         (photo_id, "megadetector-v6"),
@@ -6883,7 +6883,7 @@ def test_save_detections_is_global(tmp_path):
     photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
 
     db._active_workspace_id = ws_a
-    db.save_detections(photo_id,
+    db.detections.save(photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6")
 
@@ -6912,7 +6912,7 @@ def test_get_detections_threshold_filter(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
@@ -6922,16 +6922,16 @@ def test_get_detections_threshold_filter(tmp_path, monkeypatch):
     )
 
     # min_conf=0: returns everything
-    rows = db.get_detections(photo_id, min_conf=0)
+    rows = detection_store.get_detections(db, photo_id, min_conf=0)
     assert len(rows) == 2
 
     # min_conf=0.2: only the 0.4 row
-    rows = db.get_detections(photo_id, min_conf=0.2)
+    rows = detection_store.get_detections(db, photo_id, min_conf=0.2)
     assert len(rows) == 1
     assert rows[0]["detector_confidence"] == 0.4
 
     # min_conf=None pulls from workspace-effective config (default 0.2 → 1 row)
-    rows = db.get_detections(photo_id)
+    rows = detection_store.get_detections(db, photo_id)
     assert len(rows) == 1
     assert rows[0]["detector_confidence"] == 0.4
 
@@ -6950,14 +6950,14 @@ def test_get_detections_cross_workspace_read(tmp_path):
     )
 
     db._active_workspace_id = ws_a
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
 
     db._active_workspace_id = ws_b
-    rows = db.get_detections(photo_id, min_conf=0)
+    rows = detection_store.get_detections(db, photo_id, min_conf=0)
     assert len(rows) == 1
     assert rows[0]["detector_confidence"] == 0.9
 
@@ -6979,34 +6979,34 @@ def test_get_detections_for_photos_threshold_filter(tmp_path, monkeypatch):
     p2 = db.add_photo(fid, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
 
     db._active_workspace_id = ws_a
-    db.save_detections(p1, [
+    db.detections.save(p1, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.6, "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.save_detections(p2, [
+    db.detections.save(p2, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.1, "category": "animal"},
     ], detector_model="megadetector-v6")
 
     # min_conf=0: both photos, all three rows
-    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    result = detection_store.get_detections_for_photos(db, [p1, p2], min_conf=0)
     assert len(result[p1]) == 2
     assert len(result[p2]) == 1
 
     # min_conf=0.5: only p1's 0.6 row; p2 has nothing above threshold → omitted
-    result = db.get_detections_for_photos([p1, p2], min_conf=0.5)
+    result = detection_store.get_detections_for_photos(db, [p1, p2], min_conf=0.5)
     assert set(result.keys()) == {p1}
     assert len(result[p1]) == 1
     assert result[p1][0]["confidence"] == 0.6
 
     # min_conf=None resolves from workspace-effective config (default 0.2):
     # p1 keeps the 0.6, p2's 0.1 is filtered out.
-    result = db.get_detections_for_photos([p1, p2])
+    result = detection_store.get_detections_for_photos(db, [p1, p2])
     assert set(result.keys()) == {p1}
     assert len(result[p1]) == 1
 
     # Cross-workspace: read from B, see A's writes.
     db._active_workspace_id = ws_b
-    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    result = detection_store.get_detections_for_photos(db, [p1, p2], min_conf=0)
     assert len(result[p1]) == 2
     assert len(result[p2]) == 1
 
@@ -7020,8 +7020,8 @@ def test_get_detections_for_photo(tmp_path):
     detections = [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
     ]
-    db.save_detections(pid, detections, detector_model="MDV6")
-    result = db.get_detections(pid)
+    db.detections.save(pid, detections, detector_model="MDV6")
+    result = detection_store.get_detections(db, pid)
     assert len(result) == 1
     assert result[0]["box_x"] == 0.1
     assert result[0]["detector_model"] == "MDV6"
@@ -7035,15 +7035,15 @@ def test_get_detections_for_photos_batch(tmp_path):
     p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
     p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg", file_size=100, file_mtime=3.0)
-    db.save_detections(p1, [
+    db.detections.save(p1, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
-    db.save_detections(p2, [
+    db.detections.save(p2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.1, "h": 0.1}, "confidence": 0.7, "category": "person"},
     ], detector_model="MDV6")
 
-    result = db.get_detections_for_photos([p1, p2, p3])
+    result = detection_store.get_detections_for_photos(db, [p1, p2, p3])
 
     assert set(result.keys()) == {p1, p2}
     assert len(result[p1]) == 2
@@ -7059,7 +7059,7 @@ def test_get_detections_for_photos_empty(tmp_path):
     """get_detections_for_photos with empty input returns empty dict."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    assert db.get_detections_for_photos([]) == {}
+    assert detection_store.get_detections_for_photos(db, []) == {}
 
 
 def test_get_detections_for_photos_is_global(tmp_path):
@@ -7069,7 +7069,7 @@ def test_get_detections_for_photos_is_global(tmp_path):
     fid = db.add_folder("/photos")
     db.add_workspace_folder(db._ws_id(), fid)
     pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
 
@@ -7077,7 +7077,7 @@ def test_get_detections_for_photos_is_global(tmp_path):
     db.set_active_workspace(other_ws)
 
     # Global cache: workspace "Other" sees detections written under the default workspace.
-    result = db.get_detections_for_photos([pid], min_conf=0)
+    result = detection_store.get_detections_for_photos(db, [pid], min_conf=0)
     assert len(result[pid]) == 1
     assert result[pid][0]["confidence"] == 0.9
 
@@ -7093,7 +7093,7 @@ def test_get_predictions_for_detection_filters(tmp_path):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
 
@@ -7108,12 +7108,12 @@ def test_get_predictions_for_detection_filters(tmp_path):
     db.conn.commit()
 
     # All three rows when unfiltered
-    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0)) == 3
+    assert len(detection_store.get_predictions_for_detection(db, det_id, min_classifier_conf=0)) == 3
     # Only >= 0.5
-    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0.5)) == 2
+    assert len(detection_store.get_predictions_for_detection(db, det_id, min_classifier_conf=0.5)) == 2
     # Filter by fingerprint
-    by_abc = db.get_predictions_for_detection(
-        det_id, labels_fingerprint="abc", min_classifier_conf=0
+    by_abc = detection_store.get_predictions_for_detection(
+        db, det_id, labels_fingerprint="abc", min_classifier_conf=0
     )
     assert {r["species"] for r in by_abc} == {"Robin", "Sparrow"}
 
@@ -7124,7 +7124,7 @@ def test_clear_detections(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
     pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.conn.execute(
@@ -7145,7 +7145,7 @@ def test_add_prediction_with_detection(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
     pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
@@ -7171,7 +7171,7 @@ def test_get_predictions_includes_photo_and_box(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
     pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
@@ -7187,7 +7187,7 @@ def test_accept_prediction_tags_photo(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
     pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
@@ -7213,7 +7213,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.tag_photo(pid, nested)
     db.tag_photo(pid, stale)
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7254,7 +7254,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
     stale = db.add_keyword("Sparrow", is_species=True)
     db.tag_photo(pid, nested)
     db.tag_photo(pid, stale)
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7341,7 +7341,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
     )
     db.conn.commit()
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7435,7 +7435,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
     db.tag_photo(pid, legacy)
     db.conn.commit()
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7502,7 +7502,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
     db.tag_photo(pid, linked_homonym)
     db.conn.commit()
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7547,7 +7547,7 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
     )
     wigeon_id = db.add_keyword("American Wigeon", is_species=True)
     db.tag_photo(photo_id, wigeon_id)
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.5, "y": 0.4, "w": 0.2, "h": 0.2},
@@ -7613,7 +7613,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
     db.tag_photo(pid, wigeon)
     db.tag_photo(pid, stale_teal)
 
-    d_wigeon, d_teal = db.save_detections(pid, [
+    d_wigeon, d_teal = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
@@ -7672,7 +7672,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
     db.tag_photo(pid, fresh_wigeon)
     db.tag_photo(pid, stale_teal)
 
-    d_target, d_neighbour = db.save_detections(pid, [
+    d_target, d_neighbour = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
@@ -7742,7 +7742,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
     db.tag_photo(pid, apapane)
     db.tag_photo(pid, stale)
 
-    d_target, d_neighbour = db.save_detections(pid, [
+    d_target, d_neighbour = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
@@ -7799,7 +7799,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
     stale = db.add_keyword("Green-winged Teal", is_species=True)
     db.tag_photo(pid, stale)
 
-    d_target, d_neighbour = db.save_detections(pid, [
+    d_target, d_neighbour = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
@@ -7862,7 +7862,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
     stale = db.add_keyword("Green-winged Teal", is_species=True)
     db.tag_photo(pid, stale)
 
-    d_target, d_dormant = db.save_detections(pid, [
+    d_target, d_dormant = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         # Below the 0.5 workspace threshold — Compare treats as dormant.
@@ -7921,7 +7921,7 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
     db.tag_photo(pid, wigeon)
     db.tag_photo(pid, stale)
 
-    d_target, d_wigeon = db.save_detections(pid, [
+    d_target, d_wigeon = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         # Comfortably above the 0.5 workspace threshold.
@@ -8085,7 +8085,7 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
     )
     db.conn.commit()
 
-    d_target, d_neighbour = db.save_detections(pid, [
+    d_target, d_neighbour = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
@@ -8149,7 +8149,7 @@ def test_accept_prediction_queues_normalized_species(tmp_path):
         folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -8190,7 +8190,7 @@ def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
         file_size=100,
         file_mtime=1.0,
     )
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
@@ -8241,7 +8241,7 @@ def test_accept_prediction_out_of_scope_row_mutates_nothing(tmp_path):
         folder_id=fid, filename="elk.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -8295,7 +8295,7 @@ def test_accept_prediction_grouped_leaves_out_of_scope_entry_row_alone(tmp_path)
             folder_id=fid, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(photo_id, [
+        det_id = db.detections.save(photo_id, [
             {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
              "confidence": 0.9, "category": "animal"},
         ], detector_model="MDV6")[0]
@@ -8363,7 +8363,7 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
             folder_id=fid, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(photo_id, [
+        det_id = db.detections.save(photo_id, [
             {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
              "confidence": 0.9, "category": "animal"},
         ], detector_model="MDV6")[0]
@@ -8410,23 +8410,6 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
     assert pred_rejected in named["accepted_prediction_ids"]
 
 
-def test_get_existing_detection_photo_ids(tmp_path):
-    """get_existing_detection_photo_ids shim returns photo IDs where the default
-    detector model has run (delegates to get_detector_run_photo_ids)."""
-    from db import Database
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder("/photos")
-    pid1 = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    pid2 = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
-    db.save_detections(pid1, [
-        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
-    ], detector_model="megadetector-v6")
-    db.model_runs.record_detector_run(pid1, "megadetector-v6", box_count=1)
-    result = db.get_existing_detection_photo_ids()
-    assert pid1 in result
-    assert pid2 not in result
-
-
 def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
     """A detector_runs row with box_count>0 but no matching detections is a
     torn state left behind by a reclassify that cleared detections and then
@@ -8446,7 +8429,7 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
 
     # Torn: run recorded with boxes, but detections cleared (simulates a
     # reclassify that wiped rows then crashed before re-detecting).
-    db.save_detections(torn, [
+    db.detections.save(torn, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")
@@ -8457,7 +8440,7 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
     db.model_runs.record_detector_run(empty, "megadetector-v6", box_count=0)
 
     # Consistent: run recorded and detection rows present.
-    db.save_detections(ok, [
+    db.detections.save(ok, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")
@@ -8513,8 +8496,8 @@ def test_write_detection_batch_is_atomic_under_commit_failure(tmp_path):
     db.conn = FailingCommitConn(real_conn)
     try:
         with pytest.raises(RuntimeError, match="simulated commit failure"):
-            db.write_detection_batch(
-                photo_id, "megadetector-v6", detections,
+            detection_store.write_detection_batch(
+                db, photo_id, "megadetector-v6", detections,
             )
     finally:
         db.conn = real_conn
@@ -8566,7 +8549,7 @@ def test_write_detection_batch_writes_both_tables_atomically(tmp_path):
         {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},
          "confidence": 0.7, "category": "animal"},
     ]
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", detections)
     assert len(ids) == 2
 
     rows = db.conn.execute(
@@ -8599,7 +8582,7 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
         file_size=100, file_mtime=1.0,
     )
 
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", [])
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [])
     assert ids == []
     run = db.conn.execute(
         "SELECT box_count FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
@@ -8637,12 +8620,12 @@ def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
         {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},
          "confidence": 0.7, "category": "animal"},
     ]
-    ids1 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    ids1 = detection_store.write_detection_batch(db, photo_a, "megadetector-v6", detections)
     # Insert into a different photo so the table is non-empty when photo_a's
     # rows are deleted-and-reinserted — defeats auto-rowid's "reset to 1
     # when table empty" recycling that hides the bug.
-    db.write_detection_batch(photo_b, "megadetector-v6", detections)
-    ids2 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    detection_store.write_detection_batch(db, photo_b, "megadetector-v6", detections)
+    ids2 = detection_store.write_detection_batch(db, photo_a, "megadetector-v6", detections)
     assert ids1 == ids2, (
         f"same content must produce same IDs across rewrites; got {ids1} vs {ids2}"
     )
@@ -8678,7 +8661,7 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
          "confidence": 0.9, "category": "animal"}
     c = {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
          "confidence": 0.9, "category": "animal"}
-    ids_abc = db.write_detection_batch(photo_id, "megadetector-v6", [a, b, c])
+    ids_abc = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [a, b, c])
     id_a, id_b, id_c = ids_abc
 
     # Plant a prediction against every detection. The retained ones
@@ -8696,7 +8679,7 @@ def test_write_detection_batch_retires_stale_rows(tmp_path):
         )
     db.conn.commit()
 
-    ids_ac = db.write_detection_batch(photo_id, "megadetector-v6", [a, c])
+    ids_ac = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [a, c])
     assert ids_ac == [id_a, id_c], "stable IDs for retained boxes"
 
     remaining = {r["id"] for r in db.conn.execute(
@@ -8738,14 +8721,14 @@ def test_runtime_change_retires_unreviewed_detector_output(tmp_path):
     second = {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
               "confidence": 0.8, "category": "animal"}
 
-    old_id = db.write_detection_batch(
-        photo_id, "megadetector-v6", [first],
+    old_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [first],
         runtime_fingerprint="runtime-a", input_fingerprint="input-a",
     )[0]
     db.predictions.add(old_id, "Robin", 0.95, "bioclip")
 
-    new_ids = db.write_detection_batch(
-        photo_id, "megadetector-v6", [second],
+    new_ids = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [second],
         runtime_fingerprint="runtime-b", input_fingerprint="input-a",
     )
     assert len(new_ids) == 1
@@ -8787,8 +8770,8 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
              "confidence": 0.9, "category": "animal"}
     second = {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
               "confidence": 0.8, "category": "animal"}
-    old_id = db.write_detection_batch(
-        photo_id, "megadetector-v6", [first],
+    old_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [first],
         runtime_fingerprint="runtime-a", input_fingerprint="input-a",
     )[0]
 
@@ -8797,8 +8780,8 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
         old_id, "Robin", 0.95, "bioclip", status="accepted",
         individual="reviewed by user",
     )
-    returned = db.write_detection_batch(
-        photo_id, "megadetector-v6", [second],
+    returned = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [second],
         runtime_fingerprint="runtime-b", input_fingerprint="input-a",
     )
 
@@ -8814,8 +8797,8 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
         "megadetector-v6", runtime_fingerprint="runtime-b",
     ), "a pinned older runtime should suppress redundant inference"
 
-    forced = db.write_detection_batch(
-        photo_id, "megadetector-v6", [second],
+    forced = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [second],
         runtime_fingerprint="runtime-b", input_fingerprint="input-a",
         force_runtime_replace=True,
     )
@@ -8863,7 +8846,7 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
 
     # Pipeline A: writes detections, then writes a prediction against the
     # detection it just produced.
-    ids_a = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    ids_a = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", detections)
     det_id = ids_a[0]
     db.conn.execute(
         """INSERT INTO predictions
@@ -8881,7 +8864,7 @@ def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_pa
 
     # Pipeline B: writes the same detections. With auto-rowid this would
     # DELETE A's row and CASCADE-delete A's prediction.
-    ids_b = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    ids_b = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", detections)
     assert ids_b == ids_a, "concurrent writer must produce same IDs"
 
     pred_count_after = db.conn.execute(
@@ -8921,8 +8904,8 @@ def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
         "category": "animal",
     }
 
-    ids1 = db.write_detection_batch(photo_id, "megadetector-v6", [first])
-    ids2 = db.write_detection_batch(photo_id, "megadetector-v6", [second])
+    ids1 = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [first])
+    ids2 = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [second])
     assert ids2 == ids1, "sub-quantization box drift should keep the same id"
 
     row = db.conn.execute(
@@ -8967,7 +8950,7 @@ def test_write_detection_batch_deduplicates_same_batch_ids(tmp_path):
         "category": "animal",
     }
 
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", [low, high])
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [low, high])
     assert len(ids) == 1
 
     row = db.conn.execute(
@@ -9007,7 +8990,7 @@ def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
-    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+    det_ids = detection_store.write_detection_batch(db, jpeg_id, "MDV6", [
         {"box": box, "confidence": 0.9, "category": "animal"},
     ])
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")
@@ -9060,7 +9043,7 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
-    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+    det_ids = detection_store.write_detection_batch(db, jpeg_id, "MDV6", [
         {"box": box, "confidence": 0.9, "category": "animal"},
     ])
     old_det_id = det_ids[0]
@@ -9104,7 +9087,7 @@ def test_get_classifier_run_key_gate_splits_accepted_and_rejected(tmp_path):
     prematurely collapses ``remaining_uncached`` to zero.
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -9151,7 +9134,7 @@ def test_get_classifier_run_key_gate_honors_individual_review_override(tmp_path)
     """
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
     ws_id = db._ws_id()
-    det_id = db.save_detections(pids[0], [
+    det_id = db.detections.save(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -9202,10 +9185,10 @@ def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
                           file_size=1, file_mtime=1.0)
 
     box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
-    jpeg_det = db.write_detection_batch(jpeg_id, "MDV6", [
+    jpeg_det = detection_store.write_detection_batch(db, jpeg_id, "MDV6", [
         {"box": box, "confidence": 0.9, "category": "animal"},
     ])[0]
-    raw_det = db.write_detection_batch(raw_id, "MDV6", [
+    raw_det = detection_store.write_detection_batch(db, raw_id, "MDV6", [
         {"box": box, "confidence": 0.9, "category": "animal"},
     ])[0]
     db.predictions.add(jpeg_det, "Robin", 0.95, "bioclip", status="accepted")
@@ -9239,7 +9222,7 @@ def test_multiple_predictions_per_detection(tmp_path):
     db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
     det_id = det_ids[0]
@@ -9267,7 +9250,7 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
     det_id = det_ids[0]
@@ -11126,7 +11109,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     assert pid in photos_map  # the one real row survives the chunked select
     species_map = db.keywords.get_species_for_photos(huge)
     assert species_map == {}  # no keywords attached, but no OperationalError
-    det_map = db.get_detections_for_photos(huge, min_conf=0)
+    det_map = detection_store.get_detections_for_photos(db, huge, min_conf=0)
     assert det_map == {}
 
     # Sidecar-path resolution takes the same whole-list treatment.
@@ -15715,7 +15698,7 @@ def test_collection_vireo_native_fields(tmp_path):
         "VALUES (?, 123, 'https://example.test/obs/123')",
         (p1,),
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         p1,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.95, "category": "animal"}],
@@ -15989,7 +15972,7 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
     # Save the matching detection rows alongside the run so the cached-run
     # state is consistent — get_detector_run_photo_ids excludes torn states
     # where box_count>0 has no matching detections.
-    db.save_detections(photo_id, [
+    db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9,
          "category": "animal"},
         {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}, "confidence": 0.8,
@@ -16012,7 +15995,7 @@ def test_record_classifier_run_and_lookup(tmp_path):
         file_size=100, file_mtime=1.0,
     )
     # Need a detection row to reference:
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
@@ -16065,7 +16048,7 @@ def test_review_status_absence_is_pending(tmp_path):
         folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
@@ -16147,7 +16130,7 @@ def test_list_misses_returns_flagged_photos_only(tmp_path):
     )
     db.conn.commit()
 
-    misses = db.list_misses()
+    misses = miss_flags.list_misses(db)
     ids = [m["id"] for m in misses]
     assert p1 in ids
     assert p2 not in ids
@@ -16167,8 +16150,8 @@ def test_list_misses_filters_by_category(tmp_path):
     db.conn.execute("UPDATE photos SET miss_oof=1     WHERE id=?", (p_oof,))
     db.conn.commit()
 
-    assert [m["id"] for m in db.list_misses(category="clipped")] == [p_clip]
-    assert [m["id"] for m in db.list_misses(category="oof")] == [p_oof]
+    assert [m["id"] for m in miss_flags.list_misses(db, category="clipped")] == [p_clip]
+    assert [m["id"] for m in miss_flags.list_misses(db, category="oof")] == [p_oof]
 
 
 def test_clear_miss_flag_on_photo(tmp_path):
@@ -16183,7 +16166,7 @@ def test_clear_miss_flag_on_photo(tmp_path):
     )
     db.conn.commit()
 
-    db.clear_miss_flag(p, "clipped")
+    miss_flags.clear_miss_flag(db, p, "clipped")
     row = db.conn.execute(
         "SELECT miss_clipped, miss_oof FROM photos WHERE id=?", (p,)
     ).fetchone()
@@ -16206,7 +16189,7 @@ def test_bulk_reject_category_sets_flag_rejected(tmp_path):
     )
     db.conn.commit()
 
-    affected = db.bulk_reject_miss_category("clipped")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped")
     assert len(affected) == 2
     assert {a["photo_id"] for a in affected} == {p1, p2}
     for pid in (p1, p2):
@@ -16239,11 +16222,11 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (p_already,))
     db.conn.commit()
 
-    listed = [m["id"] for m in db.list_misses(category="clipped")]
+    listed = [m["id"] for m in miss_flags.list_misses(db, category="clipped")]
     assert p_miss in listed
     assert p_already not in listed
 
-    affected = db.bulk_reject_miss_category("clipped")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped")
     # only p_miss got rejected; p_already was already rejected
     assert len(affected) == 1
     assert affected[0]["photo_id"] == p_miss
@@ -16278,14 +16261,14 @@ def test_list_misses_since_filter(tmp_path):
     )
     db.conn.commit()
 
-    all_ids = [m["id"] for m in db.list_misses(category="clipped")]
+    all_ids = [m["id"] for m in miss_flags.list_misses(db, category="clipped")]
     assert p_old in all_ids and p_new in all_ids
 
-    recent = [m["id"] for m in db.list_misses(category="clipped",
+    recent = [m["id"] for m in miss_flags.list_misses(db, category="clipped",
                                               since="2026-04-21T00:00:00+00:00")]
     assert recent == [p_new]
 
-    grouped = db.list_misses(since="2026-04-21T00:00:00+00:00")
+    grouped = miss_flags.list_misses(db, since="2026-04-21T00:00:00+00:00")
     assert [m["id"] for m in grouped] == [p_new]
 
 
@@ -16311,11 +16294,11 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
     db.conn.commit()
 
     # Workspace B sees only its own miss.
-    ids_b = [m["id"] for m in db.list_misses(category="clipped")]
+    ids_b = [m["id"] for m in miss_flags.list_misses(db, category="clipped")]
     assert ids_b == [p_b]
 
     # Bulk reject in B must not touch A's photo.
-    affected = db.bulk_reject_miss_category("clipped")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped")
     assert len(affected) == 1
     assert affected[0]["photo_id"] == p_b
     flag_a = db.conn.execute(
@@ -16329,7 +16312,7 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
 
     # Switching back to A should still reveal its untouched miss.
     db.set_active_workspace(ws_a)
-    ids_a = [m["id"] for m in db.list_misses(category="clipped")]
+    ids_a = [m["id"] for m in miss_flags.list_misses(db, category="clipped")]
     assert ids_a == [p_a]
 
 
@@ -16347,7 +16330,7 @@ def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
     db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p,))
     db.conn.commit()
     # Two detections; the primary is the higher-confidence one.
-    db.save_detections(
+    db.detections.save(
         p,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1},
@@ -16358,7 +16341,7 @@ def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
         detector_model="megadetector-v6",
     )
 
-    misses = db.list_misses(category="clipped")
+    misses = miss_flags.list_misses(db, category="clipped")
     assert len(misses) == 1
     m = misses[0]
     assert m["detection_conf"] == 0.85
@@ -16375,7 +16358,7 @@ def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
     db.conn.execute("UPDATE photos SET miss_no_subject=1 WHERE id=?", (p,))
     db.conn.commit()
 
-    misses = db.list_misses(category="no_subject")
+    misses = miss_flags.list_misses(db, category="no_subject")
     assert len(misses) == 1
     assert misses[0]["detection_box"] is None
     assert misses[0]["detection_conf"] is None
@@ -16402,7 +16385,7 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     db.conn.commit()
 
     # Since filter matches only the new miss.
-    affected = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped", since="2026-04-20T00:00:00+00:00")
     assert len(affected) == 1
     assert affected[0]["photo_id"] == p_new
 
@@ -16416,7 +16399,7 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     assert flag_new == "rejected"
 
     # Without since, the old miss is now eligible.
-    affected2 = db.bulk_reject_miss_category("clipped")
+    affected2 = miss_flags.bulk_reject_miss_category(db, "clipped")
     assert len(affected2) == 1
     assert affected2[0]["photo_id"] == p_old
     flag_old2 = db.conn.execute(
@@ -16449,7 +16432,7 @@ def test_bulk_reject_miss_category_preserves_null_flag_in_old_value(tmp_path):
     db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (p_flagged,))
     db.conn.commit()
 
-    affected = db.bulk_reject_miss_category("clipped")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped")
     by_id = {a["photo_id"]: a for a in affected}
 
     assert by_id[p_null]["old_value"] is None
@@ -16483,14 +16466,14 @@ def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
     )
     db.conn.commit()
     for pid in photo_ids:
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
         )
 
-    misses = db.list_misses(category="clipped")
+    misses = miss_flags.list_misses(db, category="clipped")
     assert len(misses) == N
     # Every row must have a detection attached (proving chunking visited all).
     assert all(m["detection_conf"] == 0.9 for m in misses)
@@ -16514,7 +16497,7 @@ def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
 
     db.set_active_workspace(ws_b)
     with pytest.raises(ValueError):
-        db.clear_miss_flag(p_a, "clipped")
+        miss_flags.clear_miss_flag(db, p_a, "clipped")
 
     # A's miss flag must still be set.
     row = db.conn.execute(
@@ -20406,27 +20389,27 @@ def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     _record_usable_classifier_run(db, d3, "iNat21", "fp-a")
 
     # Only p1 matches (BioCLIP-2.5 + fp-a).
-    assert db.count_classifier_runs(
-        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    assert classify_preflight.count_classifier_runs(
+        db, [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 1
 
     # Empty input returns 0.
-    assert db.count_classifier_runs([], "BioCLIP-2.5", "fp-a") == 0
+    assert classify_preflight.count_classifier_runs(db, [], "BioCLIP-2.5", "fp-a") == 0
 
     # Photo with multiple detections, only one cached, does NOT count:
     # the runtime would still need to infer the uncached detection, and the
     # photo would end up in ``count`` (inferred), not ``cached``.
     d2b = _add_one_detection(db, p2)
     _record_usable_classifier_run(db, d2b, "BioCLIP-2.5", "fp-a")
-    assert db.count_classifier_runs(
-        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    assert classify_preflight.count_classifier_runs(
+        db, [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 1  # only p1 — p2 still has d2 (fp-b) with no matching run key
 
     # Once every qualifying detection on p2 has a matching run key, p2
     # counts too.
     _record_usable_classifier_run(db, d2, "BioCLIP-2.5", "fp-a")
-    assert db.count_classifier_runs(
-        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    assert classify_preflight.count_classifier_runs(
+        db, [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 2  # p1 and p2
 
 
@@ -20450,8 +20433,8 @@ def test_count_classifier_runs_chunks_large_id_lists(tmp_path):
         _record_usable_classifier_run(db, did, "BioCLIP-2.5", "fp-a")
         photo_ids.append(pid)
 
-    assert db.count_classifier_runs(
-        photo_ids, "BioCLIP-2.5", "fp-a"
+    assert classify_preflight.count_classifier_runs(
+        db, photo_ids, "BioCLIP-2.5", "fp-a"
     ) == 1500
 
 
@@ -20485,8 +20468,8 @@ def test_count_classifier_runs_uses_full_image_not_below_threshold_crop(tmp_path
     d3 = _add_one_detection(db, p3, conf=0.9)
     _record_usable_classifier_run(db, d3, "BioCLIP-2.5", "fp-a")
 
-    assert db.count_classifier_runs(
-        [p1, p2, p3], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.count_classifier_runs(
+        db, [p1, p2, p3], "BioCLIP-2.5", "fp-a",
     ) == 2
 
 
@@ -20536,8 +20519,8 @@ def test_count_classifier_runs_ignores_non_animal_detections(tmp_path):
         db, cur.lastrowid, "BioCLIP-2.5", "fp-a",
     )
 
-    assert db.count_classifier_runs(
-        [p1, p2], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.count_classifier_runs(
+        db, [p1, p2], "BioCLIP-2.5", "fp-a",
     ) == 1
 
 
@@ -20575,8 +20558,8 @@ def test_get_classifier_run_cache_hits_returns_matched_photo_ids(tmp_path):
 
     _ = _add_one_detection(db, p_none)
 
-    hits = db.get_classifier_run_cache_hits(
-        [p_cached, p_partial, p_none], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_cached, p_partial, p_none], "BioCLIP-2.5", "fp-a",
     )
     assert hits == {p_cached}, (
         "Only the fully-cached photo should be reported; scoping the "
@@ -20599,8 +20582,8 @@ def test_get_classifier_run_cache_hits_requires_usable_prediction(tmp_path):
         detection_id, "BioCLIP-2.5", "fp-a", prediction_count=1,
     )
 
-    assert db.get_classifier_run_cache_hits(
-        [photo_id], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [photo_id], "BioCLIP-2.5", "fp-a",
     ) == set()
 
     db.predictions.add(
@@ -20610,8 +20593,8 @@ def test_get_classifier_run_cache_hits_requires_usable_prediction(tmp_path):
         model="BioCLIP-2.5",
         labels_fingerprint="fp-a",
     )
-    assert db.get_classifier_run_cache_hits(
-        [photo_id], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [photo_id], "BioCLIP-2.5", "fp-a",
     ) == {photo_id}
 
 
@@ -20695,16 +20678,16 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
 
     # Without the map, all three count (preserves prior behaviour on the
     # reclassify path and for callers that don't wire up portable identity).
-    assert db.get_classifier_run_cache_hits(
-        [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
     ) == {p_stale, p_legacy, p_current}
 
     # With the map, the stale-runtime row is filtered out — matching what
     # ``get_classifier_run_key_gate`` returns at runtime. The observation
     # tracker no longer has to reconcile a phantom cache hit for the
     # unvisited tail.
-    hits = db.get_classifier_run_cache_hits(
-        [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
         expected_classifier_runtime_by_detector_runtime={
             "rt-current": "cls-current",
         },
@@ -20721,8 +20704,8 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
     # classifier_runs.runtime_fingerprint. This mirrors the pipeline's
     # ``get_classifier_run_keys`` else branch when portable identity is
     # not available to compute an expected value.
-    permissive_hits = db.get_classifier_run_cache_hits(
-        [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
+    permissive_hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
         expected_classifier_runtime_by_detector_runtime={"rt-current": None},
     )
     assert permissive_hits == {p_stale, p_legacy, p_current}
@@ -20737,8 +20720,8 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
     db.set_review_status(
         pred_id, ws_id, "accepted", individual="Robin",
     )
-    hits_with_override = db.get_classifier_run_cache_hits(
-        [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
+    hits_with_override = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_stale, p_legacy, p_current], "BioCLIP-2.5", "fp-a",
         expected_classifier_runtime_by_detector_runtime={
             "rt-current": "cls-current",
         },
@@ -20790,12 +20773,12 @@ def test_get_classifier_run_cache_hits_uses_fresh_runtime_candidates(tmp_path):
         db, failed_fallback_id, "BioCLIP-2.5", "fp-a",
     )
 
-    assert db.get_classifier_run_cache_hits(
-        [p_processed, p_failed], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [p_processed, p_failed], "BioCLIP-2.5", "fp-a",
     ) == {p_failed}
 
-    hits = db.get_classifier_run_cache_hits(
-        [p_processed, p_failed], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_processed, p_failed], "BioCLIP-2.5", "fp-a",
         fresh_detections_by_photo={
             p_processed: [{
                 "id": fresh_detection_id,
@@ -20860,8 +20843,8 @@ def test_get_classifier_run_cache_hits_includes_noise_full_image_anchor(
         db, failure_anchor, "BioCLIP-2.5", "fp-a",
     )
 
-    hits = db.get_classifier_run_cache_hits(
-        [p_noise, p_person, p_detector_failure], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_noise, p_person, p_detector_failure], "BioCLIP-2.5", "fp-a",
     )
     assert hits == {p_noise, p_detector_failure}
 
@@ -20889,16 +20872,16 @@ def test_fresh_preflight_reloads_omitted_contextual_weak_candidate(tmp_path):
     processed_ids = {photo_id}
     weak_ids = {photo_id}
 
-    hits = db.get_classifier_run_cache_hits(
-        [photo_id], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [photo_id], "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids=weak_ids,
         weak_confidence=0.12,
         fresh_detections_by_photo=fresh_map,
         fresh_processed_photo_ids=processed_ids,
     )
     assert hits == {photo_id}
-    assert db.get_unclassifiable_photos(
-        [photo_id],
+    assert classify_preflight.get_unclassifiable_photos(
+        db, [photo_id],
         contextual_weak_photo_ids=weak_ids,
         weak_confidence=0.12,
         fresh_detections_by_photo=fresh_map,
@@ -20937,13 +20920,13 @@ def test_get_classifier_run_cache_hits_includes_contextual_weak(tmp_path):
 
     # Legacy path (no weak args): both photos below the normal floor,
     # neither counted. This is the buggy behavior the fix corrects.
-    assert db.get_classifier_run_cache_hits(
-        [p_weak_cached, p_weak_uncached], "BioCLIP-2.5", "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [p_weak_cached, p_weak_uncached], "BioCLIP-2.5", "fp-a",
     ) == set()
 
     # With contextual weak args the cached weak photo is counted.
-    hits = db.get_classifier_run_cache_hits(
-        [p_weak_cached, p_weak_uncached],
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_weak_cached, p_weak_uncached],
         "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p_weak_cached, p_weak_uncached},
         weak_confidence=0.12,
@@ -20978,8 +20961,8 @@ def test_get_classifier_run_cache_hits_weak_scoped_per_photo(tmp_path):
 
     # Only p_weak is in the contextual weak set; p_normal_weak_only stays
     # gated by the ordinary detector_confidence floor.
-    hits = db.get_classifier_run_cache_hits(
-        [p_normal_weak_only, p_weak],
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_normal_weak_only, p_weak],
         "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p_weak},
         weak_confidence=0.12,
@@ -21029,8 +21012,8 @@ def test_get_classifier_run_cache_hits_weak_matches_top_detection_only(tmp_path)
     )
     _record_usable_classifier_run(db, d_top, "BioCLIP-2.5", "fp-a")
 
-    hits = db.get_classifier_run_cache_hits(
-        [p_lower_cached, p_top_cached],
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p_lower_cached, p_top_cached],
         "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p_lower_cached, p_top_cached},
         weak_confidence=0.12,
@@ -21062,8 +21045,8 @@ def test_get_classifier_run_cache_hits_weak_ties_break_by_id(tmp_path):
     _record_usable_classifier_run(db, d_second, "BioCLIP-2.5", "fp-a")
     assert d_first < d_second
 
-    hits = db.get_classifier_run_cache_hits(
-        [p], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p], "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p},
         weak_confidence=0.12,
     )
@@ -21081,8 +21064,8 @@ def test_get_classifier_run_cache_hits_weak_ties_break_by_id(tmp_path):
     )
     db.conn.commit()
 
-    hits = db.get_classifier_run_cache_hits(
-        [p], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p], "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p},
         weak_confidence=0.12,
     )
@@ -21120,8 +21103,8 @@ def test_get_classifier_run_cache_hits_weak_ignores_foreign_detector(tmp_path):
         db, p, detector_model="megadetector-v6", conf=0.15,
     )
 
-    hits = db.get_classifier_run_cache_hits(
-        [p], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p], "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p},
         weak_confidence=0.12,
     )
@@ -21135,8 +21118,8 @@ def test_get_classifier_run_cache_hits_weak_ignores_foreign_detector(tmp_path):
         (p,),
     ).fetchone()["id"]
     _record_usable_classifier_run(db, d_v6_top, "BioCLIP-2.5", "fp-a")
-    hits = db.get_classifier_run_cache_hits(
-        [p], "BioCLIP-2.5", "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [p], "BioCLIP-2.5", "fp-a",
         contextual_weak_photo_ids={p},
         weak_confidence=0.12,
     )
@@ -21178,8 +21161,8 @@ def test_get_unclassifiable_photos_keeps_noise_fallback_as_work(tmp_path):
     )
     _add_one_detection(db, p_weak_rescued, conf=0.15)
 
-    unclassifiable = db.get_unclassifiable_photos(
-        [p_ok, p_skip, p_empty, p_weak_rescued],
+    unclassifiable = classify_preflight.get_unclassifiable_photos(
+        db, [p_ok, p_skip, p_empty, p_weak_rescued],
         contextual_weak_photo_ids={p_weak_rescued},
         weak_confidence=0.12,
     )
@@ -21208,7 +21191,7 @@ def test_get_unclassifiable_photos_flags_confident_non_animal_boxes(tmp_path):
     )
     db.conn.commit()
 
-    unclassifiable = db.get_unclassifiable_photos([p_person_only])
+    unclassifiable = classify_preflight.get_unclassifiable_photos(db, [p_person_only])
     assert unclassifiable == {p_person_only}
 
 
@@ -21260,12 +21243,12 @@ def test_get_unclassifiable_photos_uses_fresh_detections_when_provided(tmp_path)
     }
 
     # Sanity: DB-only view returns nothing (both photos have >= floor rows).
-    assert db.get_unclassifiable_photos(
-        [p_still_classifiable, p_fresh_person],
+    assert classify_preflight.get_unclassifiable_photos(
+        db, [p_still_classifiable, p_fresh_person],
     ) == set()
 
-    unclassifiable = db.get_unclassifiable_photos(
-        [p_still_classifiable, p_fresh_person],
+    unclassifiable = classify_preflight.get_unclassifiable_photos(
+        db, [p_still_classifiable, p_fresh_person],
         fresh_detections_by_photo=fresh_map,
     )
     assert unclassifiable == {p_fresh_person}
@@ -21274,7 +21257,7 @@ def test_get_unclassifiable_photos_uses_fresh_detections_when_provided(tmp_path)
 def test_get_unclassifiable_photos_db_fallback_for_unprocessed_photos(tmp_path):
     """When ``_detect_batch`` fails for a single image on a reclassify run
     it omits that photo from both ``detections`` and ``processed_ids``,
-    and the runtime falls back to ``db.get_detections()`` for it. The
+    and the runtime falls back to ``detection_store.get_detections()`` for it. The
     preflight must do the same when the retained DB row is a confident
     non-animal skip.
     """
@@ -21319,16 +21302,16 @@ def test_get_unclassifiable_photos_db_fallback_for_unprocessed_photos(tmp_path):
 
     # Without processed IDs the missing photo looks like an empty current map,
     # so only the explicitly present person box is predicted as a skip.
-    naive = db.get_unclassifiable_photos(
-        [p_processed_person, p_detector_failed],
+    naive = classify_preflight.get_unclassifiable_photos(
+        db, [p_processed_person, p_detector_failed],
         fresh_detections_by_photo=fresh_map,
     )
     assert naive == {p_processed_person}
 
     # With ``fresh_processed_photo_ids``, the detector-failed photo falls
     # back to the DB predicate and its confident person row is also a skip.
-    unclassifiable = db.get_unclassifiable_photos(
-        [p_processed_person, p_detector_failed],
+    unclassifiable = classify_preflight.get_unclassifiable_photos(
+        db, [p_processed_person, p_detector_failed],
         fresh_detections_by_photo=fresh_map,
         fresh_processed_photo_ids=processed_ids,
     )
@@ -22659,7 +22642,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
     for i in range(2):
         pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
                            width=800, height=600)
-        det_ids = db.save_detections(
+        det_ids = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
@@ -22695,7 +22678,7 @@ def test_get_predictions_chunks_large_photo_id_list(tmp_path):
     def make_photo(name, conf):
         pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
-        det = db.save_detections(
+        det = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}],
             detector_model="MegaDetector",
@@ -24629,7 +24612,7 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
     )
     db.conn.commit()
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -25159,7 +25142,7 @@ def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
     ws_id = db._ws_id()
     photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    det = db.save_detections(photo, [
+    det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25220,7 +25203,7 @@ def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path,
     # should match every advertised prediction rule.
     a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
-    det_a = db.save_detections(a, [
+    det_a = db.detections.save(a, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25235,7 +25218,7 @@ def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path,
     # prediction filters must hide the photo too.
     b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
-    det_b = db.save_detections(b, [
+    det_b = db.detections.save(b, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25271,7 +25254,7 @@ def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
     ws_id = db._ws_id()
     photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    det = db.save_detections(photo, [
+    det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25327,7 +25310,7 @@ def test_prediction_confidence_filter_moves_when_alternative_becomes_rejected(tm
     ws_id = db._ws_id()
     photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    det = db.save_detections(photo, [
+    det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25387,7 +25370,7 @@ def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(
     db, fid = _filter_db(tmp_path)
     photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
                          file_size=100, file_mtime=1.0)
-    det = db.save_detections(photo, [
+    det = db.detections.save(photo, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -26090,7 +26073,7 @@ def _metric_sort_db(tmp_path, column, specs):
             # Not a photos column: the sort reads the photo's top current
             # prediction, so seed one (or none, for a NULL spec).
             if value is not None:
-                det_ids = db.save_detections(photo_id, [{
+                det_ids = db.detections.save(photo_id, [{
                     "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
                     "confidence": 0.9, "category": "animal",
                 }], detector_model="MDV6")
@@ -26318,7 +26301,7 @@ def _confidence_sort_db(tmp_path):
         )
         ids[name] = photo_id
         if confidence is not None:
-            det_ids = db.save_detections(photo_id, [{
+            det_ids = db.detections.save(photo_id, [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
                 "confidence": 0.9, "category": "animal",
             }], detector_model="MDV6")
@@ -26381,7 +26364,7 @@ def test_prediction_confidence_sort_ignores_hidden_detections(tmp_path):
                           extension='.jpg', file_size=1, file_mtime=1.0)
     for photo_id, detector_conf, species_conf in (
             (visible, 0.9, 0.4), (hidden, 0.05, 0.99)):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": detector_conf, "category": "animal",
         }], detector_model="MDV6")
@@ -26402,7 +26385,7 @@ def test_prediction_confidence_sort_ignores_alternative_rows(tmp_path):
     db, fid = _filter_db(tmp_path)
     photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                             file_size=1, file_mtime=1.0)
-    det_ids = db.save_detections(photo_id, [{
+    det_ids = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
         "confidence": 0.9, "category": "animal",
     }], detector_model="MDV6")
@@ -26432,7 +26415,7 @@ def test_prediction_confidence_sort_ignores_detection_only_rows(tmp_path):
     bare = db.add_photo(folder_id=fid, filename='bare.jpg', extension='.jpg',
                         file_size=1, file_mtime=1.0)
     for photo_id in (scored, bare):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": 0.99, "category": "animal",
         }], detector_model="MDV6")
@@ -26454,7 +26437,7 @@ def test_prediction_confidence_sort_reads_the_current_label_set(tmp_path):
                          file_size=1, file_mtime=1.0)
     other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
                          file_size=1, file_mtime=1.0)
-    det_ids = db.save_detections(stale, [{
+    det_ids = db.detections.save(stale, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
         "confidence": 0.9, "category": "animal",
     }], detector_model="MDV6")
@@ -26462,7 +26445,7 @@ def test_prediction_confidence_sort_reads_the_current_label_set(tmp_path):
                       labels_fingerprint="old")
     db.predictions.add(det_ids[0], "Wren", 0.10, "test",
                       labels_fingerprint="new")
-    other_det = db.save_detections(other, [{
+    other_det = db.detections.save(other, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
         "confidence": 0.9, "category": "animal",
     }], detector_model="MDV6")
@@ -26481,7 +26464,7 @@ def test_prediction_confidence_rejection_is_workspace_scoped(tmp_path):
     db, fid = _filter_db(tmp_path)
     photo_id = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                             file_size=1, file_mtime=1.0)
-    det_ids = db.save_detections(photo_id, [{
+    det_ids = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
         "confidence": 0.9, "category": "animal",
     }], detector_model="MDV6")

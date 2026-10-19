@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 from pipeline_stages.context import PipelineRun
+from services import classify_preflight, detection_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -200,8 +201,8 @@ def _stored_animal_boxes(
             "confidence": d["detector_confidence"],
             "category": d["category"],
         }
-        for d in thread_db.get_detections(
-            photo_id, min_conf=min_conf, detector_model=detector_model,
+        for d in detection_store.get_detections(
+            thread_db, photo_id, min_conf=min_conf, detector_model=detector_model,
         )
         if d["detector_model"] != "full-image"
         and d["category"] == "animal"
@@ -466,8 +467,8 @@ class _ClassifyPass:
             return set()
         from weak_detections import contextual_weak_photo_ids
 
-        raw_mdv6_detections = self.thread_db.get_detections_for_photos(
-            [p["id"] for p in self.photos],
+        raw_mdv6_detections = detection_store.get_detections_for_photos(
+            self.thread_db, [p["id"] for p in self.photos],
             min_conf=self.weak_detection_confidence,
             detector_model="megadetector-v6",
         )
@@ -764,15 +765,15 @@ class _ClassifyPass:
             ),
         }
         spec.preflight_unclassifiable_ids = (
-            self.thread_db.get_unclassifiable_photos(
-                [p["id"] for p in self.photos], **candidate_scope,
+            classify_preflight.get_unclassifiable_photos(
+                self.thread_db, [p["id"] for p in self.photos], **candidate_scope,
             )
         )
         if not self._uses_cache():
             return
         spec.preflight_cached_ids = (
-            self.thread_db.get_classifier_run_cache_hits(
-                [p["id"] for p in self.photos],
+            classify_preflight.get_classifier_run_cache_hits(
+                self.thread_db, [p["id"] for p in self.photos],
                 spec.model_name,
                 spec.fp,
                 **candidate_scope,
@@ -905,7 +906,7 @@ class _ClassifyPass:
         """Pick the boxes to classify as ``(detections, full_image_fallback)``.
 
         Pull every qualifying detection for this photo from the
-        detect-stage cache. Fall back to db.get_detections() only for
+        detect-stage cache. Fall back to detection_store.get_detections() only for
         photos whose per-photo detect iteration never completed (e.g.
         mid-batch exception, or the detect stage was skipped for an
         already-detected non-reclassify run — in which case the DB holds
@@ -1035,15 +1036,15 @@ class _ClassifyPass:
         return any(
             d["detector_model"] != "full-image"
             and d["category"] != "animal"
-            for d in self.thread_db.get_detections(
-                photo_id, min_conf=self.detector_confidence,
+            for d in detection_store.get_detections(
+                self.thread_db, photo_id, min_conf=self.detector_confidence,
             )
         )
 
     def _full_image_detection_id(self, photo_id: int) -> int:
         """Reuse or write the synthetic full-image detection for a photo."""
-        existing_full = self.thread_db.get_detections(
-            photo_id,
+        existing_full = detection_store.get_detections(
+            self.thread_db, photo_id,
             detector_model="full-image",
             min_conf=0,
         )
@@ -1071,8 +1072,8 @@ class _ClassifyPass:
         # can't leave a full-image detection row without its matching
         # detector_runs row — mirroring the invariant documented for
         # write_detection_batch.
-        full_det_ids = self.thread_db.write_detection_batch(
-            photo_id, "full-image",
+        full_det_ids = detection_store.write_detection_batch(
+            self.thread_db, photo_id, "full-image",
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
                 "confidence": 0,
@@ -1100,8 +1101,8 @@ class _ClassifyPass:
 
         run_key = (spec.model_name, spec.fp)
         if run_key in run_keys:
-            cached = thread_db.get_predictions_for_detection(
-                detection["id"],
+            cached = detection_store.get_predictions_for_detection(
+                thread_db, detection["id"],
                 classifier_model=spec.model_name,
                 labels_fingerprint=spec.fp,
                 min_classifier_conf=0,
@@ -1728,7 +1729,7 @@ class _ClassifyPass:
             return
         # Scope the purge to photos whose detect AND classify iterations
         # both completed in this run. Using only classify coverage would
-        # delete rows for photos that hit the db.get_detections()
+        # delete rows for photos that hit the detection_store.get_detections()
         # fallback (i.e. never got a fresh detect). Using only detect
         # coverage would delete rows for photos the classifier never
         # reached. The intersection guarantees there's a replacement
@@ -1778,11 +1779,7 @@ class _ClassifyPass:
             )
         ]
         if stale_ids:
-            getattr(
-                self.thread_db,
-                "delete_detections_by_ids",
-                lambda _: None,
-            )(stale_ids)
+            detection_store.delete_detections_by_ids(self.thread_db, stale_ids)
             log.debug(
                 "reclassify: purged %d stale detection rows for "
                 "%d photos (%d not in purge scope, rows preserved)",

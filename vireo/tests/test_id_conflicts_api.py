@@ -26,7 +26,7 @@ def compare_collection(app_and_db):
     cardinal = db.add_keyword("Cardinal", is_species=True)
     db.tag_photo(photo_ids[0], cardinal)
     for index, photo_id in enumerate(photo_ids):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
             "confidence": 0.9,
             "category": "animal",
@@ -174,7 +174,7 @@ def test_refresh_photo_id_picks_up_a_sibling_that_just_joined(app_and_db):
     # Only photos with the "Bird" species keyword satisfy the rule, so the
     # third photo starts outside the collection until it is tagged too.
     for photo_id in photo_ids:
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
             "confidence": 0.9,
             "category": "animal",
@@ -284,7 +284,7 @@ def test_a_joining_sibling_that_carries_a_new_model_reassesses(app_and_db):
     db.tag_photo(photo_ids[0], bird)
     db.tag_photo(photo_ids[1], bird)
     for photo_id in photo_ids:
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
             "confidence": 0.9,
             "category": "animal",
@@ -341,7 +341,7 @@ def test_a_widening_refresh_shows_every_model_it_advertises(app_and_db):
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     for photo_id in photo_ids:
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
             "confidence": 0.9,
             "category": "animal",
@@ -382,7 +382,7 @@ def test_a_pinned_model_page_is_rebuilt_but_stays_pinned(app_and_db):
     bird = db.add_keyword("Bird", is_species=True)
     db.tag_photo(photo_ids[0], bird)
     for photo_id in photo_ids:
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
             "confidence": 0.9,
             "category": "animal",

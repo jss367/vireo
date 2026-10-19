@@ -21,7 +21,7 @@ from contextlib import suppress
 import numpy as np
 from file_replace import replace_file
 from repositories.masks_features import PipelineFeatures
-from services import dashboard_stats, stage_counts, subject_masks
+from services import dashboard_stats, detection_store, stage_counts, subject_masks
 
 log = logging.getLogger(__name__)
 
@@ -311,8 +311,8 @@ class _FeatureLoad:
         if self.weak_rescue_enabled and self.weak_confidence < self.min_conf:
             from weak_detections import contextual_weak_runs
 
-            self.raw_mdv6_dets = self.db.get_detections_for_photos(
-                self.photo_ids_for_dets,
+            self.raw_mdv6_dets = detection_store.get_detections_for_photos(
+                self.db, self.photo_ids_for_dets,
                 min_conf=self.weak_confidence,
                 detector_model="megadetector-v6",
             )
@@ -449,7 +449,7 @@ class _FeatureLoad:
         if not ids:
             return photos
         evidence = {pid: [dict(d) for d in detections] for pid, detections in
-                    self.db.get_detections_for_photos(sorted(ids), min_conf=0.).items()}
+                    detection_store.get_detections_for_photos(self.db, sorted(ids), min_conf=0.).items()}
         by_detection = {}
         for detections in evidence.values():
             for d in detections:
@@ -471,8 +471,8 @@ class _FeatureLoad:
         This replaces the old photos.detection_box / photos.detection_conf
         columns; the helper applies the same threshold resolved above.
         """
-        dets_by_photo = self.db.get_detections_for_photos(
-            self.photo_ids_for_dets, min_conf=self.min_conf,
+        dets_by_photo = detection_store.get_detections_for_photos(
+            self.db, self.photo_ids_for_dets, min_conf=self.min_conf,
         )
         primary_det_by_photo = self.primary_det_by_photo = {}
         for pid, dets in dets_by_photo.items():
@@ -506,8 +506,8 @@ class _FeatureLoad:
         # serves det_box/det_conf for downstream scoring and intentionally
         # accepts any detector model; the subject_absent / subject_present
         # signals must be tighter to stay in lockstep with `detected_photo_ids`.
-        mdv6_dets = self.db.get_detections_for_photos(
-            self.photo_ids_for_dets, min_conf=self.min_conf,
+        mdv6_dets = detection_store.get_detections_for_photos(
+            self.db, self.photo_ids_for_dets, min_conf=self.min_conf,
             detector_model="megadetector-v6",
         )
         self.mdv6_passing_photo_ids = {
@@ -588,12 +588,12 @@ class _FeatureLoad:
             # Ordinary weak rescue does not load boxes when its floor is at
             # or above the detector threshold. Full-image rescue still needs
             # the normal-confidence anchors in that configuration.
-            raw = self.db.get_detections_for_photos(
-                self.photo_ids_for_dets, min_conf=self.min_conf,
+            raw = detection_store.get_detections_for_photos(
+                self.db, self.photo_ids_for_dets, min_conf=self.min_conf,
                 detector_model='megadetector-v6',
             )
-        lower_boxes = self.db.get_detections_for_photos(
-            list(fallback), min_conf=0.0, detector_model='megadetector-v6',
+        lower_boxes = detection_store.get_detections_for_photos(
+            self.db, list(fallback), min_conf=0.0, detector_model='megadetector-v6',
         )
         raw.update({pid: sorted((d for d in dets if d['category'] == 'animal'),
                                 key=lambda d: d['confidence'], reverse=True)

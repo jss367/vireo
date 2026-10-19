@@ -305,7 +305,7 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
     app, db = app_and_db
     ws = db._ws_id()
     fid, pid = seed(db, tmp_path / "foreign")
-    det_id = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9}], "test-detector")[0]
+    det_id = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9}], "test-detector")[0]
     db.predictions.add(det_id, "Robin", .9, "test-model")
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (det_id,)).fetchone()[0]
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id=? AND folder_id=?", (ws, fid))
@@ -319,7 +319,7 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
 def test_classifier_partial_flush_is_not_a_cache_hit(db, tmp_path):
     from classify_job import _record_batch_classifier_runs
     _, pid = seed(db, tmp_path / "photos")
-    did = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .9}], "test-detector")[0]
+    did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .9}], "test-detector")[0]
     _record_batch_classifier_runs(db, [{"detection_id": did}], "test-model", "test-labels", [{"detection_id": did}])
     assert db.conn.execute("SELECT count(*) FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == 0
     accepted, _ = db.model_runs.get_classifier_run_key_gate(did, "some-current-runtime")

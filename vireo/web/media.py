@@ -76,6 +76,7 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from services import detection_store
 from services.original_photo import (
     EditRenderSource,
     OriginalExtraction,
@@ -3083,7 +3084,7 @@ def create_media_blueprint(
 
         # Get primary detection box — global detections table, threshold
         # resolved from workspace-effective config in get_detections.
-        dets = db.get_detections(photo_id)
+        dets = detection_store.get_detections(db, photo_id)
         requested_detection = request.args.get("detection_id")
         if requested_detection is not None:
             try:
@@ -3526,7 +3527,7 @@ def create_media_blueprint(
         box = None
         mask = _load_active_mask(db, photo_id)
         detections = [
-            detection for detection in db.get_detections(photo_id)
+            detection for detection in detection_store.get_detections(db, photo_id)
             if detection["category"] == "animal" and detection["detector_model"] != "full-image"
         ]
         if detections:

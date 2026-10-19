@@ -666,7 +666,7 @@ def test_prediction_accept_flat_removals_restore_only_live_workspaces(db, pids):
 
 def _predictions(db, pid):
     """One detection with two fpA siblings under m1, one fpB and one m2 row."""
-    det = db.save_detections(pid, [
+    det = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]

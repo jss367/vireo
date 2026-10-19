@@ -406,7 +406,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     workspace_folders. A prediction on a photo whose folder is linked only to
     ws1 is invisible to ws2."""
     db, ws_id, folder_id, photo_id = db_with_workspace
-    det_ids1 = db.save_detections(photo_id, [
+    det_ids1 = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids1[0], "Robin", 0.95, "bioclip")
@@ -417,7 +417,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     folder2 = db.add_folder("/photos2", name="photos2")
     db.add_workspace_folder(ws2, folder2)
     photo2 = db.add_photo(folder2, "bird2.jpg", ".jpg", 1000, 1.0)
-    det_ids2 = db.save_detections(photo2, [
+    det_ids2 = db.detections.save(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids2[0], "Sparrow", 0.8, "bioclip")
@@ -483,7 +483,7 @@ def test_cascade_delete_removes_collections(db_with_workspace):
 def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     """Taxonomy rules in collection filter should use workspace-scoped predictions."""
     db, ws_id, folder_id, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip",
@@ -2021,7 +2021,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     folder via workspace_folders membership rather than being reassigned.
     """
     db, ws1, folder_id, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")

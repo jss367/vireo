@@ -8,6 +8,8 @@ import sqlite3
 import types
 from pathlib import Path
 
+from services import classify_preflight
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -88,24 +90,24 @@ def test_shared_cache_output_readers():
     try:
         ids = list(range(1, 10))
         before = c.total_changes
-        hits = r.get_classifier_run_cache_hits(ids, "invented-model", "invented-fp", min_conf=0.2)
+        hits = classify_preflight.get_classifier_run_cache_hits(r, ids, "invented-model", "invented-fp", min_conf=0.2)
         assert hits == {1, 5, 8}, hits
         run_filter = r.classifier_cache_run_filter("invented-model", "invented-fp", set(), True)
         for pid, wanted in ((1, True), (2, False), (3, False), (4, False), (5, True), (8, True), (9, False)):
             assert bool(r.cache_coverage_counts([pid], run_filter, 0.2)[1]) == wanted, pid
             assert bool(list(r.covering_classifier_identities([pid], run_filter, 0.2))) == wanted, pid
-        assert r.get_classifier_run_cache_hits(
-            [6], "invented-model", "invented-fp", min_conf=0.2, contextual_weak_photo_ids=[6], weak_confidence=0.05
+        assert classify_preflight.get_classifier_run_cache_hits(
+            r, [6], "invented-model", "invented-fp", min_conf=0.2, contextual_weak_photo_ids=[6], weak_confidence=0.05
         ) == {6}
-        assert not r.get_classifier_run_cache_hits(
-            [1],
+        assert not classify_preflight.get_classifier_run_cache_hits(
+            r, [1],
             "invented-model",
             "invented-fp",
             min_conf=0.2,
             expected_classifier_runtime_by_detector_runtime={"detector-rt": "wrong-runtime"},
         )
-        assert r.get_classifier_run_cache_hits(
-            [1],
+        assert classify_preflight.get_classifier_run_cache_hits(
+            r, [1],
             "invented-model",
             "invented-fp",
             min_conf=0.2,

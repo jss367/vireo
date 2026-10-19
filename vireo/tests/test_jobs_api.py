@@ -2710,7 +2710,7 @@ def _seed_photo_with_detection(db, tmp_path, filename, box, model):
         os.path.join(folder_path, filename)
     )
     x, y, w, h = box
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": x, "y": y, "w": w, "h": h},
           "confidence": 0.9, "category": "animal"}],

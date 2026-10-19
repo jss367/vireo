@@ -1064,7 +1064,7 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
         timestamp="2024-03-10T08:03:00",
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.65 WHERE id = ?", (pid,))
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         pid,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -1127,7 +1127,7 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
         timestamp="2024-03-10T08:05:00",
     )
     db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (pid,))
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         pid,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},

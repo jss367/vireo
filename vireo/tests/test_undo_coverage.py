@@ -92,7 +92,7 @@ def test_batch_location_history_failure_rolls_back_all_writes(app_and_db, monkey
 
 
 def _predictions(db, pid, group=None):
-    did = db.save_detections(pid, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    did = db.detections.save(pid, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
     db.predictions.add(did, 'Robin', .7, 'test', labels_fingerprint='other')
     db.predictions.add(did, 'Bald Eagle', .9, 'test', group_id=group)
     db.predictions.add(did, 'Golden Eagle', .8, 'test', status='alternative')
@@ -251,7 +251,7 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
     app, db = app_and_db
     client = app.test_client()
     pids = [p['id'] for p in db.photos.list_page()][:2]
-    did = db.save_detections(pids[0], [
+    did = db.detections.save(pids[0], [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
     db.predictions.add(did, 'Bald Eagle', .9, 'test')
@@ -262,7 +262,7 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
         assert client.post('/api/undo').status_code == 200
     db.predictions.clear(model='test')
     if changed == 'detection':
-        did = db.save_detections(pids[0], [
+        did = db.detections.save(pids[0], [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='replacement')[0]
     elif changed == 'photo':
@@ -320,7 +320,7 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]['id']
-    did = db.save_detections(pid, [
+    did = db.detections.save(pid, [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
     db.predictions.add(did, 'Bald Eagle', .9, 'test')

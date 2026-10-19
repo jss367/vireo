@@ -220,7 +220,7 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     )
     db.conn.commit()
     for pid in (p_keeper, p_miss):
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
@@ -267,7 +267,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
         (0.001, 1.0, 80.0, 40.0, p_a),
     )
-    db.save_detections(
+    db.detections.save(
         p_a,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
@@ -286,7 +286,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
         (0.001, 1.0, 80.0, 40.0, p_b),
     )
-    db.save_detections(
+    db.detections.save(
         p_b,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
@@ -344,7 +344,7 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
         ],
     )
     for pid in (p_in, p_out):
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
@@ -413,7 +413,7 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
         ],
     )
     for pid in (p_kept, p_excluded):
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
@@ -462,7 +462,7 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
         "subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
         (0.001, 1.0, 80.0, 40.0, pid),
     )
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
@@ -495,7 +495,7 @@ def _photo_with_weak_detection(db, name, file_mtime, det_conf=0.143):
         folder_id, f"{name}.jpg", extension=".jpg", file_size=100,
         file_mtime=file_mtime, timestamp=f"2026-04-22T10:00:0{file_mtime}",
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.19, "y": 0.22, "w": 0.33, "h": 0.23},
           "confidence": det_conf, "category": "animal"}],

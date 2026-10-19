@@ -8,7 +8,7 @@ _DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "cat
 
 def _make_detection(db, photo_id):
     """Create a detection for a photo and return its ID."""
-    return db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+    return db.detections.save(photo_id, [_DET], detector_model="MDV6")[0]
 
 
 def _seed_predictions(db):
@@ -386,7 +386,7 @@ def test_predictions_include_alternatives(app_and_db):
     """GET /api/predictions includes alternatives for each prediction."""
     app, db = app_and_db
     photos = db.photos.list_page()
-    det_ids = db.save_detections(photos[0]['id'], [
+    det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]
@@ -432,7 +432,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
     """
     app, db = app_and_db
     photos = db.photos.list_page()
-    det_ids = db.save_detections(photos[0]['id'], [
+    det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]
@@ -465,7 +465,7 @@ def test_accept_alternative_prediction(app_and_db):
     """Accepting an alternative marks it accepted, rejects the top-1, and adds keyword."""
     app, db = app_and_db
     photos = db.photos.list_page()
-    det_ids = db.save_detections(photos[0]['id'], [
+    det_ids = db.detections.save(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]

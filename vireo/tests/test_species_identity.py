@@ -15,6 +15,7 @@ from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
+from services import detection_store
 from species_identity import (
     PREDICTION_TAXONOMY_COLUMNS,
     SpeciesResolver,
@@ -111,7 +112,7 @@ def test_source_identity_survives_fetch_save_merge_and_classifier(tmp_path, monk
     _, det = _photo(db, tmp_path)
     db.predictions.add(det, prediction["species"], .9, "BioCLIP-2.5",
                       labels_fingerprint=compute_full_fingerprint(labels)[:12], taxonomy=enriched)
-    stored = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
+    stored = detection_store.get_predictions_for_detection(db, det, min_classifier_conf=0)[0]
     from classify_job import _cached_prediction_taxonomy
     assert _cached_prediction_taxonomy(stored)["taxon_id"] == 18976
     assert SpeciesResolver(db=db).prediction(stored).key == "taxon:18976"
@@ -435,7 +436,7 @@ def test_source_taxon_id_survives_name_changes(taxonomy):
 def _photo(db, tmp_path, name="photo.jpg"):
     folder = db.add_folder(str(tmp_path), name="Photos")
     pid = db.add_photo(folder, name, ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
-    det = db.save_detections(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5},
+    det = db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5},
                                     "confidence": .99}], detector_model="megadetector-v6")[0]
     return pid, det
 
@@ -801,7 +802,7 @@ def test_culling_groups_unresolved_taxa_by_id(db, tmp_path, same_taxon):
         db.predictions.add(det, "Unknown parrot", .99, "BioCLIP", labels_fingerprint="custom",
                           taxonomy={"taxon_id": tid})
         db.conn.execute("UPDATE photos SET phash = '0000000000000000' WHERE id = ?", (pid,))
-        db.upsert_photo_embedding(pid, "BioCLIP", np.ones(4, dtype=np.float32).tobytes())
+        detection_store.upsert_photo_embedding(db, pid, "BioCLIP", np.ones(4, dtype=np.float32).tobytes())
     db.conn.commit()
     result = analyze_for_culling(db)
     assert len(result["species_groups"]) == (1 if same_taxon else 2)
@@ -880,7 +881,7 @@ def test_acceptance_binds_source_ids_without_reassigning_same_name_keywords(db, 
         if source_backed:
             evidence["taxon_id"] = tid
         db.predictions.add(det, "Shared parrot", .9, "BioCLIP", labels_fingerprint="custom" if source_backed else "tol", taxonomy=evidence)
-        prediction = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
+        prediction = detection_store.get_predictions_for_detection(db, det, min_classifier_conf=0)[0]
         result = db.accept_prediction(prediction["id"])
         row = db.conn.execute("SELECT k.*, t.inat_id FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id WHERE k.id = ?",
                               (result["keyword_id"],)).fetchone()
@@ -898,7 +899,7 @@ def test_unknown_accepted_source_id_survives_name_changes_and_taxonomy_import(db
     for i, name in enumerate(["First name", "Later name"]):
         _, det = _photo(db, tmp_path, f"unknown-accept-{i}.jpg")
         db.predictions.add(det, name, .9, "BioCLIP", labels_fingerprint="custom", taxonomy={"taxon_id": 900001})
-        prediction = db.get_predictions_for_detection(det, min_classifier_conf=0)[0]
+        prediction = detection_store.get_predictions_for_detection(db, det, min_classifier_conf=0)[0]
         accepted.append(db.accept_prediction(prediction["id"])["keyword_id"])
     assert accepted[0] == accepted[1]
     keyword = db.conn.execute("SELECT * FROM keywords WHERE id = ?", (accepted[0],)).fetchone()
@@ -1257,7 +1258,7 @@ def test_inspector_and_review_payloads_resolve_guessed_binomials(app_and_db):
         database.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
                               (entry["taxon_id"], entry["scientific_name"], entry["common_name"], entry["rank"]))
     pid = database.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    det = database.save_detections(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5}, "confidence": .9,
+    det = database.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5}, "confidence": .9,
                                           "category": "animal"}], detector_model="MDV6")[0]
     guess = {"scientific_name": BROWED["scientific_name"], "genus": "Amazona", "family": "Wrongidae"}
     database.predictions.add(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="custom",

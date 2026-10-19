@@ -885,7 +885,7 @@ def test_query_move_rule_matches_reads_config_only_for_has_predictions(
     db.query_move_rule_matches({"rating_min": 1})
     assert calls == []
 
-    det = db.save_detections(p["hi"], [
+    det = db.detections.save(p["hi"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.5,
          "category": "animal"}], detector_model="MDV6")[0]
     db.predictions.add(det, species="Robin", confidence=0.9, model="bioclip")
