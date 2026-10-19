@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from services import stage_counts, subject_masks
+from services import detection_store, stage_counts, subject_masks
 
 log = logging.getLogger(__name__)
 
@@ -377,8 +377,8 @@ class _ClassifyPlan:
             from weak_detections import contextual_weak_photo_ids
 
             scoped_photos = db.photos.get_by_ids(self.scope_ids)
-            raw_mdv6_detections = db.get_detections_for_photos(
-                self.scope_ids,
+            raw_mdv6_detections = detection_store.get_detections_for_photos(
+                db, self.scope_ids,
                 min_conf=self.weak_detection_confidence,
                 detector_model="megadetector-v6",
             )

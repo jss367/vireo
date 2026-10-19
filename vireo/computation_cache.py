@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from file_replace import replace_file
+from services import detection_store
 from services.retained_cache import guarded_reader, reader_guard
 
 log = logging.getLogger(__name__)
@@ -2189,8 +2190,8 @@ class _ArtifactMaterialization:
             ):
                 result["already_materialized"] += 1
                 continue
-            db.write_detection_batch(
-                photo_id,
+            detection_store.write_detection_batch(
+                db, photo_id,
                 artifact["detector_model"],
                 detections,
                 runtime_fingerprint=artifact["runtime_fingerprint"],

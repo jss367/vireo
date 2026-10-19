@@ -24,7 +24,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
             (burst_ids[1],),
         )
-    db.save_detections(burst_ids[2], [{
+    db.detections.save(burst_ids[2], [{
         "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
         "confidence": 0.91,
         "category": "animal",

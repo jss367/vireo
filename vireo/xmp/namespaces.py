@@ -1,8 +1,10 @@
 """XMP namespace URIs and the prefixes sidecars are serialized with.
 
-Registering a prefix is a process-wide ElementTree setting: importing the
-``xmp`` package is what makes every sidecar Vireo writes spell ``dc:``,
-``lr:``, ``crs:`` and the rest instead of ``ns0:``.
+``STANDARD_PREFIXES`` is the prefix ``xmp.markup`` declares a namespace with
+when a sidecar doesn't already use one for it. It is also registered with
+ElementTree at import, a process-wide setting made once, so a tree printed
+with ``ET.tostring`` while debugging reads ``dc:`` rather than ``ns0:``;
+sidecars themselves never go through ElementTree's serializer.
 """
 
 from xml.etree import ElementTree as ET
@@ -29,16 +31,25 @@ _STRUCTURAL_RDF_ATTRIBUTES = frozenset({
     f"{{{NS_RDF}}}parseType",
 })
 
-# Register namespaces so ET preserves prefixes on output
-ET.register_namespace("x", NS_X)
-ET.register_namespace("rdf", NS_RDF)
-ET.register_namespace("dc", NS_DC)
-ET.register_namespace("lr", NS_LR)
-ET.register_namespace("xmp", NS_XMP)
-ET.register_namespace("xmpDM", NS_XMPDM)
-ET.register_namespace("crs", "http://ns.adobe.com/camera-raw-settings/1.0/")
-ET.register_namespace("photoshop", "http://ns.adobe.com/photoshop/1.0/")
-ET.register_namespace("exif", NS_EXIF)
-ET.register_namespace("tiff", "http://ns.adobe.com/tiff/1.0/")
-ET.register_namespace("aux", "http://ns.adobe.com/exif/1.0/aux/")
-ET.register_namespace("vireo", NS_VIREO)
+# The prefix each namespace is declared with when the sidecar has none of
+# its own for it: the ones Adobe's XMP specification and Lightroom use.
+STANDARD_PREFIXES = {
+    NS_X: "x",
+    NS_RDF: "rdf",
+    NS_DC: "dc",
+    NS_LR: "lr",
+    NS_XMP: "xmp",
+    NS_XMPDM: "xmpDM",
+    "http://ns.adobe.com/camera-raw-settings/1.0/": "crs",
+    "http://ns.adobe.com/photoshop/1.0/": "photoshop",
+    NS_EXIF: "exif",
+    "http://ns.adobe.com/tiff/1.0/": "tiff",
+    "http://ns.adobe.com/exif/1.0/aux/": "aux",
+    "http://ns.adobe.com/xap/1.0/mm/": "xmpMM",
+    "http://ns.adobe.com/xap/1.0/sType/ResourceEvent#": "stEvt",
+    "http://ns.adobe.com/xap/1.0/sType/ResourceRef#": "stRef",
+    NS_VIREO: "vireo",
+}
+
+for _uri, _prefix in STANDARD_PREFIXES.items():
+    ET.register_namespace(_prefix, _uri)

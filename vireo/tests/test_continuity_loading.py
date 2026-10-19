@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from services import detection_store
 
 
 @pytest.fixture
@@ -30,8 +31,8 @@ def sequence_db(tmp_path, monkeypatch):
 
 
 def classify(db, pid, confidence, species="Bluebird", score=0.99, model="megadetector-v6", x=0.2):
-    did = db.write_detection_batch(
-        pid,
+    did = detection_store.write_detection_batch(
+        db, pid,
         model,
         [
             {
@@ -147,8 +148,8 @@ def test_conflicting_independent_evidence_vetoes_new_weak_crop_rescue(sequence_d
     if source == "full_image":
         classify(db, ids[1], 0, "Other bird", 0.99, "full-image")
     else:
-        did, second = db.write_detection_batch(
-            ids[1],
+        did, second = detection_store.write_detection_batch(
+            db, ids[1],
             "megadetector-v6",
             [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.06, "category": "animal"},

@@ -19,9 +19,6 @@ STATIC = Path(__file__).resolve().parents[1] / "static"
 # script out; never raise one: put new page code in vireo/static/ instead.
 INLINE_SCRIPT_LINE_LIMITS = {
     "audit.html": 480,
-    "cull.html": 780,
-    "duplicates.html": 820,
-    "storage.html": 867,
     "welcome.html": 374,
     "workspace.html": 366,
 }
@@ -81,6 +78,9 @@ SPLIT_PAGES = {
     "/review": "review",
     "/move": "move",
     "/keywords": "keywords",
+    "/cull": "cull",
+    "/duplicates": "duplicates",
+    "/storage": "storage",
     "/id-conflicts": "id-conflicts",
 }
 

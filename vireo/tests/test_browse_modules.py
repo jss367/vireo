@@ -66,7 +66,7 @@ def test_compare_overlay_controls_are_the_ones_bind_controls_handles():
     assert used == handled, (used, handled)
     # Both pages that include the overlay bind it.
     assert "VireoBrowseCompare.bindControls(" in (BROWSE / "boot.js").read_text(encoding="utf-8")
-    assert "VireoBrowseCompare.bindControls(" in (STATIC / "cull-favorites.js").read_text(encoding="utf-8")
+    assert "VireoBrowseCompare.bindControls(" in (STATIC / "cull" / "favorites.js").read_text(encoding="utf-8")
 
 
 def test_shared_js_reads_globals_and_writes_only_the_listed_latches():

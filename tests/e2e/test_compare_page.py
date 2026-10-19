@@ -370,7 +370,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
 
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
-    second_detection = db.save_detections(
+    second_detection = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.58, "y": 0.35, "w": 0.22, "h": 0.3},
@@ -490,7 +490,7 @@ def test_compare_row_status_surfaces_unclassified_over_pending_match(
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
     # Add a second detection with no predictions — an unclassified subject.
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.6, "y": 0.4, "w": 0.25, "h": 0.3},

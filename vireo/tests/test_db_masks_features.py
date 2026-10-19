@@ -23,7 +23,7 @@ import db as db_module
 import pytest
 from db import Database
 from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures
-from services import subject_masks
+from services import detection_store, subject_masks
 
 BOX = (0.1, 0.2, 0.3, 0.4)
 OTHER_BOX = (0.5, 0.5, 0.2, 0.2)
@@ -1003,13 +1003,13 @@ def test_update_photo_embeddings_stores_blobs_and_commits(db, monkeypatch):
 def test_photo_embedding_roundtrip_and_upsert(db):
     pid = _photo(db, "a.jpg")
     assert db.masks_features.get_embedding(pid, "bioclip") is None
-    db.upsert_photo_embedding(pid, "bioclip", b"one")
+    detection_store.upsert_photo_embedding(db, pid, "bioclip", b"one")
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         assert reader.execute(
             "SELECT embedding FROM photo_embeddings").fetchone()[0] == b"one"
-    db.upsert_photo_embedding(pid, "bioclip", b"two")
-    db.upsert_photo_embedding(pid, "bioclip", b"v2", variant="v2")
+    detection_store.upsert_photo_embedding(db, pid, "bioclip", b"two")
+    detection_store.upsert_photo_embedding(db, pid, "bioclip", b"v2", variant="v2")
     assert db.masks_features.get_embedding(pid, "bioclip") == b"two"
     assert db.masks_features.get_embedding(pid, "bioclip", variant="v2") == b"v2"
     assert db.masks_features.get_embedding(pid, "other") is None
@@ -1021,11 +1021,11 @@ def test_upsert_photo_embedding_verify_workspace(db):
     mine = _photo(db, "a.jpg")
     foreign = _other_workspace_photo(db)
     # Unverified writes accept any photo (background jobs pre-scope).
-    db.upsert_photo_embedding(foreign, "m", b"x")
+    detection_store.upsert_photo_embedding(db, foreign, "m", b"x")
     with pytest.raises(ValueError, match=f"Photo {foreign} does not belong"):
-        db.upsert_photo_embedding(foreign, "m", b"y", verify_workspace=True)
+        detection_store.upsert_photo_embedding(db, foreign, "m", b"y", verify_workspace=True)
     assert db.masks_features.get_embedding(foreign, "m") == b"x"
-    db.upsert_photo_embedding(mine, "m", b"z", verify_workspace=True)
+    detection_store.upsert_photo_embedding(db, mine, "m", b"z", verify_workspace=True)
     assert db.masks_features.get_embedding(mine, "m") == b"z"
 
 
@@ -1039,9 +1039,9 @@ def test_get_photos_with_embedding_scope_and_offline_folders(db):
                     (_row(db, c)["folder_id"],))
     db.conn.commit()
     for pid in (a, b, c, foreign):
-        db.upsert_photo_embedding(pid, "m", bytes([pid]))
-    db.upsert_photo_embedding(a, "m", b"v", variant="v2")
-    db.upsert_photo_embedding(a, "n", b"n")
+        detection_store.upsert_photo_embedding(db, pid, "m", bytes([pid]))
+    detection_store.upsert_photo_embedding(db, a, "m", b"v", variant="v2")
+    detection_store.upsert_photo_embedding(db, a, "n", b"n")
 
     assert sorted(db.masks_features.photos_with_embedding("m")) == [
         (a, bytes([a])), (c, bytes([c]))]
@@ -1060,7 +1060,7 @@ def test_get_photos_with_embedding_scope_and_offline_folders(db):
 def test_get_photos_with_embedding_chunks_photo_ids(db):
     fid = _folder(db)
     a = _photo(db, "a.jpg", fid)
-    db.upsert_photo_embedding(a, "m", b"x")
+    detection_store.upsert_photo_embedding(db, a, "m", b"x")
     statements = []
     db.conn.set_trace_callback(statements.append)
     ids = list(range(100000, 101850)) + [a]
@@ -1197,12 +1197,6 @@ _REMOVED_MASKS_FEATURES_WRAPPERS = (
     "get_photos_with_embedding",
 )
 
-# Coordinated methods that stay on ``Database``: each reads the workspace
-# guard around its repository calls.
-_COORDINATED_MASKS_FEATURES_METHODS = (
-    "upsert_photo_embedding",
-)
-
 # Mask workflows in ``services/subject_masks.py``: each reads the workspace
 # config or the photo scope around its ``db.masks_features`` calls.
 _MASK_WORKFLOWS = (
@@ -1262,17 +1256,6 @@ def test_masks_features_has_no_forwarding_wrappers_on_database():
     assert "conn" not in attrs
 
 
-@pytest.mark.parametrize("name", _COORDINATED_MASKS_FEATURES_METHODS)
-def test_coordinated_masks_features_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to MasksFeaturesRepository"
-    )
-    assert "_masks_features_repository" in attrs, (
-        f"Database.{name} no longer delegates to MasksFeaturesRepository"
-    )
-
-
 def _db_attrs(fn_obj):
     """Attributes a service function reads off its ``db`` argument."""
     source = textwrap.dedent(inspect.getsource(fn_obj))
@@ -1325,7 +1308,10 @@ def test_photo_scope_comes_from_the_stats_repository(name):
 
 
 def test_upsert_photo_embedding_guards_through_the_facade():
-    assert "_verify_photo_in_workspace" in _self_attrs(Database.upsert_photo_embedding)
+    attrs = _db_attrs(detection_store.upsert_photo_embedding)
+    assert {"_verify_photo_in_workspace", "masks_features"} <= attrs
+    assert "conn" not in attrs
+    assert not hasattr(Database, "upsert_photo_embedding")
 
 
 def test_repository_imports_no_db_code():

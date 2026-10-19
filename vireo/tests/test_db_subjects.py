@@ -14,6 +14,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.subjects import SubjectsRepository
+from services import detection_store
 
 
 @pytest.fixture
@@ -21,7 +22,7 @@ def photo(db, tmp_path):
     folder = db.add_folder(str(tmp_path), name="Subjects")
     photo_id = db.add_photo(folder_id=folder, filename="a.jpg", extension=".jpg",
                             file_size=1, file_mtime=1)
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", [
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9, "category": "animal"},
         {"box": {"x": .5, "y": .5, "w": .3, "h": .3}, "confidence": .8, "category": "animal"},
     ])

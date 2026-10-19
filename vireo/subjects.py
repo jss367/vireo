@@ -9,6 +9,7 @@ import math
 import os
 
 import numpy as np
+from services import detection_store
 
 ANALYSIS_VERSION = 1
 
@@ -25,8 +26,8 @@ def primary_order_sql(alias="detections"):
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
-    detections = (dict(d) for d in db.get_detections(
-        photo_id, min_conf=min_conf, detector_model=detector_model))
+    detections = (dict(d) for d in detection_store.get_detections(
+        db, photo_id, min_conf=min_conf, detector_model=detector_model))
     return [d for d in detections
             if d.get("category", "animal") == "animal" and d.get("detector_model") != "full-image"]
 

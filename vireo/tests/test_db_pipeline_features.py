@@ -14,6 +14,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.pipeline_features import PipelineFeaturesRepository
+from services import detection_store
 
 
 @pytest.fixture
@@ -26,11 +27,11 @@ def catalog(db, tmp_path):
         for i in range(3)
     ]
     dets = {
-        photos[0]: db.write_detection_batch(photos[0], "megadetector-v6", [
+        photos[0]: detection_store.write_detection_batch(db, photos[0], "megadetector-v6", [
             {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9, "category": "animal"},
             {"box": {"x": .5, "y": .5, "w": .3, "h": .3}, "confidence": .15, "category": "animal"},
         ]),
-        photos[1]: db.write_detection_batch(photos[1], "megadetector-v6", [
+        photos[1]: detection_store.write_detection_batch(db, photos[1], "megadetector-v6", [
             {"box": {"x": .2, "y": .2, "w": .3, "h": .3}, "confidence": .1, "category": "animal"},
         ]),
     }

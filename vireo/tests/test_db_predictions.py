@@ -46,7 +46,7 @@ def _review(db, pred_id, ws=None):
 
 
 def _det(db, pid, conf=0.9, model="md", x=0.1):
-    return db.save_detections(
+    return db.detections.save(
         pid,
         [{"box": {"x": x, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": conf,
           "category": "animal"}],

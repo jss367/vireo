@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import subject_masks
+from services import detection_store, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -858,28 +858,31 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     client = app.test_client()
     resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
-    assert b'&limit=' in resp.data
-    assert b'Select all shown' in resp.data
-    assert b'Delete Entire Cache' in resp.data
+    html = _page_with_scripts(client, '/storage')
+    assert 'STORAGE_MODAL_FILE_LIMIT = 500' in html
+    assert '&limit=' in html
+    assert 'Select all shown' in html
+    assert 'Delete Entire Cache' in html
 
 
 def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
     """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
     assert page.status_code == 200
+    html = _page_with_scripts(client, '/storage')
     for marker in (
-        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
-        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
-        b'Download again', b'cannot currently be reclaimed separately',
-        b'loadMasksCard(s && s.masks)', b'cfgWorkingCopyCacheMaxGb',
-        b"{name: 'Working Copies'", b'Oldest files are removed first',
-        b'storageBreakdown', b'View files and folders',
+        'storageFreeSize', 'storageReclaimableSize', 'clearSafeCaches',
+        'openStorageFolder', 'refreshStoragePage', 'Safe to clear',
+        'Download again', 'cannot currently be reclaimed separately',
+        'loadMasksCard(s && s.masks)', 'cfgWorkingCopyCacheMaxGb',
+        "{name: 'Working Copies'", 'Oldest files are removed first',
+        'storageBreakdown', 'View files and folders',
     ):
-        assert marker in page.data
-    assert page.data.count(b"{name: 'Database'") == 1
-    assert b'Other Vireo Data' not in page.data
+        assert marker in html
+    assert html.count("{name: 'Database'") == 1
+    assert 'Other Vireo Data' not in html
 
 
 def test_storage_page_confirms_destructive_working_copy_quota_reduction(
@@ -887,43 +890,45 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
 ):
     """Quota input stays pending until Apply and explains cache eviction."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
 
     assert page.status_code == 200
-    assert b'oninput="updateWorkingCopyLimitState()"' in page.data
-    assert b'onchange="saveStorageConfig()"' not in page.data.split(
-        b'id="cfgWorkingCopyCacheMaxGb"', 1,
-    )[1].split(b'</div>', 1)[0]
+    html = _page_with_scripts(client, '/storage')
+    assert 'data-storage-on="input:updateWorkingCopyLimitState"' in html
+    assert 'change:saveStorageConfig' not in html.split(
+        'id="cfgWorkingCopyCacheMaxGb"', 1,
+    )[1].split('</div>', 1)[0]
     for marker in (
-        b'applyWorkingCopyLimitBtn',
-        b'<dialog class="modal-overlay" id="workingCopyLimitModal"',
-        b'modal.showModal()',
-        b'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        b'quotaMb > _committedWorkingCopyQuotaMb',
-        b'Lower working-copy storage limit?',
-        b'Lower limit and remove copies',
-        b'Your original photos will not be deleted',
-        b'working_copy_cache_max_mb: workingCopyQuotaMb',
+        'applyWorkingCopyLimitBtn',
+        '<dialog class="modal-overlay" id="workingCopyLimitModal"',
+        'modal.showModal()',
+        'MAX_WORKING_COPY_QUOTA_MB = 1048576',
+        'quotaMb > _committedWorkingCopyQuotaMb',
+        'Lower working-copy storage limit?',
+        'Lower limit and remove copies',
+        'Your original photos will not be deleted',
+        'working_copy_cache_max_mb: workingCopyQuotaMb',
         # 409 recovery flow: confirm flag sent after modal confirmation,
         # and stale-cache 409 rerouted back into the modal.
-        b'_confirm_working_copy_eviction = true',
-        b"'working_copy_eviction_confirmation_required'",
-        b'previous_working_copy_quota_mb',
+        '_confirm_working_copy_eviction = true',
+        "'working_copy_eviction_confirmation_required'",
+        'previous_working_copy_quota_mb',
         # Apply must flush a queued autosave for the other storage
         # controls instead of dropping it via clearTimeout.
-        b'await flushPendingStorageAutosave()',
-        b'function flushPendingStorageAutosave',
-        b'saveStorageConfig();',
-        b'throw e;',
-        b'the working-copy limit was not updated',
+        'await flushPendingStorageAutosave()',
+        'function flushPendingStorageAutosave',
+        'saveStorageConfig();',
+        'throw e;',
+        'the working-copy limit was not updated',
         # Refresh syncs the cached committed quota from the server's
         # authoritative working.quota_bytes so a concurrent quota change
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
-        b'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        b'currentInputMb === _committedWorkingCopyQuotaMb',
+        'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
+        'currentInputMb === _committedWorkingCopyQuotaMb',
     ):
-        assert marker in page.data
+        assert marker in html
 
 
 def test_api_storage_includes_offline_originals(app_and_db):
@@ -2147,13 +2152,13 @@ def test_encounter_species_tags_sub_threshold_photos_with_warning(app_and_db):
     photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     p_real, p_noise, p_undetected = photos[0]["id"], photos[1]["id"], photos[2]["id"]
 
-    db.save_detections(
+    db.detections.save(
         p_real,
         [{"box": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4},
           "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    db.save_detections(
+    db.detections.save(
         p_noise,
         [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
           "confidence": 0.02, "category": "animal"}],
@@ -2206,7 +2211,7 @@ def test_encounter_species_all_sub_threshold_still_confirms_cache(app_and_db):
     photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     p_noise = photos[0]["id"]
 
-    db.save_detections(
+    db.detections.save(
         p_noise,
         [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
           "confidence": 0.02, "category": "animal"}],
@@ -2649,7 +2654,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     ).lastrowid
     db.conn.commit()
     assert db.get_photos_with_equivalent_species([photo_id], root) == {photo_id}
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -2743,7 +2748,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         "VALUES ('Verdin', NULL, 1, 'taxonomy', 2912)"
     ).lastrowid
     db.conn.commit()
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -2819,7 +2824,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     db.tag_photo(photo_id, nested)
     db.add_keyword("Verdin", is_species=True)
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -2915,7 +2920,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     # every prediction id so undo resets both scopes.
     db.add_keyword("Verdin", is_species=True)
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -4022,10 +4027,10 @@ def test_compare_predictions_api(app_and_db):
     cid = db.collections.add("Test Collection", rules)
 
     # Create detections, then add predictions from two models
-    det_ids_0 = db.save_detections(photo_ids[0], [
+    det_ids_0 = db.detections.save(photo_ids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
-    det_ids_1 = db.save_detections(photo_ids[1], [
+    det_ids_1 = db.detections.save(photo_ids[1], [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids_0[0], "Cardinal", 0.95, "model-a")
@@ -4149,7 +4154,7 @@ def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.55, "y": 0.4, "w": 0.2, "h": 0.2},
@@ -4213,7 +4218,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Single Photo", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")
@@ -4256,7 +4261,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Pending Match", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -4283,7 +4288,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Accepted Matches", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
@@ -4338,7 +4343,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
 
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Alias Compare", rules)
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -4374,10 +4379,10 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     db.tag_photo(photo_ids[0], old_one)
     db.tag_photo(photo_ids[1], old_two)
 
-    first_det = db.save_detections(photo_ids[0], [
+    first_det = db.detections.save(photo_ids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
-    second_det = db.save_detections(photo_ids[1], [
+    second_det = db.detections.save(photo_ids[1], [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")[0]
     db.predictions.add(
@@ -4437,7 +4442,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
     db.species_curation.add_highlight("Old Species", photo_id)
     db.set_species_representative("Old Species", photo_id)
 
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -4476,7 +4481,7 @@ def test_api_predictions_include_bounding_box(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
@@ -4497,7 +4502,7 @@ def test_api_predictions_multiple_detections(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
     ], detector_model="MDV6")
@@ -4517,7 +4522,7 @@ def test_api_detections_endpoint(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.1}, "confidence": 0.7, "category": "animal"},
     ], detector_model="MDV6")
@@ -4566,7 +4571,7 @@ def test_api_photo_pipeline_detections(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Robin", confidence=0.88, model="bioclip")
@@ -4615,7 +4620,7 @@ def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_
     # Two detections on the same photo:
     #   high-conf (0.9) — in active threshold → must surface predictions
     #   low-conf  (0.05) — below default 0.2 → must be hidden
-    det_high, det_low = db.save_detections(pid, [
+    det_high, det_low = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
@@ -4678,7 +4683,7 @@ def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
     """
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
          "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -4720,7 +4725,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     db.workspaces.update(db._active_workspace_id, config_overrides={
         "detector_confidence": 0.0,
     })
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0, "category": "animal"},
     ], detector_model="full-image")[0]
@@ -4859,7 +4864,7 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     client = app.test_client()
     resp = client.get('/cull')
     assert resp.status_code == 200
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/cull')
     assert 'id="slRejectCrop"' in html
     assert 'id="slWTime"' in html
     assert 'id="slEncCut"' in html
@@ -7109,10 +7114,10 @@ def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
         (p2, [0.6, 0.8]),
         (p3, [0.0, 1.0]),
     ]:
-        db.upsert_photo_embedding(
-            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
         )
-    db.save_detections(
+    db.detections.save(
         p1,
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.91, "category": "bird"}],
@@ -7180,8 +7185,8 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
         (p3, [0.0, 1.0]),
         (missing_pid, [2.0, 0.0]),
     ]:
-        db.upsert_photo_embedding(
-            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
         )
 
     rules = json.dumps([{"field": "rating", "op": ">=", "value": 5}])
@@ -13418,7 +13423,7 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
         "VALUES (?, 'confirm.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13460,7 +13465,7 @@ def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
         "VALUES (?, 'reviewed.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13506,7 +13511,7 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, taxonomy_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13555,7 +13560,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, genus_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13600,12 +13605,12 @@ def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
     ).lastrowid
     existing_kid = db.add_keyword("House Sparrow", is_species=True)
     db.tag_photo(pid2, existing_kid)
-    det1 = db.save_detections(
+    det1 = db.detections.save(
         pid1,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
     )[0]
-    det2 = db.save_detections(
+    det2 = db.detections.save(
         pid2,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13651,7 +13656,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, old_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13696,7 +13701,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     ).lastrowid
     db.tag_photo(pid, old_kid)
     db.tag_photo(pid, old_taxonomy_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13747,7 +13752,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
         "VALUES (?, 'undo-predicted.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -14044,7 +14049,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     # `species_replace`.
     db.set_species_representative("Predicted Bird", pid)
     db.species_curation.add_highlight("Predicted Bird", pid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -14483,7 +14488,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     # runs (has_old_species stays False → action_type = "keyword_add").
     # The prediction is for a *different* species than the stale curation,
     # so the prediction-species migration guard must skip the stale rows.
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -14736,7 +14741,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     # No species keyword tag on the photo — the prediction is the only
     # source that ties the photo to ``Verdin``. This puts the relabel on
     # the ``keyword_add``/prediction-only branch of the source filter.
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -16475,7 +16480,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
                 dino_global_embedding=embedding_to_blob(emb),
             )
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
-            det_ids = db.save_detections(pid, [
+            det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
             species = "robin" if enc_idx == 0 else "eagle"
@@ -16575,7 +16580,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
                 dino_global_embedding=embedding_to_blob(emb),
             )
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
-            det_ids = db.save_detections(pid, [
+            det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
             species = "robin" if enc_idx == 0 else "eagle"
@@ -18690,7 +18695,7 @@ def _seed_prediction_photo(db, filename, species, confidence,
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19330,7 +19335,7 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19413,7 +19418,7 @@ def test_prediction_states_distinguish_empty_reasons(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(detected_only, "MDV6", box_count=1)
-    db.save_detections(
+    db.detections.save(
         detected_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19447,7 +19452,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(fallback_only, "MDV6", box_count=0)
-    db.save_detections(
+    db.detections.save(
         fallback_only,
         [{"box": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
           "confidence": 1.0, "category": "animal"}],
@@ -19459,7 +19464,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(noise_only, "MDV6", box_count=1)
-    db.save_detections(
+    db.detections.save(
         noise_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.01, "category": "animal"}],
@@ -19624,7 +19629,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
         folder_id=folder_id, filename="multi-det.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_multi,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
@@ -19642,7 +19647,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
         folder_id=folder_id, filename="multi-model.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_b = db.save_detections(
+    det_b = db.detections.save(
         photo_multi_model,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19704,7 +19709,7 @@ def test_selection_prediction_suggestions_marks_photo_ambiguous_across_siblings(
         folder_id=folder_id, filename="mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
@@ -19766,7 +19771,7 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19838,7 +19843,7 @@ def test_selection_prediction_suggestions_ignores_minority_frame_confidence(
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19900,7 +19905,7 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
         folder_id=folder_id, filename="burst-sparrow-only.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19954,7 +19959,7 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20006,7 +20011,7 @@ def test_predictions_api_exposes_consensus_species_for_burst(app_and_db):
         folder_id=folder_id, filename="consensus.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -20180,7 +20185,7 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
             folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20233,7 +20238,7 @@ def test_batch_accept_grouped_scopes_photos_per_model_bucket(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20322,7 +20327,7 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
             folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21014,7 +21019,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
         folder_id=folder_id, filename="drift.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -21111,7 +21116,7 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
         folder_id=folder_id, filename="no-expected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -21210,7 +21215,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21281,7 +21286,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21375,7 +21380,7 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
             folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21454,7 +21459,7 @@ def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
             folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21513,7 +21518,7 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21584,7 +21589,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21712,7 +21717,7 @@ def _seed_two_subject_photo(db, filename, first_species, second_species):
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
           "confidence": 0.9, "category": "animal"},
@@ -21837,7 +21842,7 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
         folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
           "confidence": 0.9, "category": "animal"},
@@ -21897,7 +21902,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -24647,7 +24652,7 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det = db.save_detections(
+        det = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -24926,7 +24931,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
         "sanity: the DB resolver collapses the alias onto its root"
     )
 
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -24970,7 +24975,7 @@ def test_compare_payload_carries_canonical_species(app_and_db, tmp_path):
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25070,7 +25075,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
     assert db.resolve_species_display_name("Desert Verdin") == "Verdin", (
         "sanity: the DB resolver collapses the alias onto its root"
     )
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25146,7 +25151,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -26002,6 +26007,140 @@ def test_encounter_species_remove_redo_refreshes_pipeline_cache(app_and_db):
     }
 
 
+def _remove_teal_from_cached_burst(app, db):
+    """Seed a confirmed-teal cache and remove teal from its first burst."""
+    app_client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    override = {
+        "species": "Green-winged Teal", "confirmed": True,
+        "species_list": ["Green-winged Teal"],
+    }
+    _seed_encounter_cache(
+        app, db, photo_ids, confirmed_species="Green-winged Teal",
+        bursts=[
+            {"photo_ids": photo_ids[:2], "species_predictions": [],
+             "species_override": dict(override)},
+            {"photo_ids": photo_ids[2:], "species_predictions": [],
+             "species_override": dict(override)},
+        ],
+    )
+    teal = db.add_keyword("Green-winged Teal", is_species=True)
+    for pid in photo_ids:
+        db.tag_photo(pid, teal)
+    resp = app_client.post("/api/encounters/species", json={
+        "species": "Green-winged Teal", "photo_ids": photo_ids[:2],
+        "burst_index": 0, "remove": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return photo_ids[:2]
+
+
+def test_undo_redo_report_a_failed_pipeline_cache_refresh(app_and_db, monkeypatch):
+    """A cache refresh that fails after undo/redo is a warning in the response.
+
+    Regression: the failure was only logged, so Process Review kept showing
+    the old species with nothing on screen saying why. The undo and redo
+    still succeed (the catalog change committed); the response says the
+    review results were not updated.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    burst_ids = _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+
+    resp = client.post("/api/undo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["undone"]
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Undo saved, but Vireo could not update")
+    assert "Process Review" in body["warning"]
+    assert "old species" in body["warning"]
+    for pid in burst_ids:
+        assert _species_names(db, pid) == ["Green-winged Teal"]
+
+    resp = client.post("/api/redo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Redo saved, but Vireo could not update")
+    for pid in burst_ids:
+        assert _species_names(db, pid) == []
+
+
+def test_undo_redo_without_a_cache_failure_carry_no_warning(app_and_db):
+    """A refresh that succeeds (or has nothing to do) keeps the old shape."""
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    for route in ("/api/undo", "/api/redo"):
+        body = client.post(route).get_json()
+        assert body["ok"] is True
+        assert "warning" not in body
+        assert "pipeline_cache_stale" not in body
+
+
+def test_undo_redo_responses_carry_the_entry_id(app_and_db, monkeypatch):
+    """Undo and redo report ``entry_id`` so the Process Review banner can
+    detect its own inverse. The failed Undo and the Redo that reverses it
+    both act on the same ``edit_history`` row, so their ``entry_id`` match;
+    on that match the client drops the stale banner the Undo put up.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+    undo_body = client.post("/api/undo").get_json()
+    assert undo_body["pipeline_cache_stale"] is True
+    assert isinstance(undo_body["entry_id"], int)
+    monkeypatch.undo()
+
+    redo_body = client.post("/api/redo").get_json()
+    assert redo_body["ok"] is True
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+
+
+def test_undo_redo_entry_id_differs_across_separate_history_entries(app_and_db):
+    """A later undo/redo for a different edit carries a different
+    ``entry_id`` than an earlier one, so the client can tell "unrelated
+    successful edit" from "this failure's own inverse".
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids must not collide.
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    chat = db.add_keyword("Yellow-breasted Chat", is_species=True)
+    for pid in photo_ids[:1]:
+        db.tag_photo(pid, chat)
+    resp = client.post("/api/encounters/species", json={
+        "species": "Yellow-breasted Chat", "photo_ids": photo_ids[:1],
+        "burst_index": 0, "remove": False,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    first_undo = client.post("/api/undo").get_json()
+    second_undo = client.post("/api/undo").get_json()
+    assert first_undo["entry_id"] != second_undo["entry_id"]
+
+
 def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override(app_and_db):
     """Frames [A, X] and [A, Y]: removing A leaves the explicit-empty
     sentinel (nothing shared). Undo restores A; redo must restore the
@@ -26181,7 +26320,7 @@ def test_compare_keeps_native_scientific_identities_with_shared_common_name(app_
 
     app, db = app_and_db
     photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
     entries = []
@@ -26214,7 +26353,7 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
     photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()[0]
     keyword = db.add_keyword("Test Parrot", is_species=True)
     db.tag_photo(photo_id, keyword)
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
     evidence = {"scientific_name": "Test species"}
