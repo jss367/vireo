@@ -251,8 +251,12 @@ def _write_tree_atomic(tree, xmp_path):
         # matching a direct write (mkstemp would silently restrict to 0600).
         fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         temp_path = candidate
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(serialize_sidecar(tree))
+        # Binary mode so Windows does not translate the serializer's "\n" to
+        # "\r\n". The serializer emits bytes exactly as the sidecar's source
+        # had them, and a sidecar is read as bytes, not platform-newlined
+        # text.
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(serialize_sidecar(tree).encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
         if source_stat is not None:
