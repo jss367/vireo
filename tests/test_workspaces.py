@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from services import dashboard_stats
 
 
 def test_database_creates_tables(db):
@@ -405,7 +406,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     workspace_folders. A prediction on a photo whose folder is linked only to
     ws1 is invisible to ws2."""
     db, ws_id, folder_id, photo_id = db_with_workspace
-    det_ids1 = db.save_detections(photo_id, [
+    det_ids1 = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids1[0], "Robin", 0.95, "bioclip")
@@ -416,7 +417,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     folder2 = db.add_folder("/photos2", name="photos2")
     db.add_workspace_folder(ws2, folder2)
     photo2 = db.add_photo(folder2, "bird2.jpg", ".jpg", 1000, 1.0)
-    det_ids2 = db.save_detections(photo2, [
+    det_ids2 = db.detections.save(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids2[0], "Sparrow", 0.8, "bioclip")
@@ -482,7 +483,7 @@ def test_cascade_delete_removes_collections(db_with_workspace):
 def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     """Taxonomy rules in collection filter should use workspace-scoped predictions."""
     db, ws_id, folder_id, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip",
@@ -834,13 +835,13 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     db.tag_photo(pid_b, k2)
 
     db.set_active_workspace(ws_a)
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     kw_names = [kw["name"] for kw in stats["top_keywords"]]
     assert "Robin" in kw_names
     assert "Hawk" not in kw_names
 
     db.set_active_workspace(ws_b)
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     kw_names = [kw["name"] for kw in stats["top_keywords"]]
     assert "Hawk" in kw_names
     assert "Robin" not in kw_names
@@ -867,14 +868,14 @@ def test_keyword_tree_scoped_by_workspace(db):
     db.tag_photo(pid_b, k3)
 
     db.set_active_workspace(ws_a)
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     names = [kw["name"] for kw in tree]
     assert "Robin" in names
     assert "Jay" in names
     assert "Hawk" not in names
 
     db.set_active_workspace(ws_b)
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     names = [kw["name"] for kw in tree]
     assert "Hawk" in names
     assert "Robin" not in names
@@ -886,7 +887,7 @@ def test_keyword_tree_empty_workspace(db):
     ws = db.create_workspace("Empty")
     db.add_keyword("Robin")
     db.set_active_workspace(ws)
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) == 0
 
 
@@ -973,7 +974,7 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
 
     # Merge in workspace A — should only merge Cardinal pair
     db.set_active_workspace(ws_a)
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
     assert merged == 1  # only Cardinal/cardinal
 
     # Sparrow/sparrow should still exist as two separate keywords
@@ -1152,7 +1153,7 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     db.queue_change(pid_b, "keyword_add", "apapane")
     db.queue_change(pid_b, "keyword_add", "\u2018apapane")
 
-    db.keywords.merge_duplicates()
+    db.keyword_tree.merge_duplicates()
 
     add_values = sorted(
         (row["photo_id"], row["value"]) for row in db.conn.execute(
@@ -1205,7 +1206,7 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     db.tag_photo(pid_a, quoted)
     db.tag_photo(pid_b, clean)
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
 
     assert merged == 1
     rows = db.conn.execute(
@@ -1281,7 +1282,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     )
     db.conn.commit()
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
 
     assert merged == 1
     # Surviving keyword row was canonicalized to the clean spelling.
@@ -1383,7 +1384,7 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     )
     db.conn.commit()
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
 
     assert merged == 1
     # Survivor keeps its clean name; the legacy source row was deleted.
@@ -1520,7 +1521,7 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     )
     db.conn.commit()
 
-    db.keywords.merge_duplicates()
+    db.keyword_tree.merge_duplicates()
 
     # Workspace A's curation and pending change should be canonicalized.
     a_hl = db.conn.execute(
@@ -1583,7 +1584,7 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     db.tag_photo(pid_a, masse_id)
     db.tag_photo(pid_b, masze_id)
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
 
     assert merged == 0
     remaining = {
@@ -1628,7 +1629,7 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     db.tag_photo(pid_a, upper_id)
     db.tag_photo(pid_b, lower_id)
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
 
     assert merged == 0
     remaining = {
@@ -1678,7 +1679,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
     assert merged == 0
 
     assert db.conn.execute(
@@ -1718,7 +1719,7 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     db.tag_photo(pid_species, species_id)
     db.tag_photo(pid_plain, plain_id)
 
-    assert db.keywords.merge_duplicates() == 0
+    assert db.keyword_tree.merge_duplicates() == 0
     rows = db.conn.execute(
         "SELECT id, is_species FROM keywords WHERE id IN (?, ?) ORDER BY id",
         (species_id, plain_id),
@@ -1762,7 +1763,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
     assert merged == 2  # Birds/birds, then Heron/heron once same-parent
 
     birds = db.conn.execute(
@@ -1810,7 +1811,7 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     db.tag_photo(pid1, h1)
     db.tag_photo(pid2, h2)
 
-    merged = db.keywords.merge_duplicates()
+    merged = db.keyword_tree.merge_duplicates()
     assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
 
     herons = db.conn.execute(
@@ -1872,7 +1873,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     db.conn.commit()
 
     # Must not raise; converges to one Birds with one Heron child.
-    db.keywords.merge_duplicates()
+    db.keyword_tree.merge_duplicates()
 
     birds = db.conn.execute(
         "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
@@ -1934,7 +1935,7 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     db.tag_photo(pid_general, m_general)
     db.tag_photo(pid_genre, m_genre)
 
-    db.keywords.merge_duplicates()
+    db.keyword_tree.merge_duplicates()
 
     # Birds/birds collapsed to one parent.
     birds = db.conn.execute(
@@ -2003,7 +2004,7 @@ def test_keyword_tree_includes_ancestors(db):
     db.tag_photo(pid, hawk)
 
     db.set_active_workspace(ws)
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     names = {kw["name"] for kw in tree}
     assert "Red-tailed Hawk" in names
     assert "Raptors" in names  # ancestor must be included
@@ -2020,7 +2021,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     folder via workspace_folders membership rather than being reassigned.
     """
     db, ws1, folder_id, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")

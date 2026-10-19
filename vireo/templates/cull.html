@@ -274,24 +274,24 @@ body { padding-bottom: 36px; }
     <details id="cullSpeciesPicker">
       <summary id="cullSpeciesSummary">All species</summary>
       <div class="cull-species-menu">
-        <input type="search" id="cullSpeciesSearch" aria-label="Search species" placeholder="Search species" oninput="renderCullSpeciesOptions()">
-        <button class="summary-link" onclick="clearCullSpecies()">All species</button>
+        <input type="search" id="cullSpeciesSearch" aria-label="Search species" placeholder="Search species" data-cull-on="input:renderCullSpeciesOptions">
+        <button class="summary-link" data-cull-on="click:clearCullSpecies">All species</button>
         <div id="cullSpeciesOptions"></div>
       </div>
     </details>
-    <label>From <input type="date" id="cullDateFrom" onchange="onCullScopeChange()"></label>
-    <label>Through <input type="date" id="cullDateTo" onchange="onCullScopeChange()"></label>
-    <button class="summary-link" onclick="clearCullFilters()">Clear filters</button>
+    <label>From <input type="date" id="cullDateFrom" data-cull-on="change:onCullScopeChange"></label>
+    <label>Through <input type="date" id="cullDateTo" data-cull-on="change:onCullScopeChange"></label>
+    <button class="summary-link" data-cull-on="click:clearCullFilters">Clear filters</button>
   </div>
   <p id="cullScope" class="cull-hint" aria-live="polite"></p>
   <div class="action-bar">
     <select id="cullCollection" class="btn btn-secondary" style="font-size:13px;">
       <option value="">All photos</option>
     </select>
-    <button class="btn btn-primary" onclick="runCulling()">Analyze for Culling</button>
-    <button class="btn btn-secondary" onclick="toggleCullSettings()" id="cullSettingsBtn" style="font-size:12px;">Settings &#9662;</button>
+    <button class="btn btn-primary" data-cull-on="click:runCulling">Analyze for Culling</button>
+    <button class="btn btn-secondary" id="cullSettingsBtn" style="font-size:12px;" data-cull-on="click:toggleCullSettings">Settings &#9662;</button>
     <span id="cullStatus" style="font-size:12px;color:var(--text-dim);"></span>
-    <button class="btn btn-primary" id="applyBtn" onclick="applyCulling()" style="display:none;margin-left:auto;">
+    <button class="btn btn-primary" id="applyBtn" style="display:none;margin-left:auto;" data-cull-on="click:applyCulling">
       Apply Culling Decisions
     </button>
   </div>
@@ -305,22 +305,22 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Minimum visible subject in frame for suggested favorites">Crop complete</span>
-        <input type="range" min="0" max="100" value="60" step="1" id="slRejectCrop" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="60" step="1" id="slRejectCrop" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valRejectCrop">0.60</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Min subject sharpness rank within the encounter">Focus</span>
-        <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valRejectFocus">0.35</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Max blown-out highlight fraction on the subject">Clip highlights</span>
-        <input type="range" min="0" max="100" value="30" step="1" id="slRejectClip" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="30" step="1" id="slRejectClip" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valRejectClip">0.30</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Min overall quality score">Composite</span>
-        <input type="range" min="0" max="100" value="40" step="1" id="slRejectComposite" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="40" step="1" id="slRejectComposite" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valRejectComposite">0.40</span>
       </div>
     </div>
@@ -330,22 +330,22 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Quality vs diversity within a burst - higher favors quality">Burst lambda</span>
-        <input type="range" min="0" max="100" value="85" step="1" id="slBurstLambda" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="85" step="1" id="slBurstLambda" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valBurstLambda">0.85</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Max photos to keep from each burst">Burst keep</span>
-        <input type="range" min="1" max="10" value="3" step="1" id="slBurstKeep" oninput="onScoringChange(this)">
+        <input type="range" min="1" max="10" value="3" step="1" id="slBurstKeep" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valBurstKeep">3</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Quality vs diversity across the encounter - higher favors quality">Enc. lambda</span>
-        <input type="range" min="0" max="100" value="70" step="1" id="slEncLambda" oninput="onScoringChange(this)">
+        <input type="range" min="0" max="100" value="70" step="1" id="slEncLambda" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valEncLambda">0.70</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Max photos to keep from each encounter">Enc. keep</span>
-        <input type="range" min="1" max="20" value="5" step="1" id="slEncKeep" oninput="onScoringChange(this)">
+        <input type="range" min="1" max="20" value="5" step="1" id="slEncKeep" data-cull-on="input:onScoringChange">
         <span class="slider-val" id="valEncKeep">5</span>
       </div>
     </div>
@@ -355,27 +355,27 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Weight of time-proximity in S_enc">Time</span>
-        <input type="range" min="0" max="100" value="35" step="1" id="slWTime" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="35" step="1" id="slWTime" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valWTime">0.35</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Weight of DINO subject embedding">Subject embed</span>
-        <input type="range" min="0" max="100" value="35" step="1" id="slWSubj" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="35" step="1" id="slWSubj" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valWSubj">0.35</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Weight of DINO global embedding">Global embed</span>
-        <input type="range" min="0" max="100" value="15" step="1" id="slWGlobal" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="15" step="1" id="slWGlobal" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valWGlobal">0.15</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Weight of per-photo species agreement">Species</span>
-        <input type="range" min="0" max="100" value="10" step="1" id="slWSpecies" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="10" step="1" id="slWSpecies" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valWSpecies">0.10</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Weight of GPS + focal length similarity">Meta (GPS+FL)</span>
-        <input type="range" min="0" max="100" value="5" step="1" id="slWMeta" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="5" step="1" id="slWMeta" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valWMeta">0.05</span>
       </div>
     </div>
@@ -384,22 +384,22 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Time constant for time-similarity decay (seconds)">tau time (s)</span>
-        <input type="range" min="5" max="120" value="40" step="1" id="slTauEnc" oninput="onGroupingChange(this)">
+        <input type="range" min="5" max="120" value="40" step="1" id="slTauEnc" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valTauEnc">40</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Force a cut if the gap between two photos exceeds this">Hard cut: time</span>
-        <input type="range" min="30" max="600" value="180" step="10" id="slHardCutTime" oninput="onGroupingChange(this)">
+        <input type="range" min="30" max="600" value="180" step="10" id="slHardCutTime" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valHardCutTime">180</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Force a cut if S_enc drops below this">Hard cut: score</span>
-        <input type="range" min="0" max="100" value="42" step="1" id="slEncCut" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="42" step="1" id="slEncCut" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valEncCut">0.42</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Soft-cut threshold: 2 of last 3 scores below this triggers a cut">Soft cut: score</span>
-        <input type="range" min="0" max="100" value="52" step="1" id="slSoftCut" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="52" step="1" id="slSoftCut" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valSoftCut">0.52</span>
       </div>
     </div>
@@ -409,17 +409,17 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Merge if S_seg between segments exceeds this">Merge score</span>
-        <input type="range" min="0" max="100" value="62" step="1" id="slEncMerge" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" value="62" step="1" id="slEncMerge" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valEncMerge">0.62</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Only consider merge if time gap is within this many seconds">Max gap (s)</span>
-        <input type="range" min="5" max="300" value="60" step="5" id="slMergeMaxGap" oninput="onGroupingChange(this)">
+        <input type="range" min="5" max="300" value="60" step="5" id="slMergeMaxGap" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valMergeMaxGap">60</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Time decay constant for merge gap scoring">tau merge (s)</span>
-        <input type="range" min="5" max="120" value="20" step="1" id="slMergeTau" oninput="onGroupingChange(this)">
+        <input type="range" min="5" max="120" value="20" step="1" id="slMergeTau" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valMergeTau">20</span>
       </div>
     </div>
@@ -429,20 +429,20 @@ body { padding-bottom: 36px; }
     <div class="slider-group">
       <div class="slider-row">
         <span class="slider-label" title="Max seconds between consecutive shots to stay in the same burst">Time gap (s)</span>
-        <input type="range" min="1" max="30" value="3" step="1" id="slBurstTime" oninput="onGroupingChange(this)">
+        <input type="range" min="1" max="30" value="3" step="1" id="slBurstTime" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valBurstTime">3</span>
       </div>
       <div class="slider-row">
         <span class="slider-label" title="Max embedding distance - higher tolerates more visually different shots">Emb. distance</span>
-        <input type="range" min="0" max="100" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+        <input type="range" min="0" max="100" step="1" id="slBurstEmb" data-cull-on="input:onGroupingChange">
         <span class="slider-val" id="valBurstEmb"></span>
       </div>
     </div>
 
     <div class="button-row">
-      <button class="reset-btn" onclick="resetScoringDefaults()">Reset scoring</button>
-      <button class="reset-btn" onclick="resetGroupingDefaults()">Reset grouping</button>
-      <button class="save-btn" onclick="saveGroupingDefaults()">Save grouping defaults</button>
+      <button class="reset-btn" data-cull-on="click:resetScoringDefaults">Reset scoring</button>
+      <button class="reset-btn" data-cull-on="click:resetGroupingDefaults">Reset grouping</button>
+      <button class="save-btn" data-cull-on="click:saveGroupingDefaults">Save grouping defaults</button>
     </div>
   </div>
 
@@ -459,874 +459,24 @@ body { padding-bottom: 36px; }
   <p id="cullRejectedCount" class="cull-hint"></p>
   <div id="cullRejectedPhotos"></div>
   <div class="cull-dialog-actions">
-    <button class="btn btn-secondary" onclick="closeCullRejected()">Back to culling</button>
-    <button class="btn btn-danger" id="cullDeleteRejected" onclick="deleteCullRejected()">Delete rejected photos…</button>
+    <button class="btn btn-secondary" data-cull-on="click:closeCullRejected">Back to culling</button>
+    <button class="btn btn-danger" id="cullDeleteRejected" data-cull-on="click:deleteCullRejected">Delete rejected photos…</button>
   </div>
 </dialog>
 {% include '_photo_compare.html' %}
 <script defer src="/static/vireo-browse-compare.js"></script>
-<script defer src="/static/cull-favorites.js"></script>
-<script>
-var cullData = null;
-var cullBusy = false;
-var cullAnalysisPending = 0;
-var cullAnalysisSeq = 0;
-var cullDirty = false;
-// Per-photo decisions the user made by hand this session: photo_id -> action.
-// They outrank both the saved flag and the freshly computed label, so a
-// slider tweak re-runs the analysis without silently undoing your calls.
-var cullManualDecisions = {};
-// Pinned decisions already written to the database, photo_id -> action.
-// "Review" is the one decision a photo flag cannot hold, so a review pin
-// stays after Apply (otherwise the card would snap back to the suggestion
-// the moment you saved it) — it just no longer counts as unsaved work.
-var cullAppliedDecisions = {};
-// Saved photo flags always outrank suggestions.
-var pipelineResults = null;
-var selectedCollectionId = null;
-var expandedSpecies = {};
-var focusedCullGroup = { speciesIdx: null, groupIdx: null };
-var _reflowTimer = null;
-var _regroupTimer = null;
-
-var SCORING_DEFAULTS = {};
-var GROUPING_DEFAULTS = {};
-
-document.addEventListener('DOMContentLoaded', async function() {
-  await loadPipelineSliderDefaults();
-  await loadCollections();
-  await loadCullingResults();
-});
-
-async function loadCollections() {
-  try {
-    var collections = await safeFetch('/api/collections', {}, { toast: false });
-    var sel = document.getElementById('cullCollection');
-    collections.forEach(function(c) {
-      var opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.name;
-      // count_error means /api/collections couldn't resolve this collection's
-      // rules — scoping the cull to it would just 400 the downstream /photos
-      // fetch. Show it disabled so the state is visible instead of offering
-      // a source that can't run.
-      if (c.count_error) {
-        opt.disabled = true;
-        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
-        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
-      } else if (c.has_visual) {
-        // Cull consumes the collection via get_collection_photos, which
-        // is rules-only — picking a visual collection here would silently
-        // scope the analysis to every metadata match. The regroup-live
-        // endpoint 400s visual collections; disable the option so the
-        // user sees why up front.
-        opt.disabled = true;
-        opt.textContent = c.name + ' (visual — open in Browse)';
-        opt.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
-      }
-      sel.appendChild(opt);
-    });
-    sel.addEventListener('change', onCullCollectionChange);
-  } catch(e) {}
-}
-
-async function onCullCollectionChange() {
-  var val = document.getElementById('cullCollection').value;
-  var parsed = val ? parseInt(val, 10) : NaN;
-  selectedCollectionId = isFinite(parsed) ? parsed : null;
-  // Re-run analysis whenever the scope changes so KEEP/REVIEW/REJECT
-  // labels are computed against the selected collection's photos only.
-  // Filtering the existing workspace-wide results client-side would
-  // leave the labels influenced by photos outside the collection.
-  if (pipelineResults || cullSourceResults) {
-    cullScopeFailed = true;
-    recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', true);
-  }
-}
-
-async function loadPipelineSliderDefaults() {
-  try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
-    var defaults = VireoPipelineConfig.buildSliderDefaults(cfg);
-    SCORING_DEFAULTS = defaults.scoring;
-    GROUPING_DEFAULTS = defaults.grouping;
-  } catch(e) {
-    console.warn('Could not load pipeline config:', e);
-    var defaults = VireoPipelineConfig.buildSliderDefaults();
-    SCORING_DEFAULTS = defaults.scoring;
-    GROUPING_DEFAULTS = defaults.grouping;
-  }
-  applyScoringDefaults();
-  applyGroupingDefaults();
-}
-
-function sliderVal(id) {
-  var el = document.getElementById(id);
-  return el ? parseFloat(el.value) : 0;
-}
-
-function updateSliderDisplay(slider) {
-  var id = slider.id;
-  var valEl = document.getElementById('val' + id.substring(2));
-  if (!valEl) return;
-  var INT_SLIDERS = [
-    'slBurstKeep','slEncKeep',
-    'slBurstTime',
-    'slTauEnc','slHardCutTime',
-    'slMergeMaxGap','slMergeTau',
-  ];
-  valEl.textContent = INT_SLIDERS.indexOf(id) >= 0
-    ? slider.value
-    : (slider.value / 100).toFixed(2);
-}
-
-function getScoringConfig() {
-  return {
-    reject_crop_complete: sliderVal('slRejectCrop') / 100,
-    reject_focus: sliderVal('slRejectFocus') / 100,
-    reject_clip_high: sliderVal('slRejectClip') / 100,
-    reject_composite: sliderVal('slRejectComposite') / 100,
-    burst_lambda: sliderVal('slBurstLambda') / 100,
-    burst_max_keep: Math.round(sliderVal('slBurstKeep')),
-    encounter_lambda: sliderVal('slEncLambda') / 100,
-    encounter_max_keep: Math.round(sliderVal('slEncKeep')),
-  };
-}
-
-function getGroupingConfig() {
-  function pct(id) { return parseFloat(document.getElementById(id).value) / 100.0; }
-  function num(id) { return parseFloat(document.getElementById(id).value); }
-  return {
-    w_time: pct('slWTime'),
-    w_subj: pct('slWSubj'),
-    w_global: pct('slWGlobal'),
-    w_species: pct('slWSpecies'),
-    w_meta: pct('slWMeta'),
-    tau_enc: num('slTauEnc'),
-    hard_cut_time: num('slHardCutTime'),
-    hard_cut_score: pct('slEncCut'),
-    soft_cut_score: pct('slSoftCut'),
-    merge_score: pct('slEncMerge'),
-    merge_max_gap: num('slMergeMaxGap'),
-    merge_tau: num('slMergeTau'),
-    burst_time_gap: num('slBurstTime'),
-    burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
-      sliderVal('slBurstEmb')
-    ),
-  };
-}
-
-function applyScoringDefaults() {
-  document.getElementById('slRejectCrop').value = SCORING_DEFAULTS.reject_crop_complete;
-  document.getElementById('slRejectFocus').value = SCORING_DEFAULTS.reject_focus;
-  document.getElementById('slRejectClip').value = SCORING_DEFAULTS.reject_clip_high;
-  document.getElementById('slRejectComposite').value = SCORING_DEFAULTS.reject_composite;
-  document.getElementById('slBurstLambda').value = SCORING_DEFAULTS.burst_lambda;
-  document.getElementById('slBurstKeep').value = SCORING_DEFAULTS.burst_max_keep;
-  document.getElementById('slEncLambda').value = SCORING_DEFAULTS.encounter_lambda;
-  document.getElementById('slEncKeep').value = SCORING_DEFAULTS.encounter_max_keep;
-  document.querySelectorAll('#cullSettings input[type="range"]').forEach(updateSliderDisplay);
-}
-
-function applyGroupingDefaults() {
-  function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
-  setVal('slWTime', GROUPING_DEFAULTS.w_time);
-  setVal('slWSubj', GROUPING_DEFAULTS.w_subj);
-  setVal('slWGlobal', GROUPING_DEFAULTS.w_global);
-  setVal('slWSpecies', GROUPING_DEFAULTS.w_species);
-  setVal('slWMeta', GROUPING_DEFAULTS.w_meta);
-  setVal('slTauEnc', GROUPING_DEFAULTS.tau_enc);
-  setVal('slHardCutTime', GROUPING_DEFAULTS.hard_cut_time);
-  setVal('slEncCut', GROUPING_DEFAULTS.hard_cut_score);
-  setVal('slSoftCut', GROUPING_DEFAULTS.soft_cut_score);
-  setVal('slEncMerge', GROUPING_DEFAULTS.merge_score);
-  setVal('slMergeMaxGap', GROUPING_DEFAULTS.merge_max_gap);
-  setVal('slMergeTau', GROUPING_DEFAULTS.merge_tau);
-  setVal('slBurstTime', GROUPING_DEFAULTS.burst_time_gap);
-  setVal('slBurstEmb', GROUPING_DEFAULTS.burst_embedding_distance);
-  document.querySelectorAll('#cullSettings input[type="range"]').forEach(updateSliderDisplay);
-}
-
-function resetScoringDefaults() {
-  applyScoringDefaults();
-  doReflow();
-}
-
-function resetGroupingDefaults() {
-  applyGroupingDefaults();
-  doRegroupLive();
-}
-
-function saveGroupingDefaults() {
-  safeFetch('/api/pipeline/save-grouping-defaults', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({pipeline: getGroupingConfig()}),
-  })
-  .then(function() { if (typeof showToast === 'function') showToast('Saved as defaults', 'success'); })
-  .catch(function() {});
-}
-
-function onScoringChange(slider) {
-  updateSliderDisplay(slider);
-  clearTimeout(_reflowTimer);
-  var indicator = document.getElementById('reflowIndicator');
-  if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Recomputing...'; }
-  _reflowTimer = setTimeout(doReflow, 250);
-  updateCullApplyButton();
-}
-
-function onGroupingChange(slider) {
-  updateSliderDisplay(slider);
-  clearTimeout(_regroupTimer);
-  var indicator = document.getElementById('reflowIndicator');
-  if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Regrouping...'; }
-  _regroupTimer = setTimeout(doRegroupLive, 500);
-  updateCullApplyButton();
-}
-
-function setPipelineResults(data, statusText, scoped) {
-  pipelineResults = data;
-  if (!scoped) cullSourceResults = data;
-  renderCullSpeciesOptions();
-  rebuildCullDataFromPipeline();
-  cullDirty = unappliedPinCount() > 0;
-  var kept = cullData ? (cullData.pinned_count || 0) : 0;
-  var parts = [];
-  if (statusText) parts.push(statusText);
-  // Say what the recompute did NOT touch, so a preserved decision never
-  // looks like the analysis quietly agreed with you.
-  if (kept) parts.push(kept + ' pinned decision' + (kept === 1 ? '' : 's') + ' kept');
-  var status = document.getElementById('cullStatus');
-  if (parts.length && status) {
-    status.textContent = parts.join(' \u00b7 ');
-    status.style.color = 'var(--accent)';
-  }
-}
-
-function pipelineBody(config, sourceOnly) {
-  var body = {config: config, save_cache: false};
-  if (!sourceOnly && hasCullFilters()) body.photo_ids = cullScopePhotoIds();
-  else if (selectedCollectionId != null) body.collection_id = selectedCollectionId;
-  return body;
-}
-
-function cullOperationPending() {
-  return cullBusy || cullScopeFailed || cullAnalysisPending > 0 || _reflowTimer != null || _regroupTimer != null
-    || !!document.querySelector('#deleteModal.open')
-    || (window.vireoHistoryBusy && window.vireoHistoryBusy());
-}
-
-function updateCullApplyButton() {
-  document.getElementById('applyBtn').disabled = !!cullOperationPending();
-  var editing = cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy()) ||
-    !!document.querySelector('#deleteModal.open');
-  document.querySelectorAll('.cull-filters input, .cull-filters button, #cullCollection').forEach(function(el) { el.disabled = !!editing; });
-}
-
-
-function doReflow() {
-  clearTimeout(_reflowTimer);
-  _reflowTimer = null;
-  if (!pipelineResults) return runCulling();
-  // Reflow also groups photos, so send both sets of current slider values.
-  return recomputeCulling('/api/pipeline/reflow');
-}
-
-function doRegroupLive() {
-  clearTimeout(_regroupTimer);
-  _regroupTimer = null;
-  return recomputeCulling('/api/pipeline/regroup-live');
-}
-
-function toggleCullSettings() {
-  var panel = document.getElementById('cullSettings');
-  panel.style.display = panel.style.display === 'none' ? '' : 'none';
-}
-
-async function runCulling() {
-  var status = document.getElementById('cullStatus');
-  status.textContent = 'Analyzing pipeline...';
-  status.style.color = 'var(--text-dim)';
-  return recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', !cullSourceResults);
-}
-
-Vireo.registerPageHooks({beforeHistoryChange: function() {
-  if (cullOperationPending()) {
-    showToast('Wait for culling to finish updating before undoing saved edits.', 'info');
-    return false;
-  }
-  if (cullDirty) {
-    showToast('Apply or clear your pinned culling decisions before undoing saved edits.', 'info');
-    return false;
-  }
-  return true;
-}, afterHistoryChange: async function(result) {
-  cullBusy = true;
-  document.getElementById('applyBtn').disabled = true;
-  try {
-    var results;
-    if (pipelineResults) {
-      // Cull analysis is ephemeral, including unfiltered runs. Keep this
-      // grouping and refresh flags rather than restoring an older cache.
-      results = JSON.parse(JSON.stringify(pipelineResults));
-      var state = await safeFetch('/api/pipeline/group/state', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({photo_ids: Array.from(new Set((cullSourceResults && cullSourceResults.photos || []).concat(results.photos).map(function(photo) { return photo.id; })))}),
-      }, {toast: false});
-      [results, cullSourceResults].forEach(function(source) {
-        (source && source.photos || []).forEach(function(photo) {
-          if (state.photos[photo.id]) photo.flag = state.photos[photo.id].flag;
-        });
-      });
-    } else {
-      var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
-      results = data && data.results;
-    }
-    syncCullSourceFlags(results);
-    setPipelineResults(results,
-      result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone, hasCullFilters());
-  } catch (error) {
-    cullData = null;
-    renderCulling();
-    throw error;
-  } finally {
-    cullBusy = false;
-    updateCullApplyButton();
-  }
-}});
-
-async function loadCullingResults() {
-  try {
-    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
-    if (data && data.results) {
-      setPipelineResults(data.results);
-    } else {
-      document.getElementById('cullContent').innerHTML =
-        '<div style="text-align:center;padding:40px;color:var(--text-dim);">No pipeline results. Run Analyze for Culling after extracting pipeline features.</div>';
-    }
-  } catch(e) {}
-}
-
-function rebuildCullDataFromPipeline() {
-  cullData = pipelineToCullData(pipelineResults);
-  renderCulling();
-}
-
-function topSpeciesForPhoto(photo) {
-  var top5 = photo && photo.species_top5;
-  if (top5 && top5.length && top5[0] && top5[0][0]) return top5[0][0];
-  return 'Unclassified';
-}
-
-function speciesName(value) {
-  if (Array.isArray(value)) return value[0] || 'Unclassified';
-  return value || 'Unclassified';
-}
-
-function speciesForEncounter(enc, photoMap) {
-  if (enc.confirmed_species) return speciesName(enc.confirmed_species);
-  if (enc.species) return speciesName(enc.species);
-  var votes = enc.species_predictions || [];
-  if (votes.length && votes[0].species) return speciesName(votes[0].species);
-  var ids = enc.photo_ids || [];
-  for (var i = 0; i < ids.length; i++) {
-    if (photoMap[ids[i]]) return topSpeciesForPhoto(photoMap[ids[i]]);
-  }
-  return 'Unclassified';
-}
-
-function actionForLabel(label) {
-  if (label === 'KEEP') return 'keep';
-  if (label === 'REJECT') return 'reject';
-  return 'review';
-}
-
-function actionForFlag(flag) {
-  if (flag === 'flagged') return 'keep';
-  if (flag === 'rejected') return 'reject';
-  return null;
-}
-
-function manualDecisionCount() {
-  return Object.keys(cullManualDecisions).length;
-}
-
-function unappliedPinCount() {
-  return Object.keys(cullManualDecisions).filter(function(pid) {
-    return cullAppliedDecisions[pid] !== cullManualDecisions[pid];
-  }).length;
-}
-
-// Resolve one photo's decision: your hand edit wins, then the flag you
-// already applied. Other photos stay undecided until chosen as a favorite
-// or explicitly rejected. Returns the action plus where
-// it came from so the card can show it.
-function resolveCullDecision(photo) {
-  var suggested = actionForLabel(photo.label);
-  var manual = cullManualDecisions[photo.id];
-  if (manual) return {action: manual, source: 'manual', suggested: suggested};
-  var confirmed = actionForFlag(photo.flag);
-  if (confirmed) {
-    return {action: confirmed, source: 'confirmed', suggested: suggested};
-  }
-  return {action: 'review', source: 'auto', suggested: suggested};
-}
-
-function encounterLabel(enc, idx, count) {
-  var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
-  if (enc.time_range && enc.time_range[0]) {
-    var day = enc.time_range[0].substring(0, 10);
-    var start = (enc.time_range[0].split('T')[1] || enc.time_range[0]).substring(0, 8);
-    var end = enc.time_range[1] ? (enc.time_range[1].split('T')[1] || enc.time_range[1]).substring(0, 8) : '';
-    label = day + ' · Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
-  }
-  if (enc.burst_count) label += ' / ' + enc.burst_count + ' bursts';
-  return label;
-}
-
-function pipelineToCullData(results) {
-  if (!results || !results.photos || !results.encounters) return null;
-  var photoMap = {};
-  results.photos.forEach(function(p) { photoMap[p.id] = p; });
-
-  var speciesMap = Object.create(null);
-  var total = 0;
-  var keep = 0;
-  var review = 0;
-  var reject = 0;
-  var pinned = 0;
-  var confirmed = 0;
-  var saved = 0;
-
-  results.encounters.forEach(function(enc, ei) {
-    var encIds = (enc.photo_ids || []).filter(function(pid) {
-      return !!photoMap[pid];
-    });
-    if (!encIds.length) return;
-
-    var bySpecies = Object.create(null);
-    encIds.forEach(function(pid) {
-      var p = photoMap[pid];
-      var species = cullPhotoSpecies(p, enc, photoMap);
-      if (!cullPhotoMatches(p, species)) return;
-      (bySpecies[species] || (bySpecies[species] = [])).push(pid);
-    });
-    Object.keys(bySpecies).forEach(function(species) {
-      encIds = bySpecies[species];
-      if (!speciesMap[species]) {
-        speciesMap[species] = {
-          species: species,
-          photo_count: 0,
-          keepers: 0,
-          reviews: 0,
-          rejects: 0,
-          scene_groups: [],
-        };
-      }
-
-      var groupPhotos = [];
-      var burstOrder = [];
-      (enc.bursts || []).forEach(function(burst) {
-        (burst.photo_ids || burst || []).forEach(function(pid) {
-          if (encIds.indexOf(pid) >= 0 && burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
-        });
-      });
-      encIds.forEach(function(pid) {
-        if (burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
-      });
-
-      burstOrder.forEach(function(pid) {
-        var p = photoMap[pid];
-        var decision = resolveCullDecision(p);
-        var action = decision.action;
-        if (decision.source === 'manual') pinned++;
-        else if (decision.source === 'confirmed') confirmed++;
-        if (actionForFlag(p.flag)) saved++;
-        groupPhotos.push({
-          photo_id: pid,
-          quality: p.quality_composite || 0,
-          quality_score: p.quality_composite != null ? p.quality_composite : null,
-          sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
-          filename: p.filename || '',
-          timestamp: p.timestamp || null,
-          day: cullPhotoDay(p),
-          burst_id: cullBurstId(enc, pid, ei),
-          action: action,
-          decision_source: decision.source,
-          suggested_action: decision.suggested,
-          pipeline_label: p.label || 'REVIEW',
-        });
-        total++;
-        if (action === 'keep') keep++;
-        else if (action === 'reject') reject++;
-        else review++;
-      });
-
-      var sg = speciesMap[species];
-      sg.photo_count += groupPhotos.length;
-      sg.keepers += groupPhotos.filter(function(p) { return p.action === 'keep'; }).length;
-      sg.reviews += groupPhotos.filter(function(p) { return p.action === 'review'; }).length;
-      sg.rejects += groupPhotos.filter(function(p) { return p.action === 'reject'; }).length;
-      sg.scene_groups.push({
-        scene_id: ei,
-        label: encounterLabel(enc, ei, groupPhotos.length),
-        photos: groupPhotos,
-      });
-    });
-  });
-
-  var speciesGroups = Object.keys(speciesMap).map(function(k) { return speciesMap[k]; });
-  speciesGroups.forEach(assignCullFavorites);
-  keep = speciesGroups.reduce(function(n, sg) { return n + sg.keepers; }, 0);
-  review = speciesGroups.reduce(function(n, sg) { return n + sg.reviews; }, 0);
-  speciesGroups.sort(function(a, b) { return b.photo_count - a.photo_count || a.species.localeCompare(b.species); });
-  return {
-    species_groups: speciesGroups,
-    total_photos: total,
-    suggested_keepers: keep,
-    suggested_reviews: review,
-    suggested_rejects: reject,
-    pinned_count: pinned,
-    confirmed_count: confirmed,
-    saved_flag_count: saved,
-    // Pins on photos outside the current scope stay in cullManualDecisions
-    // but aren't on screen; count them separately so "Clear N pinned" can
-    // say what it will actually drop.
-    pinned_offscreen: Math.max(0, manualDecisionCount() - pinned),
-    pipeline_summary: results.summary || {},
-  };
-}
-
-function cullDecisionStatsHtml() {
-  var html = '';
-  var pinned = cullData.pinned_count || 0;
-  if (pinned) {
-    html += '<div class="summary-stat" title="Decisions you made by hand. ' +
-      'Recomputing keeps them exactly as they are; Apply writes them to the photos.">' +
-      '<div class="num" style="color:var(--text-primary);">' + pinned + '</div>' +
-      '<div class="label">Pinned by you</div></div>';
-  }
-  var confirmed = cullData.confirmed_count || 0;
-  if (confirmed) {
-    html += '<div class="summary-stat" title="Photos already flagged by a previous Apply. ' +
-      'Their saved flag is shown instead of the fresh suggestion.">' +
-      '<div class="num" style="color:var(--text-secondary);">' + confirmed + '</div>' +
-      '<div class="label">Already applied</div></div>';
-  }
-  return html;
-}
-
-function cullDecisionActionsHtml() {
-  var buttons = [];
-  var pinnedTotal = manualDecisionCount();
-  if (pinnedTotal) {
-    var offscreen = cullData.pinned_offscreen || 0;
-    var label = 'Clear ' + pinnedTotal + ' pinned';
-    var title = 'Drop your manual decisions and go back to what the analysis suggests.';
-    if (offscreen) {
-      title += ' ' + offscreen + ' of them are on photos outside this view.';
-    }
-    buttons.push('<button class="summary-link" title="' + escapeAttr(title) +
-      '" onclick="clearPinnedDecisions()">' + escapeHtml(label) + '</button>');
-  }
-  if (!buttons.length) return '';
-  return '<div class="summary-actions">' + buttons.join('') + '</div>';
-}
-
-function cullGroupsForSpecies(speciesGroup) {
-  return (speciesGroup && (speciesGroup.scene_groups || speciesGroup.pose_groups)) || [];
-}
-
-function cullGroupRefs() {
-  var refs = [];
-  if (!cullData || !cullData.species_groups) return refs;
-  cullData.species_groups.forEach(function(sg, si) {
-    cullGroupsForSpecies(sg).forEach(function(_group, gi) {
-      refs.push({ speciesIdx: si, groupIdx: gi });
-    });
-  });
-  return refs;
-}
-
-function cullGroupMatches(ref) {
-  return focusedCullGroup.speciesIdx === ref.speciesIdx &&
-    focusedCullGroup.groupIdx === ref.groupIdx;
-}
-
-function cullGroupSelector(ref) {
-  return '.pose-group[data-species-index="' + ref.speciesIdx + '"][data-group-index="' + ref.groupIdx + '"]';
-}
-
-function normalizeFocusedCullGroup(refs) {
-  refs = refs || cullGroupRefs();
-  if (!refs.length) {
-    focusedCullGroup = { speciesIdx: null, groupIdx: null };
-    return refs;
-  }
-  var exists = refs.some(cullGroupMatches);
-  if (!exists) {
-    focusedCullGroup = { speciesIdx: refs[0].speciesIdx, groupIdx: refs[0].groupIdx };
-  }
-  return refs;
-}
-
-function scrollFocusedCullGroup() {
-  if (focusedCullGroup.speciesIdx == null || focusedCullGroup.groupIdx == null) return;
-  var el = document.querySelector(cullGroupSelector(focusedCullGroup));
-  if (el) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-}
-
-function focusCullGroup(ref, shouldScroll) {
-  if (!ref) return false;
-  focusedCullGroup = { speciesIdx: ref.speciesIdx, groupIdx: ref.groupIdx };
-  expandedSpecies[ref.speciesIdx] = true;
-  renderCulling();
-  if (shouldScroll !== false) {
-    window.requestAnimationFrame(scrollFocusedCullGroup);
-  }
-  return true;
-}
-
-function moveFocusedCullGroup(delta) {
-  var refs = normalizeFocusedCullGroup();
-  if (!refs.length) return false;
-  var current = refs.findIndex(cullGroupMatches);
-  if (current < 0) current = 0;
-  var next = Math.max(0, Math.min(refs.length - 1, current + delta));
-  if (next === current) return false;
-  return focusCullGroup(refs[next], true);
-}
-
-function cullKeyTargetIsEditable(target) {
-  if (!target) return false;
-  if (target.closest && target.closest('input, textarea, select, button')) return true;
-  return !!target.isContentEditable;
-}
-
-document.addEventListener('keydown', function(e) {
-  if (e.defaultPrevented) return;
-  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-  if (cullKeyTargetIsEditable(e.target)) return;
-  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active, .browse-compare-overlay.active, #deleteModal.open, #cullRejectedDialog[open]')) return;
-  if (moveFocusedCullGroup(e.key === 'ArrowRight' ? 1 : -1)) {
-    e.preventDefault();
-  }
-});
-
-function renderCulling() {
-  if (!cullData || !cullData.species_groups || cullData.species_groups.length === 0) {
-    document.getElementById('cullSummary').style.display = 'none';
-    document.getElementById('applyBtn').style.display = 'none';
-    document.getElementById('cullContent').innerHTML =
-      '<div class="cull-empty">' + (cullSourceResults && hasCullFilters() ? 'No photos match these species and dates. Try changing the filters.' : 'No pipeline results for this view. Run Analyze for Culling after extracting pipeline features.') + '</div>';
-    renderCullScope();
-    focusedCullGroup = { speciesIdx: null, groupIdx: null };
-    return;
-  }
-  if (Object.keys(expandedSpecies).length === 0 && cullData.species_groups.length > 0) {
-    expandedSpecies[0] = true;
-  }
-  normalizeFocusedCullGroup();
-  renderCullScope();
-  var rawPhotoMap = {};
-  (pipelineResults.photos || []).forEach(function(p) { rawPhotoMap[p.id] = p; });
-
-  // Summary bar
-  var summaryHtml = '<div class="summary-bar">' +
-    '<div class="summary-stat"><div class="num">' + cullData.total_photos + '</div><div class="label">Photos</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--accent);">' + cullData.suggested_keepers + '</div><div class="label">Favorites</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Undecided</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject</div></div>' +
-    '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
-    cullDecisionStatsHtml() +
-    cullDecisionActionsHtml() +
-    '<button class="summary-link" id="cullReviewRejected" onclick="reviewCullRejected()"' +
-      (cullData.suggested_rejects ? '' : ' disabled') + '>Review rejected (' + cullData.suggested_rejects + ')</button>' +
-  '</div>';
-  document.getElementById('cullSummary').innerHTML = summaryHtml;
-  document.getElementById('cullSummary').style.display = '';
-  document.getElementById('applyBtn').style.display = '';
-
-  // Species groups
-  var html = '';
-  cullData.species_groups.forEach(function(sg, si) {
-    var keepCount = sg.keepers;
-    var reviewCount = sg.reviews || 0;
-    var rejectCount = sg.rejects;
-
-    html += '<div class="species-section">';
-    html += '<div class="species-header" onclick="toggleSpecies(' + si + ')">';
-    html += '<span class="species-name">' + escapeHtml(sg.species) + '</span>';
-    html += '<span class="species-stats">' + sg.photo_count + ' photos &middot; ';
-    html += '<span class="species-keep">' + keepCount + ' favorites</span> &middot; ';
-    html += '<span style="color:var(--warning);">' + reviewCount + ' undecided</span> &middot; ';
-    html += '<span class="species-reject">' + rejectCount + ' reject</span>';
-    html += '</span></div>';
-
-    var isExpanded = expandedSpecies[si];
-    html += '<div class="species-body" id="speciesBody' + si + '" style="display:' + (isExpanded ? '' : 'none') + ';">';
-
-    var groups = cullGroupsForSpecies(sg);
-    html += cullFavoritesHtml(sg, si);
-    html += '<div class="cull-remaining-heading">Remaining photos <span class="cull-hint">Add a favorite, keep undecided, or reject.</span></div>';
-    groups.forEach(function(pg, pi) {
-      var groupFocused = focusedCullGroup.speciesIdx === si && focusedCullGroup.groupIdx === pi;
-      html += '<div class="pose-group' + (groupFocused ? ' focused' : '') + '" data-species-index="' + si + '" data-group-index="' + pi + '">';
-      var groupLabel = pg.label || ('Scene ' + (pi + 1) + ' (' + pg.photos.length + ' photos)');
-      html += '<div class="pose-label">' + escapeHtml(groupLabel) + '</div>';
-
-      // Store photo list for lightbox navigation
-      var poseKey = 'cullPose_' + si + '_' + pi;
-      window[poseKey] = pg.photos.map(function(p) { return rawPhotoMap[p.photo_id] || {id: p.photo_id, filename: p.filename || ''}; });
-
-      html += '<div class="pose-strip">';
-      var remaining = pg.photos.filter(function(p) { return !p.favorite; });
-      remaining.forEach(function(photo) { html += cullCardHtml(photo, si, pi, poseKey, false); });
-      if (!remaining.length) html += '<p class="cull-hint">All photos in this encounter are in Favorites above.</p>';
-      html += '</div></div>';
-    });
-
-    html += '</div></div>';
-  });
-
-  document.getElementById('cullContent').innerHTML = html;
-
-}
-
-function toggleSpecies(idx) {
-  expandedSpecies[idx] = !expandedSpecies[idx];
-  var body = document.getElementById('speciesBody' + idx);
-  body.style.display = body.style.display === 'none' ? '' : 'none';
-}
-
-function toggleCullAction(speciesIdx, poseIdx, photoId) {
-  if (cullOperationPending()) return;
-  var sg = cullData.species_groups[speciesIdx];
-  var groups = sg.scene_groups || sg.pose_groups || [];
-  var pg = groups[poseIdx];
-  var photo = pg.photos.find(function(p) { return p.photo_id === photoId; });
-  if (!photo) return;
-
-  var next = photo.action === 'keep' ? 'review' : (photo.action === 'review' ? 'reject' : 'keep');
-  setCullAction(photoId, next);
-}
-
-function setCullAction(photoId, action) {
-  if (cullOperationPending()) return;
-  cullManualDecisions[photoId] = action;
-  cullDirty = unappliedPinCount() > 0;
-  rebuildCullDataFromPipeline();
-}
-
-function releaseCullDecision(photoId) {
-  if (cullOperationPending()) return;
-  if (!cullManualDecisions[photoId]) return;
-  delete cullManualDecisions[photoId];
-  delete cullAppliedDecisions[photoId];
-  cullDirty = unappliedPinCount() > 0;
-  rebuildCullDataFromPipeline();
-}
-
-function clearPinnedDecisions() {
-  if (cullOperationPending()) return;
-  if (!manualDecisionCount()) return;
-  cullManualDecisions = {};
-  cullAppliedDecisions = {};
-  cullDirty = false;
-  rebuildCullDataFromPipeline();
-  var status = document.getElementById('cullStatus');
-  if (status) {
-    status.textContent = 'Pinned decisions cleared \u2014 showing the current suggestions.';
-    status.style.color = 'var(--text-dim)';
-  }
-}
-
-async function applyCulling() {
-  if (!cullData || cullOperationPending()) return;
-
-  var keepers = [];
-  var rejects = [];
-  var unflag = [];
-  var appliedPins = {};
-  var savedFlags = {};
-  (pipelineResults && pipelineResults.photos || []).forEach(function(p) {
-    savedFlags[p.id] = p.flag;
-  });
-  cullData.species_groups.forEach(function(sg) {
-    var groups = sg.scene_groups || sg.pose_groups || [];
-    groups.forEach(function(pg) {
-      pg.photos.forEach(function(p) {
-        if (p.decision_source === 'manual') appliedPins[p.photo_id] = p.action;
-        if (p.action === 'keep') keepers.push(p.photo_id);
-        else if (p.action === 'reject') rejects.push(p.photo_id);
-        else if (p.decision_source === 'manual' && actionForFlag(savedFlags[p.photo_id])) {
-          // You moved an already-flagged photo back to Review. Clear the old
-          // flag, otherwise it would reappear as the photo's decision as soon
-          // as the pin is released.
-          unflag.push(p.photo_id);
-        }
-      });
-    });
-  });
-
-  var confirmMsg = 'Apply culling decisions?\n\n' +
-    keepers.length + ' photos flagged as keepers\n' +
-    rejects.length + ' photos flagged as rejected';
-  if (unflag.length) {
-    confirmMsg += '\n' + unflag.length + ' photos cleared back to no flag (moved to Review)';
-  }
-  confirmMsg += '\n\nThis sets the flag on each photo. Use Undo below to restore the previous flags.';
-  if (!confirm(confirmMsg)) return;
-
-  cullBusy = true;
-  document.getElementById('applyBtn').disabled = true;
-  try {
-    await safeFetch('/api/culling/apply', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag}),
-    }, { toast: false });
-    // Apply establishes the saved baseline. Review photos were not sent to
-    // the server, so retain their existing flags instead of clearing them.
-    var keeperIds = new Set(keepers);
-    var rejectIds = new Set(rejects);
-    var clearedIds = new Set(unflag);
-    pipelineResults.photos.forEach(function(photo) {
-      if (keeperIds.has(photo.id)) photo.flag = 'flagged';
-      else if (rejectIds.has(photo.id)) photo.flag = 'rejected';
-      else if (clearedIds.has(photo.id)) photo.flag = 'none';
-    });
-    // Pins the write covered are in the database now. Keep/reject ones are
-    // saved flags from here on; review ones stay pinned (no flag can say
-    // "undecided on purpose") but stop counting as unsaved. Pins on photos
-    // outside this view were never sent, so they stay untouched.
-    Object.keys(appliedPins).forEach(function(pid) {
-      if (appliedPins[pid] === 'review') {
-        cullAppliedDecisions[pid] = 'review';
-      } else {
-        delete cullManualDecisions[pid];
-        delete cullAppliedDecisions[pid];
-      }
-    });
-    syncCullSourceFlags(pipelineResults);
-    cullDirty = unappliedPinCount() > 0;
-    rebuildCullDataFromPipeline();
-    document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length +
-      ' keepers, ' + rejects.length + ' rejected' +
-      (unflag.length ? ', ' + unflag.length + ' cleared' : '');
-    document.getElementById('cullStatus').style.color = 'var(--accent)';
-  } catch(e) {
-    document.getElementById('cullStatus').textContent = 'Error: ' + e.message;
-  } finally {
-    cullBusy = false;
-    updateCullApplyButton();
-  }
-}
-
-document.addEventListener('DOMContentLoaded', function() { initializeCullFavorites(); });
-</script>
+<script defer src="/static/cull/state.js"></script>
+<script defer src="/static/cull/collections.js"></script>
+<script defer src="/static/cull/settings.js"></script>
+<script defer src="/static/cull/analysis.js"></script>
+<script defer src="/static/cull/history.js"></script>
+<script defer src="/static/cull/decisions.js"></script>
+<script defer src="/static/cull/data.js"></script>
+<script defer src="/static/cull/render.js"></script>
+<script defer src="/static/cull/focus.js"></script>
+<script defer src="/static/cull/actions.js"></script>
+<script defer src="/static/cull/favorites.js"></script>
+<script defer src="/static/cull/boot.js"></script>
 
 </body>
 </html>

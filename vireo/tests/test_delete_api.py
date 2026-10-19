@@ -26,7 +26,7 @@ def test_delete_photos_removes_keywords(app_and_db):
     photos = db.photos.list_page()
     # bird1.jpg has keyword 'Cardinal' (from conftest)
     pid = photos[0]["id"]
-    assert len(db.keywords.get_for_photo(pid)) > 0
+    assert len(db.photo_keywords.get_for_photo(pid)) > 0
 
     db.delete_photos([pid])
 
@@ -41,7 +41,7 @@ def test_delete_photos_removes_predictions(app_and_db):
     app, db = app_and_db
     photos = db.photos.list_page()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Cardinal', 0.95, 'test-model')

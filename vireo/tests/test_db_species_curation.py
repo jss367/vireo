@@ -177,7 +177,7 @@ def test_next_species_representative_order(db, cur):
 
 
 def _detect(db, pid, species_conf, model="m1", fingerprint="fp1"):
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -1339,7 +1339,7 @@ def test_life_list_preference_eligibility(db, cur):
 # -- structure ----------------------------------------------------------------------------
 
 
-# Still forwarders on ``Database``: ``KeywordRepository`` and
+# Still forwarders on ``Database``: ``KeywordTreeRepository`` and
 # ``KeywordProvenanceRepository`` bind these from the façade by name
 # (``FACADE_METHODS``), so patches of the ``Database`` methods reach the
 # keyword renames and merges that call them.

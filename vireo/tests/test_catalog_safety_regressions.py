@@ -23,7 +23,7 @@ def test_large_scope_releases_its_read_transaction(db, tmp_path):
     other = Database(db._db_path)
     try:
         db.conn.commit()
-        clause, params = db._scope_clause(range(1, 802))
+        clause, params = db.stats.scope_clause(range(1, 802))
         db.conn.execute("SELECT p.id FROM photos p WHERE 1=1" + clause, params).fetchall()
         assert not db.conn.in_transaction
         other.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
@@ -126,10 +126,10 @@ def test_remove_absent_keyword_has_no_history(app_and_db):
     kid = db.add_keyword("Absent tag")
     response = app.test_client().delete(f"/api/photos/{pid}/keywords/{kid}")
     assert response.status_code == 200
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
     assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == 0
     db.undo_last_edit()
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
 
 
 def test_deleted_keyword_does_not_block_undo(app_and_db):
@@ -141,7 +141,7 @@ def test_deleted_keyword_does_not_block_undo(app_and_db):
     assert client.delete(f"/api/photos/{pid}/keywords/{kid}").status_code == 200
     assert client.delete(f"/api/keywords/{kid}").status_code == 200
     db.undo_last_edit()
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
 
 
 def test_batch_keyword_validates_all_ids_before_mutation(app_and_db):
@@ -150,7 +150,7 @@ def test_batch_keyword_validates_all_ids_before_mutation(app_and_db):
     before = db.conn.execute("SELECT count(*) FROM edit_history").fetchone()[0]
     response = app.test_client().post("/api/batch/keyword", json={"photo_ids": [pid, 99999999], "name": "Partial batch"})
     assert response.status_code == 403
-    assert not any(k["name"] == "Partial batch" for k in db.keywords.get_for_photo(pid))
+    assert not any(k["name"] == "Partial batch" for k in db.photo_keywords.get_for_photo(pid))
     assert db.conn.execute("SELECT count(*) FROM edit_history").fetchone()[0] == before
 
 
@@ -305,7 +305,7 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
     app, db = app_and_db
     ws = db._ws_id()
     fid, pid = seed(db, tmp_path / "foreign")
-    det_id = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9}], "test-detector")[0]
+    det_id = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9}], "test-detector")[0]
     db.predictions.add(det_id, "Robin", .9, "test-model")
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (det_id,)).fetchone()[0]
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id=? AND folder_id=?", (ws, fid))
@@ -319,7 +319,7 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
 def test_classifier_partial_flush_is_not_a_cache_hit(db, tmp_path):
     from classify_job import _record_batch_classifier_runs
     _, pid = seed(db, tmp_path / "photos")
-    did = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .9}], "test-detector")[0]
+    did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .9}], "test-detector")[0]
     _record_batch_classifier_runs(db, [{"detection_id": did}], "test-model", "test-labels", [{"detection_id": did}])
     assert db.conn.execute("SELECT count(*) FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == 0
     accepted, _ = db.model_runs.get_classifier_run_key_gate(did, "some-current-runtime")
@@ -354,7 +354,7 @@ def test_staging_lock_failure_allows_retry(db, tmp_path):
 def test_large_scope_preserves_caller_transaction(db, tmp_path):
     _, pid = seed(db, tmp_path / "photos")
     db.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (pid,))
-    db._scope_clause(range(1, 802))
+    db.stats.scope_clause(range(1, 802))
     assert db.conn.in_transaction
     db.conn.rollback()
     assert db.photos.get(pid)["rating"] != 4

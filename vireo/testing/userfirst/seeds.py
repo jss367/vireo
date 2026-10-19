@@ -182,7 +182,7 @@ def prediction_selection_seed(db_path, thumb_dir, photos_root):
         # One call per photo: save_detections REPLACES the set for
         # (photo, detector_model), so a second call would delete the first
         # box and leave the common species with nothing to predict on.
-        detection_ids = db.save_detections(
+        detection_ids = db.detections.save(
             photo_id, boxes, detector_model="MDV6",
         )
         db.predictions.add(detection_ids[0], "Common Gallinule", 0.97, "bioclip")
@@ -237,7 +237,7 @@ def misses_seed(db_path, thumb_dir, photos_root):
         # Write a primary detection to the canonical `detections` table so
         # the /misses cards can render bbox overlays. no_subject gets a
         # low-confidence detection (matches the pipeline behavior).
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
               "confidence": 0.10 if _cat == "no_subject" else 0.85,

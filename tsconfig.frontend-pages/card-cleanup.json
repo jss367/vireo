@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/card-cleanup.d.ts",
+    "../vireo/static/card-cleanup/boot.js",
+    "../vireo/static/card-cleanup/delete.js",
+    "../vireo/static/card-cleanup/folder-browser.js",
+    "../vireo/static/card-cleanup/jobs.js",
+    "../vireo/static/card-cleanup/manifest.js",
+    "../vireo/static/card-cleanup/shared.js",
+    "../vireo/static/card-cleanup/source.js",
+    "../vireo/static/card-cleanup/state.js",
+    "../vireo/static/card-cleanup/verification.js"
+  ]
+}

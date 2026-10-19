@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pytest
 from repositories.masks_features import PipelineFeatures
+from services import detection_store, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -83,7 +84,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             )
 
             # Add a detection in the detections table
-            det_ids = db.save_detections(pid, [
+            det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
 
@@ -188,7 +189,7 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     # write_detection_batch records both the detection rows AND a
     # detector_runs row, marking the detector as "having run" on this photo.
     pid_a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
-    db.write_detection_batch(pid_a, "megadetector-v6", [
+    detection_store.write_detection_batch(db, pid_a, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
     ])
     # Stamp stale miss flags from a hypothetical prior run that would
@@ -205,7 +206,7 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     # would also work, but a sub-threshold row matches the actual apr2026
     # state where the detector emitted low-confidence garbage.
     pid_b = db.add_photo(fid, "b.jpg", ".jpg", 100, 1.0)
-    db.write_detection_batch(pid_b, "megadetector-v6", [
+    detection_store.write_detection_batch(db, pid_b, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.05, "h": 0.05}, "confidence": 0.03},
     ])
     # Conversely, leave miss flags NULL on B — this is what the very first
@@ -254,8 +255,8 @@ def test_load_photo_features_rescues_bracketed_weak_grackle_run(
             timestamp=(base + timedelta(seconds=offset)).isoformat(),
             width=8280, height=5520,
         )
-        detection_id = db.write_detection_batch(
-            photo_id,
+        detection_id = detection_store.write_detection_batch(
+            db, photo_id,
             "megadetector-v6",
             [{
                 "box": {"x": 0.05, "y": 0.0, "w": 0.87, "h": 0.96},
@@ -321,8 +322,8 @@ def test_load_photo_features_does_not_rescue_conflicting_species_anchors(
             folder_id, f"photo{index}.jpg", ".jpg", 100, 1.0,
             timestamp=f"2026-07-18T08:36:3{index}",
         )
-        detection_id = db.write_detection_batch(
-            photo_id,
+        detection_id = detection_store.write_detection_batch(
+            db, photo_id,
             "megadetector-v6",
             [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -392,9 +393,9 @@ def test_load_photo_features_subject_absent_ignores_non_mdv6_detections(tmp_path
 
     pid = db.add_photo(fid, "x.jpg", ".jpg", 100, 1.0)
     # MDV6: empty-scene run (canonical "detector confirmed empty")
-    db.write_detection_batch(pid, "megadetector-v6", [])
+    detection_store.write_detection_batch(db, pid, "megadetector-v6", [])
     # Synthetic full-image fallback at conf 0 (mirrors classify_job)
-    db.write_detection_batch(pid, "full-image", [
+    detection_store.write_detection_batch(db, pid, "full-image", [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0},
     ])
     db.conn.commit()
@@ -420,7 +421,7 @@ def test_load_photo_features_subject_present_when_mdv6_passes_threshold(tmp_path
     fid = db.add_folder(str(tmp_path), name="photos")
 
     pid = db.add_photo(fid, "duck.jpg", ".jpg", 100, 1.0)
-    db.write_detection_batch(pid, "megadetector-v6", [
+    detection_store.write_detection_batch(db, pid, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
     ])
     db.conn.commit()
@@ -461,7 +462,7 @@ def test_load_photo_features_subject_absent_true_for_empty_scene_run(tmp_path):
     fid = db.add_folder(str(tmp_path), name="photos")
 
     pid = db.add_photo(fid, "empty.jpg", ".jpg", 100, 1.0)
-    db.write_detection_batch(pid, "megadetector-v6", [])  # empty scene
+    detection_store.write_detection_batch(db, pid, "megadetector-v6", [])  # empty scene
     db.conn.commit()
 
     photos = load_photo_features(db)
@@ -1252,7 +1253,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
     emb = emb / np.linalg.norm(emb)
 
     for pid in pids[:2]:
-        det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+        det_ids = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
         ])
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
@@ -1264,7 +1265,7 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
         )
 
     for pid in pids[2:]:
-        db.write_detection_batch(pid, "megadetector-v6", [])
+        detection_store.write_detection_batch(db, pid, "megadetector-v6", [])
 
     out = compute_review_readiness(db)
     assert out["state"] == "computable"
@@ -1291,7 +1292,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
         width=4000, height=3000,
     )
-    det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+    det_ids = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
     ])
     db.predictions.add(
@@ -1345,7 +1346,7 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         timestamp=datetime(2026, 3, 20, 10, 0, 0).isoformat(),
         width=4000, height=3000,
     )
-    det_ids = db.write_detection_batch(pid, "megadetector-v6", [
+    det_ids = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
     ])
     db.predictions.add(
@@ -1915,7 +1916,7 @@ def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
         folder_id, "two-birds.jpg", ".jpg", 1000, 1.0,
         width=4000, height=3000,
     )
-    detection_ids = db.save_detections(
+    detection_ids = db.detections.save(
         photo_id,
         [
             {
@@ -1976,7 +1977,7 @@ def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95, "category": "animal"}],
         detector_model="MDV6",
@@ -2429,7 +2430,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         height=600,
     )
 
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
@@ -2457,7 +2458,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     return db, pid
 
 
@@ -2523,13 +2524,13 @@ def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypat
     # Any call through to list_photos_for_eye_keypoint_stage would be a bug —
     # the disabled flag must short-circuit before the DB helper.
     called = {"listed": False}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
     def _spy(*args, **kwargs):
         called["listed"] = True
         return orig(*args, **kwargs)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": False})
 
@@ -2567,7 +2568,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
@@ -2578,7 +2579,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2591,15 +2592,15 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     )
 
     captured = {}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
-    def _spy(photo_ids=None):
+    def _spy(db, photo_ids=None):
         captured["photo_ids"] = (
             set(photo_ids) if photo_ids is not None else None
         )
-        return orig(photo_ids=photo_ids)
+        return orig(db, photo_ids=photo_ids)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(
         db, config={"eye_detect_enabled": True}, collection_id=cid,
@@ -2644,7 +2645,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
           "confidence": 0.9}],
@@ -2661,7 +2662,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
 
     calls = {"n": 0}
 
@@ -2740,7 +2741,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         fid, "mammal2.jpg", ".jpg", 1000, 2.0,
         timestamp="2026-04-16T11:00:00", width=800, height=600,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         other_pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
@@ -2751,7 +2752,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2764,15 +2765,15 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
     )
 
     captured = {}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
-    def _spy(photo_ids=None):
+    def _spy(db, photo_ids=None):
         captured["photo_ids"] = (
             set(photo_ids) if photo_ids is not None else None
         )
-        return orig(photo_ids=photo_ids)
+        return orig(db, photo_ids=photo_ids)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(
         db, config={"eye_detect_enabled": True}, collection_id=cid,
@@ -2835,7 +2836,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         width=img_w, height=img_h,
     )
 
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.125, "y": 0.167, "w": 0.75, "h": 0.667},
           "confidence": 0.95}],
@@ -2849,7 +2850,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         detector_model="MegaDetector",
         prompt=(0.125, 0.167, 0.75, 0.667),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     db.predictions.add(
         det_ids[0],
         species="Vulpes vulpes",
@@ -2940,7 +2941,7 @@ def test_eye_stage_gate1_failure_does_not_stamp_fingerprint(tmp_path, monkeypatc
     )
 
     # Photo must still surface as a candidate for the next stage run.
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert any(r["id"] == pid for r in rows)
 
     # Second pass: lower the gate. Now the model runs and writes eye fields.
@@ -2988,7 +2989,7 @@ def test_eye_stage_unrouted_taxonomy_does_not_stamp_fingerprint(tmp_path, monkey
         "the routing map / taxonomy data can be extended later and the "
         "photo must remain eligible to re-run then."
     )
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert any(r["id"] == pid for r in rows)
 
 
@@ -3021,7 +3022,7 @@ def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
     ).fetchone()
     assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION
     # And the photo is no longer eligible on the next selection pass.
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert not any(r["id"] == pid for r in rows)
 
 
@@ -3051,8 +3052,8 @@ def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatc
     # photo to include BOTH that detection AND a second, lower-confidence
     # one on a distinct box; save_detections replaces the whole set for
     # (photo, model), so we must pass both dicts in a single call.
-    existing_det = db.get_detections(pid)[0]
-    det_ids = db.save_detections(
+    existing_det = detection_store.get_detections(db, pid)[0]
+    det_ids = db.detections.save(
         pid,
         [
             {"box": {k: existing_det["box_" + k] for k in "xywh"},
@@ -3086,7 +3087,7 @@ def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatc
     db.conn.commit()
 
     # Sanity check: the eye stage sees the FIRST detection's box.
-    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    queued = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])
     assert queued and queued[0]["box_x"] == existing_det["box_x"]
 
     good = [
@@ -3123,7 +3124,7 @@ def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypat
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
 
-    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    queued = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])
     assert queued, "fixture must satisfy the worklist"
     row = queued[0]
 
@@ -3159,8 +3160,8 @@ def test_eye_stage_rejects_other_detector_with_identical_box(tmp_path, monkeypat
 
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
-    row = db.list_photos_for_eye_keypoint_stage([pid])[0]
-    new_id = db.write_detection_batch(pid, "other-detector", [{
+    row = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])[0]
+    new_id = detection_store.write_detection_batch(db, pid, "other-detector", [{
         "box": {k: row["box_" + k] for k in "xywh"},
         "confidence": .99, "category": "animal",
     }])[0]
@@ -3270,11 +3271,11 @@ def test_eye_stage_refreshes_mask_path_under_photo_lock(tmp_path, monkeypatch):
 
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
-    eligible = [dict(row) for row in db.list_photos_for_eye_keypoint_stage()]
+    eligible = [dict(row) for row in subject_masks.list_photos_for_eye_keypoint_stage(db)]
     eligible[0]["mask_path"] = str(tmp_path / "removed-predecessor.png")
     monkeypatch.setattr(
-        db, "list_photos_for_eye_keypoint_stage",
-        lambda **_kwargs: eligible,
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **_kwargs: eligible,
     )
     lock_events = []
 
@@ -3396,7 +3397,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
 
     # Save two boxes globally: one high-conf (surfaces at default threshold),
     # one low-conf (only surfaces when the workspace lowers its threshold).
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
          "confidence": 0.05, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3},
@@ -3909,13 +3910,13 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
                            timestamp=(base+timedelta(seconds=offset)).isoformat())
         ids.append(pid)
         middle = i == 11
-        did = db.write_detection_batch(pid, 'megadetector-v6', [{
+        did = detection_store.write_detection_batch(db, pid, 'megadetector-v6', [{
             'box': {'x':0.44,'y':0.45,'w':0.15,'h':0.2},
             'confidence':0.06396484375 if middle else 0.617 if i > 11 else 0.224,
             'category':'animal',
         }])[0]
         if middle:
-            did = db.write_detection_batch(pid, 'full-image', [{
+            did = detection_store.write_detection_batch(db, pid, 'full-image', [{
                 'box':{'x':0,'y':0,'w':1,'h':1},'confidence':0,'category':'animal',
             }])[0]
         if middle:
@@ -3937,7 +3938,7 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
         assert [e['photo_count'] for e in after] == [14]
         assert after[0]['species'][0] == 'Common Yellowthroat'
         assert any(t['decision'] == 'kept_weak_detection' for t in after[0]['trace'])
-        assert all(not db.keywords.get_for_photo(pid) for pid in ids)
+        assert all(not db.photo_keywords.get_for_photo(pid) for pid in ids)
         # A newer label set contradicting the anchors must supersede the
         # matching old fallback. Explicit fingerprint selection still works.
         db.predictions.add(fallback_detection_id, 'Song Sparrow', 0.99, 'BioCLIP-2.5',
@@ -3965,12 +3966,12 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detecto
         pid = db.add_photo(fid, f'{i}.jpg', '.jpg', 100, 1,
                            timestamp=f'2026-10-03T09:10:0{i}')
         ids.append(pid)
-        did = db.write_detection_batch(pid, 'megadetector-v6', [{
+        did = detection_store.write_detection_batch(db, pid, 'megadetector-v6', [{
             'box': {'x': .4, 'y': .4, 'w': .2, 'h': .2},
             'confidence': .02 if i == 1 else .8, 'category': 'animal',
         }])[0]
         if i == 1:
-            did = db.write_detection_batch(pid, 'full-image', [{
+            did = detection_store.write_detection_batch(db, pid, 'full-image', [{
                 'box': {'x': 0, 'y': 0, 'w': 1, 'h': 1},
                 'confidence': 0, 'category': 'animal',
             }])[0]

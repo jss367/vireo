@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from resource_ledger import ResourceWaitCancelled
+from services import detection_store
 
 BOX = {"x": 0, "y": 0, "w": 1, "h": 1}
 
@@ -124,7 +125,7 @@ def test_cancelled_reclassify_keeps_unreached_photos_predictions(db, tmp_path):
 
     photos = _add_photos(db, 2)
     for photo in photos:
-        det = db.save_detections(
+        det = db.detections.save(
             photo["id"],
             [{"box": BOX, "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
@@ -186,7 +187,7 @@ def test_summary_counts_match_score_skips_without_going_negative(db, tmp_path):
     photos = _add_photos(db, 3)
     detection_map = {}
     for photo in photos:
-        det = db.save_detections(
+        det = db.detections.save(
             photo["id"],
             [{"box": BOX, "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
@@ -354,7 +355,7 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
         for r in raw
     }
     assert models == {"megadetector-v6"}
-    assert [d["detector_model"] for d in db.get_detections(first, min_conf=0)] == [
+    assert [d["detector_model"] for d in detection_store.get_detections(db, first, min_conf=0)] == [
         "megadetector-v6"
     ]
 
@@ -434,7 +435,7 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
     photos = _add_photos(db, 2)
     stored = {}
     for photo in photos:
-        det = db.save_detections(
+        det = db.detections.save(
             photo["id"],
             [{"box": BOX, "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
@@ -488,7 +489,7 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
         # No synthetic full-image anchor was created.
         assert [
             d["detector_model"]
-            for d in db.get_detections(photo["id"], min_conf=0)
+            for d in detection_store.get_detections(db, photo["id"], min_conf=0)
         ] == ["megadetector-v6"]
         # The other workspace's fingerprint on the same box survives.
         assert db.conn.execute(
@@ -531,7 +532,7 @@ def test_classify_photos_stops_cleanly_on_cancel_during_flush(db, tmp_path):
     photos = _add_photos(db, classify_job._BATCH_SIZE + 3)
     detection_map = {}
     for photo in photos:
-        det = db.save_detections(
+        det = db.detections.save(
             photo["id"],
             [{"box": BOX, "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
@@ -586,7 +587,7 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
 
     photos = _add_photos(db, 1)
     photo = photos[0]
-    full_det = db.save_detections(
+    full_det = db.detections.save(
         photo["id"],
         [{"box": BOX, "confidence": 0, "category": "animal"}],
         detector_model="full-image",
@@ -639,5 +640,5 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
     assert _prediction_count(db, photo["id"]) == 0
     assert sorted({
         d["detector_model"]
-        for d in db.get_detections(photo["id"], min_conf=0)
+        for d in detection_store.get_detections(db, photo["id"], min_conf=0)
     }) == ["megadetector-v6"]

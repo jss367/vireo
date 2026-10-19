@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
+from services import detection_store, stage_counts, subject_masks
 from testing.waits import synchronization_timeout
 
 
@@ -601,14 +602,14 @@ def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
     by_name = {p["filename"]: p["id"] for p in photos}
     model_name = "test-clip"
 
-    db.upsert_photo_embedding(
-        by_name["bird1.jpg"], model_name, np.array([0.95, 0.0], dtype=np.float32).tobytes()
+    detection_store.upsert_photo_embedding(
+        db, by_name["bird1.jpg"], model_name, np.array([0.95, 0.0], dtype=np.float32).tobytes()
     )
-    db.upsert_photo_embedding(
-        by_name["bird2.jpg"], model_name, np.array([0.8, 0.0], dtype=np.float32).tobytes()
+    detection_store.upsert_photo_embedding(
+        db, by_name["bird2.jpg"], model_name, np.array([0.8, 0.0], dtype=np.float32).tobytes()
     )
-    db.upsert_photo_embedding(
-        by_name["bird3.jpg"], model_name, np.array([0.1, 0.0], dtype=np.float32).tobytes()
+    detection_store.upsert_photo_embedding(
+        db, by_name["bird3.jpg"], model_name, np.array([0.1, 0.0], dtype=np.float32).tobytes()
     )
 
     import models
@@ -689,7 +690,7 @@ def test_api_photos_includes_all_detections(app_and_db):
     app, db = app_and_db
     photos = db.photos.list_page()
     target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
-    db.save_detections(target['id'], [
+    db.detections.save(target['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
@@ -723,7 +724,7 @@ def test_api_photos_detections_honor_workspace_threshold(app_and_db):
     target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
 
     # Save two boxes: one above the default 0.2 threshold, one below it.
-    db.save_detections(target['id'], [
+    db.detections.save(target['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")
@@ -1402,7 +1403,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
             ),
         )
         db.photos.update_quality(pid, subject_size=0.1)
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             pid,
             [{"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9}],
             detector_model="megadetector-v6",
@@ -1688,8 +1689,8 @@ def test_api_photos_geo_species_filter(app_and_db):
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE filename IN ('bird1.jpg','bird3.jpg')")
     db.conn.commit()
     # Add detections then predictions
-    det1 = db.save_detections(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
-    det3 = db.save_detections(3, [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}], detector_model="MDV6")
+    det1 = db.detections.save(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    det3 = db.detections.save(3, [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}], detector_model="MDV6")
     db.predictions.add(det1[0], 'Cardinal', 0.9, 'bioclip')
     db.predictions.add(det3[0], 'Sparrow', 0.8, 'bioclip')
     preds = db.predictions.get_rows(photo_ids=[1, 3])
@@ -1709,7 +1710,7 @@ def test_api_species_list(app_and_db):
     """GET /api/species returns accepted species from geolocated photos."""
     app, db = app_and_db
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=1")
-    det_ids = db.save_detections(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    det_ids = db.detections.save(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Cardinal', 0.9, 'bioclip')
     preds = db.predictions.get_rows(photo_ids=[1])
     db.accept_prediction(preds[0]['id'])
@@ -3648,6 +3649,66 @@ def test_original_serves_post_upgrade_working_copy_without_reextracting(app_and_
     assert resp.status_code == 200
     with open(wc_path, "rb") as f:
         assert resp.data == f.read()
+
+
+def test_freshly_extracted_original_carries_the_warm_cache_validators(
+    app_and_db, tmp_path,
+):
+    """The cold, just-extracted ``/original`` sends ETag and Last-Modified.
+
+    Regression: the cacheable cold response was sent from the file handle
+    opened under the publication guard, so Flask had no path to derive
+    validators from and sent neither, while every later (warm) request for
+    the same file carried both. A browser could not revalidate the first
+    copy it got. The cold validators must equal the warm ones, so a
+    revalidation of the first response is a 304.
+    """
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.photos.list_page()[0]
+    photo_id = photo["id"]
+    source_dir = tmp_path / "cold-validators"
+    source_dir.mkdir()
+    Image.new("RGB", (640, 480), color=(40, 50, 60)).save(
+        source_dir / "source.tiff", "TIFF",
+    )
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(source_dir), photo["folder_id"]),
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.tiff', extension='.tiff', width=640,
+               height=480, working_copy_path=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    cold = client.get(f"/photos/{photo_id}/original")
+    assert cold.status_code == 200
+    cold_body = cold.data
+    cold.close()
+    assert db.photos.get(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
+
+    warm = client.get(f"/photos/{photo_id}/original")
+    assert warm.status_code == 200
+    assert warm.data == cold_body
+    warm.close()
+    assert warm.headers.get("ETag")
+    assert warm.headers.get("Last-Modified")
+
+    assert cold.headers.get("ETag") == warm.headers["ETag"]
+    assert cold.headers.get("Last-Modified") == warm.headers["Last-Modified"]
+
+    revalidated = client.get(
+        f"/photos/{photo_id}/original",
+        headers={"If-None-Match": cold.headers["ETag"]},
+    )
+    assert revalidated.status_code == 304
+    revalidated.close()
 
 
 def test_original_serves_native_jpeg_directly(app_and_db, tmp_path):
@@ -8720,11 +8781,11 @@ def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
         (f"{photo_id}.jpg", photo_id),
     )
     db.conn.commit()
-    assert db.count_photos_missing_thumb()["pending"] == 0
+    assert stage_counts.count_photos_missing_thumb(db)["pending"] == 0
 
     resp = client.post("/api/storage/clear", json={"type": "thumbnails"})
     assert resp.status_code == 200
-    assert db.count_photos_missing_thumb()["pending"] == 1
+    assert stage_counts.count_photos_missing_thumb(db)["pending"] == 1
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
     ).fetchone()
@@ -11184,7 +11245,7 @@ def test_api_photo_masks_lists_variants_and_active(app_and_db):
 
     _seed_mask(db, masks_dir, pid, "sam2-small")
     _seed_mask(db, masks_dir, pid, "sam2-large")
-    db.set_active_mask_variant(pid, "sam2-large")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
     client = app.test_client()
     resp = client.get(f"/api/photos/{pid}/masks")
@@ -11319,7 +11380,7 @@ def test_legacy_serve_mask_falls_back_to_active_variant(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _seed_mask(db, masks_dir, pid, "sam2-small", body=b"ACTIVEPNG")
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     # No literal `{pid}.png` on disk.
     assert not _os.path.exists(_os.path.join(masks_dir, f"{pid}.png"))
 
@@ -11342,7 +11403,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
     old_path = _seed_mask(
         db, masks_dir, pid, "sam2-small", body=b"PREDECESSOR",
     )
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     new_path = _os.path.join(masks_dir, f"{pid}.sam2-small.next.png")
     with open(new_path, "wb") as handle:
         handle.write(b"CURRENT")
@@ -11548,7 +11609,7 @@ def test_api_detections_rejects_cross_workspace_photo(app_and_db):
     """GET /api/detections/<id> must 404 for photos outside the workspace."""
     app, db = app_and_db
     hidden_pid = _add_other_workspace_photo(db)
-    db.save_detections(hidden_pid, [
+    db.detections.save(hidden_pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -11688,7 +11749,7 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
         "megadetector-v6",
         (0.0, 0.0, 0.5, 1.0),
     )
-    db.set_active_mask_variant(photo_id, "sam2-small")
+    subject_masks.set_active_mask_variant(db, photo_id, "sam2-small")
     return path
 
 
@@ -12235,7 +12296,7 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
         "megadetector-v6",
         (0.0, 0.0, 1.0, 0.5),
     )
-    db.set_active_mask_variant(pid2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid2, "sam2-small")
 
     source_mask = client.post(
         f"/api/photos/{photo_id}/local-mask/snapshot"
@@ -12301,7 +12362,7 @@ def _seed_prediction_confidences(db, by_filename):
         confidence = by_filename.get(photo["filename"])
         if confidence is None:
             continue
-        det_ids = db.save_detections(photo["id"], [{
+        det_ids = db.detections.save(photo["id"], [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
@@ -12401,7 +12462,7 @@ def test_api_photos_query_stack_badge_is_the_score_that_placed_it(app_and_db):
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.01 WHERE id = ?", (lead,))
     for photo_id, confidence in ((cover, 0.2), (lead, 0.9)):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
@@ -12433,7 +12494,7 @@ def test_api_photos_query_unsorted_stack_badge_is_the_covers_own_score(app_and_d
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,))
     for photo_id, confidence in ((cover, 0.2), (other, 0.9)):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
@@ -13588,15 +13649,15 @@ def _seed_browse_summary_analysis(db):
     only the full-image placeholder row."""
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
-    db.save_detections(photos["bird1.jpg"], [
+    db.detections.save(photos["bird1.jpg"], [
         {"box": box, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
     ], detector_model="MDV6")
-    db.save_detections(photos["bird2.jpg"], [
+    db.detections.save(photos["bird2.jpg"], [
         {"box": box, "confidence": 0.9, "category": "person"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")
-    db.save_detections(photos["bird3.jpg"], [
+    db.detections.save(photos["bird3.jpg"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1.0, "category": "animal"},
     ], detector_model="full-image")
     db.model_runs.record_detector_run(photos["bird1.jpg"], "MDV6", 2)
@@ -13707,8 +13768,8 @@ def _seed_embeddings(db, model_name="test-clip"):
         ("bird2.jpg", [0.8, 0.0]),
         ("bird3.jpg", [0.05, 0.0]),
     ]:
-        db.upsert_photo_embedding(
-            photos[name], model_name, np.array(vec, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, photos[name], model_name, np.array(vec, dtype=np.float32).tobytes()
         )
     return photos
 
@@ -13794,7 +13855,7 @@ def test_api_photos_query_visual_stack_never_claims_confidence_order(
         db.conn.execute(
             "UPDATE photos SET quality_score = 0.99 WHERE id = ?", (cover,))
     for photo_id, confidence in ((cover, 0.2), (other, 0.9)):
-        det_ids = db.save_detections(photo_id, [{
+        det_ids = db.detections.save(photo_id, [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
             "confidence": 0.9, "category": "animal",
         }], detector_model="MDV6")
@@ -14003,8 +14064,8 @@ def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
     app, db = app_and_db
     photos = {p["filename"]: p["id"] for p in db.photos.list_page(sort="name")}
     for name, vec in [("bird1.jpg", [0.95, 0.0]), ("bird2.jpg", [0.8, 0.0])]:
-        db.upsert_photo_embedding(
-            photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
         )
     # bird3 (the only photo in the collection) has no embedding.
     collection_id = db.collections.add(
@@ -14035,7 +14096,7 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
         rows.append(pid)
     vec = np.array([0.5, 0.5], dtype=np.float32).tobytes()
     for pid in rows:
-        db.upsert_photo_embedding(pid, "test-clip", vec)
+        detection_store.upsert_photo_embedding(db, pid, "test-clip", vec)
     pairs = db.masks_features.photos_with_embedding("test-clip", photo_ids=ids)
     assert len(pairs) == 1200
 
@@ -14137,7 +14198,7 @@ def test_api_predictions_accepts_rules(app_and_db):
     from labels_fingerprint import TOL_SENTINEL
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     for name, species in [("bird1.jpg", "Cardinal"), ("bird3.jpg", "Blue Jay")]:
-        det_ids = db.save_detections(photos[name], [
+        det_ids = db.detections.save(photos[name], [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.9, "category": "animal"},
         ], detector_model="test-detector")
@@ -14172,7 +14233,7 @@ def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
     app, db = app_and_db
     from labels_fingerprint import TOL_SENTINEL
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
-    det_ids = db.save_detections(photos["bird1.jpg"], [
+    det_ids = db.detections.save(photos["bird1.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.4, "h": 0.4},
@@ -14216,7 +14277,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
     # bird1 has one prediction (accepted); bird2 has one rejected;
     # bird3 has no predictions at all — the photo-scoped `is not
     # Rejected` filter must include bird1 and bird3 and exclude bird2.
-    det = db.save_detections(photos["bird1.jpg"], [
+    det = db.detections.save(photos["bird1.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="test-detector")
@@ -14224,7 +14285,7 @@ def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_
                       confidence=0.9, model="M1",
                       labels_fingerprint=TOL_SENTINEL)
 
-    det2 = db.save_detections(photos["bird2.jpg"], [
+    det2 = db.detections.save(photos["bird2.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="test-detector")
@@ -14277,7 +14338,7 @@ def test_photos_query_classifier_model_is_not_includes_photos_without_prediction
     app, db = app_and_db
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
 
-    det = db.save_detections(photos["bird1.jpg"], [
+    det = db.detections.save(photos["bird1.jpg"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="test-detector")
@@ -14408,7 +14469,7 @@ def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
     for name, species in [("bird1.jpg", "Cardinal"),
                           ("bird2.jpg", "Sparrow"),
                           ("bird3.jpg", "Blue Jay")]:
-        det_ids = db.save_detections(photos[name], [
+        det_ids = db.detections.save(photos[name], [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.9, "category": "animal"},
         ], detector_model="test-detector")

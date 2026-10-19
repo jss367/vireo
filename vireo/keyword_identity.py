@@ -166,7 +166,7 @@ def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keyw
     }
     blocked_paths, blocked_names = set(), set()
     if merges:
-        tagged = db.keywords.get_for_photo(photo_id)
+        tagged = db.photo_keywords.get_for_photo(photo_id)
         tagged_ids = {k['id'] for k in tagged}
         tagged_names = {keyword_match_key(k['name']) for k in tagged}
         paths = keyword_paths(db.keyword_merges.tree_rows())
@@ -272,7 +272,7 @@ def validate_import_locations(db, photo_id, flat_keywords, hierarchical_keywords
 
 
 def grouped_keywords(db):
-    rows = [dict(r) for r in db.keywords.list_all()]
+    rows = [dict(r) for r in db.keyword_tree.list_all()]
     identities = {r['id']: r['identity'] for r in db.keyword_merges.identities()}
     paths = keyword_paths(rows)
     groups = defaultdict(list)
@@ -308,7 +308,7 @@ def location_candidates(db):
     rows = [dict(r) for r in db.keyword_merges.candidate_rows()]
     paths = keyword_paths(rows)
     by_id = {r['id']: r for r in rows}
-    visible = {r['id'] for r in db.keywords.get_tree()}
+    visible = {r['id'] for r in db.keyword_tree.get_tree()}
     parents = {r['parent_id'] for r in rows}
     children = defaultdict(list)
     for row in rows:
@@ -369,7 +369,7 @@ def reconcile_location(db, source_id, target_id):
         )
         # No children are eligible, so this cannot move an imported subtree.
         # The shared merger preserves provenance, pending edits and history.
-        affected = db.keywords.photo_workspaces_tagged_with(source_id)
+        affected = db.photo_keywords.photo_workspaces_tagged_with(source_id)
         db._merge_keyword_into(source_id, target_id)
         for row in affected:
             db.remove_pending_changes(row['photo_id'], 'location',
@@ -1097,7 +1097,7 @@ def preview_keyword_merge(db, keyword_ids, target_id, overrides=None):
     """
     overrides = _validated_merge_overrides(keyword_ids, target_id, overrides)
     selected = set(keyword_ids)
-    visible = {r['id'] for r in db.keywords.get_tree()}
+    visible = {r['id'] for r in db.keyword_tree.get_tree()}
     if not selected <= visible:
         raise ValueError('A selected keyword is no longer available in this workspace. Refresh the list.')
     rows = [dict(r) for r in db.keyword_merges.all_rows()]
@@ -1226,7 +1226,7 @@ def _merge_sources_into_target(db, preview, target_id, ambiguous_keys, live_owne
     affected = []
     for source in preview['sources']:
         affected.extend((dict(r), source)
-                        for r in db.keywords.photo_workspaces_tagged_with(source['id']))
+                        for r in db.photo_keywords.photo_workspaces_tagged_with(source['id']))
         # Remember every merged path, including same-name leaves under
         # different parents. Existing sidecars/catalogs can retain that
         # hierarchy even after a flat keyword_add has been synchronized.
@@ -1273,7 +1273,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
     # photos, so a photo tagged solely with the retained sibling would
     # otherwise keep stale GPS and location metadata in its sidecar.
     for folded_id in preview.get('metadata_folded_ids', []):
-        for row in db.keywords.photo_workspaces_tagged_with(folded_id):
+        for row in db.photo_keywords.photo_workspaces_tagged_with(folded_id):
             db.remove_pending_changes(row['photo_id'], 'location',
                                       workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective',
@@ -1287,7 +1287,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # survivor) still carry that source's vireo location marker,
         # hierarchy and coordinates in their sidecars, and only a
         # ``location`` resync clears them.
-        for row in db.keywords.photo_workspaces_tagged_with(target_id):
+        for row in db.photo_keywords.photo_workspaces_tagged_with(target_id):
             db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
             db.queue_change(row['photo_id'], 'location', 'effective', workspace_id=row['workspace_id'], _commit=False)
     if (target['type'] == 'location' and resolved['type'] != 'location'
@@ -1299,7 +1299,7 @@ def _queue_merge_location_resyncs(db, preview, target, resolved, target_id):
         # keyword. The sidecar would lose a word the database still
         # assigns. Same case `api_update_keyword` handles for a plain
         # location->non-location retype.
-        for row in db.keywords.photo_workspaces_tagged_with(target_id):
+        for row in db.photo_keywords.photo_workspaces_tagged_with(target_id):
             db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
                             workspace_id=row['workspace_id'], _commit=False)
     if (target['type'] == 'location') != (resolved['type'] == 'location'):
@@ -1385,7 +1385,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
     """
     if old_name == new_name:
         return
-    rows = db.keywords.photo_workspaces_tagged_with(target_id)
+    rows = db.photo_keywords.photo_workspaces_tagged_with(target_id)
     for row in rows:
         pid, ws = row['photo_id'], row['workspace_id']
         still_used = db.keyword_merges.other_keyword_names_on_photo(pid, target_id)

@@ -62,7 +62,7 @@ def _ids(db, rules, **kwargs):
 
 
 def _prediction(db, photo_id, *, confidence=0.9, taxonomy=None, status="pending"):
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
@@ -1151,7 +1151,7 @@ def test_top_predicted_species_matches_summary(db, folder):
     hawk = _photo(db, folder, "hawk.jpg")
     hidden = _photo(db, folder, "hidden.jpg")
     for pid, floor in [(robin, .95), (hawk, .95), (hidden, .01)]:
-        det = db.save_detections(pid, [
+        det = db.detections.save(pid, [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": floor}
         ], detector_model="test")[0]
         for species, confidence, fingerprint, created in [

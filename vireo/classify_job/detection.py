@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import compute_sharpness, detect_animals, get_primary_detection, log
 from resource_ledger import ResourceWaitCancelled
+from services import detection_store
 
 if TYPE_CHECKING:
     import sqlite3
@@ -29,15 +30,12 @@ if TYPE_CHECKING:
 def _stored_detection_list(db: Database, photo_id: int, min_conf: float | None = None) -> list[DetectionDict]:
     """Return a photo's stored detection rows as ``detection_map`` entries.
 
-    ``min_conf`` is forwarded to ``db.get_detections`` (``None`` means the
+    ``min_conf`` is forwarded to ``detection_store.get_detections`` (``None`` means the
     workspace's ``detector_confidence``). A read failure yields ``[]``.
     """
     try:
-        rows = (
-            db.get_detections(photo_id) if min_conf is None
-            else db.get_detections(photo_id, min_conf=min_conf)
-        )
-    except Exception:
+        rows = detection_store.get_detections(db, photo_id, min_conf=min_conf)
+    except Exception:  # broad: the read also loads config; a failure treats the photo as having no stored boxes
         log.warning(
             "Could not read stored detections for photo %s; treating it as having none",
             photo_id, exc_info=True,
@@ -153,7 +151,7 @@ class _DetectBatchRun:
                 continue
             try:
                 if (photo["id"] in self.already_detected_ids
-                        or self.db.get_detections(photo["id"], min_conf=0)):
+                        or detection_store.get_detections(self.db, photo["id"], min_conf=0)):
                     # Empty and now-subthreshold cached runs still need
                     # to clear outputs from their former primary.
                     self.processed_ids.add(photo["id"])
@@ -202,8 +200,8 @@ class _DetectBatchRun:
         portable_input, portable_photo_hash = self._portable_identity(
             photo, detector_runtime,
         )
-        det_ids = self.db.write_detection_batch(
-            photo["id"], "megadetector-v6", detections,
+        det_ids = detection_store.write_detection_batch(
+            self.db, photo["id"], "megadetector-v6", detections,
             runtime_fingerprint=detector_runtime,
             input_fingerprint=portable_input,
             force_runtime_replace=self.reclassify,
@@ -235,7 +233,7 @@ class _DetectBatchRun:
         # Prefer cached detections from an earlier model in this
         # same pipeline run so that model 2+ is bound to the
         # detection rows just produced, not stale rows from a
-        # prior pipeline pass that db.get_detections() would
+        # prior pipeline pass that detection_store.get_detections() would
         # return when old rows haven't been cleared.
         if self.cached_detections is not None and photo["id"] in self.cached_detections:
             det_list = self.cached_detections[photo["id"]]
@@ -331,8 +329,8 @@ class _DetectBatchRun:
                     },
                     "confidence": row["detector_confidence"],
                     "category": row["category"],
-                } for row in sorted(db.get_detections(
-                    photo["id"], min_conf=0,
+                } for row in sorted(detection_store.get_detections(
+                    db, photo["id"], min_conf=0,
                     detector_model="megadetector-v6",
                 ), key=lambda row: (-row["detector_confidence"], row["id"]))]
                 # Reconstruct the configured ArtifactStore from
@@ -352,7 +350,7 @@ class _DetectBatchRun:
                     normalized_detections,
                     store=_publish_store,
                 )
-        except Exception:
+        except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
             log.warning(
                 "Could not publish portable detector result for photo %s",
                 photo["id"], exc_info=True,
@@ -381,8 +379,8 @@ class _DetectBatchRun:
                     "detector_model": "megadetector-v6",
                 })
         else:
-            for det in self.db.get_detections(
-                photo["id"], min_conf=0,
+            for det in detection_store.get_detections(
+                self.db, photo["id"], min_conf=0,
                 detector_model="megadetector-v6",
             ):
                 det_list.append({
@@ -440,7 +438,7 @@ class _DetectBatchRun:
                 )
             finally:
                 img.close()
-        except Exception:
+        except Exception:  # broad: PIL and the sharpness math raise a wide set; whole-frame sharpness is the fallback
             log.debug(
                 "Subject-region sharpness failed for photo %s; "
                 "using whole-frame sharpness",
@@ -483,7 +481,7 @@ def _detect_batch(
         cached_detections: Optional dict {photo_id: [detection_dicts]}
             produced by a prior model in the same pipeline run. When
             provided and a photo is in already_detected_ids, the cached
-            entries are used instead of db.get_detections() so that
+            entries are used instead of detection_store.get_detections() so that
             model 2+ binds to the exact detection rows from this run,
             not stale rows from a previous pipeline pass.
         vireo_dir: optional path to ~/.vireo/; when set, the subject
@@ -543,7 +541,7 @@ def _detect_batch(
         # entirely, which let the detect stage report success while the
         # batch's remaining photos were silently skipped.
         log.warning("Detection unavailable for batch (non-fatal): %s", e)
-    except Exception:
+    except Exception:  # broad: detection is optional for classify; any failure degrades to full-image classification
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
     run.sync_reclassified_subjects()
@@ -615,7 +613,7 @@ def _analyze_subjects(
                           checkpoint=checkpoint)
         except ResourceWaitCancelled:
             raise
-        except Exception:
+        except Exception:  # broad: per-photo boundary; subject analysis is optional and one photo must not stop the batch
             db.rollback()
             log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
 
@@ -1020,7 +1018,7 @@ def _detect_subjects(
         job["_detect_cancelled"] = True
     except (ImportError, RuntimeError) as e:
         run.report_detection_unavailable(e)
-    except Exception as e:
+    except Exception as e:  # broad: detection is optional for classify; any failure degrades to full-image classification and is reported
         log.warning(
             "Detection failed (non-fatal) — classifying full images", exc_info=True
         )

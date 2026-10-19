@@ -85,13 +85,22 @@ class FeatureReader:
         return self.require_workspace_id()
 
     @property
-    def keywords(self):
-        """``db.keywords`` as the current loader reads it.
+    def photo_species(self):
+        """``db.photo_species`` as the current loader reads it.
 
-        The loader asks ``db.keywords.get_species_for_photos(...)``; the reader
-        answers that one read itself. ``get_species_keywords_for_photos`` stays
-        callable on the reader directly for historical loaders, which called
-        the old ``Database`` wrapper of that name.
+        The loader asks ``db.photo_species.get_species_for_photos(...)``; the
+        reader answers that one read itself.
+        """
+        return self
+
+    @property
+    def keywords(self):
+        """``db.keywords`` as historical loaders read it.
+
+        Loaders before the keyword-repository split asked
+        ``db.keywords.get_species_for_photos(...)``, and older ones called the
+        ``Database`` wrapper ``get_species_keywords_for_photos``, which stays
+        callable on the reader directly.
         """
         return self
 
@@ -109,6 +118,21 @@ class FeatureReader:
     def get_meta(self, key):
         """Support historical loaders, which called the old ``Database`` wrapper."""
         return self.meta.get(key)
+
+    @property
+    def detections(self):
+        """``db.detections`` as the current loader reads it.
+
+        ``services.detection_store.get_detections_for_photos`` resolves the
+        floor and asks ``db.detections.get_for_photos(...)``; the reader
+        answers that one read itself. ``get_detections_for_photos`` stays
+        callable on the reader directly for historical loaders, which called
+        the old ``Database`` method of that name.
+        """
+        return self
+
+    def get_for_photos(self, photo_ids, min_conf, detector_model=None):
+        return self.get_detections_for_photos(photo_ids, min_conf, detector_model)
 
     def get_detections_for_photos(self, photo_ids, min_conf, detector_model=None):
         result = defaultdict(list)

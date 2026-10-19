@@ -115,8 +115,8 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         photos = db.photos.get_by_ids(batch)
         recipes = db.edits.get_photo_recipes(batch)
         exif = _get_photo_exif_data(db, batch)
-        keywords = db.keywords.get_for_photos(batch)
-        species = db.keywords.get_species_for_photos(batch, include_identities=True)
+        keywords = db.photo_keywords.get_for_photos(batch)
+        species = db.photo_species.get_species_for_photos(batch, include_identities=True)
         locations = db.locations.get_effective(
             batch, verify_workspace=False,
         ) if include_locations else {}
@@ -226,7 +226,7 @@ def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
                     record["image"] = path
                     images[pid] = path
                     exported += 1
-                except Exception as exc:
+                except Exception as exc:  # broad: per-photo boundary; the failure is listed in the export's errors
                     log.warning("Site export failed for photo %s", pid, exc_info=True)
                     (output / path).unlink(missing_ok=True)
                     record["error"] = str(exc)

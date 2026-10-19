@@ -8,6 +8,7 @@ import sys
 import threading
 
 import pytest
+from services import detection_store, subject_masks
 from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -3091,12 +3092,12 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
 
     check = Database(db_path)
     check.set_active_workspace(ws_id)
-    full = check.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
+    full = detection_store.get_detections(
+        check, photo_id, detector_model="full-image", min_conf=0,
     )
     assert len(full) == 1
-    pred = check.get_predictions_for_detection(
-        full[0]["id"],
+    pred = detection_store.get_predictions_for_detection(
+        check, full[0]["id"],
         classifier_model="BioCLIP",
         min_classifier_conf=0,
     )
@@ -3113,8 +3114,8 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     )
     assert second["stages"]["classify"]["full_image_fallbacks"] == 1
     assert classify_calls == [1]
-    full_after = check.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
+    full_after = detection_store.get_detections(
+        check, photo_id, detector_model="full-image", min_conf=0,
     )
     assert [d["id"] for d in full_after] == [full[0]["id"]]
 
@@ -3135,12 +3136,12 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     assert classify_calls == [1, 1]
     verify = Database(db_path)
     verify.set_active_workspace(ws_id)
-    full_reclassified = verify.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
+    full_reclassified = detection_store.get_detections(
+        verify, photo_id, detector_model="full-image", min_conf=0,
     )
     assert [d["id"] for d in full_reclassified] == [full[0]["id"]]
-    pred_after_reclassify = verify.get_predictions_for_detection(
-        full[0]["id"],
+    pred_after_reclassify = detection_store.get_predictions_for_detection(
+        verify, full[0]["id"],
         classifier_model="BioCLIP",
         min_classifier_conf=0,
     )
@@ -3228,7 +3229,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     # marker stays.
     check = Database(db_path)
     check.set_active_workspace(ws_id)
-    full = check.get_detections(photo_id, detector_model="full-image", min_conf=0)
+    full = detection_store.get_detections(check, photo_id, detector_model="full-image", min_conf=0)
     assert len(full) == 1
     full_det_id = full[0]["id"]
     run_key = check.conn.execute(
@@ -3270,8 +3271,8 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     # No predictions materialized behind the measured no-match.
     verify = Database(db_path)
     verify.set_active_workspace(ws_id)
-    preds_after = verify.get_predictions_for_detection(
-        full_det_id,
+    preds_after = detection_store.get_predictions_for_detection(
+        verify, full_det_id,
         classifier_model=run_key["classifier_model"],
         min_classifier_conf=0,
     )
@@ -3317,8 +3318,8 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
         "confidence": 0.02,
         "category": "animal",
     }
-    raw_detection_id = db.write_detection_batch(
-        photo_id, "megadetector-v6", [raw_detection],
+    raw_detection_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [raw_detection],
     )[0]
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
@@ -3428,8 +3429,8 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
         "confidence": 0.95,
         "category": "person",
     }
-    person_det_id = db.write_detection_batch(
-        photo_id, "megadetector-v6", [person_det],
+    person_det_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [person_det],
     )[0]
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
@@ -3545,8 +3546,8 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
         "confidence": 0.03,
         "category": "animal",
     }
-    raw_detection_id = db.write_detection_batch(
-        photo_id, "megadetector-v6", [raw_detection],
+    raw_detection_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6", [raw_detection],
     )[0]
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
@@ -3757,7 +3758,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     get_existing_detection_photo_ids() before the model loop.  When model 1
     ran with reclassify=True but did NOT produce a detection for a photo that
     already had a prior-run detection row, model 2 (reclassify=False) still
-    found that photo in already_detected and called db.get_detections(),
+    found that photo in already_detected and called detection_store.get_detections(),
     binding its predictions to outdated detection_ids.
     """
     import json
@@ -3774,7 +3775,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -3847,7 +3848,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
 def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     """_detect_batch must use cached_detections when provided instead of
-    calling db.get_detections(), so model 2+ in a multi-model reclassify run
+    calling detection_store.get_detections(), so model 2+ in a multi-model reclassify run
     bind predictions to the detection rows model 1 produced in *this* run
     rather than stale rows from a prior pipeline pass.
 
@@ -3884,7 +3885,7 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     )
 
     assert db_called["n"] == 0, (
-        "db.get_detections() must NOT be called when cached_detections "
+        "detection_store.get_detections() must NOT be called when cached_detections "
         "already has an entry for the photo."
     )
     assert det_map.get(42) == cached_det, (
@@ -4023,7 +4024,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     folder = db.add_folder(folder_path)
     photo = db.add_photo(folder, "bird.jpg", ".jpg", 1000, 1)
     _drop_jpeg(folder_path, "bird.jpg")
-    detection = db.save_detections(photo, [{
+    detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -4034,7 +4035,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
     monkeypatch.setattr(classifier, "Classifier", lambda *a, **k: object())
     monkeypatch.setattr(classify_job, "_detect_batch", lambda photos, *a, **k: (
-        {p["id"]: [{**dict(d), "confidence": d["detector_confidence"]} for d in db.get_detections(p["id"])] for p in photos}, len(photos), {p["id"] for p in photos},
+        {p["id"]: [{**dict(d), "confidence": d["detector_confidence"]} for d in detection_store.get_detections(db, p["id"])] for p in photos}, len(photos), {p["id"] for p in photos},
     ))
     monkeypatch.setattr(classify_job, "_prepare_image", lambda *a, **k: (
         Image.new("RGB", (100, 100)), folder_path, os.path.join(folder_path, "bird.jpg"),
@@ -4100,8 +4101,8 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
-        db.write_detection_batch(
-            photo_id,
+        detection_store.write_detection_batch(
+            db, photo_id,
             "megadetector-v6",
             [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -4144,8 +4145,8 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
 
     assert ("bird1.jpg", 0.18) in captured
     assert [name for name, _ in captured].count("bird1.jpg") == 1
-    assert db.get_detections(
-        photo_ids[1], detector_model="full-image", min_conf=0,
+    assert detection_store.get_detections(
+        db, photo_ids[1], detector_model="full-image", min_conf=0,
     ) == []
 
 
@@ -4176,7 +4177,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     _drop_jpeg(folder_path, "test.jpg")
 
     # Prior-run detection row (e.g. a prior false positive).
-    prior_det_ids = db.save_detections(
+    prior_det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -4220,7 +4221,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     # future non-reclassify runs don't reuse it via the already-detected path.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
-    remaining = verify_db.get_detections(photo_id)
+    remaining = detection_store.get_detections(verify_db, photo_id)
     assert remaining == [], (
         f"Stale prior-run detection rows must be purged during reclassify but "
         f"db.get_detections({photo_id}) returned {remaining!r}. "
@@ -4259,7 +4260,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     _drop_jpeg(folder_path, "test.jpg")
 
     box = {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}
-    prior = db.save_detections(
+    prior = db.detections.save(
         photo_id,
         [{"box": box, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
@@ -4277,8 +4278,8 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
                           cached_detections=None, vireo_dir=None):
         dmap = {}
         for p in batch:
-            ids = db_.write_detection_batch(
-                p["id"], "megadetector-v6",
+            ids = detection_store.write_detection_batch(
+                db_, p["id"], "megadetector-v6",
                 [{"box": box, "confidence": 0.9, "category": "animal"}],
             )
             dmap[p["id"]] = [{
@@ -4314,7 +4315,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
 
     verify = Database(db_path)
     verify.set_active_workspace(ws_id)
-    assert verify.get_detections(photo_id) != [], (
+    assert detection_store.get_detections(verify, photo_id) != [], (
         "re-detected detection (same box → same content id) must survive "
         "reclassify, not be purged as 'stale'"
     )
@@ -4355,7 +4356,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     # Simulate a prior run where MegaDetector scanned the photo and found
     # NOTHING — there are no detection rows, but detector_runs records the
     # scan so the next pipeline pass can skip re-invoking the detector.
-    db.save_detections(photo_id, [], detector_model="megadetector-v6")
+    db.detections.save(photo_id, [], detector_model="megadetector-v6")
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=0)
 
     col_id = db.collections.add(
@@ -4365,11 +4366,11 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
-    # Remove the legacy shim so the pipeline must call
-    # get_detector_run_photo_ids directly. If pipeline still uses the
-    # legacy name (via getattr) it will fall through to the default
-    # `lambda: set()` and miss our empty-scene photo.
-    monkeypatch.delattr(Database, "get_existing_detection_photo_ids")
+    # The legacy get_existing_detection_photo_ids shim is gone, so the
+    # pipeline must call get_detector_run_photo_ids directly. If it still
+    # looked the legacy name up (via getattr) it would fall through to the
+    # default `lambda: set()` and miss our empty-scene photo.
+    assert not hasattr(Database, "get_existing_detection_photo_ids")
 
     # Capture what already_detected_ids the pipeline passes to _detect_batch.
     # If the pipeline seeds correctly from get_detector_run_photo_ids, our
@@ -4465,13 +4466,13 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     _drop_jpeg(folder_path, "photo2.jpg")
 
     # Give each photo a prior-run detection row.
-    prior_det1 = db.save_detections(
+    prior_det1 = db.detections.save(
         photo1_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    prior_det2 = db.save_detections(
+    prior_det2 = db.detections.save(
         photo2_id,
         [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
           "confidence": 0.8, "category": "animal"}],
@@ -4532,8 +4533,8 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
 
-    remaining1 = verify_db.get_detections(photo1_id)
-    remaining2 = verify_db.get_detections(photo2_id)
+    remaining1 = detection_store.get_detections(verify_db, photo1_id)
+    remaining2 = detection_store.get_detections(verify_db, photo2_id)
 
     # No model ran to completion (abort fired before classify could store
     # predictions), so neither photo's prior row may be purged — otherwise
@@ -4586,13 +4587,13 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     _drop_jpeg(folder_path, "photo1.jpg")
     _drop_jpeg(folder_path, "photo2.jpg")
 
-    prior_det1 = db.save_detections(
+    prior_det1 = db.detections.save(
         photo1_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )
-    prior_det2 = db.save_detections(
+    prior_det2 = db.detections.save(
         photo2_id,
         [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
           "confidence": 0.8, "category": "animal"}],
@@ -4641,8 +4642,8 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
 
-    remaining1 = verify_db.get_detections(photo1_id)
-    remaining2 = verify_db.get_detections(photo2_id)
+    remaining1 = detection_store.get_detections(verify_db, photo1_id)
+    remaining2 = detection_store.get_detections(verify_db, photo2_id)
 
     assert remaining1 == [], (
         f"photo1's per-photo iteration completed in _detect_batch; its stale "
@@ -4681,7 +4682,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -4705,7 +4706,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
                           cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
-            existing = db_.get_detections(p["id"])
+            existing = detection_store.get_detections(db_, p["id"])
             det_map[p["id"]] = [{
                 "id": d["id"],
                 "box_x": d["box_x"], "box_y": d["box_y"],
@@ -4860,7 +4861,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 3000 + i, 3_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        det_ids = db.save_detections(
+        det_ids = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -4898,7 +4899,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
                           cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
-            existing = db_.get_detections(p["id"])
+            existing = detection_store.get_detections(db_, p["id"])
             det_map[p["id"]] = [{
                 "id": d["id"],
                 "box_x": d["box_x"], "box_y": d["box_y"],
@@ -5008,7 +5009,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        det_ids = db.save_detections(
+        det_ids = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -5032,7 +5033,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
                           cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
-            existing = db_.get_detections(p["id"])
+            existing = detection_store.get_detections(db_, p["id"])
             det_map[p["id"]] = [{
                 "id": d["id"],
                 "box_x": d["box_x"], "box_y": d["box_y"],
@@ -5172,7 +5173,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 2000 + i, 2_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -5192,7 +5193,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
                           cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
-            existing = db_.get_detections(p["id"])
+            existing = detection_store.get_detections(db_, p["id"])
             det_map[p["id"]] = [{
                 "id": d["id"],
                 "box_x": d["box_x"], "box_y": d["box_y"],
@@ -5316,7 +5317,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "photo.jpg", ".jpg", 2000, 2_000_000.0)
     _drop_jpeg(folder_path, "photo.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -5334,7 +5335,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
                           cached_detections=None, vireo_dir=None):
         det_map = {}
         for p in batch:
-            existing = db_.get_detections(p["id"])
+            existing = detection_store.get_detections(db_, p["id"])
             det_map[p["id"]] = [{
                 "id": d["id"],
                 "box_x": d["box_x"], "box_y": d["box_y"],
@@ -5799,7 +5800,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     # Persist a real detection row for photo_with_det so det_map carries a
     # valid DB id the pipeline can bind predictions to.
-    real_det_ids = db.save_detections(
+    real_det_ids = db.detections.save(
         photo_with_det,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.95, "category": "animal"}],
@@ -5957,7 +5958,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
 
     # Simulate a prior standalone classify run that inserted a full-image
     # detection anchor for this photo.
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0, "category": "animal"}],
@@ -6060,7 +6061,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     # Real MegaDetector hit, but at confidence 0.05 — well below the default
     # 0.2 detector_confidence threshold. The detection row is real, but
     # get_detections() filters it out at read time.
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 100, "h": 100},
           "confidence": 0.05, "category": "animal"}],
@@ -6146,7 +6147,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     # NOT fire.
     masked_id = db.add_photo(folder_id, "masked.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "masked.jpg")
-    db.save_detections(
+    db.detections.save(
         masked_id,
         [{"box": {"x": 0, "y": 0, "w": 100, "h": 100},
           "confidence": 0.9, "category": "animal"}],
@@ -6160,7 +6161,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     # Photo B: no mask, only sub-threshold detection → should be flagged.
     lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
-    db.save_detections(
+    db.detections.save(
         lowconf_id,
         [{"box": {"x": 0, "y": 0, "w": 50, "h": 50},
           "confidence": 0.05, "category": "animal"}],
@@ -6246,7 +6247,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
     folder_id = db.add_folder(folder_path)
     lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
-    db.save_detections(
+    db.detections.save(
         lowconf_id,
         [{"box": {"x": 0, "y": 0, "w": 50, "h": 50},
           "confidence": 0.05, "category": "animal"}],
@@ -6338,12 +6339,12 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
 
-    det_p1 = db.save_detections(
+    det_p1 = db.detections.save(
         p1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
     )[0]
-    det_p2 = db.save_detections(
+    det_p2 = db.detections.save(
         p2, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
         detector_model="MegaDetector",
@@ -6604,7 +6605,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
         events.append(("detect", [p["id"] for p in batch]))
         det_map = {}
         for p in batch:
-            det_id = db_.save_detections(
+            det_id = db_.detections.save(
                 p["id"],
                 [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                   "confidence": 0.9, "category": "animal"}],
@@ -6846,7 +6847,7 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -7557,7 +7558,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
         det_map = {}
         processed = set()
         for p in batch:
-            det_ids = db_.save_detections(
+            det_ids = db_.detections.save(
                 p["id"],
                 [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                   "confidence": 0.95, "category": "animal"}],
@@ -8666,8 +8667,8 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
-        detection_id = db.write_detection_batch(
-            photo_id,
+        detection_id = detection_store.write_detection_batch(
+            db, photo_id,
             "megadetector-v6",
             [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -8680,7 +8681,7 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
 
     # The foreign detector outranks MDv6 at the weak floor, but is not
     # eligible for contextual rescue. State must follow the extracted MDv6 box.
-    db.write_detection_batch(photo_ids[1], "other-detector", [{
+    detection_store.write_detection_batch(db, photo_ids[1], "other-detector", [{
         "box": {"x": .6, "y": .2, "w": .2, "h": .3},
         "confidence": .19, "category": "animal",
     }])
@@ -8743,7 +8744,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
             folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i,
         )
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -8849,7 +8850,7 @@ def _add_photo_with_detection(db, folder_id, folder_path, filename):
         folder_id, filename, ".jpg", 1000, 1_000_000.0 + hash(filename) % 1000,
     )
     _drop_jpeg(folder_path, filename)
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -9163,7 +9164,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
         "MegaDetector",
         (0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(cached, sam2_variant)
+    subject_masks.set_active_mask_variant(db, cached, sam2_variant)
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, cached),
@@ -9404,7 +9405,7 @@ def _run_extract_masks_for_test(
         pid = db.add_photo(folder_id, spec["filename"], ".jpg", 1000, 1.0)
         _drop_jpeg(folder_path, spec["filename"])
         x, y, w, h = spec["box"]
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": x, "y": y, "w": w, "h": h},
               "confidence": 0.9, "category": "animal"}],
@@ -9512,7 +9513,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         settings["pipeline"]["sam2_variant"] = "sam2-large"
         cfg.save(settings)
         assert run(False)["quality_input_recipe"] is None
-        db.set_active_mask_variant(ids[0], "sam2-small")
+        subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
         restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
         assert restored[0] == raw_analysis.RECIPE
         restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
@@ -9528,7 +9529,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         settings["pipeline"]["sam2_variant"] = "sam2-large"
         cfg.save(settings)
         run(True)
-        db.set_active_mask_variant(ids[0], "sam2-small")
+        subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
         settings["pipeline"]["sam2_variant"] = "sam2-small"
         cfg.save(settings)
         restored_normal = run(False)
@@ -10446,7 +10447,6 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10455,7 +10455,7 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10477,8 +10477,8 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     # The wrapping stage uses list_photos_for_eye_keypoint_stage to compute
     # `total`. Force a simple list of one photo.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": pid}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": pid}],
     )
     # Stub ensure_keypoint_weights so the auto-download path doesn't try to
     # hit HuggingFace from a unit test. Pretend weights are already there.
@@ -10553,7 +10553,6 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     per-photo Gate 2 check would skip every photo.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10562,7 +10561,7 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10582,8 +10581,8 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     # eye_classifier_conf_gate (0.5) so the conf-gate filter doesn't drop
     # them before _resolve_keypoint_model runs.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1000, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
@@ -10629,7 +10628,6 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     never use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10638,7 +10636,7 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10657,8 +10655,8 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     # (default 0.5) so the conf-gate filter doesn't drop the row before
     # routing.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
@@ -10697,7 +10695,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     variants even though `_resolve_keypoint_model` skips every photo.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10706,7 +10703,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10727,8 +10724,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     # the conf-gate threshold to isolate the routing skip from the
     # confidence skip.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Reptilia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Actinopterygii",
              "species_conf": 0.9},
@@ -10770,7 +10767,6 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10779,7 +10775,7 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10799,8 +10795,8 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     # species_conf above the conf-gate so they reach the download
     # planner.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 2, "taxonomy_class": "Mammalia", "species_conf": 0.9},
@@ -10878,7 +10874,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     """When no photos are eligible (total == 0), the stage must NOT trigger
     a multi-hundred-MB download — gate matches the SAM2/DINOv2 pattern."""
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10887,7 +10882,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10905,8 +10900,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     # Force "no eligible photos" — preflight passes but the eligibility
     # query returns nothing.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [],
     )
     monkeypatch.setattr(
         pipeline_mod, "detect_eye_keypoints_stage",
@@ -10943,7 +10938,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     multi-hundred-MB SuperAnimal weights that no photo can use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10952,7 +10946,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -10969,8 +10963,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     )
     # Default eye_classifier_conf_gate is 0.5; both rows sit below it.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.2},
             {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.4},
         ],
@@ -11011,7 +11005,6 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11020,7 +11013,7 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11037,8 +11030,8 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     )
     # One mammal + one bird so the planner queues both variants.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
@@ -11096,7 +11089,6 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     RuntimeError out of run_pipeline_job for an optional stage.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11105,7 +11097,7 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11121,8 +11113,8 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11216,7 +11208,7 @@ def _run_eye_keypoints_download_failure_through_runner(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11231,8 +11223,8 @@ def _run_eye_keypoints_download_failure_through_runner(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11321,7 +11313,6 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
     from resource_ledger import ResourceWaitCancelled
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -11334,7 +11325,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11350,8 +11341,8 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11446,7 +11437,6 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     wastes bandwidth on a variant that no included photo will use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11455,7 +11445,7 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11475,8 +11465,8 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     # quadruped, but it's deselected so that variant is wasted bandwidth.
     excluded_id = pid + 7
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
             {"id": excluded_id, "taxonomy_class": "Mammalia",
              "species_conf": 0.9},
@@ -11525,7 +11515,6 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
@@ -11537,7 +11526,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11552,8 +11541,8 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     # Use the REAL preflight — the fix must feed it a config where
     # eye_detect_enabled=True regardless of the on-disk setting.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
@@ -11625,7 +11614,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
     folder_id = db.add_folder(folder_path)
     pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -11986,8 +11975,8 @@ def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": 1}, {"id": 2}, {"id": 3},
         ],
     )
@@ -12043,8 +12032,8 @@ def test_detect_eye_keypoints_stage_skips_synthetic_100pct_on_abort(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
     )
     monkeypatch.setattr(
         FolderRepository, "tree",
@@ -12108,8 +12097,8 @@ def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": 1}, {"id": 2}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": 1}, {"id": 2}],
     )
     monkeypatch.setattr(
         FolderRepository, "tree",
@@ -13742,7 +13731,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
         # Pre-seed one detection per photo so the classify loop has a
         # primary detection to classify (and, on run 2, to find cached
         # predictions for). Mirrors the reclassify tests' setup.
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -13763,7 +13752,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
         for p in batch:
             # The classify loop expects plain dicts (the real _detect_batch
             # returns them); sqlite3.Row has no .get.
-            dets = [dict(d) for d in db_.get_detections(p["id"])]
+            dets = [dict(d) for d in detection_store.get_detections(db_, p["id"])]
             if dets:
                 det_map[p["id"]] = dets
         return det_map, 0, {p["id"] for p in batch}
@@ -14680,7 +14669,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -14709,7 +14698,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -14847,7 +14836,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -14876,7 +14865,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15038,7 +15027,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15067,7 +15056,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15214,7 +15203,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15243,7 +15232,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15311,7 +15300,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15340,7 +15329,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15458,7 +15447,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15487,7 +15476,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15655,7 +15644,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
             gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15669,7 +15658,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
             healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15699,7 +15688,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15850,7 +15839,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -15879,7 +15868,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -15967,7 +15956,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
     _drop_jpeg(folder_path, name)
     # Three qualifying animal detections on the same photo — this is what
     # a multi-subject frame looks like to classify.
-    db.save_detections(
+    db.detections.save(
         pid,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
@@ -16001,7 +15990,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -16088,7 +16077,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -16117,7 +16106,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -16254,7 +16243,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
             gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
-        det_ids = db.save_detections(
+        det_ids = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -16269,7 +16258,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
             healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -16313,7 +16302,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -16443,7 +16432,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
     )
     _drop_jpeg(gone_folder_path, "gone.jpg")
-    gone_det_id = db.save_detections(
+    gone_det_id = db.detections.save(
         gone_photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -16454,7 +16443,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
     )
     _drop_jpeg(healthy_folder_path, "healthy.jpg")
-    db.save_detections(
+    db.detections.save(
         healthy_photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -16507,7 +16496,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -16670,7 +16659,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
     )
     _drop_jpeg(gone_folder_path, "gone.jpg")
-    old_gone_det_id = db.save_detections(
+    old_gone_det_id = db.detections.save(
         gone_photo_id,
         [{"box": {"x": 0.05, "y": 0.05, "w": 0.30, "h": 0.30},
           "confidence": 0.9, "category": "animal"}],
@@ -16692,7 +16681,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
     )
     _drop_jpeg(healthy_folder_path, "healthy.jpg")
-    db.save_detections(
+    db.detections.save(
         healthy_photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -16745,7 +16734,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
                     "box_w": d["box_w"], "box_h": d["box_h"],
                     "confidence": d["detector_confidence"],
                     "category": d["category"],
-                } for d in db_.get_detections(p["id"])
+                } for d in detection_store.get_detections(db_, p["id"])
                     if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -16879,7 +16868,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -16908,7 +16897,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -17060,7 +17049,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
     name = "photo0.jpg"
     pid = db.add_photo(folder_id, name, ".jpg", 4000, 4_000_000.0)
     _drop_jpeg(folder_path, name)
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -17089,7 +17078,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -17251,7 +17240,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
             gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -17265,7 +17254,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
             healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -17303,7 +17292,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -17438,7 +17427,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -17467,7 +17456,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -17558,7 +17547,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -17587,7 +17576,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
                 "box_w": d["box_w"], "box_h": d["box_h"],
                 "confidence": d["detector_confidence"],
                 "category": d["category"],
-            } for d in db_.get_detections(p["id"])
+            } for d in detection_store.get_detections(db_, p["id"])
                 if d["detector_model"] != "full-image"]
         return det_map, len(batch), {p["id"] for p in batch}
 
@@ -17681,7 +17670,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
         name = f"photo{i}.jpg"
         pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -17938,7 +17927,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
         "MegaDetector",
         (0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(masked, sam2_variant)
+    subject_masks.set_active_mask_variant(db, masked, sam2_variant)
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, masked),
@@ -18013,7 +18002,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
             "MegaDetector",
             (0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, sam2_variant)
+        subject_masks.set_active_mask_variant(db, pid, sam2_variant)
         db.conn.execute(
             "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
             (dinov2_variant, pid),
@@ -18478,8 +18467,8 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
-        det_id = db.write_detection_batch(
-            pid,
+        det_id = detection_store.write_detection_batch(
+            db, pid,
             "megadetector-v6",
             [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -18556,7 +18545,7 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
     # Between weak_detection_confidence (0.12) and detector_confidence (0.2)
     # — but isolated, so contextual_weak_runs won't surface it and the mask
     # loop would never read it online.
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.15, "category": "animal"}],

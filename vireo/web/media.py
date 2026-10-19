@@ -76,6 +76,7 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from services import detection_store
 from services.original_photo import (
     EditRenderSource,
     OriginalExtraction,
@@ -319,6 +320,36 @@ def _serve_trusted_working_copy(path):
 
     touch_working_copy_access(path)
     return send_file(path, mimetype="image/jpeg")
+
+
+def _send_opened_file(handle, path, mimetype):
+    """``send_file`` an already-open ``handle`` with the validators of ``path``.
+
+    A response sent from a file object carries no ETag or Last-Modified:
+    Werkzeug derives both from a path. Routes that must open the file under
+    a lock (so eviction cannot unlink it before the response has an fd)
+    still owe the client the validators a later ``send_file(path)`` of the
+    same file sends, or the first copy a browser gets can never be
+    revalidated. Build them the way Werkzeug does for a path: Last-Modified
+    is the file's mtime and the ETag is ``"<mtime>-<size>-<adler32 of the
+    path>"``, read from the open handle, so the cold and warm responses
+    for one file agree and a revalidation of either is a 304.
+    """
+    from zlib import adler32
+
+    from flask import current_app, send_file
+
+    stat = os.fstat(handle.fileno())
+    # Flask's send_file joins a path onto the app root before Werkzeug
+    # hashes it; an absolute path is left as it is.
+    sent_path = os.path.join(current_app.root_path, path)
+    check = adler32(sent_path.encode()) & 0xFFFFFFFF
+    return send_file(
+        handle,
+        mimetype=mimetype,
+        etag=f"{stat.st_mtime}-{stat.st_size}-{check}",
+        last_modified=stat.st_mtime,
+    )
 
 def _prepared_full_resolution_render(
     vireo_dir, photo, recipe, file_state=None,
@@ -1073,8 +1104,8 @@ class _ExtractedOriginal:
             # The on-demand route is also a cache writer. Apply the same
             # oldest-first ceiling as scanner/backfill generation. The
             # open fd above pins the rendition against this call's own
-            # enforcement pass too.
-            response = send_file(rendition_fh, mimetype="image/jpeg")
+            # enforcement pass too. Validators are wc_abs's, as a warm hit sends.
+            response = _send_opened_file(rendition_fh, self.extraction.wc_abs, "image/jpeg")
             try:
                 evict_working_copy_cache_if_over_quota(self.db, self.vireo_dir)
             except Exception:
@@ -3083,7 +3114,7 @@ def create_media_blueprint(
 
         # Get primary detection box — global detections table, threshold
         # resolved from workspace-effective config in get_detections.
-        dets = db.get_detections(photo_id)
+        dets = detection_store.get_detections(db, photo_id)
         requested_detection = request.args.get("detection_id")
         if requested_detection is not None:
             try:
@@ -3526,7 +3557,7 @@ def create_media_blueprint(
         box = None
         mask = _load_active_mask(db, photo_id)
         detections = [
-            detection for detection in db.get_detections(photo_id)
+            detection for detection in detection_store.get_detections(db, photo_id)
             if detection["category"] == "animal" and detection["detector_model"] != "full-image"
         ]
         if detections:

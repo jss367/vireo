@@ -16,6 +16,7 @@ import math
 from config import settings_write_lock
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_edit_recipes, attach_species_representatives
+from services import miss_flags
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 
 
@@ -331,8 +332,8 @@ def create_misses_blueprint(
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = [dict(p) for p in db.list_misses(
-                category=category, since=since, photo_ids=photo_ids
+            photos = [dict(p) for p in miss_flags.list_misses(
+                db, category=category, since=since, photo_ids=photo_ids
             )]
             attach_species_representatives(db, photos)
             attach_edit_recipes(db, photos)
@@ -341,9 +342,9 @@ def create_misses_blueprint(
                 response["visual"] = visual_info
             return jsonify(response)
         grouped = {
-            "no_subject": db.list_misses(category="no_subject", since=since, photo_ids=photo_ids),
-            "clipped":    db.list_misses(category="clipped", since=since, photo_ids=photo_ids),
-            "oof":        db.list_misses(category="oof", since=since, photo_ids=photo_ids),
+            "no_subject": miss_flags.list_misses(db, category="no_subject", since=since, photo_ids=photo_ids),
+            "clipped":    miss_flags.list_misses(db, category="clipped", since=since, photo_ids=photo_ids),
+            "oof":        miss_flags.list_misses(db, category="oof", since=since, photo_ids=photo_ids),
         }
         grouped = _attach_miss_edit_recipes(db, grouped)
         if visual_info is not None:
@@ -441,8 +442,8 @@ def create_misses_blueprint(
             photo_ids, _ = _miss_filter_photo_ids(db, body)
         except ValueError as e:
             return json_error(str(e), 400)
-        affected = db.bulk_reject_miss_category(
-            category, since=since, photo_ids=photo_ids
+        affected = miss_flags.bulk_reject_miss_category(
+            db, category, since=since, photo_ids=photo_ids
         )
         if affected:
             items = [
@@ -474,7 +475,7 @@ def create_misses_blueprint(
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
         try:
-            db.clear_miss_flag(photo_id, category)
+            miss_flags.clear_miss_flag(db, photo_id, category)
         except ValueError:
             return jsonify({"error": "photo not in active workspace"}), 404
         return jsonify({"ok": True})

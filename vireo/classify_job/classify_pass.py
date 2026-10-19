@@ -16,6 +16,7 @@ from classify_job.common import _photo_timestamp, load_image, load_working_image
 from classify_job.store_predictions import _cached_prediction_taxonomy
 from keyword_normalization import folded_species_key as _folded_species_key
 from resource_ledger import ResourceWaitCancelled
+from services import detection_store
 
 if TYPE_CHECKING:
     import sqlite3
@@ -266,7 +267,7 @@ def _classify_batch_images(
             raise
         log.warning("Batch classification failed, falling back to single-image", exc_info=True)
         batch_results = None
-    except Exception:
+    except Exception:  # broad: the batch path falls back to per-image classification on any inference failure
         log.warning("Batch classification failed, falling back to single-image", exc_info=True)
         batch_results = None
     if batch_results is None:
@@ -285,7 +286,7 @@ def _classify_batch_images(
                 log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
                 batch_results.append(None)
                 failed += 1
-            except Exception:
+            except Exception:  # broad: per-image boundary; inference raises undocumented errors and one image must not stop the batch
                 log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
                 batch_results.append(None)
                 failed += 1
@@ -295,8 +296,8 @@ def _classify_batch_images(
 def _store_batch_embedding(db: Database, entry: BatchEntry, model_name: str, embedding: np.ndarray) -> None:
     """Persist one classified entry's embedding by photo and by detection."""
     emb_bytes = embedding.tobytes()
-    db.upsert_photo_embedding(
-        entry["photo"]["id"], model_name, emb_bytes,
+    detection_store.upsert_photo_embedding(
+        db, entry["photo"]["id"], model_name, emb_bytes,
     )
     # Also key by detection so multi-subject reruns from
     # cache pick each detection's own vector instead of the
@@ -307,8 +308,8 @@ def _store_batch_embedding(db: Database, entry: BatchEntry, model_name: str, emb
     # reruns even though no fresh inference ran.
     det_id = entry.get("detection_id")
     if det_id is not None:
-        db.upsert_photo_embedding(
-            entry["photo"]["id"], model_name, emb_bytes,
+        detection_store.upsert_photo_embedding(
+            db, entry["photo"]["id"], model_name, emb_bytes,
             variant=f"det:{det_id}",
         )
 
@@ -546,8 +547,8 @@ class _ClassifyPhotosPass:
         run_keys = self._runtime_aware_run_keys(detection_id)
         if (self.model.model_name, self.fp) not in run_keys:
             return False
-        cached = self.db.get_predictions_for_detection(
-            detection_id,
+        cached = detection_store.get_predictions_for_detection(
+            self.db, detection_id,
             classifier_model=self.model.model_name,
             labels_fingerprint=self.fp,
             min_classifier_conf=0,
@@ -726,8 +727,8 @@ class _ClassifyPhotosPass:
         threshold filter would hide it.
         """
         db = self.db
-        existing_full = db.get_detections(
-            photo["id"], detector_model="full-image", min_conf=0,
+        existing_full = detection_store.get_detections(
+            db, photo["id"], detector_model="full-image", min_conf=0,
         )
         if existing_full and not self.reclassify:
             return existing_full[0]["id"]
@@ -753,8 +754,8 @@ class _ClassifyPhotosPass:
         # row without its matching detector_runs row — that torn
         # state would fool the runtime-aware reuse gates into
         # treating the photo as never detected.
-        full_det_ids = db.write_detection_batch(
-            photo["id"], "full-image", full_image_det,
+        full_det_ids = detection_store.write_detection_batch(
+            db, photo["id"], "full-image", full_image_det,
             runtime_fingerprint=full_runtime,
             input_fingerprint=full_input,
         )
@@ -1017,7 +1018,7 @@ def _publish_classifier_runs_for_raw_results(
                     else None
                 ),
             )
-        except Exception:
+        except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
             log.warning(
                 "Could not publish portable classifier result for detection %s",
                 det_id, exc_info=True,

@@ -4,7 +4,7 @@ import {test} from 'node:test';
 import vm from 'node:vm';
 
 const context = vm.createContext({});
-vm.runInContext(readFileSync('vireo/static/duplicates-categories.js', 'utf8'), context);
+vm.runInContext(readFileSync('vireo/static/duplicates/categories.js', 'utf8'), context);
 const categories = context.DuplicateCategories;
 
 function group(paths, overrides = {}) {

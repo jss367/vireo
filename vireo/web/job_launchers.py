@@ -36,6 +36,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
+from services import detection_store, subject_masks
 from services.folder_moves import FolderMoveRequest
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -1766,8 +1767,8 @@ class _MaskExtractionRun:
         photos = []
         for p in coll_photos:
             dets = [
-                d for d in thread_db.get_detections(
-                    p["id"], min_conf=self.min_detector_conf,
+                d for d in detection_store.get_detections(
+                    thread_db, p["id"], min_conf=self.min_detector_conf,
                 )
                 if d["detector_model"] != "full-image"
             ]
@@ -1883,7 +1884,7 @@ class _MaskExtractionRun:
         )
         thread_db.commit_with_retry()
         # A user can change primary after this job was queued.
-        current = [d for d in thread_db.get_detections(photo_id, min_conf=self.min_detector_conf)
+        current = [d for d in detection_store.get_detections(thread_db, photo_id, min_conf=self.min_detector_conf)
                    if d["detector_model"] != "full-image"]
         if not current:
             return False
@@ -2029,8 +2030,8 @@ class _MaskExtractionRun:
             ),
             _commit=False,
         )
-        thread_db.set_active_mask_variant(
-            photo_id, self.sam2_variant, _commit=False,
+        subject_masks.set_active_mask_variant(
+            thread_db, photo_id, self.sam2_variant, _commit=False,
         )
         # Remaining (non-mask) per-photo features still land
         # on the photos row. mask_path / crop_complete /

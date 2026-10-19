@@ -291,6 +291,27 @@ class PhotoVisibilityRepository:
         ).fetchall()
 
 
+def keep_photo_visible_across_folder_change(conn, photo_id, target_folder_id, *, except_workspace):
+    """Grant ``photo_id`` to each workspace that sees it now but has no link
+    to ``target_folder_id``, before the caller moves the row there.
+
+    For a photo row joining a folder that already holds other photos: a
+    photo grant keeps the photo visible without exposing those photos to
+    the workspace, which linking ``target_folder_id`` would. Workspaces that
+    already link the target need no grant. ``except_workspace`` (the one
+    running the move) decides its own scope through its folder links.
+    Caller's transaction; no commit.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO workspace_photos (workspace_id, photo_id) "
+        "SELECT v.workspace_id, v.photo_id FROM photo_workspace_visibility v "
+        "WHERE v.photo_id = ? AND v.workspace_id != ? AND NOT EXISTS ("
+        "SELECT 1 FROM workspace_folders wf "
+        "WHERE wf.folder_id = ? AND wf.workspace_id = v.workspace_id)",
+        (photo_id, except_workspace, target_folder_id),
+    )
+
+
 def remap_photo_visibility(conn, mapping):
     """Keep each workspace's photo-only access when catalog identities fold."""
     for losing, surviving in mapping.items():

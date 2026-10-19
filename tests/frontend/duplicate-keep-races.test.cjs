@@ -51,7 +51,7 @@ function page() {
     refreshDuplicateSummaries() {},
     renderResults() { throw new Error('Stale result cannot own the live page'); },
   });
-  const source = fs.readFileSync(path.join(root, 'vireo/static/duplicates-cleanup.js'), 'utf8');
+  const source = fs.readFileSync(path.join(root, 'vireo/static/duplicates/cleanup.js'), 'utf8');
   const names = ['duplicateFileTrashIsPending', 'updateDuplicateFileTrashCard',
     'prepareDuplicateTrashBatch', 'applyKeptDuplicateCopy', 'keepDuplicateCopy'];
   for (const n of parse(source, {ecmaVersion: 'latest'}).body) {
@@ -59,11 +59,10 @@ function page() {
       vm.runInContext(source.slice(n.start, n.end), c);
     }
   }
-  const restore = fs.readFileSync(path.join(root, 'vireo/static/duplicates-restore.js'), 'utf8');
-  const template = fs.readFileSync(path.join(root, 'vireo/templates/duplicates.html'), 'utf8');
-  const inline = template.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const restore = fs.readFileSync(path.join(root, 'vireo/static/duplicates/restore.js'), 'utf8');
+  const scan = fs.readFileSync(path.join(root, 'vireo/static/duplicates/scan.js'), 'utf8');
   for (const [text, wanted] of [[restore, ['cancelDuplicateLoad', 'prepareDuplicateScan',
-    'duplicateResultsReloadBlocked', 'tryRestoreLastScan']], [inline, ['startScan']]]) {
+    'duplicateResultsReloadBlocked', 'tryRestoreLastScan']], [scan, ['startScan']]]) {
     for (const n of parse(text, {ecmaVersion: 'latest'}).body) {
       if (n.type === 'FunctionDeclaration' && wanted.includes(n.id.name)) {
         vm.runInContext(text.slice(n.start, n.end), c);

@@ -240,7 +240,7 @@ def create_keywords_blueprint(get_db, json_error):
     @blueprint.route("/api/keywords/all")
     def api_all_keywords():
         db = get_db()
-        keywords = db.keywords.list_all()
+        keywords = db.keyword_tree.list_all()
         return jsonify([dict(k) for k in keywords])
 
     @blueprint.route('/api/keywords/identities')
@@ -290,7 +290,7 @@ def create_keywords_blueprint(get_db, json_error):
     @blueprint.route("/api/keywords")
     def api_keywords():
         db = get_db()
-        keywords = db.keywords.get_tree()
+        keywords = db.keyword_tree.get_tree()
         return jsonify([dict(k) for k in keywords])
 
     @blueprint.route("/api/keywords/duplicates")
@@ -306,7 +306,7 @@ def create_keywords_blueprint(get_db, json_error):
         """
         db = get_db()
         ws = db.active_workspace_id
-        dupes = db.keywords.workspace_duplicate_groups(ws)
+        dupes = db.keyword_tree.workspace_duplicate_groups(ws)
         results = []
         for d in dupes:
             # Cleanup keeps the earliest variant; set iteration order must
@@ -315,7 +315,7 @@ def create_keywords_blueprint(get_db, json_error):
             # Count photos per variant within this workspace
             variants = []
             for kid in ids:
-                row = db.keywords.workspace_photo_count(kid, ws)
+                row = db.photo_keywords.workspace_photo_count(kid, ws)
                 if row and row["cnt"] > 0:
                     variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
             if len(variants) > 1:
@@ -326,7 +326,7 @@ def create_keywords_blueprint(get_db, json_error):
     def api_clean_keywords():
         """Merge case-insensitive duplicate keywords."""
         db = get_db()
-        merged = db.keywords.merge_duplicates()
+        merged = db.keyword_tree.merge_duplicates()
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
@@ -341,7 +341,7 @@ def create_keywords_blueprint(get_db, json_error):
         # or retype can merge this row into a normalized same-slot peer, in
         # which case the original id and its photo_keywords rows are gone
         # afterwards (update_keyword returns the surviving id).
-        old_row = db.keywords.rename_state(keyword_id)
+        old_row = db.keyword_tree.rename_state(keyword_id)
         if old_row is None:
             return json_error("keyword not found", 404)
         affected = []
@@ -354,7 +354,7 @@ def create_keywords_blueprint(get_db, json_error):
         # empty list and XMP keeps exporting the old spelling until another
         # edit occurs.
         if body.get("name") or body.get("type"):
-            affected = db.keywords.photo_workspaces_tagged_with(keyword_id)
+            affected = db.photo_keywords.photo_workspaces_tagged_with(keyword_id)
         # Additionally snapshot photos whose SIDECAR LOCATION path would go
         # stale from this update. A location-keyword rename does not just
         # change ``dc:subject`` (the flat leaf, which the ``affected`` set
@@ -373,7 +373,7 @@ def create_keywords_blueprint(get_db, json_error):
             old_row["type"] == "location"
             or (isinstance(body.get("type"), str) and body["type"] == "location")
         ):
-            location_affected = db.keywords.subtree_photo_workspaces(keyword_id)
+            location_affected = db.photo_keywords.subtree_photo_workspaces(keyword_id)
         # Reject '|' in a rename that lands on a location keyword before we
         # ever touch the row (see _location_pipe_rename_error).
         invalid = _location_pipe_rename_error(body, old_row)
@@ -387,7 +387,7 @@ def create_keywords_blueprint(get_db, json_error):
         # Queue sidecar updates only after a successful DB update, using the
         # STORED spelling of the surviving row — update_keyword normalizes
         # the requested name, so it can differ from the raw request value.
-        new_row = db.keywords.rename_state(effective_id)
+        new_row = db.keyword_tree.rename_state(effective_id)
         if (
             old_row is not None and new_row is not None
             and old_row["name"] != new_row["name"]
@@ -409,7 +409,7 @@ def create_keywords_blueprint(get_db, json_error):
         if kw_row is None:
             return json_error("keyword not found", 404)
         if kw_row:
-            affected = db.keywords.photo_workspaces_tagged_with(keyword_id)
+            affected = db.photo_keywords.photo_workspaces_tagged_with(keyword_id)
             for row in affected:
                 queue_keyword_remove(db, row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
             # Deleting a location ancestor detaches its children (they
@@ -427,7 +427,7 @@ def create_keywords_blueprint(get_db, json_error):
             # so the same photo appearing under ``affected`` above is
             # harmless.
             if kw_row["type"] == "location":
-                location_descendants = db.keywords.subtree_photo_workspaces(keyword_id)
+                location_descendants = db.photo_keywords.subtree_photo_workspaces(keyword_id)
                 for row in location_descendants:
                     db.queue_change(
                         row["photo_id"],
@@ -436,7 +436,7 @@ def create_keywords_blueprint(get_db, json_error):
                         workspace_id=row["workspace_id"],
                         _commit=False,
                     )
-        db.keywords.delete(keyword_id)
+        db.keyword_tree.delete(keyword_id)
         return jsonify({"ok": True})
 
     return blueprint

@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from services import detection_store
 
 
 @pytest.fixture
@@ -30,8 +31,8 @@ def sequence_db(tmp_path, monkeypatch):
 
 
 def classify(db, pid, confidence, species="Bluebird", score=0.99, model="megadetector-v6", x=0.2):
-    did = db.write_detection_batch(
-        pid,
+    did = detection_store.write_detection_batch(
+        db, pid,
         model,
         [
             {
@@ -59,7 +60,7 @@ def test_weak_crop_recovers_without_full_image_or_keyword_labels(sequence_db):
     assert middle["subjects"] == []  # does not invent a normal-confidence subject
     assert len(run_grouping(photos)) == 1
     assert db.conn.execute("SELECT * FROM predictions ORDER BY id").fetchall() == original
-    assert all(not db.keywords.get_for_photo(pid) for pid in ids)
+    assert all(not db.photo_keywords.get_for_photo(pid) for pid in ids)
     disabled = load_photo_features(db, effective_config={"pipeline": {"weak_detection_rescue_enabled": False}})
     assert disabled[1]["subject_absent"]
 
@@ -85,7 +86,7 @@ def test_isolated_species_abstention_preserves_subject_prediction_and_trace(sequ
     assert saved["photos"][1]["species_top5"][0][0] == "Chickadee"
     predictions = rebuild_species_predictions(saved, ids)
     assert any(p["species"] == "Chickadee" for p in predictions)
-    assert all(not db.keywords.get_for_photo(pid) for pid in ids)
+    assert all(not db.photo_keywords.get_for_photo(pid) for pid in ids)
 
 
 def test_additional_evidence_respects_latest_and_pinned_label_sets(sequence_db):
@@ -147,8 +148,8 @@ def test_conflicting_independent_evidence_vetoes_new_weak_crop_rescue(sequence_d
     if source == "full_image":
         classify(db, ids[1], 0, "Other bird", 0.99, "full-image")
     else:
-        did, second = db.write_detection_batch(
-            ids[1],
+        did, second = detection_store.write_detection_batch(
+            db, ids[1],
             "megadetector-v6",
             [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.06, "category": "animal"},
@@ -180,5 +181,5 @@ def test_default_long_context_loads_real_evidence_and_preserves_tags(sequence_db
     saved = serialize_results({"photos": photos, "encounters": groups, "summary": {}})
     assert saved["photos"][1]["weak_detection_context"] == middle["weak_detection_context"]
     assert db.conn.execute("SELECT * FROM predictions ORDER BY id").fetchall() == original
-    assert all(not db.keywords.get_for_photo(pid) for pid in ids)
+    assert all(not db.photo_keywords.get_for_photo(pid) for pid in ids)
     assert load_photo_features(db, effective_config={}, photo_ids=ids[1:])[0]["subject_absent"]

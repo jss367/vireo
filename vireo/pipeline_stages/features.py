@@ -19,6 +19,7 @@ from resource_ledger import (
     ResourceWaitCancelled,
     bind_resource_cancel_check,
 )
+from services import detection_store, subject_masks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -365,8 +366,8 @@ class _MaskPass:
             and self.photos
         ):
             from weak_detections import contextual_weak_runs
-            raw_mdv6_dets = self.thread_db.get_detections_for_photos(
-                [p["id"] for p in self.photos],
+            raw_mdv6_dets = detection_store.get_detections_for_photos(
+                self.thread_db, [p["id"] for p in self.photos],
                 min_conf=self.weak_detection_confidence,
                 detector_model="megadetector-v6",
             )
@@ -573,7 +574,7 @@ class _MaskPass:
                 # photo isn't in the "what got skipped silently"
                 # diagnostic regardless of threshold).
                 raw_dets = [
-                    d for d in thread_db.get_detections(p["id"], min_conf=0)
+                    d for d in detection_store.get_detections(thread_db, p["id"], min_conf=0)
                     if d["detector_model"] != "full-image"
                 ]
                 if raw_dets:
@@ -603,16 +604,16 @@ class _MaskPass:
         # in to.
         if p["id"] in self.contextual_weak_ids:
             return [
-                d for d in thread_db.get_detections(
-                    p["id"],
+                d for d in detection_store.get_detections(
+                    thread_db, p["id"],
                     min_conf=self.weak_detection_confidence,
                     detector_model="megadetector-v6",
                 )
                 if d["category"] == "animal"
             ]
         return [
-            d for d in thread_db.get_detections(
-                p["id"], min_conf=self.detector_confidence,
+            d for d in detection_store.get_detections(
+                thread_db, p["id"], min_conf=self.detector_confidence,
             )
             if d["detector_model"] != "full-image"
         ]
@@ -1219,8 +1220,8 @@ class _MaskPass:
             ),
             _commit=False,
         )
-        thread_db.set_active_mask_variant(
-            photo_id, self.sam2_variant, _commit=False,
+        subject_masks.set_active_mask_variant(
+            thread_db, photo_id, self.sam2_variant, _commit=False,
             weak_rescue_min_conf=(self.weak_detection_confidence
                 if photo_id in self.contextual_weak_ids else None),
         )
@@ -1578,8 +1579,8 @@ class _EyeKeypointPass:
                 pid for pid in collection_photo_ids
                 if pid not in params.exclude_photo_ids
             }
-        self.photos = self.thread_db.list_photos_for_eye_keypoint_stage(
-            photo_ids=collection_photo_ids,
+        self.photos = subject_masks.list_photos_for_eye_keypoint_stage(
+            self.thread_db, photo_ids=collection_photo_ids,
         )
         # Defensive second filter: when collection_photo_ids is None
         # (whole-workspace path) the DB query above returned every

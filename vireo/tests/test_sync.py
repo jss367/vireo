@@ -1,6 +1,7 @@
 # vireo/tests/test_sync.py
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -482,7 +483,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kw_names = {k['name'] for k in keywords}
     assert 'Cardinal' in kw_names
     assert 'Sparrow' not in kw_names
@@ -530,7 +531,7 @@ def test_sync_from_xmp_does_not_restore_keyword_with_pending_removal(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    assert db.keywords.get_for_photo(pid) == []
+    assert db.photo_keywords.get_for_photo(pid) == []
 
 
 def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
@@ -557,7 +558,7 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keyword_ids = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    keyword_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert flat not in keyword_ids
     assert nested in keyword_ids
 
@@ -581,7 +582,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'Sparrow'}
 
 
@@ -613,7 +614,7 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'apapane'}
 
 
@@ -648,7 +649,7 @@ def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'Sparrow', 'Cardinal'}
 
 
@@ -1211,7 +1212,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     # Both distinct-slot homonyms must survive; sidecar reconciliation
     # cannot pick between them.
     surviving_ids = {kw['id'] for kw in keywords}
@@ -1342,6 +1343,17 @@ def test_sync_result_counts_distinct_photos_not_records():
     assert result["errors"] == ["unsupported change type: flag (2 photos)"]
 
 
+_SYNC_PANEL = Path(__file__).parents[1] / "static" / "sync-panel"
+
+
+def _sync_result_reporter():
+    """``_syncShowSyncResult``: how the sync panel reports a finished job
+    (``static/sync-panel/run.js``; runSync's onComplete calls it)."""
+    run_js = (_SYNC_PANEL / "run.js").read_text(encoding="utf-8")
+    reporter = run_js[run_js.index("function _syncShowSyncResult("):]
+    return reporter[:reporter.index("async function runSync(")]
+
+
 def test_sync_panel_does_not_report_zero_for_a_resultless_failure():
     """A crashed sync must not render as "Wrote 0, failed on 0".
 
@@ -1353,11 +1365,8 @@ def test_sync_panel_does_not_report_zero_for_a_resultless_failure():
     than on ``event.status`` so a resultless completed or cancelled event
     cannot reach the counter branches either.
     """
-    from pathlib import Path
 
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
-    handler = panel[panel.index("onComplete: function(event)"):]
-    handler = handler[:handler.index("onError:")]
+    handler = _sync_result_reporter()
     assert "typeof result.synced === 'number'" in handler
     assert "typeof result.failed === 'number'" in handler
     assert "Sync failed" in handler
@@ -1378,22 +1387,18 @@ def test_sync_panel_clears_stale_success_when_pending_remains():
     rather than the specific words, so future copy tweaks to the success
     branch cannot desync the check.
     """
-    from pathlib import Path
-
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
 
     # The success branches (``Synced!`` / ``Synced N photos!`` /
     # ``Nothing to sync.``) mark the element as success.
-    complete_handler = panel[panel.index("onComplete: function(event)"):]
-    complete_handler = complete_handler[:complete_handler.index("onError:")]
+    complete_handler = _sync_result_reporter()
     assert "status.dataset.syncState = 'success'" in complete_handler
 
     # ``checkPendingSync`` clears any stale success when pending remains,
     # so the marker approach must be used there too. The old literal-text
     # match (``status.textContent === 'Synced!'``) is gone: it silently
     # missed the ``Synced N photos!`` case runVisibleSync produces.
-    check_fn = panel[panel.index("async function checkPendingSync"):]
-    check_fn = check_fn[:check_fn.index("async function runSync")]
+    status_js = (_SYNC_PANEL / "status.js").read_text(encoding="utf-8")
+    check_fn = status_js[status_js.index("async function checkPendingSync"):]
     assert "status.dataset.syncState === 'success'" in check_fn
     assert "status.textContent === 'Synced!'" not in check_fn
 
@@ -1407,11 +1412,8 @@ def test_sync_panel_cancelled_summary_includes_failures():
     ``status: "cancelled"``. Reporting only the written count would present
     a NAS-wide permission failure as an ordinary cancellation.
     """
-    from pathlib import Path
 
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
-    handler = panel[panel.index("onComplete: function(event)"):]
-    handler = handler[:handler.index("onError:")]
+    handler = _sync_result_reporter()
 
     cancelled = handler[handler.index("event.status === 'cancelled'"):]
     # Take just the cancelled branch, up to the next ``else if`` / ``else``.
@@ -2434,7 +2436,7 @@ def test_sync_from_xmp_keeps_the_assigned_location(tmp_path, monkeypatch):
 
     sync_from_xmp(db, [pid])
 
-    names = {row["name"] for row in db.keywords.get_for_photo(pid)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(pid)}
     assert "Kumeyaay Lake" in names
     db.close()
 
@@ -2462,7 +2464,7 @@ def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypa
 
     sync_from_xmp(db, [pid])
 
-    names = {row["name"] for row in db.keywords.get_for_photo(pid)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(pid)}
     assert names == {"Pont de Gau"}
     db.close()
 
@@ -3277,10 +3279,10 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
         result = sync.sync_to_xmp(db)
         assert result['failed'] == (0 if first_sync == 'success' else 1)
     db.undo_last_edit()
-    assert not db.keywords.get_for_photo(pid)
+    assert not db.photo_keywords.get_for_photo(pid)
     if redo:
         db.redo_last_undo()
-        assert [k['id'] for k in db.keywords.get_for_photo(pid)] == [keyword]
+        assert [k['id'] for k in db.photo_keywords.get_for_photo(pid)] == [keyword]
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == ({'Osprey'} if redo else set())
     assert not db.pending_changes.list_all()

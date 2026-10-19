@@ -49,7 +49,7 @@ def _rearm_label_desc_heal(peek_model: ModelSpec | None) -> None:
                 rearm_pending_label_desc_heal(
                     _heal_model_str, _heal_model_dir,
                 )
-            except Exception:
+            except Exception:  # broad: the heal is retried on the next model load; it must not fail classify
                 log.info(
                     "Re-arming label_descriptions heal for %s failed",
                     _heal_model_str, exc_info=True,

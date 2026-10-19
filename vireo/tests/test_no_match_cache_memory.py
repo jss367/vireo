@@ -171,6 +171,15 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         "_cached_only_label_source": lambda *a, **kw: None,
         "_cached_only_detection_map": lambda db, ids: {pid: [{"id": pid}] for pid in ids},
         "_cache_run_filter": lambda db, ids, model, fp, *a: repo.classifier_cache_run_filter(model, fp, set(), True),
+        "detection_store": types.SimpleNamespace(
+            get_predictions_for_detection=lambda db, did, **kw: [
+                dict(r)
+                for r in c.execute(
+                    "SELECT * FROM predictions WHERE detection_id=? AND classifier_model=? AND (? IS NULL OR labels_fingerprint=?) AND confidence>=0 ORDER BY confidence DESC",
+                    (did, kw["classifier_model"], kw["labels_fingerprint"], kw["labels_fingerprint"]),
+                )
+            ],
+        ),
     }
 
     def finalize(db, runner, job, params, tax, total, raw, model, fp):
@@ -182,13 +191,6 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
     db = types.SimpleNamespace(
         model_runs=repo,
         folders=types.SimpleNamespace(tree=lambda: [{"id": 1, "path": "/invented"}]),
-        get_predictions_for_detection=lambda did, **kw: [
-            dict(r)
-            for r in c.execute(
-                "SELECT * FROM predictions WHERE detection_id=? AND classifier_model=? AND (? IS NULL OR labels_fingerprint=?) AND confidence>=0 ORDER BY confidence DESC",
-                (did, kw["classifier_model"], kw["labels_fingerprint"], kw["labels_fingerprint"]),
-            )
-        ],
     )
     runner = types.SimpleNamespace(update_step=lambda *a, **kw: steps.append(kw))
     before = c.total_changes

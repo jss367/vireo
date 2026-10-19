@@ -92,7 +92,7 @@ def create_photo_location_keywords_blueprint(
         # the pending/history bookkeeping when the row already exists, so
         # the second click is a true no-op (mirrors the batch route's
         # already_tagged precheck).
-        already_tagged = photo_id in db.keywords.photo_ids_tagged_with(kid, [photo_id])
+        already_tagged = photo_id in db.photo_keywords.photo_ids_tagged_with(kid, [photo_id])
         if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
         # source='manual': a person clicked Add. Stamping the association
@@ -111,7 +111,7 @@ def create_photo_location_keywords_blueprint(
         db = get_db()
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return photo_not_found_error()
-        keywords = db.keywords.get_for_photo(photo_id)
+        keywords = db.photo_keywords.get_for_photo(photo_id)
         kw_name = ""
         kw_type = ""
         for k in keywords:

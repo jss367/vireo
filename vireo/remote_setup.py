@@ -154,7 +154,7 @@ def _reverse_dns(ip):
     def _worker():
         try:
             result_q.put(("ok", socket.gethostbyaddr(ip)))
-        except BaseException as exc:  # pylint: disable=broad-except
+        except BaseException as exc:  # pylint: disable=broad-except  # broad: handed to the waiting caller
             result_q.put(("err", exc))
 
     threading.Thread(target=_worker, daemon=True).start()

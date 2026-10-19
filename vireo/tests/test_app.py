@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
+from services import detection_store, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -201,7 +202,7 @@ def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     )
 
     assert resp.status_code == 200
-    names = {k["name"] for k in db.keywords.get_for_photo(photo["id"])}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])}
     assert "Cardinal" in names
 
 
@@ -857,28 +858,31 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     client = app.test_client()
     resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
-    assert b'&limit=' in resp.data
-    assert b'Select all shown' in resp.data
-    assert b'Delete Entire Cache' in resp.data
+    html = _page_with_scripts(client, '/storage')
+    assert 'STORAGE_MODAL_FILE_LIMIT = 500' in html
+    assert '&limit=' in html
+    assert 'Select all shown' in html
+    assert 'Delete Entire Cache' in html
 
 
 def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
     """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
     assert page.status_code == 200
+    html = _page_with_scripts(client, '/storage')
     for marker in (
-        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
-        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
-        b'Download again', b'cannot currently be reclaimed separately',
-        b'loadMasksCard(s && s.masks)', b'cfgWorkingCopyCacheMaxGb',
-        b"{name: 'Working Copies'", b'Oldest files are removed first',
-        b'storageBreakdown', b'View files and folders',
+        'storageFreeSize', 'storageReclaimableSize', 'clearSafeCaches',
+        'openStorageFolder', 'refreshStoragePage', 'Safe to clear',
+        'Download again', 'cannot currently be reclaimed separately',
+        'loadMasksCard(s && s.masks)', 'cfgWorkingCopyCacheMaxGb',
+        "{name: 'Working Copies'", 'Oldest files are removed first',
+        'storageBreakdown', 'View files and folders',
     ):
-        assert marker in page.data
-    assert page.data.count(b"{name: 'Database'") == 1
-    assert b'Other Vireo Data' not in page.data
+        assert marker in html
+    assert html.count("{name: 'Database'") == 1
+    assert 'Other Vireo Data' not in html
 
 
 def test_storage_page_confirms_destructive_working_copy_quota_reduction(
@@ -886,43 +890,45 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
 ):
     """Quota input stays pending until Apply and explains cache eviction."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
 
     assert page.status_code == 200
-    assert b'oninput="updateWorkingCopyLimitState()"' in page.data
-    assert b'onchange="saveStorageConfig()"' not in page.data.split(
-        b'id="cfgWorkingCopyCacheMaxGb"', 1,
-    )[1].split(b'</div>', 1)[0]
+    html = _page_with_scripts(client, '/storage')
+    assert 'data-storage-on="input:updateWorkingCopyLimitState"' in html
+    assert 'change:saveStorageConfig' not in html.split(
+        'id="cfgWorkingCopyCacheMaxGb"', 1,
+    )[1].split('</div>', 1)[0]
     for marker in (
-        b'applyWorkingCopyLimitBtn',
-        b'<dialog class="modal-overlay" id="workingCopyLimitModal"',
-        b'modal.showModal()',
-        b'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        b'quotaMb > _committedWorkingCopyQuotaMb',
-        b'Lower working-copy storage limit?',
-        b'Lower limit and remove copies',
-        b'Your original photos will not be deleted',
-        b'working_copy_cache_max_mb: workingCopyQuotaMb',
+        'applyWorkingCopyLimitBtn',
+        '<dialog class="modal-overlay" id="workingCopyLimitModal"',
+        'modal.showModal()',
+        'MAX_WORKING_COPY_QUOTA_MB = 1048576',
+        'quotaMb > _committedWorkingCopyQuotaMb',
+        'Lower working-copy storage limit?',
+        'Lower limit and remove copies',
+        'Your original photos will not be deleted',
+        'working_copy_cache_max_mb: workingCopyQuotaMb',
         # 409 recovery flow: confirm flag sent after modal confirmation,
         # and stale-cache 409 rerouted back into the modal.
-        b'_confirm_working_copy_eviction = true',
-        b"'working_copy_eviction_confirmation_required'",
-        b'previous_working_copy_quota_mb',
+        '_confirm_working_copy_eviction = true',
+        "'working_copy_eviction_confirmation_required'",
+        'previous_working_copy_quota_mb',
         # Apply must flush a queued autosave for the other storage
         # controls instead of dropping it via clearTimeout.
-        b'await flushPendingStorageAutosave()',
-        b'function flushPendingStorageAutosave',
-        b'saveStorageConfig();',
-        b'throw e;',
-        b'the working-copy limit was not updated',
+        'await flushPendingStorageAutosave()',
+        'function flushPendingStorageAutosave',
+        'saveStorageConfig();',
+        'throw e;',
+        'the working-copy limit was not updated',
         # Refresh syncs the cached committed quota from the server's
         # authoritative working.quota_bytes so a concurrent quota change
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
-        b'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        b'currentInputMb === _committedWorkingCopyQuotaMb',
+        'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
+        'currentInputMb === _committedWorkingCopyQuotaMb',
     ):
-        assert marker in page.data
+        assert marker in html
 
 
 def test_api_storage_includes_offline_originals(app_and_db):
@@ -1982,7 +1988,7 @@ def test_encounter_species_confirm(app_and_db):
 
     # Verify all photos are tagged
     for pid in photo_ids:
-        tags = db.keywords.get_for_photo(pid)
+        tags = db.photo_keywords.get_for_photo(pid)
         species_tags = [t for t in tags if t["name"] == "Blue Jay"]
         assert len(species_tags) == 1
 
@@ -2025,8 +2031,8 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
     ).fetchone() is None
 
     for photo_id in photo_ids:
-        assert nested in {row["id"] for row in db.keywords.get_for_photo(photo_id)}
-    species_by_photo = db.keywords.get_species_for_photos(photo_ids)
+        assert nested in {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
+    species_by_photo = db.photo_species.get_species_for_photos(photo_ids)
     assert species_by_photo[nested_photo].count("Verdin") == 1
     assert species_by_photo[untagged_photo].count("Verdin") == 1
     additions = [
@@ -2065,7 +2071,7 @@ def test_batch_species_keyword_reuses_hierarchical_taxon(app_and_db):
     assert db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'Verdin' AND parent_id IS NULL"
     ).fetchone() is None
-    assert nested in {row["id"] for row in db.keywords.get_for_photo(untagged_photo)}
+    assert nested in {row["id"] for row in db.photo_keywords.get_for_photo(untagged_photo)}
     additions = [
         row["photo_id"] for row in db.pending_changes.list_all()
         if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
@@ -2090,7 +2096,7 @@ def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
     )
 
     assert resp.status_code == 200
-    assert any(t["name"] == "Blue Jay" for t in db.keywords.get_for_photo(photo_id))
+    assert any(t["name"] == "Blue Jay" for t in db.photo_keywords.get_for_photo(photo_id))
     assert not os.path.exists(cache_path)
     assert len([
         name for name in os.listdir(cache_dir)
@@ -2126,7 +2132,7 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     assert "99999" in resp.get_json()["error"]
 
     # Verify nothing was written for the valid ID either
-    tags = db.keywords.get_for_photo(valid_id)
+    tags = db.photo_keywords.get_for_photo(valid_id)
     assert not any(t["name"] == "Robin" for t in tags)
     pending = db.pending_changes.list_all()
     assert not any(c["value"] == "Robin" for c in pending)
@@ -2146,13 +2152,13 @@ def test_encounter_species_tags_sub_threshold_photos_with_warning(app_and_db):
     photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     p_real, p_noise, p_undetected = photos[0]["id"], photos[1]["id"], photos[2]["id"]
 
-    db.save_detections(
+    db.detections.save(
         p_real,
         [{"box": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4},
           "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    db.save_detections(
+    db.detections.save(
         p_noise,
         [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
           "confidence": 0.02, "category": "animal"}],
@@ -2168,9 +2174,9 @@ def test_encounter_species_tags_sub_threshold_photos_with_warning(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
 
-    real_tags = {k["name"] for k in db.keywords.get_for_photo(p_real)}
-    noise_tags = {k["name"] for k in db.keywords.get_for_photo(p_noise)}
-    undetected_tags = {k["name"] for k in db.keywords.get_for_photo(p_undetected)}
+    real_tags = {k["name"] for k in db.photo_keywords.get_for_photo(p_real)}
+    noise_tags = {k["name"] for k in db.photo_keywords.get_for_photo(p_noise)}
+    undetected_tags = {k["name"] for k in db.photo_keywords.get_for_photo(p_undetected)}
 
     assert "Mountain Chickadee" in real_tags, (
         "photo with high-confidence detection must still be tagged"
@@ -2205,7 +2211,7 @@ def test_encounter_species_all_sub_threshold_still_confirms_cache(app_and_db):
     photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     p_noise = photos[0]["id"]
 
-    db.save_detections(
+    db.detections.save(
         p_noise,
         [{"box": {"x": 0.01, "y": 0.01, "w": 0.98, "h": 0.98},
           "confidence": 0.02, "category": "animal"}],
@@ -2242,7 +2248,7 @@ def test_encounter_species_all_sub_threshold_still_confirms_cache(app_and_db):
     assert data["photo_count"] == 1
     assert data["skipped_photo_ids"] == []
     assert data["low_confidence_photo_ids"] == [p_noise]
-    assert "Mountain Chickadee" in {k["name"] for k in db.keywords.get_for_photo(p_noise)}
+    assert "Mountain Chickadee" in {k["name"] for k in db.photo_keywords.get_for_photo(p_noise)}
 
     assert "encounters" in data, (
         "response should include server-updated encounters when a cache exists"
@@ -2371,7 +2377,7 @@ def test_encounter_species_change_cancels_pending_add(app_and_db):
 
     # Photos should now have Blue Jay but not Sparrow
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" in names
         assert "Sparrow" not in names
 
@@ -2408,7 +2414,7 @@ def test_encounter_species_change_queues_remove_after_sync(app_and_db):
 
     # Photos have Blue Jay, not Sparrow
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" in names
         assert "Sparrow" not in names
 
@@ -2449,7 +2455,7 @@ def test_burst_override_change_untags_previous(app_and_db):
     assert resp.get_json()["previous_species"] == "Sparrow"
 
     for pid in burst_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Junco" in names
         assert "Sparrow" not in names
 
@@ -2522,7 +2528,7 @@ def test_encounter_species_replacement_undo_restores_previous(app_and_db):
     assert undone['action_type'] == 'pipeline_grouping'
 
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Sparrow" in names
         assert "Blue Jay" not in names
 
@@ -2558,7 +2564,7 @@ def test_encounter_species_replacement_undo_after_sync_queues_swap(app_and_db):
     assert undone['action_type'] == 'pipeline_grouping'
 
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Sparrow" in names
         assert "Blue Jay" not in names
 
@@ -2585,7 +2591,7 @@ def test_encounter_species_replacement_redo_reapplies(app_and_db):
     assert redone['action_type'] == 'pipeline_grouping'
 
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" in names
         assert "Sparrow" not in names
 
@@ -2618,7 +2624,7 @@ def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
     # The pre-existing keyword survives — undoing leaves it intact (there's
     # nothing the redundant confirm could have queued to remove).
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" in names
 
 
@@ -2648,7 +2654,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     ).lastrowid
     db.conn.commit()
     assert db.get_photos_with_equivalent_species([photo_id], root) == {photo_id}
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -2678,7 +2684,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == before + 1
-    names = [row["name"] for row in db.keywords.get_for_photo(photo_id)]
+    names = [row["name"] for row in db.photo_keywords.get_for_photo(photo_id)]
     assert names.count("Verdin") == 1
     assert db.conn.execute(
         "SELECT status FROM prediction_review WHERE prediction_id = ? "
@@ -2696,11 +2702,11 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         "WHERE prediction_id = ? AND workspace_id = ?",
         (prediction_id, db._active_workspace_id),
     ).fetchone()["status"] == "pending"
-    names_after_undo = [row["name"] for row in db.keywords.get_for_photo(photo_id)]
+    names_after_undo = [row["name"] for row in db.photo_keywords.get_for_photo(photo_id)]
     # The hierarchy leaf (parent nested Verdin) is still attached; the
     # root Verdin was never tagged so it must not appear now.
-    assert nested in {row["id"] for row in db.keywords.get_for_photo(photo_id)}
-    assert root not in {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    assert nested in {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
+    assert root not in {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert names_after_undo.count("Verdin") == 1
 
     # Redo re-flips the review status without tagging the root Verdin.
@@ -2712,8 +2718,8 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         "AND workspace_id = ?",
         (prediction_id, db._active_workspace_id),
     ).fetchone()["status"] == "accepted"
-    assert root not in {row["id"] for row in db.keywords.get_for_photo(photo_id)}
-    assert nested in {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    assert root not in {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
+    assert nested in {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
 
 
 def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
@@ -2742,7 +2748,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         "VALUES ('Verdin', NULL, 1, 'taxonomy', 2912)"
     ).lastrowid
     db.conn.commit()
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -2768,7 +2774,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
-    names = [row["name"] for row in db.keywords.get_for_photo(photo_id)]
+    names = [row["name"] for row in db.photo_keywords.get_for_photo(photo_id)]
     assert names.count("Verdin") == 1
     assert db.conn.execute(
         "SELECT status FROM prediction_review WHERE prediction_id = ? "
@@ -2786,7 +2792,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         "WHERE prediction_id = ? AND workspace_id = ?",
         (prediction_id, db._active_workspace_id),
     ).fetchone()["status"] == "pending"
-    ids_after_undo = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    ids_after_undo = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert nested in ids_after_undo
     assert root not in ids_after_undo
 
@@ -2818,7 +2824,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     db.tag_photo(photo_id, nested)
     db.add_keyword("Verdin", is_species=True)
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -2914,7 +2920,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     # every prediction id so undo resets both scopes.
     db.add_keyword("Verdin", is_species=True)
 
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -2950,7 +2956,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
         if row["species"] == "Verdin"
     }
     assert statuses_by_model == {"bioclip": "accepted", "inat": "accepted"}
-    assert [k["name"] for k in db.keywords.get_for_photo(photo_id)].count("Verdin") == 1
+    assert [k["name"] for k in db.photo_keywords.get_for_photo(photo_id)].count("Verdin") == 1
 
     # The recorded prediction_accept edit stores prediction ids as JSON,
     # not a comma-separated fallback string.
@@ -2984,7 +2990,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     undone = db.undo_last_edit()
     assert undone is not None
     assert undone["action_type"] == "prediction_accept"
-    assert "Verdin" not in {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    assert "Verdin" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
 
     statuses_after_undo = {
         row["classifier_model"]: row["status"]
@@ -3026,9 +3032,9 @@ def test_encounter_species_records_only_newly_tagged(app_and_db):
     # Undoing removes the species only from the photos that were newly tagged;
     # the pre-tagged photo keeps it.
     db.undo_last_edit()
-    assert "Blue Jay" in {k["name"] for k in db.keywords.get_for_photo(photo_ids[0])}
+    assert "Blue Jay" in {k["name"] for k in db.photo_keywords.get_for_photo(photo_ids[0])}
     for pid in photo_ids[1:]:
-        assert "Blue Jay" not in {k["name"] for k in db.keywords.get_for_photo(pid)}
+        assert "Blue Jay" not in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
@@ -3065,8 +3071,8 @@ def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
     # All photos gained Blue Jay (none had it), so all are recorded.
     assert history[0]["item_count"] == len(photo_ids)
     for pid in photo_ids:
-        assert "Blue Jay" in {k["name"] for k in db.keywords.get_for_photo(pid)}
-        assert "Sparrow" not in {k["name"] for k in db.keywords.get_for_photo(pid)}
+        assert "Blue Jay" in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
+        assert "Sparrow" not in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
@@ -3093,7 +3099,7 @@ def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
 
     # Nothing should have been written.
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" not in names
     assert not db.pending_changes.list_all()
 
@@ -3121,7 +3127,7 @@ def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
 
     # Nothing should have been written.
     for pid in photo_ids[:1]:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Blue Jay" not in names
     assert not db.pending_changes.list_all()
 
@@ -3155,28 +3161,28 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     )
 
     assert response.status_code == 200
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Verdin" not in names
     assert "Blue Jay" in names
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert nested not in tagged_ids
     assert alternate_nested not in tagged_ids
     history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
 
     db.undo_last_edit()
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Verdin" in names
     assert "Blue Jay" not in names
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert nested in tagged_ids
     assert alternate_nested in tagged_ids
 
     db.redo_last_undo()
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Verdin" not in names
     assert "Blue Jay" in names
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert nested not in tagged_ids
     assert alternate_nested not in tagged_ids
 
@@ -3301,7 +3307,7 @@ def test_encounter_species_replacement_preserves_linked_homonym(app_and_db):
     )
     assert resp.status_code == 200
 
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert linked_homonym in tagged_ids, (
         "Linked same-key homonym is a distinct species — it must survive "
         "an encounter replacement whose previous species is unlinked and "
@@ -3375,7 +3381,7 @@ def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
     )
     assert resp.status_code == 200
 
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     # Linked root "Robin" was the confirmed old species — must be untagged.
     assert old_root not in tagged_ids
     # Legacy leaf "Robin" is an ambiguous homonym — must survive; the
@@ -3443,7 +3449,7 @@ def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_ph
     )
     assert resp.status_code == 200
 
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     # The attached hierarchy leaf on the submitted photo must be gone.
     assert attached_leaf not in tagged_ids, (
         "Scoped hierarchy fallback should have picked the attached leaf "
@@ -3456,7 +3462,7 @@ def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_ph
         "SELECT 1 FROM keywords WHERE id = ?", (unrelated_leaf,),
     ).fetchone()
     assert unrelated_still_exists is not None
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Blue Jay" in names
     assert "Verdin" not in names
 
@@ -3523,8 +3529,8 @@ def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
     )
     assert resp.status_code == 200
 
-    kids_a = {row["id"] for row in db.keywords.get_for_photo(photo_a)}
-    kids_b = {row["id"] for row in db.keywords.get_for_photo(photo_b)}
+    kids_a = {row["id"] for row in db.photo_keywords.get_for_photo(photo_a)}
+    kids_b = {row["id"] for row in db.photo_keywords.get_for_photo(photo_b)}
     # Each photo's own hierarchy leaf must be gone — not just the one for
     # the taxon that happened to cover the most photos.
     assert leaf_a not in kids_a, (
@@ -3535,8 +3541,8 @@ def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
         "photo_b's Verdin leaf (taxon 9202) must be untagged — a batch-wide "
         "``best_taxon`` pick would leave one of the two photos stranded"
     )
-    names_a = {row["name"] for row in db.keywords.get_for_photo(photo_a)}
-    names_b = {row["name"] for row in db.keywords.get_for_photo(photo_b)}
+    names_a = {row["name"] for row in db.photo_keywords.get_for_photo(photo_a)}
+    names_b = {row["name"] for row in db.photo_keywords.get_for_photo(photo_b)}
     assert "Blue Jay" in names_a
     assert "Blue Jay" in names_b
     assert "Verdin" not in names_a
@@ -3597,7 +3603,7 @@ def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attac
     )
     assert resp.status_code == 200
 
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     # The attached hierarchy leaf (taxon 9302) on the submitted photo
     # must be gone. A catalog-wide root shortcut on the 9301 row would
     # have left the 9302 leaf attached because taxon_id mismatch.
@@ -3612,7 +3618,7 @@ def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attac
     assert db.conn.execute(
         "SELECT 1 FROM keywords WHERE id = ?", (root_verdin,),
     ).fetchone() is not None
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Blue Jay" in names
     assert "Verdin" not in names
 
@@ -3676,7 +3682,7 @@ def test_encounter_species_replacement_removes_repaired_alias_leaf(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json().get("previous_species") == "Verdin"
 
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(photo_id)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(photo_id)}
     # The repaired alias leaf must be gone — not left behind alongside the
     # new species. Matching only by name would miss it because
     # ``Desert Verdin`` != ``Verdin``.
@@ -3685,7 +3691,7 @@ def test_encounter_species_replacement_removes_repaired_alias_leaf(app_and_db):
         "alias leaf (same taxon as the linked root) so the removal loop "
         "matches and untags it."
     )
-    names = {row["name"] for row in db.keywords.get_for_photo(photo_id)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)}
     assert "Blue Jay" in names
     # Neither the alias leaf nor the canonical root should remain on the
     # photo — a lingering ``Desert Verdin`` would leave the photo tagged
@@ -3733,7 +3739,7 @@ def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     assert resp.status_code == 200
 
     for pid in photo_ids:
-        kw_ids = {k["id"] for k in db.keywords.get_for_photo(pid)}
+        kw_ids = {k["id"] for k in db.photo_keywords.get_for_photo(pid)}
         assert root_sparrow_id not in kw_ids
 
 
@@ -4021,10 +4027,10 @@ def test_compare_predictions_api(app_and_db):
     cid = db.collections.add("Test Collection", rules)
 
     # Create detections, then add predictions from two models
-    det_ids_0 = db.save_detections(photo_ids[0], [
+    det_ids_0 = db.detections.save(photo_ids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
-    det_ids_1 = db.save_detections(photo_ids[1], [
+    det_ids_1 = db.detections.save(photo_ids[1], [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids_0[0], "Cardinal", 0.95, "model-a")
@@ -4148,7 +4154,7 @@ def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.55, "y": 0.4, "w": 0.2, "h": 0.2},
@@ -4212,7 +4218,7 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Single Photo", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")
@@ -4255,7 +4261,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Pending Match", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
@@ -4282,7 +4288,7 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Accepted Matches", rules)
 
-    det_ids = db.save_detections(photo_id, [
+    det_ids = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
@@ -4337,7 +4343,7 @@ def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
 
     rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
     cid = db.collections.add("Alias Compare", rules)
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -4373,10 +4379,10 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     db.tag_photo(photo_ids[0], old_one)
     db.tag_photo(photo_ids[1], old_two)
 
-    first_det = db.save_detections(photo_ids[0], [
+    first_det = db.detections.save(photo_ids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
-    second_det = db.save_detections(photo_ids[1], [
+    second_det = db.detections.save(photo_ids[1], [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
     ], detector_model="MDV6")[0]
     db.predictions.add(
@@ -4397,7 +4403,7 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
 
     assert resp.status_code == 200
     for pid in photo_ids:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "New Species" in names
         assert "Old Species One" not in names
         assert "Old Species Two" not in names
@@ -4436,7 +4442,7 @@ def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
     db.species_curation.add_highlight("Old Species", photo_id)
     db.set_species_representative("Old Species", photo_id)
 
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -4475,7 +4481,7 @@ def test_api_predictions_include_bounding_box(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
@@ -4496,7 +4502,7 @@ def test_api_predictions_multiple_detections(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.95, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
     ], detector_model="MDV6")
@@ -4516,7 +4522,7 @@ def test_api_detections_endpoint(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.1}, "confidence": 0.7, "category": "animal"},
     ], detector_model="MDV6")
@@ -4565,7 +4571,7 @@ def test_api_photo_pipeline_detections(app_and_db):
     app, db = app_and_db
     photos = db.conn.execute("SELECT id FROM photos").fetchall()
     pid = photos[0]["id"]
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species="Robin", confidence=0.88, model="bioclip")
@@ -4614,7 +4620,7 @@ def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_
     # Two detections on the same photo:
     #   high-conf (0.9) — in active threshold → must surface predictions
     #   low-conf  (0.05) — below default 0.2 → must be hidden
-    det_high, det_low = db.save_detections(pid, [
+    det_high, det_low = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
@@ -4677,7 +4683,7 @@ def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
     """
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
          "confidence": 0.05, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -4719,7 +4725,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     db.workspaces.update(db._active_workspace_id, config_overrides={
         "detector_confidence": 0.0,
     })
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0, "category": "animal"},
     ], detector_model="full-image")[0]
@@ -4858,7 +4864,7 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     client = app.test_client()
     resp = client.get('/cull')
     assert resp.status_code == 200
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/cull')
     assert 'id="slRejectCrop"' in html
     assert 'id="slWTime"' in html
     assert 'id="slEncCut"' in html
@@ -7108,10 +7114,10 @@ def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
         (p2, [0.6, 0.8]),
         (p3, [0.0, 1.0]),
     ]:
-        db.upsert_photo_embedding(
-            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
         )
-    db.save_detections(
+    db.detections.save(
         p1,
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.91, "category": "bird"}],
@@ -7179,8 +7185,8 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
         (p3, [0.0, 1.0]),
         (missing_pid, [2.0, 0.0]),
     ]:
-        db.upsert_photo_embedding(
-            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        detection_store.upsert_photo_embedding(
+            db, pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
         )
 
     rules = json.dumps([{"field": "rating", "op": ">=", "value": 5}])
@@ -9991,7 +9997,7 @@ def test_wildlife_excluded_route_does_not_add_landscape_keyword(app_and_db):
         "SELECT wildlife_excluded FROM photos WHERE id = ?", (photo_id,)
     ).fetchone()
     assert row["wildlife_excluded"] == 1
-    keywords = [dict(k) for k in db.keywords.get_for_photo(photo_id)]
+    keywords = [dict(k) for k in db.photo_keywords.get_for_photo(photo_id)]
     assert all(k["name"] != "Landscape" for k in keywords)
 
 
@@ -13417,7 +13423,7 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
         "VALUES (?, 'confirm.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13438,7 +13444,7 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
     assert resp.get_json()["ok"] is True
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "accepted"
     assert db.predictions.get_review_status(sibling["id"], db._ws_id()) == "rejected"
-    assert "Bald Eagle" in {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    assert "Bald Eagle" in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     history = db.edit_history.list_recent(limit=1)
     assert history[0]["action_type"] == "prediction_accept"
 
@@ -13459,7 +13465,7 @@ def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
         "VALUES (?, 'reviewed.jpg', 0.9, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13473,14 +13479,14 @@ def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
     resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
     assert resp.status_code == 200
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "accepted"
-    assert "Bald Eagle" in {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    assert "Bald Eagle" in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
 
     # Undo restores the user's earlier "reviewed" decision. It used to reset
     # the row to ``pending``, a status it had not had since the user reviewed
     # it, so the prediction reappeared in Review's pending queue.
     assert client.post("/api/undo").status_code == 200
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "reviewed"
-    assert "Bald Eagle" not in {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    assert "Bald Eagle" not in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     assert client.post("/api/redo").status_code == 200
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "accepted"
 
@@ -13505,7 +13511,7 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, taxonomy_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13554,7 +13560,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, genus_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13570,7 +13576,7 @@ def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
     body = resp.get_json()
     assert body["skipped"] == []
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "accepted"
-    kw_names = {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    kw_names = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     assert "Bald Eagle" in kw_names
     # The genus-rank tag is preserved alongside the newly-confirmed species.
     assert "Haliaeetus" in kw_names
@@ -13599,12 +13605,12 @@ def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
     ).lastrowid
     existing_kid = db.add_keyword("House Sparrow", is_species=True)
     db.tag_photo(pid2, existing_kid)
-    det1 = db.save_detections(
+    det1 = db.detections.save(
         pid1,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
     )[0]
-    det2 = db.save_detections(
+    det2 = db.detections.save(
         pid2,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13626,8 +13632,8 @@ def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
     assert [item["photo_id"] for item in body["affected"]] == [pid1]
     assert db.predictions.get_review_status(pred1["id"], db._ws_id()) == "accepted"
     assert db.predictions.get_review_status(pred2["id"], db._ws_id()) == "pending"
-    assert "Bald Eagle" in {kw["name"] for kw in db.keywords.get_for_photo(pid1)}
-    pid2_keywords = {kw["name"] for kw in db.keywords.get_for_photo(pid2)}
+    assert "Bald Eagle" in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid1)}
+    pid2_keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid2)}
     assert "House Sparrow" in pid2_keywords
     assert "Bald Eagle" not in pid2_keywords
 
@@ -13650,7 +13656,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
         (fid,),
     ).lastrowid
     db.tag_photo(pid, old_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13668,7 +13674,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()["ok"] is True
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "rejected"
-    keywords = {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     assert "House Sparrow" in keywords
     assert "Bald Eagle" not in keywords
     history = db.edit_history.list_recent(limit=1)
@@ -13695,7 +13701,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     ).lastrowid
     db.tag_photo(pid, old_kid)
     db.tag_photo(pid, old_taxonomy_kid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13716,7 +13722,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     undone = db.undo_last_edit()
     assert undone["action_type"] == "species_replace"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "pending"
-    keywords = {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     assert "Bald Eagle" in keywords
     assert "Haliaeetus" in keywords
     assert "House Sparrow" not in keywords
@@ -13724,7 +13730,7 @@ def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
     redone = db.redo_last_undo()
     assert redone["action_type"] == "species_replace"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "rejected"
-    keywords = {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    keywords = {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
     assert "House Sparrow" in keywords
     assert "Bald Eagle" not in keywords
     assert "Haliaeetus" not in keywords
@@ -13746,7 +13752,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
         "VALUES (?, 'undo-predicted.jpg', 0.8, 'none')",
         (fid,),
     ).lastrowid
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -13768,7 +13774,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
     undone = db.undo_last_edit()
     assert undone["action_type"] == "keyword_add"
     assert db.predictions.get_review_status(pred["id"], db._ws_id()) == "pending"
-    assert "House Sparrow" not in {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    assert "House Sparrow" not in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_highlights_relabel_unidentified_sets_species(app_and_db):
@@ -13794,7 +13800,7 @@ def test_highlights_relabel_unidentified_sets_species(app_and_db):
         json={"photo_ids": [pid], "species": "Song Sparrow"},
     )
     assert resp.status_code == 200
-    assert "Song Sparrow" in {kw["name"] for kw in db.keywords.get_for_photo(pid)}
+    assert "Song Sparrow" in {kw["name"] for kw in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
@@ -14043,7 +14049,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
     # `species_replace`.
     db.set_species_representative("Predicted Bird", pid)
     db.species_curation.add_highlight("Predicted Bird", pid)
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -14482,7 +14488,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     # runs (has_old_species stays False → action_type = "keyword_add").
     # The prediction is for a *different* species than the stale curation,
     # so the prediction-species migration guard must skip the stale rows.
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -14735,7 +14741,7 @@ def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
     # No species keyword tag on the photo — the prediction is the only
     # source that ties the photo to ``Verdin``. This puts the relabel on
     # the ``keyword_add``/prediction-only branch of the source filter.
-    det = db.save_detections(
+    det = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
         detector_model="MDV6",
@@ -16214,8 +16220,8 @@ def _seed_masks(db, tmp_path):
     # realistic state. delete_inactive_masks now skips photos with NULL
     # active (the partial-state case) rather than treating them as
     # entirely-inactive.
-    db.set_active_mask_variant(p1, "sam2-small")
-    db.set_active_mask_variant(p2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p2, "sam2-small")
     return masks_dir, p1, p2
 
 
@@ -16474,7 +16480,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
                 dino_global_embedding=embedding_to_blob(emb),
             )
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
-            det_ids = db.save_detections(pid, [
+            det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
             species = "robin" if enc_idx == 0 else "eagle"
@@ -16574,7 +16580,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
                 dino_global_embedding=embedding_to_blob(emb),
             )
             db.photos.update_quality(pid, subject_size=0.08 + i * 0.02)
-            det_ids = db.save_detections(pid, [
+            det_ids = db.detections.save(pid, [
                 {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
             ], detector_model="megadetector")
             species = "robin" if enc_idx == 0 else "eagle"
@@ -17596,7 +17602,7 @@ def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
     assert resp.get_json()["photo_count"] == len(photo_ids)
     # Both chunks were validated and tagged.
     for pid in (photo_ids[0], photo_ids[-1]):
-        assert any(t["name"] == "Chunk Finch" for t in db.keywords.get_for_photo(pid))
+        assert any(t["name"] == "Chunk Finch" for t in db.photo_keywords.get_for_photo(pid))
 
 
 def test_api_exiftool_status_reports_missing(app_and_db, monkeypatch):
@@ -18689,7 +18695,7 @@ def _seed_prediction_photo(db, filename, species, confidence,
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    detection_id = db.save_detections(
+    detection_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -18886,7 +18892,7 @@ def test_batch_accept_flips_status_and_tags(app_and_db):
     assert statuses == {photo_a: "accepted", photo_b: "accepted"}
 
     for pid in (photo_a, photo_b):
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" in names
 
 
@@ -18920,7 +18926,7 @@ def test_batch_accept_records_single_undo_entry(app_and_db):
     }
     assert statuses == {photo_a: "pending", photo_b: "pending"}
     for pid in (photo_a, photo_b):
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" not in names
 
 
@@ -18948,9 +18954,9 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.json["accepted"] == 4
     for pid in selection:
-        assert "Bald Eagle" in {k["name"] for k in db.keywords.get_for_photo(pid)}
-    assert not db.keywords.get_for_photo(outside)
-    assert "Osprey" in {k["name"] for k in db.keywords.get_for_photo(other)}
+        assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
+    assert not db.photo_keywords.get_for_photo(outside)
+    assert "Osprey" in {k["name"] for k in db.photo_keywords.get_for_photo(other)}
     statuses = {p["photo_id"]: p["status"] for p in db.predictions.get_rows(photo_ids=selection)}
     assert statuses == {predicted: "accepted", existing: "accepted", other: "pending"}
     edits = [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
@@ -18960,12 +18966,12 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     assert client.post("/api/predictions/batch-accept", json=payload).json["accepted"] == 0
     db.undo_last_edit()
     for pid in (predicted, other, unclassified):
-        assert "Bald Eagle" not in {k["name"] for k in db.keywords.get_for_photo(pid)}
-    assert "Bald Eagle" in {k["name"] for k in db.keywords.get_for_photo(existing)}
+        assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
+    assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(existing)}
     assert all(p["status"] == "pending" for p in db.predictions.get_rows(photo_ids=selection))
     db.redo_last_undo()
     for pid in selection:
-        assert "Bald Eagle" in {k["name"] for k in db.keywords.get_for_photo(pid)}
+        assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_batch_accept_on_all_without_acceptable_predictions(app_and_db):
@@ -18977,11 +18983,11 @@ def test_batch_accept_on_all_without_acceptable_predictions(app_and_db):
         "prediction_ids": [], "expected_species": "Bald Eagle", "photo_ids": [photo],
     })
     assert response.status_code == 200, response.get_data(as_text=True)
-    assert {k["name"] for k in db.keywords.get_for_photo(photo)} == {"Bald Eagle", "Osprey"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo)} == {"Bald Eagle", "Osprey"}
     assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == "pending"
     assert db.edit_history.list_recent()[0]["description"] == 'Added species "Bald Eagle"'
     db.undo_last_edit()
-    assert {k["name"] for k in db.keywords.get_for_photo(photo)} == {"Osprey"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo)} == {"Osprey"}
 
 
 @pytest.mark.parametrize("pending_removal,sync_after_accept", [(True, False), (False, False), (False, True)])
@@ -19012,11 +19018,11 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
         db.undo_last_edit()
-        assert "Bald Eagle" not in {k["name"] for k in db.keywords.get_for_photo(photo)}
+        assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
         assert pending_types() == (["keyword_remove"] if sidecar_has_keyword else [])
         assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == "pending"
         db.redo_last_undo()
-        assert "Bald Eagle" in {k["name"] for k in db.keywords.get_for_photo(photo)}
+        assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
         assert pending_types() == ([] if sidecar_has_keyword else ["keyword_add"])
         assert db.predictions.get_rows(photo_ids=[photo])[0]["status"] == ("accepted" if with_prediction else "pending")
 
@@ -19056,10 +19062,10 @@ def test_batch_accept_on_all_undo_restores_flat_removals(app_and_db, delete_othe
     for _ in range(2):
         db.undo_last_edit()
         assert flat_removals() == expected
-        assert "Bald Eagle" not in {k["name"] for k in db.keywords.get_for_photo(photo)}
+        assert "Bald Eagle" not in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
         db.redo_last_undo()
         assert flat_removals() == {(active_ws, "Osprey")}
-        assert "Bald Eagle" in {k["name"] for k in db.keywords.get_for_photo(photo)}
+        assert "Bald Eagle" in {k["name"] for k in db.photo_keywords.get_for_photo(photo)}
 
 
 @pytest.mark.parametrize("invalid", ["missing_species", "outside_selection", "foreign_photo"])
@@ -19081,8 +19087,8 @@ def test_batch_accept_on_all_validates_scope_before_writing(app_and_db, invalid)
         assert client.post(f"/api/workspaces/{workspace}/activate").status_code == 200
     response = client.post("/api/predictions/batch-accept", json=payload)
     assert response.status_code == (403 if invalid == "foreign_photo" else 400)
-    assert not db.keywords.get_for_photo(photo)
-    assert not db.keywords.get_for_photo(other)
+    assert not db.photo_keywords.get_for_photo(photo)
+    assert not db.photo_keywords.get_for_photo(other)
 
 
 def test_batch_accept_chunks_oversized_id_payloads(app_and_db):
@@ -19294,7 +19300,7 @@ def test_batch_reject_flips_status_and_records_single_undo(app_and_db):
     assert len(reject_rows) == 1
     # Rejecting must not tag anything.
     for pid in (photo_a, photo_b):
-        assert not db.keywords.get_for_photo(pid)
+        assert not db.photo_keywords.get_for_photo(pid)
 
 
 def test_batch_reject_rejects_foreign_prediction(app_and_db):
@@ -19329,7 +19335,7 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19356,11 +19362,11 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
 
     # Selected photos get the species keyword and their prediction flips.
     for pid in (photo_selected_a, photo_selected_b):
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" in names
 
     # The unselected group member must be untouched — no tag, still pending.
-    unselected_kws = {k["name"] for k in db.keywords.get_for_photo(photo_unselected)}
+    unselected_kws = {k["name"] for k in db.photo_keywords.get_for_photo(photo_unselected)}
     assert "Bald Eagle" not in unselected_kws
     unselected_status = next(
         row["status"] for row in db.predictions.get_rows(photo_ids=[photo_unselected])
@@ -19412,7 +19418,7 @@ def test_prediction_states_distinguish_empty_reasons(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(detected_only, "MDV6", box_count=1)
-    db.save_detections(
+    db.detections.save(
         detected_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19446,7 +19452,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(fallback_only, "MDV6", box_count=0)
-    db.save_detections(
+    db.detections.save(
         fallback_only,
         [{"box": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
           "confidence": 1.0, "category": "animal"}],
@@ -19458,7 +19464,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(noise_only, "MDV6", box_count=1)
-    db.save_detections(
+    db.detections.save(
         noise_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.01, "category": "animal"}],
@@ -19553,7 +19559,7 @@ def test_batch_accept_skips_rejected_predictions(app_and_db):
     assert _status_by_species() == {
         "Bald Eagle": "rejected", "Golden Eagle": "accepted",
     }
-    keywords_after_promotion = db.keywords.get_for_photo(photo_id)
+    keywords_after_promotion = db.photo_keywords.get_for_photo(photo_id)
     edits_after_promotion = len(db.edit_history.list_recent(limit=50))
 
     # The stale panel submits the loser.
@@ -19568,7 +19574,7 @@ def test_batch_accept_skips_rejected_predictions(app_and_db):
     assert _status_by_species() == {
         "Bald Eagle": "rejected", "Golden Eagle": "accepted",
     }, "a stale accept re-decided a row the user had already rejected"
-    assert db.keywords.get_for_photo(photo_id) == keywords_after_promotion, (
+    assert db.photo_keywords.get_for_photo(photo_id) == keywords_after_promotion, (
         "the rejected loser's species was tagged onto the photo"
     )
     # And nothing was recorded: a no-op must not sit on the undo stack, where
@@ -19623,7 +19629,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
         folder_id=folder_id, filename="multi-det.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_multi,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
@@ -19641,7 +19647,7 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
         folder_id=folder_id, filename="multi-model.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_b = db.save_detections(
+    det_b = db.detections.save(
         photo_multi_model,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19703,7 +19709,7 @@ def test_selection_prediction_suggestions_marks_photo_ambiguous_across_siblings(
         folder_id=folder_id, filename="mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
@@ -19765,7 +19771,7 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19807,7 +19813,7 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
     )
     assert resp.status_code == 200, resp.get_data(as_text=True)
     for pid in (robin_a, robin_b, sparrow_frame):
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Robin" in names
         assert "Sparrow" not in names
 
@@ -19837,7 +19843,7 @@ def test_selection_prediction_suggestions_ignores_minority_frame_confidence(
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -19899,7 +19905,7 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
         folder_id=folder_id, filename="burst-sparrow-only.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -19953,7 +19959,7 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20005,7 +20011,7 @@ def test_predictions_api_exposes_consensus_species_for_burst(app_and_db):
         folder_id=folder_id, filename="consensus.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -20152,7 +20158,7 @@ def test_selection_prediction_suggestions_flips_status_on_already_keyworded_phot
         photo_missing: "accepted",
     }
     for pid in (photo_keyworded, photo_missing):
-        names = [k["name"] for k in db.keywords.get_for_photo(pid)]
+        names = [k["name"] for k in db.photo_keywords.get_for_photo(pid)]
         assert names.count("Bald Eagle") == 1
 
 
@@ -20179,7 +20185,7 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
             folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20232,7 +20238,7 @@ def test_batch_accept_grouped_scopes_photos_per_model_bucket(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20321,7 +20327,7 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
             folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -20449,7 +20455,7 @@ def test_batch_accept_revalidates_ambiguity_after_keywords_move(app_and_db):
     assert body["already_decided"] == 0
 
     def _species_names(photo_id):
-        return {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+        return {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
 
     assert "TestZanclusalpha" in _species_names(clean_photo)
     assert "TestZanclusalpha" not in _species_names(stale_photo), (
@@ -20544,7 +20550,7 @@ def test_batch_accept_skips_superseded_label_set_rows(app_and_db):
     assert body["skipped_ambiguous"] == 0
     assert body["already_decided"] == 0
 
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "TestZanclusdelta" not in names, (
         "accepted a species from a label set the catalog has moved past"
     )
@@ -20703,7 +20709,7 @@ def test_batch_accept_checks_and_writes_are_one_transaction(
     ).fetchone()["status"]
     assert status == "accepted"
     assert "TestZanclustheta" in {
-        k["name"] for k in db.keywords.get_for_photo(photo_id)
+        k["name"] for k in db.photo_keywords.get_for_photo(photo_id)
     }
 
 
@@ -20746,7 +20752,7 @@ def test_batch_accept_skips_ambiguous_rows_with_alternatives(app_and_db):
         "ambiguity, and the count the user is shown has to say which"
     )
     assert {"TestZanclusgamma", "TestZanclusdelta"}.isdisjoint(
-        {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+        {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     )
     # A no-op must leave nothing on the undo stack: Browse gates its undo
     # toast on ``accepted``, and an entry here would let Ctrl+Z reverse some
@@ -20906,7 +20912,7 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db, monk
     assert body["skipped_superseded"] == 0
     # Nothing on the photo: no keyword, no workspace-scoped review row for a
     # folder that no longer belongs to this workspace.
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "TestDetachAlpha" not in names
     status = db.conn.execute(
         """SELECT COALESCE(pr_rev.status, 'pending') AS status
@@ -21013,7 +21019,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
         folder_id=folder_id, filename="drift.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -21075,7 +21081,7 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
     # The photo carries neither the raw label the row would have tagged with
     # nor the consensus the button named — a drift is a caller-side refresh,
     # not a "close enough, tag anyway" decision.
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "Robin" not in names
     assert "Sparrow" not in names
     status = db.conn.execute(
@@ -21110,7 +21116,7 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
         folder_id=folder_id, filename="no-expected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
@@ -21130,7 +21136,7 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
     body = resp.get_json()
     assert body["accepted"] == 1
     assert body["skipped_species_drifted"] == 0
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "Warbler" in names
 
 
@@ -21209,7 +21215,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21249,7 +21255,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
     # only skips re-expanding the same group, it does not silently drop
     # any prediction from being marked accepted.
     for pid in photos:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" in names
     remaining = [
         row for row in db.predictions.get_rows(photo_ids=photos, status="pending")
@@ -21280,7 +21286,7 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21374,7 +21380,7 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
             folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21453,7 +21459,7 @@ def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
             folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21512,7 +21518,7 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21560,7 +21566,7 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
 
     # Both submitted photos still get the keyword, exactly once each.
     for pid in (photo_a, photo_b):
-        names = [k["name"] for k in db.keywords.get_for_photo(pid)]
+        names = [k["name"] for k in db.photo_keywords.get_for_photo(pid)]
         assert names.count("Bald Eagle") == 1
 
 
@@ -21583,7 +21589,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -21620,7 +21626,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
 
     db.undo_last_edit()
     for pid in photos:
-        names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+        names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
         assert "Bald Eagle" not in names
 
 
@@ -21711,7 +21717,7 @@ def _seed_two_subject_photo(db, filename, first_species, second_species):
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
           "confidence": 0.9, "category": "animal"},
@@ -21770,7 +21776,7 @@ def test_accepting_one_subject_keeps_the_other_subject_acceptable(app_and_db):
         "/api/predictions/batch-accept", json={"prediction_ids": [egret]},
     )
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert {"Spotted Redshank", "Little Egret"} <= names
 
 
@@ -21836,7 +21842,7 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
         folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
           "confidence": 0.9, "category": "animal"},
@@ -21863,7 +21869,7 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
         "/api/predictions/batch-accept", json={"prediction_ids": [sparrow_pred]},
     )
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "Robin" in names and "Sparrow" not in names
 
     # The egret ID on the other detection must still be acceptable: Robin
@@ -21896,7 +21902,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
             folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -22019,7 +22025,7 @@ def test_batch_reject_skips_already_accepted_predictions(app_and_db):
         "/api/predictions/batch-accept", json={"prediction_ids": [pred_id]},
     )
     assert accepted.status_code == 200, accepted.get_data(as_text=True)
-    keywords_after_accept = db.keywords.get_for_photo(photo_id)
+    keywords_after_accept = db.photo_keywords.get_for_photo(photo_id)
     assert keywords_after_accept, "accept should have tagged the photo"
     edits_after_accept = len(db.edit_history.list_recent(limit=50))
 
@@ -22035,7 +22041,7 @@ def test_batch_reject_skips_already_accepted_predictions(app_and_db):
     assert statuses == ["accepted"], (
         "the stale reject overwrote a completed accept, orphaning its keyword"
     )
-    assert db.keywords.get_for_photo(photo_id) == keywords_after_accept
+    assert db.photo_keywords.get_for_photo(photo_id) == keywords_after_accept
     # And nothing was recorded: a no-op must not sit on the undo stack.
     assert len(db.edit_history.list_recent(limit=50)) == edits_after_accept
 
@@ -24203,11 +24209,11 @@ def _run_id_conflicts_batch(html, payload):
     # From the first of the helpers ``batchAction`` leans on, so the code
     # under test is the shipped one rather than a paraphrase of it.
     start = html.find("function loadedPhoto(")
-    # Up to the page's startup, which follows ``batchAction`` and runs once
-    # the document has loaded.
-    end = html.rfind("document.addEventListener('DOMContentLoaded', function() { updateConflictThresholdControl(); });")
+    # To the end of static/id-conflicts/decisions.js, whose last function is
+    # ``batchAction`` (page_with_scripts inlines each file in its own tag).
+    end = html.find("</script>", start)
     assert start != -1 and end > start, (
-        "id_conflicts.html's batch action code could not be located"
+        "ID Conflicts' batch action code could not be located"
     )
     import json as _json
 
@@ -24237,7 +24243,7 @@ def test_id_conflicts_batch_accept_reports_group_expanded_rows_as_applied(
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/id-conflicts").get_data(as_text=True)
+    html = _page_with_scripts(client, "/id-conflicts")
     photos = [
         {"photo_id": 1, "best_prediction_id": 11},
         {"photo_id": 2, "best_prediction_id": 12},
@@ -24274,7 +24280,7 @@ def test_id_conflicts_batch_accept_reports_group_expanded_rows_as_applied(
 def test_id_conflicts_batch_unconfirmed_accept_fully_reloads(app_and_db):
     """A lost grouped-write response cannot be reconciled by selected IDs."""
     app, _ = app_and_db
-    html = app.test_client().get("/id-conflicts").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/id-conflicts")
     photos = [
         {"photo_id": 1, "best_prediction_id": 11},
         {"photo_id": 2, "best_prediction_id": 12},
@@ -24572,13 +24578,13 @@ def test_single_accept_refuses_reviewed_prediction(app_and_db):
     reviewed = client.post(f"/api/predictions/{pred_id}/reviewed")
     assert reviewed.status_code == 200
     edits_after_mark = len(db.edit_history.list_recent(limit=50))
-    keywords_before = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    keywords_before = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
 
     accept = client.post(f"/api/predictions/{pred_id}/accept")
     assert accept.status_code == 409, accept.get_data(as_text=True)
     assert "reviewed" in accept.get_json().get("error", "")
 
-    assert {k["name"] for k in db.keywords.get_for_photo(photo_id)} == keywords_before, (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)} == keywords_before, (
         "an accept that should have been refused still tagged the photo"
     )
     assert len(db.edit_history.list_recent(limit=50)) == edits_after_mark
@@ -24598,7 +24604,7 @@ def test_batch_endpoints_skip_reviewed_predictions(app_and_db):
         db, "batch-vs-reviewed.jpg", "Peregrine Falcon",
     )
     assert client.post(f"/api/predictions/{pred_id}/reviewed").status_code == 200
-    keywords_before = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    keywords_before = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
 
     accept = client.post(
         "/api/predictions/batch-accept", json={"prediction_ids": [pred_id]},
@@ -24623,7 +24629,7 @@ def test_batch_endpoints_skip_reviewed_predictions(app_and_db):
         (pred_id, ws_id),
     ).fetchone()["status"]
     assert status == "reviewed"
-    assert {k["name"] for k in db.keywords.get_for_photo(photo_id)} == keywords_before
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)} == keywords_before
 
 
 def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
@@ -24646,7 +24652,7 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
             folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        det = db.save_detections(
+        det = db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -24682,8 +24688,8 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
     )
     assert rows[pred_ids[1]] == "accepted"
     # Only the accepted member's photo is tagged; the reviewed one stays clear.
-    assert {k["name"] for k in db.keywords.get_for_photo(photo_ids[0])} == set()
-    assert "Common Loon" in {k["name"] for k in db.keywords.get_for_photo(photo_ids[1])}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo_ids[0])} == set()
+    assert "Common Loon" in {k["name"] for k in db.photo_keywords.get_for_photo(photo_ids[1])}
 
 
 def test_single_reject_serializes_with_concurrent_batch_accept(
@@ -24925,7 +24931,7 @@ def test_compare_canonical_key_collapses_hierarchy_aliases(app_and_db, tmp_path)
         "sanity: the DB resolver collapses the alias onto its root"
     )
 
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -24969,7 +24975,7 @@ def test_compare_payload_carries_canonical_species(app_and_db, tmp_path):
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25069,7 +25075,7 @@ def test_compare_canonical_display_prefers_db_canonical_for_aliases(
     assert db.resolve_species_display_name("Desert Verdin") == "Verdin", (
         "sanity: the DB resolver collapses the alias onto its root"
     )
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25145,7 +25151,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
     ).fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
@@ -25180,7 +25186,7 @@ def test_compare_canonical_display_keeps_raw_when_only_case_differs(
 
 
 def _species_names(db, pid):
-    return db.keywords.get_species_for_photos([pid]).get(pid, [])
+    return db.photo_species.get_species_for_photos([pid]).get(pid, [])
 
 
 def test_encounter_species_add_mode_keeps_existing_species(app_and_db):
@@ -26158,7 +26164,7 @@ def test_pipeline_results_overlay_refreshes_confirmed_species_list(app_and_db):
         _json.dump(data, f)
     teal = db.add_keyword("Green-winged Teal", is_species=True)
     db.tag_photo(photo_ids[0], teal)
-    expected = db.keywords.get_species_for_photos(photo_ids)
+    expected = db.photo_species.get_species_for_photos(photo_ids)
 
     resp = client.get("/api/pipeline/results")
     assert resp.status_code == 200, resp.get_json()
@@ -26180,7 +26186,7 @@ def test_compare_keeps_native_scientific_identities_with_shared_common_name(app_
 
     app, db = app_and_db
     photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()["id"]
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
     entries = []
@@ -26213,7 +26219,7 @@ def test_compare_preserves_exact_keyword_match_with_incomplete_taxonomy(
     photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()[0]
     keyword = db.add_keyword("Test Parrot", is_species=True)
     db.tag_photo(photo_id, keyword)
-    det_id = db.save_detections(photo_id, [
+    det_id = db.detections.save(photo_id, [
         {"box": {"x": .1, "y": .1, "w": .3, "h": .3}, "confidence": .9},
     ], detector_model="MDV6")[0]
     evidence = {"scientific_name": "Test species"}
@@ -26298,14 +26304,14 @@ def test_selection_prediction_species_identity_merges_names_and_accepts(
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.get_json()["skipped_species_drifted"] == 0
     assert response.get_json()["accepted"] == (3 if on_all else 2)
-    tagged = [db.keywords.get_for_photo(p) for p in photos]
+    tagged = [db.photo_keywords.get_for_photo(p) for p in photos]
     assert len(tagged[0]) == len(tagged[1]) == 1
     assert tagged[0][0]["id"] == tagged[1][0]["id"]
     assert len(tagged[2]) == (1 if on_all else 0)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos[:2])} == {"accepted"}
     db.undo_last_edit()
-    assert all(not db.keywords.get_for_photo(p) for p in photos[1:])
-    assert [k["id"] for k in db.keywords.get_for_photo(photos[0])] == ([existing_kid] if already_tagged else [])
+    assert all(not db.photo_keywords.get_for_photo(p) for p in photos[1:])
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photos[0])] == ([existing_kid] if already_tagged else [])
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos[:2])} == {"pending"}
 
 
@@ -26358,14 +26364,14 @@ def test_batch_accept_prefers_named_keyword_among_same_taxon_aliases(
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.get_json()["accepted"] == (3 if on_all else 2)
     assert response.get_json()["species"] == "Pond slider"
-    assert [k["id"] for k in db.keywords.get_for_photo(photos[0])] == [alias_id if already_tagged else pond_id]
-    assert [k["id"] for k in db.keywords.get_for_photo(photos[1])] == [pond_id]
-    assert [k["id"] for k in db.keywords.get_for_photo(extra)] == ([pond_id] if on_all else [])
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photos[0])] == [alias_id if already_tagged else pond_id]
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photos[1])] == [pond_id]
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(extra)] == ([pond_id] if on_all else [])
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos)} == {"accepted"}
     assert client.post("/api/undo").status_code == 200
-    assert [k["id"] for k in db.keywords.get_for_photo(photos[0])] == ([alias_id] if already_tagged else [])
-    assert not db.keywords.get_for_photo(photos[1])
-    assert not db.keywords.get_for_photo(extra)
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photos[0])] == ([alias_id] if already_tagged else [])
+    assert not db.photo_keywords.get_for_photo(photos[1])
+    assert not db.photo_keywords.get_for_photo(extra)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos)} == {"pending"}
 
 
@@ -26414,7 +26420,7 @@ def test_batch_accept_same_species_with_different_keyword_names(
         expected[extra] = [common_id if reverse else alias_id]
 
     def assert_accepted():
-        assert {p: [k["id"] for k in db.keywords.get_for_photo(p)] for p in photos} == expected
+        assert {p: [k["id"] for k in db.photo_keywords.get_for_photo(p)] for p in photos} == expected
         assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"accepted"}
         for photo, kids in expected.items():
             names = {db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()[0] for kid in kids}
@@ -26427,7 +26433,7 @@ def test_batch_accept_same_species_with_different_keyword_names(
     edits = [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
     assert len(edits) == 1
     assert client.post("/api/undo").status_code == 200
-    assert all(not db.keywords.get_for_photo(p) for p in photos)
+    assert all(not db.photo_keywords.get_for_photo(p) for p in photos)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"pending"}
     assert not db.conn.execute(
         "SELECT 1 FROM pending_changes WHERE photo_id IN (?, ?, ?) AND change_type = 'keyword_add'", photos,
@@ -26457,7 +26463,7 @@ def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
     response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
     assert response.status_code == 400
     assert "one species" in response.get_json()["error"]
-    assert all(not db.keywords.get_for_photo(p) for p in photos)
+    assert all(not db.photo_keywords.get_for_photo(p) for p in photos)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=photos)} == {"pending"}
     assert [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")] == keywords_before
     assert not [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
@@ -26511,28 +26517,28 @@ def test_undo_after_alias_merge_preserves_manual_tag_from_mixed_batch(app_and_db
     assert response.status_code == 200, response.get_data(as_text=True)
     # Sanity: the batch tags each photo with the alias that matched its own
     # prediction, so the two items have different ``new_value`` keyword ids.
-    assert [k["id"] for k in db.keywords.get_for_photo(photo_a)] == [alias_id]
-    assert [k["id"] for k in db.keywords.get_for_photo(photo_b)] == [common_id]
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_a)] == [alias_id]
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)] == [common_id]
     # Simulate the user tagging photo_b with the OTHER alias after acceptance,
     # then merging the two aliases together. Photo_b's ``alias_id`` tag is a
     # user action the accept never created.
     db.tag_photo(photo_b, alias_id)
-    assert alias_id in [k["id"] for k in db.keywords.get_for_photo(photo_b)]
+    assert alias_id in [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)]
     db._merge_keyword_into(common_id, alias_id)
     db.conn.commit()
     # After the merge photo_b carries the surviving alias_id only.
-    assert [k["id"] for k in db.keywords.get_for_photo(photo_b)] == [alias_id]
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)] == [alias_id]
     # Undo of the accept must not strip the manually applied ``alias_id`` from
     # photo_b — that tag pre-existed the merge and was never in this batch.
     assert client.post("/api/undo").status_code == 200
-    assert alias_id in [k["id"] for k in db.keywords.get_for_photo(photo_b)]
+    assert alias_id in [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)]
     # photo_a's accepted tag was the only thing that item contributed, so its
     # undo still runs and clears the tag.
-    assert not db.keywords.get_for_photo(photo_a)
+    assert not db.photo_keywords.get_for_photo(photo_a)
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"pending"}
     assert client.post("/api/redo").status_code == 200
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"accepted"}
-    assert all([k["id"] for k in db.keywords.get_for_photo(p)] == [alias_id] for p in [photo_a, photo_b])
+    assert all([k["id"] for k in db.photo_keywords.get_for_photo(p)] == [alias_id] for p in [photo_a, photo_b])
 
 
 @pytest.mark.parametrize("earlier_source_add", [False, True])
@@ -26580,14 +26586,14 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
         # The later redundant add is retained as an empty history entry.
         assert not db.conn.execute("SELECT 1 FROM edit_history_items WHERE edit_id = ?", (later_edit,)).fetchone()
         assert client.post("/api/undo").status_code == 200
-        assert [k["id"] for k in db.keywords.get_for_photo(photo_b)] == [alias_id]
+        assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)] == [alias_id]
     assert client.post("/api/undo").status_code == 200
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"pending"}
-    assert not db.keywords.get_for_photo(photo_a)
-    assert [k["id"] for k in db.keywords.get_for_photo(photo_b)] == [alias_id]
+    assert not db.photo_keywords.get_for_photo(photo_a)
+    assert [k["id"] for k in db.photo_keywords.get_for_photo(photo_b)] == [alias_id]
     assert client.post("/api/redo").status_code == 200
     assert {r["status"] for r in db.predictions.get_rows(photo_ids=[photo_a, photo_b])} == {"accepted"}
-    assert all([k["id"] for k in db.keywords.get_for_photo(p)] == [alias_id] for p in [photo_a, photo_b])
+    assert all([k["id"] for k in db.photo_keywords.get_for_photo(p)] == [alias_id] for p in [photo_a, photo_b])
 
 
 def test_selection_prediction_species_identity_keeps_homonyms_separate(app_and_db):
@@ -26665,10 +26671,10 @@ def test_batch_accept_on_all_qualified_species_without_predictions(app_and_db):
     })
     assert response.status_code == 200
     assert response.get_json()["accepted"] == 1
-    keyword = db.keywords.get_for_photo(photo)[0]
+    keyword = db.photo_keywords.get_for_photo(photo)[0]
     assert db.conn.execute("SELECT source_taxon_id FROM keywords WHERE id = ?", (keyword["id"],)).fetchone()[0] == 42
     db.undo_last_edit()
-    assert not db.keywords.get_for_photo(photo)
+    assert not db.photo_keywords.get_for_photo(photo)
 
 
 def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
@@ -26702,7 +26708,7 @@ def test_accept_legacy_prediction_reuses_unlinked_same_name_keyword(app_and_db):
 
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.get_json()["accepted"] == 1
-    tagged = db.keywords.get_for_photo(photo)
+    tagged = db.photo_keywords.get_for_photo(photo)
     assert len(tagged) == 1
     assert tagged[0]["id"] == existing_kid
     # No suffixed duplicate leaked into the keywords table.
@@ -26743,7 +26749,7 @@ def test_batch_accept_on_all_bare_name_reuses_unlinked_same_name_keyword(app_and
 
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.get_json()["accepted"] == 1
-    tagged = db.keywords.get_for_photo(photo)
+    tagged = db.photo_keywords.get_for_photo(photo)
     assert len(tagged) == 1
     assert tagged[0]["id"] == existing_kid
     duplicates = db.conn.execute(

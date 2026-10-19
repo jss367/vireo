@@ -12,7 +12,7 @@ it always did.
 
 The life-list and explorer reads of ``taxa`` belong to
 ``repositories.species_curation``, and keyword-to-taxon linking to
-``repositories.keywords``.
+``repositories.keyword_taxa``.
 
 Callers reach it as ``db.taxa`` (a fresh repository per access, see
 ``Database.taxa``); there are no forwarding wrappers on ``Database``.

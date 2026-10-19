@@ -370,7 +370,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
 
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
-    second_detection = db.save_detections(
+    second_detection = db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.58, "y": 0.35, "w": 0.22, "h": 0.3},
@@ -432,7 +432,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
     row = page.locator(f'tr[data-photo-id="{photo_id}"]')
     expect(row.locator(".keyword-pill.species", has_text="Cooper's Hawk")).to_be_visible()
 
-    keyword_names = {item["name"] for item in db.keywords.get_for_photo(photo_id)}
+    keyword_names = {item["name"] for item in db.photo_keywords.get_for_photo(photo_id)}
     assert {"Red-tailed Hawk", "Cooper's Hawk"} <= keyword_names
     statuses = {
         pred["model"]: pred["status"]
@@ -490,7 +490,7 @@ def test_compare_row_status_surfaces_unclassified_over_pending_match(
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
     # Add a second detection with no predictions — an unclassified subject.
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{
             "box": {"x": 0.6, "y": 0.4, "w": 0.25, "h": 0.3},

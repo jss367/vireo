@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
+from services import detection_store, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -3264,8 +3265,8 @@ def _seed_workspace_with_masks(db_path):
         detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p1, "sam2-large", "/m/a.large.png",
         detector_model="md", prompt=(0, 0, 0, 0))
-    db.set_active_mask_variant(p1, "sam2-small")
-    db.set_active_mask_variant(p2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p2, "sam2-small")
     db.close()
     return p1, p2
 
@@ -3280,7 +3281,7 @@ def _seed_workspace_with_large_only_masks(db_path):
     for name in ("a.jpg", "b.jpg"):
         pid = db.add_photo(folder_id=fid, filename=name, extension=".jpg",
                            file_size=1, file_mtime=1.0)
-        db.save_detections(
+        db.detections.save(
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": 0.9, "category": "animal"}],
@@ -3291,7 +3292,7 @@ def _seed_workspace_with_large_only_masks(db_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
         photo_ids.append(pid)
     db.close()
     return photo_ids
@@ -3661,7 +3662,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
             pid = db.add_photo(folder, f"{i}.jpg", ".jpg", 100, 1,
                                timestamp=(datetime(2026, 1, 1) + timedelta(seconds=i * 0.5)).isoformat())
             ids.append(pid)
-            did = db.write_detection_batch(pid, "megadetector-v6", [{
+            did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [{
                 "box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
                 "confidence": 0.06 if i == 1 else 0.8, "category": "animal",
             }])[0]

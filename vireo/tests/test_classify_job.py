@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from classify_job import ClassifyParams, run_classify_job
 from PIL import Image
+from services import detection_store
 
 
 def test_classify_params_is_dataclass():
@@ -661,8 +662,7 @@ def test_detect_subjects_returns_detection_map(tmp_path):
 
     mock_db = MagicMock()
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
-    mock_db.get_existing_detection_photo_ids.return_value = set()
-    mock_db.write_detection_batch.return_value = [101]
+    mock_db.detections.write_batch.return_value = [101]
 
     with patch("classify_job.detection.detect_animals", return_value=[fake_detection]), \
          patch("classify_job.detection.get_primary_detection", return_value=fake_detection), \
@@ -703,7 +703,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     # Photo 1 already has detections in the database
     mock_db.model_runs.get_detector_run_photo_ids.return_value = {1}
-    mock_db.get_detections.return_value = [
+    mock_db.detections.get.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
     ]
@@ -743,7 +743,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     mock_db = MagicMock()
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     mock_db.model_runs.get_detector_run_photo_ids.return_value = {1}
-    mock_db.get_detections.return_value = [
+    mock_db.detections.get.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
     ]
@@ -840,7 +840,7 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.write_detection_batch.return_value = [42]
+    mock_db.detections.write_batch.return_value = [42]
 
     # quality scoring raises — simulates compute_sharpness or
     # update_photo_quality failing after the detection row is already saved.
@@ -861,7 +861,7 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
         )
 
     # The detection was saved to the DB before quality scoring raised.
-    mock_db.write_detection_batch.assert_called_once()
+    mock_db.detections.write_batch.assert_called_once()
     # photo 7 must be in processed_ids even though quality scoring raised, so
     # the reclassify purge correctly removes its stale pre-run detection rows.
     assert 7 in processed_ids, (
@@ -1000,9 +1000,9 @@ def test_detect_batch_stores_all_detections(tmp_path):
         {"box": {"x": 0.5, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
         {"box": {"x": 0.3, "y": 0.5, "w": 0.15, "h": 0.2}, "confidence": 0.60, "category": "animal"},
     ]
-    det_ids = db.save_detections(pid, detections_list, detector_model="MDV6")
+    det_ids = db.detections.save(pid, detections_list, detector_model="MDV6")
     assert len(det_ids) == 3
-    stored = db.get_detections(pid)
+    stored = detection_store.get_detections(db, pid)
     assert len(stored) == 3
 
 
@@ -1031,7 +1031,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.write_detection_batch.return_value = [101, 102]
+    mock_db.detections.write_batch.return_value = [101, 102]
 
     with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
          patch("classify_job.detection.get_primary_detection", return_value=fake_detections[0]), \
@@ -1054,7 +1054,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     assert detection_map[1][0]["box_x"] == 0.1
     assert detection_map[1][1]["id"] == 102
     assert detection_map[1][1]["box_x"] == 0.5
-    mock_db.write_detection_batch.assert_called_once()
+    mock_db.detections.write_batch.assert_called_once()
 
 
 def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
@@ -1085,8 +1085,8 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.write_detection_batch.return_value = [101]
-    mock_db.get_detections.return_value = [{
+    mock_db.detections.write_batch.return_value = [101]
+    mock_db.detections.get.return_value = [{
         "id": 101,
         "box_x": 0.10002,
         "box_y": 0.2,
@@ -1122,9 +1122,7 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
         "category": "animal",
         "detector_model": "megadetector-v6",
     }]
-    mock_db.get_detections.assert_called_once_with(
-        1, min_conf=0, detector_model="megadetector-v6",
-    )
+    mock_db.detections.get.assert_called_once_with(1, 0, "megadetector-v6")
 
 
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
@@ -1387,8 +1385,8 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
     # Seed a cached detector run so this photo goes through the
     # already-detected branch — the exact case where the source is
     # offline but subject analysis should still succeed.
-    db.write_detection_batch(
-        photo_id, "megadetector-v6",
+    detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6",
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
     )
@@ -1450,7 +1448,7 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     mock_db = MagicMock()
     # Gate fires (run key present) but no cached prediction rows.
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
     mock_db.masks_features.get_embedding.return_value = None
     # No measured match-score summary for this triple either — a torn
     # write from a crashed local job (or a suppressed ``match`` row),
@@ -1518,7 +1516,7 @@ def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
     mock_clf = MagicMock()
     mock_db = MagicMock()
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
     mock_db.masks_features.get_embedding.return_value = None
     # The measured summary says the run happened and matched nothing.
     mock_db.model_runs.has_classifier_match_score.return_value = True
@@ -1572,7 +1570,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
@@ -1652,7 +1650,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")[0]
     db.predictions.add(det_id, species="Robin", confidence=0.9,
@@ -1773,7 +1771,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -1885,7 +1883,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
@@ -2023,9 +2021,9 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     mock_db = MagicMock()
     # No real detections → full-image path. Existing full-image
     # detection is cached.
-    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.detections.get.return_value = [{"id": 999}]
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
-    mock_db.get_predictions_for_detection.return_value = [
+    mock_db.detections.get_predictions.return_value = [
         {"species": "Robin", "confidence": 0.9, "detection_id": 999},
     ]
     mock_db.masks_features.get_embedding.return_value = None
@@ -2084,9 +2082,9 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
     # is reused; its (model, fingerprint) run key exists; no cached
     # predictions; but a measured match-score row records the run as a
     # zero-candidate no-match.
-    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.detections.get.return_value = [{"id": 999}]
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
     mock_db.masks_features.get_embedding.return_value = None
     mock_db.model_runs.has_classifier_match_score.return_value = True
 
@@ -2136,7 +2134,7 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
     )
     # Pre-seed a full-image detection that a prior classify pass would have
     # left behind.
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
         detector_model="full-image",
@@ -2145,8 +2143,8 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
 
     # Sanity check the helper used by the reuse path — must use min_conf=0
     # because the synthetic full-image detection has confidence=0.
-    existing = db.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
+    existing = detection_store.get_detections(
+        db, photo_id, detector_model="full-image", min_conf=0,
     )
     assert len(existing) == 1
     assert existing[0]["id"] == original_det_id
@@ -2163,8 +2161,8 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
     db.conn.commit()
 
     # Reuse path via the helper
-    reused = db.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
+    reused = detection_store.get_detections(
+        db, photo_id, detector_model="full-image", min_conf=0,
     )
     assert reused[0]["id"] == original_det_id
     # Prediction still there
@@ -2191,7 +2189,7 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2249,7 +2247,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2287,8 +2285,8 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
     assert result["predictions_stored"] == 0
     assert result["already_labeled"] == 1
 
-    cached = db.get_predictions_for_detection(
-        det_id,
+    cached = detection_store.get_predictions_for_detection(
+        db, det_id,
         classifier_model="bioclip-2",
         labels_fingerprint="fp-active",
         min_classifier_conf=0,
@@ -2321,7 +2319,7 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
         for idx in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -2404,7 +2402,7 @@ def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
         for idx in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -2477,7 +2475,7 @@ def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
         (det_ids[1], "Robin", "match", "accepted"),
     }
     # The cached top-1 (confidence-DESC) is the consensus species, not Hawk.
-    top = db.get_predictions_for_detection(det_ids[0], min_classifier_conf=0)
+    top = detection_store.get_predictions_for_detection(db, det_ids[0], min_classifier_conf=0)
     assert top[0]["species"] == "Robin"
 
 
@@ -2498,7 +2496,7 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2579,7 +2577,7 @@ def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypa
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2651,7 +2649,7 @@ def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2728,7 +2726,7 @@ def test_hierarchy_keyword_still_auto_accepts_single_species_match(
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2804,7 +2802,7 @@ def test_multiple_distinct_descendants_stay_pending(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2900,7 +2898,7 @@ def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -2968,7 +2966,7 @@ def test_match_flip_preserves_manual_review_on_reuse(
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="MDV6",
@@ -3041,7 +3039,7 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
         for i in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -3125,7 +3123,7 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
         for i in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -3230,7 +3228,7 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
         for i in range(3)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -3290,7 +3288,7 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
         "accepting the row Browse labels 'Sparrow' tagged a different "
         "species"
     )
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_ids[2])}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_ids[2])}
     assert "Sparrow" in names
     assert "Robin" not in names
 
@@ -3322,7 +3320,7 @@ def test_grouped_burst_consensus_equals_each_row_species(tmp_path, monkeypatch):
         for i in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -3400,7 +3398,7 @@ def test_ungrouped_burst_clears_stale_group_id_on_reuse(
         for i in range(2)
     ]
     det_ids = [
-        db.save_detections(
+        db.detections.save(
             pid,
             [{
                 "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -3496,7 +3494,7 @@ def test_stored_prediction_species_folds_curly_apostrophe(tmp_path):
             folder_id, "a.jpg", extension=".jpg", file_size=100,
             file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
               "category": "animal"}],
@@ -3540,7 +3538,7 @@ def test_stored_prediction_species_preserves_okina(tmp_path):
             folder_id, "a.jpg", extension=".jpg", file_size=100,
             file_mtime=1.0,
         )
-        det_id = db.save_detections(
+        det_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
               "category": "animal"}],
@@ -3575,7 +3573,7 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
@@ -3619,7 +3617,7 @@ def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatc
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
           "category": "animal"}],
@@ -3655,7 +3653,7 @@ def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ok, det_failed = db.save_detections(
+    det_ok, det_failed = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9},
@@ -3726,8 +3724,8 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
     _input, det_input_fp = source_input(
         photo_hash, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        photo_id, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, photo_id, "megadetector-v6",
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -3866,7 +3864,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -3907,7 +3905,7 @@ def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
@@ -4060,9 +4058,9 @@ def test_classify_photos_new_photo(tmp_path):
     # consumers (culling, similarity search) and a per-detection
     # (variant='det:<id>') entry so multi-subject reruns from cache use
     # the correct per-subject vector instead of last-wins.
-    embed_calls = mock_db.upsert_photo_embedding.call_args_list
+    embed_calls = mock_db.masks_features.upsert_embedding.call_args_list
     assert len(embed_calls) == 2
-    variants = {call.kwargs.get("variant", "") for call in embed_calls}
+    variants = {call.args[3] for call in embed_calls}
     assert "" in variants
     assert any(v.startswith("det:") for v in variants)
 
@@ -4091,7 +4089,7 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_db = MagicMock()
     # Detection 101 has a cached classifier_run for (BioCLIP, legacy).
     mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "legacy")}
-    mock_db.get_predictions_for_detection.return_value = [
+    mock_db.detections.get_predictions.return_value = [
         {"species": "Northern Cardinal", "confidence": 0.95,
          "detection_id": 101},
     ]
@@ -4259,7 +4257,7 @@ def test_flush_batch_writes_per_detection_embedding(tmp_path):
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     # Simulate two qualifying detections on one photo.
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},
@@ -4348,7 +4346,7 @@ def test_flush_batch_does_not_hold_gpu_lock_around_helper_or_db():
     clf.classify_batch_with_embedding.side_effect = record_inside_helper
 
     db = MagicMock()
-    db.upsert_photo_embedding.side_effect = record_inside_db
+    db.masks_features.upsert_embedding.side_effect = record_inside_db
 
     raw_results = []
     batch = [{
@@ -4370,7 +4368,7 @@ def test_flush_batch_does_not_hold_gpu_lock_around_helper_or_db():
         "helpers, wrapping only ``session.run``"
     )
     assert snapshots["during_db_write"] == baseline, (
-        "GPU lock must NOT be held during db.upsert_photo_embedding so "
+        "GPU lock must NOT be held during the embedding write so "
         "concurrent pipelines can do GPU work while this one persists"
     )
 
@@ -4398,7 +4396,7 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
     fid = db.add_folder("/photos", name="photos")
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
 
@@ -4782,7 +4780,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
     mock_db_instance.model_runs.cache_coverage_counts.return_value = (0, 0, 0)
     # Subject-skip gate: with no subject types configured the gate is a no-op.
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.photo_keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
 
@@ -5408,7 +5406,7 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
     photo_id = db.add_photo(
         folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
           "category": "animal"}],
@@ -5550,11 +5548,11 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
         folder_id, "second.jpg", extension=".jpg",
         file_size=100, file_mtime=2.0,
     )
-    det_first = db.save_detections(pid_first, [
+    det_first = db.detections.save(pid_first, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    det_second = db.save_detections(pid_second, [
+    det_second = db.detections.save(pid_second, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -5656,7 +5654,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det = db.save_detections(pid, [
+    det = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -5682,7 +5680,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
         )
 
     assert pid not in job.get("_detect_processed_ids", set())
-    assert [d["id"] for d in db.get_detections(pid, min_conf=0)] == [det]
+    assert [d["id"] for d in detection_store.get_detections(db, pid, min_conf=0)] == [det]
     assert db.conn.execute(
         "SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (det,),
     ).fetchone()[0] == 1
@@ -5752,10 +5750,10 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     # is well over 2, so neither flushes mid-loop — the only flush path is
     # the post-loop one, which must be skipped on cancel.
     mock_db = MagicMock()
-    mock_db.get_detections.return_value = []
-    mock_db.save_detections.return_value = [101]
+    mock_db.detections.get.return_value = []
+    mock_db.detections.save.return_value = [101]
     mock_db.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
 
     photos = [
         {"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None},
@@ -5849,10 +5847,10 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
-    mock_db.get_detections.return_value = []
-    mock_db.save_detections.return_value = [101]
+    mock_db.detections.get.return_value = []
+    mock_db.detections.save.return_value = [101]
     mock_db.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
 
     clf = MagicMock()
     clf.classify_batch_with_embedding.return_value = [
@@ -5925,10 +5923,10 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
-    mock_db.get_detections.return_value = []
-    mock_db.save_detections.return_value = [101]
+    mock_db.detections.get.return_value = []
+    mock_db.detections.save.return_value = [101]
     mock_db.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
 
     clf = MagicMock()
     clf.classify_batch_with_embedding.return_value = [
@@ -5991,11 +5989,11 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
         folder_id, "second.jpg", extension=".jpg",
         file_size=100, file_mtime=2.0,
     )
-    det_first = db.save_detections(pid_first, [
+    det_first = db.detections.save(pid_first, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    det_second = db.save_detections(pid_second, [
+    det_second = db.detections.save(pid_second, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -6107,7 +6105,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     # Pretend a prior megadetector run left a detection + prediction
     # behind. The reclassify-with-weights-failure path must not let this
     # prediction linger alongside the new full-image one.
-    stale_det = db.save_detections(pid, [
+    stale_det = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -6203,7 +6201,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     )
     # Prior run: megadetector detection + prediction under the OLD
     # workspace label fingerprint.
-    stale_det = db.save_detections(pid, [
+    stale_det = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -6297,11 +6295,11 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
         folder_id, "b.jpg", extension=".jpg",
         file_size=100, file_mtime=2.0,
     )
-    det_a = db.save_detections(pid_a, [
+    det_a = db.detections.save(pid_a, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    det_b = db.save_detections(pid_b, [
+    det_b = db.detections.save(pid_b, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -6406,10 +6404,10 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
     clf = MagicMock()
 
     mock_db = MagicMock()
-    mock_db.get_detections.return_value = []
-    mock_db.save_detections.return_value = [101]
+    mock_db.detections.get.return_value = []
+    mock_db.detections.save.return_value = [101]
     mock_db.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
 
     photos = [
         {"id": 1, "filename": "a.jpg", "folder_id": 10, "timestamp": None},
@@ -6468,7 +6466,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
 
     mock_db = MagicMock()
     mock_db.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.detections.get_predictions.return_value = []
 
     photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10,
                "timestamp": None}]
@@ -6553,14 +6551,14 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.photo_keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     # The classify loop uses these to gate-check; empty returns force
     # full re-classification (which is what reclassify means anyway).
     mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db_instance.get_predictions_for_detection.return_value = []
-    mock_db_instance.get_detections.return_value = []
+    mock_db_instance.detections.get_predictions.return_value = []
+    mock_db_instance.detections.get.return_value = []
 
     fake_model = {
         "id": "test-model",
@@ -6676,12 +6674,12 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.photo_keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db_instance.get_predictions_for_detection.return_value = []
-    mock_db_instance.get_detections.return_value = []
+    mock_db_instance.detections.get_predictions.return_value = []
+    mock_db_instance.detections.get.return_value = []
 
     fake_model = {
         "id": "test-model",
@@ -6806,7 +6804,7 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
 
     fake_db = MagicMock()
     fake_db.model_runs.get_classifier_run_keys.return_value = set()
-    fake_db.get_predictions_for_detection.return_value = []
+    fake_db.detections.get_predictions.return_value = []
 
     fake_embedding = np.ones(512, dtype=np.float32)
     fake_preds = [{"species": "Restored", "score": 0.95, "taxonomy": None}]
@@ -6927,7 +6925,7 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
 
     fake_db = MagicMock()
     fake_db.model_runs.get_classifier_run_keys.return_value = set()
-    fake_db.get_predictions_for_detection.return_value = []
+    fake_db.detections.get_predictions.return_value = []
 
     fake_embedding = np.ones(512, dtype=np.float32)
     fake_preds = [{"species": "Restored", "score": 0.9, "taxonomy": None}]
@@ -7072,21 +7070,21 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     mock_db_instance.predictions.get_existing_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
-    mock_db_instance.keywords.filter_out_subject_tagged.side_effect = (
+    mock_db_instance.photo_keywords.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
-    mock_db_instance.get_predictions_for_detection.return_value = []
+    mock_db_instance.detections.get_predictions.return_value = []
     # No prior full-image synthetic detection exists for photo 1 — the
     # classifier creates one for the full-image fallback path.
-    mock_db_instance.get_detections.return_value = []
+    mock_db_instance.detections.get.return_value = []
     # save_detections + write_detection_batch both return the synthetic
     # detection id for the full-image fallback path.  The classify loop
     # now writes both the detection and the detector_runs row in a single
     # ``write_detection_batch`` transaction to avoid torn state on crash,
     # so the mock has to answer that call too.
-    mock_db_instance.save_detections.return_value = [201]
-    mock_db_instance.write_detection_batch.return_value = [201]
+    mock_db_instance.detections.save.return_value = [201]
+    mock_db_instance.detections.write_batch.return_value = [201]
 
     fake_model = {
         "id": "test-model",
@@ -7292,7 +7290,7 @@ def test_store_pending_alt_that_folds_to_primary_does_not_hide_top1(tmp_path):
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0,
                        timestamp="2024-01-15T10:00:00")
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
 
@@ -7358,7 +7356,7 @@ def test_store_match_alt_that_folds_to_primary_preserves_auto_accept(tmp_path):
     fid = db.add_folder("/photos", name="photos")
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
 
@@ -7412,7 +7410,7 @@ def test_store_match_alt_that_only_differs_in_case_preserves_auto_accept(
     fid = db.add_folder("/photos", name="photos")
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
 
@@ -7461,7 +7459,7 @@ def test_store_match_alt_non_ascii_case_preserves_both_predictions(tmp_path):
     fid = db.add_folder("/photos", name="photos")
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="megadetector-v6")
 
@@ -7572,7 +7570,7 @@ def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
         folder_id, "bare.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(covered, [
+    det_id = db.detections.save(covered, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")[0]
     # A classifier_run row without a matching predictions row is a torn
@@ -7614,7 +7612,7 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 2, "y": 2, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
@@ -7656,7 +7654,7 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
         folder_id, "b.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det2 = db.save_detections(pid2, [
+    det2 = db.detections.save(pid2, [
         {"box": {"x": 4, "y": 4, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
         {"box": {"x": 6, "y": 6, "w": 1, "h": 1}, "confidence": 0.9,
@@ -7714,8 +7712,8 @@ def test_all_photos_cache_satisfied_rejects_stale_classifier_runtime(tmp_path):
     _input, det_input_fp = source_input(
         "0" * 64, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        pid, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, pid, "megadetector-v6",
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -7847,8 +7845,8 @@ def test_all_photos_cache_satisfied_rejects_pre_synonym_classifier_runtime(
     _input, det_input_fp = source_input(
         "0" * 64, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        pid, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, pid, "megadetector-v6",
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -7956,7 +7954,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     # Two detections: one clearly above the workspace threshold, one
     # clearly below. Only the classifiable, above-threshold row needs a
     # cached run for the all-cache-hit shortcut to be valid.
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 2, "y": 2, "w": 1, "h": 1}, "confidence": 0.3, "category": "animal"},
     ], detector_model="megadetector-v6")
@@ -8022,7 +8020,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8136,7 +8134,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
         folder_id, "empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0,
         "category": "animal",
@@ -8188,7 +8186,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         folder_id, "legacy.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    detection_id = db.save_detections(photo_id, [{
+    detection_id = db.detections.save(photo_id, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9,
         "category": "animal",
@@ -8258,7 +8256,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8371,7 +8369,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8459,7 +8457,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8537,7 +8535,7 @@ def test_describe_cached_label_source_ignores_runs_coverage_ignores(tmp_path):
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8595,7 +8593,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [{
+    det_id = db.detections.save(pid, [{
         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
@@ -8643,7 +8641,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
     # Two real detections: one above the workspace threshold (eligible),
     # one below (ineligible). Distinct boxes so ``detection_id`` (which
     # is content-addressed) does not collapse them into one row.
-    dets = db.save_detections(pid, [
+    dets = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
         {"box": {"x": 2, "y": 2, "w": 1, "h": 1},
@@ -8733,7 +8731,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -8801,7 +8799,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_id = db.save_detections(pid, [
+    det_id = db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -8873,11 +8871,11 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
         file_size=100, file_mtime=1.0,
         timestamp="2024-01-01T10:00:01",
     )
-    det_a = db.save_detections(pid_a, [
+    det_a = db.detections.save(pid_a, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
-    det_b = db.save_detections(pid_b, [
+    det_b = db.detections.save(pid_b, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")[0]
@@ -8969,8 +8967,8 @@ def test_pre_heal_classifier_run_does_not_satisfy_cache(tmp_path):
     _input, det_input_fp = source_input(
         "0" * 64, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        pid, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, pid, "megadetector-v6",
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -9090,8 +9088,8 @@ def test_all_photos_cache_satisfied_excludes_unreviewed_legacy_timm_after_heal(
     _input, det_input_fp = source_input(
         "0" * 64, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        pid, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, pid, "megadetector-v6",
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -9216,8 +9214,8 @@ def test_all_photos_cache_satisfied_still_grandfathers_legacy_bioclip(tmp_path):
     _input, det_input_fp = source_input(
         "0" * 64, "vireo-detector-source-v1",
     )
-    det_id = db.write_detection_batch(
-        pid, "megadetector-v6",
+    det_id = detection_store.write_detection_batch(
+        db, pid, "megadetector-v6",
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=detector_runtime,
@@ -9338,7 +9336,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")

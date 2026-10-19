@@ -15,6 +15,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from services import detection_store, stage_counts, subject_masks
+
 log = logging.getLogger(__name__)
 
 
@@ -181,8 +183,8 @@ def _resolve_labels_for_models(models, labels_files, db):
         )
         try:
             return load_merged_labels(active_sets) if active_sets else []
-        except Exception as e:
-            log.warning("plan: failed to load labels %s: %s", active_sets, e)
+        except Exception as e:  # broad: label files raise a wide set; the plan shows no labels
+            log.warning("plan: failed to load labels %s: %s", active_sets, e, exc_info=True)
             return []
 
     if labels_files:
@@ -375,8 +377,8 @@ class _ClassifyPlan:
             from weak_detections import contextual_weak_photo_ids
 
             scoped_photos = db.photos.get_by_ids(self.scope_ids)
-            raw_mdv6_detections = db.get_detections_for_photos(
-                self.scope_ids,
+            raw_mdv6_detections = detection_store.get_detections_for_photos(
+                db, self.scope_ids,
                 min_conf=self.weak_detection_confidence,
                 detector_model="megadetector-v6",
             )
@@ -391,11 +393,11 @@ class _ClassifyPlan:
     def count_targets(self):
         """Count the classifiable units and the runnable models' pairs."""
         db = self.db
-        det_counts = db.count_real_detections_in_scope(
-            self.photo_ids, min_conf=self.detector_confidence,
+        det_counts = stage_counts.count_real_detections_in_scope(
+            db, self.photo_ids, min_conf=self.detector_confidence,
         )
-        weak_det_counts = db.count_primary_detections_in_scope(
-            self.contextual_weak_ids, min_conf=self.weak_detection_confidence,
+        weak_det_counts = stage_counts.count_primary_detections_in_scope(
+            db, self.contextual_weak_ids, min_conf=self.weak_detection_confidence,
         )
         self.total_dets = (
             det_counts["total_dets"] + weak_det_counts["total_dets"]
@@ -412,8 +414,8 @@ class _ClassifyPlan:
         self.fallback_photo_ids = (
             set(self.scope_ids) - self.contextual_weak_ids
         ) & self.current_detector_photo_ids
-        self.full_image_fallbacks = db.count_full_image_fallback_photos(
-            self.fallback_photo_ids, min_conf=self.detector_confidence,
+        self.full_image_fallbacks = stage_counts.count_full_image_fallback_photos(
+            db, self.fallback_photo_ids, min_conf=self.detector_confidence,
         )
         self.classifiable_units = self.total_dets + self.full_image_fallbacks
 
@@ -428,18 +430,21 @@ class _ClassifyPlan:
     ):
         """Sum one model's count over detections, weak rescues and fallbacks."""
         n = count_dets(
+            self.db,
             classifier_model=model_name,
             labels_fingerprint=fp,
             photo_ids=self.photo_ids,
             min_conf=self.detector_confidence,
         )
         n += count_primary(
+            self.db,
             classifier_model=model_name,
             labels_fingerprint=fp,
             photo_ids=self.contextual_weak_ids,
             min_conf=self.weak_detection_confidence,
         )
         n += count_full_image(
+            self.db,
             classifier_model=model_name,
             labels_fingerprint=fp,
             photo_ids=self.fallback_photo_ids,
@@ -452,7 +457,6 @@ class _ClassifyPlan:
     def count_stale(self):
         """Count cached classifications made under a different label set."""
         params = self.params
-        db = self.db
         self.stale_total = 0
         if self.classifiable_units > 0 and not (params.reclassify or params.raw_subject_analysis):
             for m in self.models:
@@ -460,9 +464,9 @@ class _ClassifyPlan:
                 if info.get("blocked"):
                     continue
                 self.stale_total += self._count_over_targets(
-                    db.count_classify_stale,
-                    db.count_primary_classify_stale,
-                    db.count_full_image_classify_stale,
+                    stage_counts.count_classify_stale,
+                    stage_counts.count_primary_classify_stale,
+                    stage_counts.count_full_image_classify_stale,
                     m["name"], info["fingerprint"],
                 )
         # Reclassify is a user override, not a settings-change signal.
@@ -474,7 +478,6 @@ class _ClassifyPlan:
     def count_pending(self):
         """Count each runnable model's pending pairs; collect blocked models."""
         params = self.params
-        db = self.db
         self.blocked = []
         self.pending_per_model = {}
         self.pending_total = 0
@@ -487,9 +490,9 @@ class _ClassifyPlan:
                 pending = self.classifiable_units
             else:
                 pending = self._count_over_targets(
-                    db.count_classify_pending_pairs,
-                    db.count_primary_classify_pending_pairs,
-                    db.count_full_image_classify_pending_pairs,
+                    stage_counts.count_classify_pending_pairs,
+                    stage_counts.count_primary_classify_pending_pairs,
+                    stage_counts.count_full_image_classify_pending_pairs,
                     m["name"], info["fingerprint"],
                 )
             if pending:
@@ -799,19 +802,19 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "state": "will-run",
             "summary": "Recompute quality with per-subject RAW exposure analysis",
         }
-    scope_sql, scope_params = db._scope_clause(photo_ids)
+    scope_sql, scope_params = db.stats.scope_clause(photo_ids)
     if db.stats.has_quality_input_recipe(scope_sql, scope_params):
         return {
             "state": "will-run",
             "summary": "Recompute quality without RAW exposure correction",
         }
-    counts = db.count_photos_pending_masks(
-        photo_ids, sam2_variant=sam2_variant,
+    counts = stage_counts.count_photos_pending_masks(
+        db, photo_ids, sam2_variant=sam2_variant,
     )
     eligible = counts["eligible"]
     pending = counts["pending"]
-    stale = db.count_extract_stale(sam2_variant, photo_ids)
-    sam_warning = db.sam_variant_rerun_warning(sam2_variant, photo_ids)
+    stale = stage_counts.count_extract_stale(db, sam2_variant, photo_ids)
+    sam_warning = subject_masks.sam_variant_rerun_warning(db, sam2_variant, photo_ids)
     if eligible == 0:
         return _extract_no_eligible_plan(params, photo_ids, new_count)
     if pending == 0 and stale == 0 and new_count == 0:
@@ -931,9 +934,9 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
             "summary": f"Will skip — {skip_reason}",
         }
 
-    pending = len(db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids))
-    eligible = db.count_eye_keypoint_eligible(photo_ids)
-    stale = db.count_eye_keypoint_stale(photo_ids)
+    pending = len(subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=photo_ids))
+    eligible = stage_counts.count_eye_keypoint_eligible(db, photo_ids)
+    stale = stage_counts.count_eye_keypoint_stale(db, photo_ids)
     processed = max(eligible - pending, 0)
 
     if eligible == 0:
@@ -1124,7 +1127,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
         coming in.
       - ``will-run``: everything else, with a count of pending work.
     """
-    thumb = db.count_photos_missing_thumb(photo_ids)
+    thumb = stage_counts.count_photos_missing_thumb(db, photo_ids)
     eligible = thumb["eligible"]
     thumb_pending = thumb["pending"]
 
@@ -1138,7 +1141,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
         preview_pending = 0
     else:
         previews_skipped = False
-        prev = db.count_photos_missing_preview(preview_size, photo_ids)
+        prev = stage_counts.count_photos_missing_preview(db, preview_size, photo_ids)
         preview_pending = prev["pending"]
 
     if eligible == 0 and new_count == 0:
@@ -1175,8 +1178,8 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
     if previews_skipped:
         existing_pending = thumb_pending
     else:
-        union = db.count_photos_missing_thumb_or_preview(
-            preview_size, photo_ids,
+        union = stage_counts.count_photos_missing_thumb_or_preview(
+            db, preview_size, photo_ids,
         )
         existing_pending = union["pending"]
     photos_pending = existing_pending + new_count
@@ -1695,7 +1698,7 @@ def compute_plan(db, params, db_path):
     # in every stage, so a plan that only honored them for collections
     # overstated the pending counts (the proxy drift this module forbids).
     # Whole-workspace scope materializes the id set first so the same
-    # subtraction works; _scope_clause stages large sets in a temp table.
+    # subtraction works; stats.scope_clause stages large sets in a temp table.
     if params.exclude_photo_ids:
         excl = set(params.exclude_photo_ids)
         if photo_ids is None:

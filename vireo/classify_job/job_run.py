@@ -21,6 +21,7 @@ from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
 from classify_job.store_predictions import _store_grouped_predictions
 from models import get_active_model, get_models
+from services import detection_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -125,7 +126,7 @@ class _ClassifyJobRun:
             subject_types = thread_db.get_subject_types()
             if subject_types:
                 pre_count = len(photos)
-                kept_ids = set(thread_db.keywords.filter_out_subject_tagged(
+                kept_ids = set(thread_db.photo_keywords.filter_out_subject_tagged(
                     [p["id"] for p in photos], subject_types,
                 ))
                 photos = [p for p in photos if p["id"] in kept_ids]
@@ -194,7 +195,7 @@ class _ClassifyJobRun:
                     reused.get("detector_runs_applied", 0),
                     reused.get("classifier_runs_applied", 0),
                 )
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure classify recomputes
             log.warning("Could not apply local computation cache", exc_info=True)
 
     # -- cached-only shortcut ------------------------------------------
@@ -274,7 +275,7 @@ class _ClassifyJobRun:
                     peek.desired_classifier_model = (
                         params.model_name or peek.peek_model.get("name")
                     )
-        except Exception:
+        except Exception:  # broad: the model lookup reads config and model dirs; the explicit request is preserved so the guard below decides
             # A raising get_models() here left both peek and constraints
             # unresolved. Clearing ``model_id_missing`` or
             # ``desired_classifier_model`` unconditionally would let
@@ -338,7 +339,7 @@ class _ClassifyJobRun:
             # previous label space and finish "successfully" for a
             # selection the authoritative load below rejects.
             raise
-        except Exception:
+        except Exception:  # broad: label loading raises undocumented errors; cache reuse falls back to model-only filtering
             log.warning(
                 "Could not load labels before the cache check; "
                 "cache reuse falls back to model-only filtering",
@@ -844,7 +845,7 @@ class _ClassifyJobRun:
                     "Portable cache added %d classifier runs after detect",
                     reapplied["classifier_runs_applied"],
                 )
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure the fresh results stand
             log.warning(
                 "Could not reapply local computation cache after detect",
                 exc_info=True,
@@ -885,11 +886,11 @@ class _ClassifyJobRun:
                     )
                 except (ValueError, CacheFormatError):
                     full_input = None
-            existing_full = thread_db.get_detections(
-                photo_id, detector_model="full-image", min_conf=0,
+            existing_full = detection_store.get_detections(
+                thread_db, photo_id, detector_model="full-image", min_conf=0,
             )
             if not existing_full:
-                thread_db.save_detections(
+                thread_db.detections.save(
                     photo_id,
                     [{
                         "box": {"x": 0, "y": 0, "w": 1, "h": 1},
@@ -949,7 +950,7 @@ class _ClassifyJobRun:
                     )
                     if crt:
                         known_classifier_runtimes.add(crt)
-            except Exception:
+            except Exception:  # broad: without fingerprints the reapply runs unfiltered, which is still correct
                 log.warning(
                     "Could not compute classifier runtime fingerprints; "
                     "reapplying without a classifier filter",
