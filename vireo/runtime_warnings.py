@@ -136,6 +136,6 @@ def runtime_warning_work_units(description, count_fn):
     """Best-effort sizing for warnings; never block job submission."""
     try:
         return count_fn()
-    except Exception:
+    except Exception:  # broad: a sizing query must not break the warning; the count stays unknown
         log.debug("Could not size %s for runtime warning", description, exc_info=True)
         return None

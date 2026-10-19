@@ -45,7 +45,7 @@ class FolderRepository:
         self.chunk_size = chunk_size
         # What ``merge_into_existing`` hands to other domains, all run inside
         # its transaction: the GPS-review carry (moves/merge), the
-        # embedded-keyword offer carry (``KeywordRepository``) and the
+        # embedded-keyword offer carry (``PhotoKeywordRepository``) and the
         # ``db`` module's ``KEYWORD_SOURCE_CONFLICT_SQL``, the shared ON
         # CONFLICT clause the ``photo_keywords`` carry uses so a losing row's
         # keyword that lands on an existing survivor association keeps the

@@ -753,6 +753,149 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         for error in result.get("errors") or []:
             event(f"move_photos error: {_error_kind(error)}")
 
+    def _visible_paired_photo_ids(self):
+        visible = set(self._visible_photo_ids())
+        return [
+            r[0] for r in self.db.conn.execute(
+                "SELECT id FROM photos WHERE companion_path IS NOT NULL ORDER BY id"
+            ) if r[0] in visible
+        ]
+
+    @precondition(lambda self: self._visible_paired_photo_ids())
+    @rule(data=st.data(), cleanup_fails=st.booleans())
+    def move_photos_when_a_companion_copy_fails(self, data, cleanup_fails):
+        """Move Photos where a RAW's companion JPEG fails to copy (the share
+        drops mid-photo), and removing the photo's partial copy from the
+        destination can fail too (Windows antivirus holding the new file).
+
+        The photo stays at its source with its catalog row, the rest of the
+        batch still moves, and every failure is reported.
+        """
+        import move
+
+        paired = data.draw(st.sampled_from(self._visible_paired_photo_ids()))
+        others = data.draw(st.lists(st.sampled_from(self._visible_photo_ids()),
+                                    max_size=2, unique=True))
+        chosen = [paired] + [pid for pid in others if pid != paired]
+        dest = data.draw(st.sampled_from([
+            os.path.join(self.moved, "picked"),
+            os.path.join(self.library, "picked"),
+        ]))
+        os.makedirs(dest, exist_ok=True)
+        before_folder, before_path = self.db.conn.execute(
+            "SELECT f.id, f.path FROM photos p JOIN folders f ON f.id = p.folder_id "
+            "WHERE p.id = ?", (paired,),
+        ).fetchone()
+        already_there = os.path.normcase(before_path) == os.path.normcase(dest)
+        companions = {
+            os.path.normcase(p) for p in self._paired_companion_paths()
+        }
+        failing_names = {
+            r[0] for r in self.db.conn.execute(
+                "SELECT filename FROM photos WHERE companion_path IS NOT NULL"
+            )
+        }
+        real_copy = move.photos._copy_and_verify
+        real_remove = os.remove
+
+        def copy_and_verify(src, dst):
+            if os.path.normcase(src) in companions:
+                raise OSError("simulated: share dropped mid-copy")
+            return real_copy(src, dst)
+
+        def remove(path, *args, **kwargs):
+            if cleanup_fails and \
+                    os.path.normcase(os.path.dirname(path)) == os.path.normcase(dest) and \
+                    os.path.basename(path) in failing_names:
+                raise PermissionError("simulated: destination copy is locked")
+            return real_remove(path, *args, **kwargs)
+
+        move.photos._copy_and_verify = copy_and_verify
+        os.remove = remove
+        try:
+            result = move.move_photos(self.db, chosen, dest)
+        finally:
+            move.photos._copy_and_verify = real_copy
+            os.remove = real_remove
+        errors = result.get("errors") or []
+        # A companion that cannot be copied means the photo never moves, and
+        # the reason reaches the user (unless it already sat in ``dest``).
+        row = self.db.conn.execute(
+            "SELECT p.filename, p.companion_path, p.folder_id FROM photos p "
+            "WHERE p.id = ?", (paired,),
+        ).fetchone()
+        assert row["folder_id"] == before_folder, (
+            f"photo {paired} moved although its companion never copied"
+        )
+        if not already_there:
+            assert any(row["filename"] in e or row["companion_path"] in e
+                       for e in errors), errors
+        if cleanup_fails and any("partial copy could not be removed" in e for e in errors):
+            event("move_photos: partial copy left at destination")
+        event(f"move_photos with failing companion: moved={result.get('moved')}")
+
+    @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data(), locked=st.sampled_from(["original", "companion"]))
+    def move_photos_when_a_source_file_cannot_be_deleted(self, data, locked):
+        """Move Photos where deleting a moved photo's original, or only its
+        companion JPEG, from the source fails (a file another app holds open
+        on Windows, a read-only source). The copy at the destination is
+        already cataloged, and the error says which file was left behind.
+        """
+        import move
+
+        visible = self._visible_photo_ids()
+        chosen = data.draw(st.lists(st.sampled_from(visible),
+                                    min_size=1, max_size=3, unique=True))
+        dest = data.draw(st.sampled_from([
+            os.path.join(self.moved, "picked"),
+            os.path.join(self.library, "picked"),
+        ]))
+        os.makedirs(dest, exist_ok=True)
+        before = {
+            r["id"]: r for r in (dict(row) for row in self.db.conn.execute(
+                "SELECT p.id, p.filename, p.companion_path, f.path AS folder_path "
+                "FROM photos p JOIN folders f ON f.id = p.folder_id"))
+            if r["id"] in chosen
+        }
+        locked_paths = {
+            os.path.normcase(os.path.join(
+                r["folder_path"],
+                r["filename"] if locked == "original" else (r["companion_path"] or ""),
+            ))
+            for r in before.values()
+            if locked == "original" or r["companion_path"]
+        }
+        real_remove = os.remove
+
+        def remove(path, *args, **kwargs):
+            if os.path.normcase(path) in locked_paths:
+                raise PermissionError("simulated: file is open in another app")
+            return real_remove(path, *args, **kwargs)
+
+        os.remove = remove
+        try:
+            result = move.move_photos(self.db, chosen, dest)
+        finally:
+            os.remove = real_remove
+        errors = result.get("errors") or []
+        after = {r["id"]: r for r in self._catalog_rows() if r["id"] in before}
+        for pid, row in before.items():
+            moved = pid in after and \
+                os.path.normcase(after[pid]["folder_path"]) == os.path.normcase(dest) and \
+                os.path.normcase(row["folder_path"]) != os.path.normcase(dest)
+            if not moved:
+                continue
+            mine = [e for e in errors if e.startswith(f"{row['filename']}: moved")]
+            original_left = os.path.exists(os.path.join(row["folder_path"], row["filename"]))
+            if original_left:
+                assert any("the original could not be deleted" in e for e in mine), errors
+            elif mine:
+                # Only a companion was left; the message must not claim the
+                # original was kept.
+                assert all("original deleted" in e for e in mine), mine
+            event(f"move_photos with {locked} locked: original_left={original_left} reported={bool(mine)}")
+
     @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
     def move_a_folder(self, data):
@@ -782,6 +925,44 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         event(f"move_folder: {sorted(k for k, v in (result or {}).items() if v)[:4]}")
         for error in (result or {}).get("errors") or []:
             event(f"move_folder error: {_error_kind(error)}")
+
+    @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data(), merge=st.booleans(),
+          launch_error=st.sampled_from(["permission", "e2big"]))
+    def move_a_folder_when_rsync_cannot_start(self, data, merge, launch_error):
+        """Move Folder where rsync exists but cannot be started (not
+        executable, or an argv over the platform limit). The move fails as a
+        reported error; the folder, its photos and its catalog rows stay."""
+        import move
+
+        folders = self._photo_folders()
+        if not folders:
+            return
+        folder = data.draw(st.sampled_from(folders))
+        dest = data.draw(st.sampled_from([self.moved, os.path.join(self.moved, "nested")]))
+        os.makedirs(dest, exist_ok=True)
+        error = {
+            "permission": PermissionError(13, "Permission denied"),
+            "e2big": OSError(7, "Argument list too long"),
+        }[launch_error]
+        real_rsync = move.folder_transfer._run_rsync_streamed
+
+        def cannot_start(*_args, **_kwargs):
+            raise error
+
+        before_rows = sorted((r["id"], r["folder_path"]) for r in self._catalog_rows())
+        move.folder_transfer._run_rsync_streamed = cannot_start
+        try:
+            result = move.move_folder(self.db, folder["id"], dest, merge=merge)
+        finally:
+            move.folder_transfer._run_rsync_streamed = real_rsync
+        assert result["moved"] == 0, result
+        assert result["errors"], result
+        # Refused before the copy (overlap, existing destination) or after it
+        # failed to start: either way nothing in the catalog moved.
+        assert sorted((r["id"], r["folder_path"]) for r in self._catalog_rows()) == before_rows
+        for err in result["errors"]:
+            event(f"move_folder with rsync that cannot start: {_error_kind(err)}")
 
     @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
@@ -1409,6 +1590,71 @@ def test_reimport_moved_duplicate_is_visible_in_receiving_workspace():
         machine.teardown()
     assert visible, "successful duplicate reimport is invisible in the active workspace"
 
+
+
+def test_archive_merge_keeps_photo_in_workspace_that_shared_its_folder():
+    """The nightly failure "photos lost workspace visibility: {2: [2]}", as
+    Hypothesis shrank it on main: a folder shared with the other workspace
+    merges into a tracked folder that only the active workspace links, and
+    its photo dropped out of the other workspace."""
+    import move
+
+    machine = PhotoSafetyMachine()
+
+    def check():
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        machine.catalog_matches_disk()
+
+    def import_card():
+        card_hashes = {
+            _sha256(os.path.join(machine.cards[CARDS[0]], n))
+            for n in machine._card_images(CARDS[0])
+        }
+        result = machine._run_import(CARDS[0], _Runner())
+        machine._check_finished_import(result, CARDS[0], card_hashes)
+        check()
+
+    def move_a_folder(folder, dest, **kwargs):
+        before_disk, before_rows = machine._disk_snapshot(), machine._catalog_rows()
+        os.makedirs(dest, exist_ok=True)
+        result = move.move_folder(machine.db, folder["id"], dest, **kwargs)
+        assert not result["errors"]
+        if kwargs.get("merge"):
+            target = result.get("merged_into_existing") or os.path.join(
+                dest, os.path.basename(folder["path"]))
+            machine._record_verified_consolidations(
+                folder["path"], target, before_disk, before_rows, result)
+        check()
+        return result
+
+    try:
+        machine.first_shoot(["DSC_0001.jpg", "DSC_0002.jpg"], 0)
+        import_card()
+        imported = machine._photo_folders()[0]
+        move_a_folder(imported, machine.moved)
+        result = machine._deleter().run_batch_delete(machine.db, [1], mode="vireo")
+        machine._record_successful_deletions([1], result, {})
+        check()
+        # The card still holds the deleted photo, so it comes back in a new
+        # library folder.
+        import_card()
+        machine.db.add_workspace_folder(machine.other_ws, imported["id"])
+        check()
+        reimported = next(f for f in machine._photo_folders() if f["id"] != imported["id"])
+        nested = os.path.join(machine.moved, "nested")
+        move_a_folder(reimported, nested)
+        shared = next(f for f in machine._photo_folders() if f["id"] == imported["id"])
+        merged = move_a_folder(
+            shared, nested,
+            merge=True, allow_tracked_merge=True, verify_contents=True,
+        )
+        assert merged["merge"]["merged_folders"] == 1
+        # The other workspace sees the photo it shared, not the folder's others.
+        machine.switch_workspace()
+        assert len(machine._visible_photo_ids()) == 1
+    finally:
+        machine.teardown()
 
 
 def test_crashed_import_archive_merge_consolidates_verified_copy():

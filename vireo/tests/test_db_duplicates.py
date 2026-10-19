@@ -459,18 +459,18 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
     db.tag_photo(loser, manual, source="manual")
 
     db._apply_winner_loser_merge(winner, [loser])
-    names = {k["name"] for k in db.keywords.get_for_photo(winner)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(winner)}
     assert ("Robin" in names) is not removed
     assert "Field note" in names
     assert _keyword_sources(db, winner)[manual] == "manual"
-    assert db.keywords.embedded_offered_keys(winner) == {key}
+    assert db.photo_keywords.embedded_offered_keys(winner) == {key}
     # The rejected row still exists and may later be reopened.
-    assert db.keywords.embedded_offered_keys(loser) == {key}
+    assert db.photo_keywords.embedded_offered_keys(loser) == {key}
 
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (winner,))
     db.conn.commit()
     _import_embedded_keywords_for_photo(db, winner, metadata)
-    assert db.keywords.get_for_photo(winner) == []
+    assert db.photo_keywords.get_for_photo(winner) == []
 
 
 def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
@@ -495,7 +495,7 @@ def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
 
     db._apply_winner_loser_merge(winner, [loser])
 
-    names = {k["name"] for k in db.keywords.get_for_photo(winner)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(winner)}
     assert "Robin" in names, (
         "A manually re-added loser tag must carry through even when the "
         "survivor removed the embedded value it was offered under."
@@ -517,8 +517,8 @@ def test_merge_embedded_suppression_from_one_loser_does_not_block_another(db, fo
     _import_embedded_keywords_for_photo(db, attached, metadata)
 
     db._apply_winner_loser_merge(winner, [detached, attached])
-    assert {k["name"] for k in db.keywords.get_for_photo(winner)} == {"Robin"}
-    assert db.keywords.embedded_offered_keys(winner) == {"robin"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(winner)} == {"Robin"}
+    assert db.photo_keywords.embedded_offered_keys(winner) == {"robin"}
 
 
 def test_merge_leaves_a_higher_winner_rating_alone(db, folder):

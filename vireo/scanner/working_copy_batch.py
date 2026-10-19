@@ -7,10 +7,12 @@ copy while keeping the cache under its quota. The SQL lives in
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -650,20 +652,22 @@ class _WorkingCopyBatch:
         expected_w, expected_h = _scaled_dimensions(
             oriented_w, oriented_h, self.wc_max_size,
         )
-        try:
-            with Image.open(wc_abs) as _wc:
-                wc_w, wc_h = _wc.size
-        except Exception:
-            # PIL couldn't open the file: corrupt / truncated /
-            # unsupported. Treat as a failed extraction so the
-            # companion fallback runs instead of caching an
-            # unreadable working copy.
-            log.info(
-                "RAW working-copy extraction for photo %s produced "
-                "an unreadable file %s; retrying from companion "
-                "JPEG %s",
-                row["id"], wc_abs, companion_path,
-            )
+        dimensions_read = False
+        # broad: decoder and diagnostic failures must keep companion fallback available
+        with contextlib.suppress(Exception):
+            try:
+                with Image.open(wc_abs) as _wc:
+                    wc_w, wc_h = _wc.size
+                dimensions_read = True
+            finally:
+                if not dimensions_read and isinstance(sys.exception(), Exception):
+                    log.info(
+                        "RAW working-copy extraction for photo %s produced "
+                        "an unreadable file %s; retrying from companion "
+                        "JPEG %s",
+                        row["id"], wc_abs, companion_path, exc_info=True,
+                    )
+        if not dimensions_read:
             return False
         # Use a 1% relative tolerance (not the request paths' 1px slack):
         # libraw can emit the active image area a few pixels narrower than
@@ -1069,7 +1073,7 @@ class _WorkingCopyBatch:
                 self.db, self.vireo_dir,
                 protect_paths=set(self.retained_new_files) - {wc_abs},
             )
-        except Exception:
+        except Exception:  # broad: quota maintenance is best-effort; the copies written so far are valid
             log.exception(
                 "Working-copy quota enforcement failed mid-batch"
             )
@@ -1394,7 +1398,7 @@ class _WorkingCopyBatch:
                 self.working_copy_stats(self.vireo_dir)["size"] - batch_bytes,
             )
         except Exception:
-            # Accounting failure must not strand the batch; fall back to
+            # broad: accounting failure must not strand the batch; fall back to
             # the batch-only comparison the trim used before.
             log.exception(
                 "Working-copy usage accounting failed; trimming "
@@ -1531,6 +1535,7 @@ class _WorkingCopyBatch:
             else:
                 self.evict_if_over_quota(self.db, self.vireo_dir)
         except Exception:
+            # broad: quota maintenance is best-effort.
             # The working copies themselves are valid even if quota
             # maintenance hits a transient filesystem/database error. Keep
             # the scan result and retry enforcement at startup or on the

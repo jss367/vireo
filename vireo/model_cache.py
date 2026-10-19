@@ -19,6 +19,7 @@ all receive the same object.
 
 import contextlib
 import logging
+import sys
 import threading
 
 log = logging.getLogger(__name__)
@@ -52,11 +53,17 @@ def _is_caller_cancelled_error(exc):
 
 def _make_cancellation_error():
     """Build a caller-visible cancellation exception without importing at load."""
-    try:
-        from classifier import ClassificationCancelled
-    except Exception:
-        # Cancellation must still surface as a cancellation when the
-        # classifier module cannot load; a local stand-in keeps the name.
+    imported = False
+    # broad: import and optional diagnostics must preserve cancellation fallback
+    with contextlib.suppress(Exception):
+        try:
+            from classifier import ClassificationCancelled
+            imported = True
+        finally:
+            if not imported and isinstance(sys.exception(), Exception):
+                log.debug("classifier unavailable; using a stand-in cancellation class", exc_info=True)
+    if not imported:
+        # Keep cancellation recognizable even when the classifier cannot load.
         class ClassificationCancelled(RuntimeError):
             pass
     return ClassificationCancelled("classification cancelled")
@@ -122,6 +129,7 @@ class _Handle:
         # Safety net for legacy/script callers that unwind before their normal
         # explicit release. ``release`` is idempotent and does only in-memory
         # bookkeeping plus timer creation.
+        # broad: a finalizer must never raise, and logging may be torn down.
         with contextlib.suppress(Exception):
             self.release()
 
@@ -287,7 +295,7 @@ class ModelCache:
         if post_load_key is not None:
             try:
                 actual_key = post_load_key(value)
-            except Exception:
+            except Exception:  # broad: a caller's key callback must not lose the loaded model
                 log.exception(
                     "ModelCache: post_load_key callback raised; "
                     "leaving entry keyed by the pre-load key"

@@ -34,7 +34,8 @@ from services.local_workspace import (
 from services.missing_originals import HEAVY_JOB_TYPES as MISSING_ORIGINALS_HEAVY_JOB_TYPES
 from web.settings import (
     LOCATION_KEYWORDS_SETTING,
-    queue_location_keyword_cleanup_for_workspace,
+    _with_warning,
+    queue_location_keyword_cleanup_reporting,
     workspace_effective_setting,
 )
 
@@ -726,6 +727,7 @@ def create_workspace_blueprint(
                 f"A workspace named {kwargs.get('name')!r} already exists", 409,
             )
         ws = db.workspaces.get(ws_id)
+        warning = None
         if overrides_changing and prev_effective_location_keywords:
             new_effective = workspace_effective_setting(
                 ws["config_overrides"],
@@ -733,8 +735,8 @@ def create_workspace_blueprint(
                 LOCATION_KEYWORDS_SETTING,
             )
             if not new_effective:
-                queue_location_keyword_cleanup_for_workspace(db, ws_id)
-        return jsonify(dict(ws))
+                warning = queue_location_keyword_cleanup_reporting(db, ws_id)
+        return jsonify(_with_warning(dict(ws), warning))
 
     @blueprint.route("/api/workspaces/<int:ws_id>", methods=["DELETE"])
     def api_delete_workspace(ws_id):

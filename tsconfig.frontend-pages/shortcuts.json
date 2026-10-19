@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/shortcuts.d.ts",
+    "../vireo/static/shortcuts/boot.js",
+    "../vireo/static/shortcuts/capture.js",
+    "../vireo/static/shortcuts/editor.js",
+    "../vireo/static/shortcuts/labels.js",
+    "../vireo/static/shortcuts/shared.js",
+    "../vireo/static/shortcuts/state.js"
+  ]
+}

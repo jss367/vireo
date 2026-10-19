@@ -11,6 +11,8 @@ import pytest
     "module_name, class_name",
     [
         ("repositories.keywords", "KeywordRepository"),
+        ("repositories.keyword_taxa", "KeywordTaxonRepository"),
+        ("repositories.keyword_tree", "KeywordTreeRepository"),
         ("repositories.keyword_provenance", "KeywordProvenanceRepository"),
         ("repositories.photos", "PhotoRepository"),
         ("repositories.predictions", "PredictionRepository"),

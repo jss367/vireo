@@ -230,6 +230,8 @@ def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
         keywords=types.SimpleNamespace(
             name_of=lambda kid: next(r["name"] for r in rows if r["id"] == kid),
             get_row=lambda kid: next((r for r in rows if r["id"] == kid), None),
+        ),
+        photo_keywords=types.SimpleNamespace(
             photo_ids_tagged_with=lambda kid, ids: [],
         ),
         transaction=contextlib.nullcontext,

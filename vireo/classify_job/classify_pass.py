@@ -267,7 +267,7 @@ def _classify_batch_images(
             raise
         log.warning("Batch classification failed, falling back to single-image", exc_info=True)
         batch_results = None
-    except Exception:
+    except Exception:  # broad: the batch path falls back to per-image classification on any inference failure
         log.warning("Batch classification failed, falling back to single-image", exc_info=True)
         batch_results = None
     if batch_results is None:
@@ -286,7 +286,7 @@ def _classify_batch_images(
                 log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
                 batch_results.append(None)
                 failed += 1
-            except Exception:
+            except Exception:  # broad: per-image boundary; inference raises undocumented errors and one image must not stop the batch
                 log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
                 batch_results.append(None)
                 failed += 1
@@ -1018,7 +1018,7 @@ def _publish_classifier_runs_for_raw_results(
                     else None
                 ),
             )
-        except Exception:
+        except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
             log.warning(
                 "Could not publish portable classifier result for detection %s",
                 det_id, exc_info=True,

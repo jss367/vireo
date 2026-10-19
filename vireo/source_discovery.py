@@ -341,7 +341,7 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
                     include_capture_dates=include_capture_dates,
                 )
             except Exception:
-                # A walker must never die silently: the scheduler would wait
+                # broad: a walker must never die silently: the scheduler would wait
                 # on its completion forever. Surface the folder as unavailable.
                 log.warning("Source discovery failed for %s", folder, exc_info=True)
                 result = _empty_result(folder, error=True)

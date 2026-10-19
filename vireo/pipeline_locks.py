@@ -135,7 +135,7 @@ def _session_uses_gpu(session):
     """
     try:
         providers = session.get_providers()
-    except Exception:
+    except Exception:  # broad: onnxruntime session introspection raises undocumented errors
         log.debug("Session providers unreadable; assuming GPU", exc_info=True)
         return True
     return any(p in _GPU_PROVIDERS for p in providers)
@@ -282,7 +282,7 @@ def acquire_inference_resources(session, *, cancel_check=None):
         # match the conservative "unknown providers" branch below.
         try:
             providers = set(session.get_providers())
-        except Exception:
+        except Exception:  # broad: onnxruntime session introspection raises undocumented errors
             log.debug("Session providers unreadable; treating as compound", exc_info=True)
             providers = None
         if providers is None or "CPUExecutionProvider" in providers:
@@ -293,7 +293,7 @@ def acquire_inference_resources(session, *, cancel_check=None):
         return _GpuLockContext(cancel_check)
     try:
         providers = set(session.get_providers())
-    except Exception:
+    except Exception:  # broad: onnxruntime session introspection raises undocumented errors
         log.debug("Session providers unreadable; treating as compound", exc_info=True)
         # Unknown provider surface: fall through to the same
         # conservative compound path — matches the pre-branch behavior

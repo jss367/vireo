@@ -1,4 +1,5 @@
 """End-to-end tests for the keymap registry and dispatcher."""
+from e2e.module_pages import import_page_modules
 
 
 def _wait_for_nav_shortcuts(page):
@@ -772,19 +773,9 @@ def test_shortcut_capture_does_not_navigate(live_server, page):
     page.wait_for_function(
         "document.querySelector('.shortcut-key-btn') !== null", timeout=2000
     )
-    page.evaluate("""
-        (function() {
-            var btns = document.querySelectorAll('.shortcut-key-btn');
-            for (var i = 0; i < btns.length; i++) {
-                var attr = btns[i].getAttribute('onclick') || '';
-                if (attr.indexOf("'navigation', 'browse'") !== -1) {
-                    btns[i].click();
-                    return;
-                }
-            }
-            throw new Error('navigation.browse button not found');
-        })();
-    """)
+    page.locator(
+        '.shortcut-key-btn[data-ctx="navigation"][data-action="browse"]'
+    ).click()
 
     page.wait_for_function(
         "document.querySelector('.shortcut-key-btn.capturing') !== null", timeout=2000
@@ -808,13 +799,14 @@ def test_shortcut_editor_captures_unreserved_bare_navigation_key(live_server, pa
     )
 
     button = page.locator(
-        ".shortcut-key-btn[onclick*=\"'navigation', 'dashboard'\"]"
+        '.shortcut-key-btn[data-ctx="navigation"][data-action="dashboard"]'
     )
     button.click()
     page.keyboard.press("d")
 
     assert button.text_content() == "D"
-    assert page.evaluate("currentShortcuts.navigation.dashboard") == "d"
+    import_page_modules(page, "shortcuts", ["state"])
+    assert page.evaluate("pageModules.state.state.currentShortcuts.navigation.dashboard") == "d"
 
 
 def test_help_modal_unlocks_scroll_when_keymap_unavailable(live_server, page):
