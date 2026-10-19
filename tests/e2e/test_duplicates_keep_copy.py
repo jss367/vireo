@@ -1,6 +1,7 @@
 """E2E coverage for "Keep this copy instead" on a resolved duplicate group."""
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_resolved_pair(db, root):
@@ -14,8 +15,8 @@ def _seed_resolved_pair(db, root):
         folder.mkdir(parents=True)
         (folder / "kangaroo.jpg").write_bytes(b"same bytes")
         fid = db.add_folder(str(folder))
-        ids.append(db.add_photo(
-            folder_id=fid, filename="kangaroo.jpg", extension=".jpg",
+        ids.append(photo_ingest.add_photo(
+            db, folder_id=fid, filename="kangaroo.jpg", extension=".jpg",
             file_size=10, file_mtime=100.0, file_hash="KEEPE2E",
         ))
     flags = {

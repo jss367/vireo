@@ -41,6 +41,7 @@ import re
 from pathlib import Path
 
 import pytest
+from services import photo_ingest
 
 VIREO_DIR = Path(__file__).resolve().parent.parent
 
@@ -401,8 +402,8 @@ def prov_db(tmp_path):
 def test_unstamped_tag_photo_is_recorded_as_manual(prov_db):
     """A call site that forgets provenance still produces a protected row."""
     fid = prov_db.add_folder("/photos", name="photos")
-    pid = prov_db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
@@ -421,8 +422,8 @@ def test_sidecar_import_leaves_provenance_unknown(prov_db):
     from db import KEYWORD_SOURCE_UNKNOWN
 
     fid = prov_db.add_folder("/photos", name="photos")
-    pid = prov_db.add_photo(
-        folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="b.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
@@ -441,12 +442,12 @@ def test_duplicate_merge_carries_manual_provenance_to_the_winner(prov_db):
     from db import KEYWORD_SOURCE_UNKNOWN
 
     fid = prov_db.add_folder("/photos", name="photos")
-    winner = prov_db.add_photo(
-        folder_id=fid, filename="w.jpg", extension=".jpg",
+    winner = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="w.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    loser = prov_db.add_photo(
-        folder_id=fid, filename="l.jpg", extension=".jpg",
+    loser = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="l.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     hand_added = prov_db.add_keyword("Backlit", kw_type="general")
@@ -498,8 +499,8 @@ def test_keyword_merge_folds_provenance_on_overlapping_photos(prov_db):
     fid = prov_db.add_folder("/photos", name="photos")
 
     def _photo(name):
-        return prov_db.add_photo(
-            folder_id=fid, filename=name, extension=".jpg",
+        return photo_ingest.add_photo(
+            prov_db, folder_id=fid, filename=name, extension=".jpg",
             file_size=10, file_mtime=1.0,
         )
 
@@ -551,8 +552,8 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
 
     def _stamp(first, second):
-        pid = prov_db.add_photo(
-            folder_id=fid, filename=f"{first}-{second}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            prov_db, folder_id=fid, filename=f"{first}-{second}.jpg", extension=".jpg",
             file_size=10, file_mtime=1.0,
         )
         prov_db.tag_photo(pid, kid, source=first)
@@ -574,8 +575,8 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
 def test_setting_a_photo_location_records_manual_provenance(prov_db):
     """Assigning a place is a person's explicit act, not generated metadata."""
     fid = prov_db.add_folder("/photos", name="photos")
-    pid = prov_db.add_photo(
-        folder_id=fid, filename="loc.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="loc.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     leaf = prov_db.add_keyword("Yosemite", kw_type="location")
@@ -594,8 +595,8 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
     from db import KEYWORD_SOURCE_MANUAL, KEYWORD_SOURCE_UNKNOWN
 
     fid = prov_db.add_folder("/photos", name="photos")
-    pid = prov_db.add_photo(
-        folder_id=fid, filename="c.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        prov_db, folder_id=fid, filename="c.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")

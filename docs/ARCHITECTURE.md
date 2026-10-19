@@ -85,9 +85,11 @@ that information for interactive use.
   a domain accessor, a property that builds a fresh repository through the
   domain's `_<domain>_repository` factory on every access
   (`db.job_history.get(job_id)`), so workspace scoping and connection policy
-  stay in one place without a forwarding alias per query. `Database` keeps the
-  coordinated workflows (`add_photo` and the like), cross-domain composition
-  and the active-workspace state. Older domains still carry one-line
+  stay in one place without a forwarding alias per query. Coordinated
+  workflows (`photo_ingest.add_photo` and the like) and cross-domain
+  composition live in `vireo/services/` as functions taking `db`; `Database`
+  keeps the active-workspace state, the process caches and the methods a
+  contract or a repository binds by name. Older domains still carry one-line
   forwarding wrappers; `test_db_facade_structure.py` caps their number at
   `FORWARDING_WRAPPER_LIMIT`, which only shrinks as domains move to
   accessors. `Database` runs no SQL itself: `test_db_facade_structure.py` fails if a

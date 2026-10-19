@@ -8,7 +8,6 @@ import sys
 import threading
 
 import pytest
-from services import detection_store, subject_masks
 from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -25,6 +24,7 @@ from pipeline_job import (
     run_pipeline_job,
 )
 from repositories.masks_features import PipelineFeatures
+from services import detection_store, photo_ingest, subject_masks
 
 
 @pytest.fixture(autouse=True)
@@ -821,8 +821,8 @@ def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
 
     db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="broken.jpg",
         extension=".jpg",
         file_size=os.path.getsize(photo_path),
@@ -1234,8 +1234,8 @@ def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypa
 
     db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="edited.jpg",
         extension=".jpg",
         file_size=os.path.getsize(source_path),
@@ -3038,8 +3038,8 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(
-        folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "empty.jpg")
     col_id = db.collections.add(
@@ -3172,8 +3172,8 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(
-        folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "empty.jpg")
     collection_id = db.collections.add(
@@ -3303,8 +3303,8 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(
-        folder_id, "bird-in-branches.jpg", ".jpg", 100, 1_000_000.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "bird-in-branches.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "bird-in-branches.jpg")
     collection_id = db.collections.add(
@@ -3414,8 +3414,8 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(
-        folder_id, "hiker.jpg", ".jpg", 100, 1_000_000.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "hiker.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "hiker.jpg")
     collection_id = db.collections.add(
@@ -3531,8 +3531,8 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(
-        folder_id, "faint-warbler.jpg", ".jpg", 100, 1_000_000.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "faint-warbler.jpg", ".jpg", 100, 1_000_000.0,
     )
     _drop_jpeg(folder_path, "faint-warbler.jpg")
     collection_id = db.collections.add(
@@ -3773,7 +3773,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
     db.detections.save(
         photo_id,
@@ -3920,7 +3920,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "bird.jpg")
     col_id = db.collections.add(
         "Test",
@@ -4022,7 +4022,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path)
     folder = db.add_folder(folder_path)
-    photo = db.add_photo(folder, "bird.jpg", ".jpg", 1000, 1)
+    photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 1000, 1)
     _drop_jpeg(folder_path, "bird.jpg")
     detection = db.detections.save(photo, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
@@ -4096,8 +4096,8 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     photo_ids = []
     for index, confidence in enumerate((0.9, 0.18, 0.9)):
         filename = f"bird{index}.jpg"
-        photo_id = db.add_photo(
-            folder_id, filename, ".jpg", 12345, 1_000_000.0 + index,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 12345, 1_000_000.0 + index,
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
@@ -4173,7 +4173,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
 
     # Prior-run detection row (e.g. a prior false positive).
@@ -4256,7 +4256,7 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
 
     box = {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}
@@ -4350,7 +4350,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "empty.jpg")
 
     # Simulate a prior run where MegaDetector scanned the photo and found
@@ -4460,8 +4460,8 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
-    photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+    photo1_id = photo_ingest.add_photo(db, folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
+    photo2_id = photo_ingest.add_photo(db, folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
     _drop_jpeg(folder_path, "photo1.jpg")
     _drop_jpeg(folder_path, "photo2.jpg")
 
@@ -4582,8 +4582,8 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
-    photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+    photo1_id = photo_ingest.add_photo(db, folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
+    photo2_id = photo_ingest.add_photo(db, folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
     _drop_jpeg(folder_path, "photo1.jpg")
     _drop_jpeg(folder_path, "photo2.jpg")
 
@@ -4680,7 +4680,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -4859,7 +4859,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
     detection_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 3000 + i, 3_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 3000 + i, 3_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         det_ids = db.detections.save(
             pid,
@@ -5007,7 +5007,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     detection_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         det_ids = db.detections.save(
             pid,
@@ -5171,7 +5171,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 2000 + i, 2_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 2000 + i, 2_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -5315,7 +5315,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "photo.jpg", ".jpg", 2000, 2_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "photo.jpg", ".jpg", 2000, 2_000_000.0)
     _drop_jpeg(folder_path, "photo.jpg")
     db.detections.save(
         pid,
@@ -5781,11 +5781,11 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_with_det = db.add_photo(
-        folder_id, "hawk.jpg", ".jpg", 12345, 1_000_000.0
+    photo_with_det = photo_ingest.add_photo(
+        db, folder_id, "hawk.jpg", ".jpg", 12345, 1_000_000.0
     )
-    photo_without_det = db.add_photo(
-        folder_id, "empty.jpg", ".jpg", 12346, 1_000_100.0
+    photo_without_det = photo_ingest.add_photo(
+        db, folder_id, "empty.jpg", ".jpg", 12346, 1_000_100.0
     )
     _drop_jpeg(folder_path, "hawk.jpg")
     _drop_jpeg(folder_path, "empty.jpg")
@@ -5949,7 +5949,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "empty.jpg")
     col_id = db.collections.add(
         "Test",
@@ -6051,7 +6051,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "lowconf.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
     col_id = db.collections.add(
         "Test",
@@ -6145,7 +6145,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     # Photo A: already has a mask AND a qualifying detection — drives
     # photos_with_detections > 0 so the existing no-detections guard does
     # NOT fire.
-    masked_id = db.add_photo(folder_id, "masked.jpg", ".jpg", 12345, 1_000_000.0)
+    masked_id = photo_ingest.add_photo(db, folder_id, "masked.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "masked.jpg")
     db.detections.save(
         masked_id,
@@ -6159,7 +6159,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     )
 
     # Photo B: no mask, only sub-threshold detection → should be flagged.
-    lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
+    lowconf_id = photo_ingest.add_photo(db, folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
     db.detections.save(
         lowconf_id,
@@ -6245,7 +6245,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
+    lowconf_id = photo_ingest.add_photo(db, folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
     _drop_jpeg(folder_path, "lowconf.jpg")
     db.detections.save(
         lowconf_id,
@@ -6328,9 +6328,9 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     # Two photos one second apart — burst grouping will fuse them.
-    p1 = db.add_photo(folder_id, "a.jpg", ".jpg", 1, 1_000_000.0,
+    p1 = photo_ingest.add_photo(db, folder_id, "a.jpg", ".jpg", 1, 1_000_000.0,
                       timestamp="2026-01-01T12:00:00")
-    p2 = db.add_photo(folder_id, "b.jpg", ".jpg", 2, 1_000_001.0,
+    p2 = photo_ingest.add_photo(db, folder_id, "b.jpg", ".jpg", 2, 1_000_001.0,
                       timestamp="2026-01-01T12:00:01")
     _drop_jpeg(folder_path, "a.jpg")
     _drop_jpeg(folder_path, "b.jpg")
@@ -6588,7 +6588,7 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
         img_path = photo_dir / f"p{i}.jpg"
         Image.new("RGB", (64, 64), "red").save(str(img_path))
         photo_ids.append(
-            db.add_photo(folder_id, f"p{i}.jpg", ".jpg", 1000 + i, 1_000_000.0)
+            photo_ingest.add_photo(db, folder_id, f"p{i}.jpg", ".jpg", 1000 + i, 1_000_000.0)
         )
     col_id = db.collections.add(
         "Test",
@@ -6697,7 +6697,7 @@ def test_pipeline_one_model_fails_to_load_other_model_still_runs(
     folder_id = db.add_folder(str(photo_dir))
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "x.jpg"))
-    photo_id = db.add_photo(folder_id, "x.jpg", ".jpg", 1000, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "x.jpg", ".jpg", 1000, 1_000_000.0)
     col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -6786,7 +6786,7 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
     folder_id = db.add_folder(str(photo_dir))
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
-    photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
     col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -6846,7 +6846,7 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -6928,7 +6928,7 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
     db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir))
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
-    photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
     col_id = db.collections.add(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -8662,8 +8662,8 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
     detection_ids = []
     for index, confidence in enumerate((0.9, 0.18, 0.9)):
         filename = f"bird{index}.jpg"
-        photo_id = db.add_photo(
-            folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
@@ -8740,8 +8740,8 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(
-            folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i,
         )
         _drop_jpeg(folder_path, name)
         db.detections.save(
@@ -8846,8 +8846,8 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
 
 def _add_photo_with_detection(db, folder_id, folder_path, filename):
     """Add a photo + an animal detection so it enters the mask worklist."""
-    photo_id = db.add_photo(
-        folder_id, filename, ".jpg", 1000, 1_000_000.0 + hash(filename) % 1000,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + hash(filename) % 1000,
     )
     _drop_jpeg(folder_path, filename)
     db.detections.save(
@@ -9402,7 +9402,7 @@ def _run_extract_masks_for_test(
 
     photo_ids = []
     for spec in photo_specs:
-        pid = db.add_photo(folder_id, spec["filename"], ".jpg", 1000, 1.0)
+        pid = photo_ingest.add_photo(db, folder_id, spec["filename"], ".jpg", 1000, 1.0)
         _drop_jpeg(folder_path, spec["filename"])
         x, y, w, h = spec["box"]
         db.detections.save(
@@ -10453,7 +10453,7 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10559,7 +10559,7 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10634,7 +10634,7 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10701,7 +10701,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10773,7 +10773,7 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10880,7 +10880,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -10944,7 +10944,7 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11011,7 +11011,7 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11095,7 +11095,7 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11206,7 +11206,7 @@ def _run_eye_keypoints_download_failure_through_runner(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11323,7 +11323,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11443,7 +11443,7 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11524,7 +11524,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11612,7 +11612,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     db.detections.save(
         pid,
@@ -11688,7 +11688,7 @@ def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -11763,7 +11763,7 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -11834,7 +11834,7 @@ def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -11904,7 +11904,7 @@ def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
     _drop_jpeg(folder_path, "p.jpg")
     col_id = db.collections.add(
         "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
@@ -12551,8 +12551,8 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     raw_path.write_bytes(b"raw")
     db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="source.NEF",
         extension=".nef",
         file_size=raw_path.stat().st_size,
@@ -12639,8 +12639,8 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
     raw_path.write_bytes(b"raw bytes decoded by the test double")
     db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="source.NEF",
         extension=".nef",
         file_size=raw_path.stat().st_size,
@@ -12741,8 +12741,8 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
         progress_callback = hooks.progress if hooks is not None else None
         photo_callback = hooks.photo if hooks is not None else None
         folder_id = scan_db.add_folder(str(root), name="photos")
-        photo_id = scan_db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            scan_db, folder_id=folder_id,
             filename="source.NEF",
             extension=".nef",
             file_size=raw_path.stat().st_size,
@@ -12827,8 +12827,8 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
         progress_callback = hooks.progress if hooks is not None else None
         photo_callback = hooks.photo if hooks is not None else None
         folder_id = scan_db.add_folder(str(root), name="photos")
-        photo_id = scan_db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            scan_db, folder_id=folder_id,
             filename="source.NEF",
             extension=".nef",
             file_size=raw_path.stat().st_size,
@@ -13473,7 +13473,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
     _drop_jpeg(folder_path, "test.jpg")
     col_id = db.collections.add(
         "Test",
@@ -13726,7 +13726,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
     folder_id = db.add_folder(folder_path)
     photo_ids = []
     for i, name in enumerate(("a.jpg", "b.jpg")):
-        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         # Pre-seed one detection per photo so the classify loop has a
         # primary detection to classify (and, on run 2, to find cached
@@ -14423,11 +14423,11 @@ def test_still_offline_folder_ids_prunes_recovered_folders(tmp_path):
     healthy_folder_id = db.add_folder(str(healthy_folder))
     gone_folder_id = db.add_folder(str(gone_folder))
 
-    healthy_id = db.add_photo(
-        healthy_folder_id, "a.jpg", ".jpg", 1000, 100.0,
+    healthy_id = photo_ingest.add_photo(
+        db, healthy_folder_id, "a.jpg", ".jpg", 1000, 100.0,
     )
-    gone_id = db.add_photo(
-        gone_folder_id, "b.jpg", ".jpg", 1000, 101.0,
+    gone_id = photo_ingest.add_photo(
+        db, gone_folder_id, "b.jpg", ".jpg", 1000, 101.0,
     )
 
     # Now delete the "gone" folder — folder A recovered, folder B is
@@ -14478,9 +14478,9 @@ def test_still_offline_folder_ids_expands_beyond_seed_photos(tmp_path):
     # ``_prepare_image``. ``cached_sibling`` is a photo in the SAME
     # folder that took the cache branch and never touched disk, so it
     # never entered the seed set.
-    seed = db.add_photo(gone_folder_id, "seed.jpg", ".jpg", 1000, 100.0)
-    cached_sibling = db.add_photo(
-        gone_folder_id, "cached.jpg", ".jpg", 1000, 101.0,
+    seed = photo_ingest.add_photo(db, gone_folder_id, "seed.jpg", ".jpg", 1000, 100.0)
+    cached_sibling = photo_ingest.add_photo(
+        db, gone_folder_id, "cached.jpg", ".jpg", 1000, 101.0,
     )
 
     os.rmdir(gone_folder)
@@ -14632,7 +14632,7 @@ def test_still_offline_folder_ids_chunks_large_id_sets(tmp_path):
     # 2500 > the 999-variable ceiling AND > the 900 chunk size, so the
     # query has to run in at least three chunks to succeed.
     photo_ids = [
-        db.add_photo(gone_folder_id, f"p{i:04d}.jpg", ".jpg", 1000, float(i))
+        photo_ingest.add_photo(db, gone_folder_id, f"p{i:04d}.jpg", ".jpg", 1000, float(i))
         for i in range(2500)
     ]
 
@@ -14667,7 +14667,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
     photo_ids = []
     for i in range(6):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -14834,7 +14834,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
     photo_ids = []
     for i in range(6):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15025,7 +15025,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
     photo_ids = []
     for i in range(n_photos):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15201,7 +15201,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15298,7 +15298,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15445,7 +15445,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
     photo_ids = []
     for i in range(4):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15640,8 +15640,8 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
     healthy_photo_ids = []
     for i in range(3):
         name = f"gone{i}.jpg"
-        pid = db.add_photo(
-            gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
         db.detections.save(
@@ -15654,8 +15654,8 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
         gone_photo_ids.add(pid)
     for i in range(3):
         name = f"healthy{i}.jpg"
-        pid = db.add_photo(
-            healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
         db.detections.save(
@@ -15837,7 +15837,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -15952,7 +15952,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     name = "photo0.jpg"
-    pid = db.add_photo(folder_id, name, ".jpg", 4000, 4_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000, 4_000_000.0)
     _drop_jpeg(folder_path, name)
     # Three qualifying animal detections on the same photo — this is what
     # a multi-subject frame looks like to classify.
@@ -16075,7 +16075,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -16239,8 +16239,8 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
     gone_detection_ids = []
     for i in range(3):
         name = f"gone{i}.jpg"
-        pid = db.add_photo(
-            gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
         det_ids = db.detections.save(
@@ -16254,8 +16254,8 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
         gone_detection_ids.append(det_ids[0])
     for i in range(3):
         name = f"healthy{i}.jpg"
-        pid = db.add_photo(
-            healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
         db.detections.save(
@@ -16428,8 +16428,8 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
     gone_folder_id = db.add_folder(gone_folder_path)
     healthy_folder_id = db.add_folder(healthy_folder_path)
 
-    gone_photo_id = db.add_photo(
-        gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
+    gone_photo_id = photo_ingest.add_photo(
+        db, gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
     )
     _drop_jpeg(gone_folder_path, "gone.jpg")
     gone_det_id = db.detections.save(
@@ -16439,8 +16439,8 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
         detector_model="MegaDetector",
     )[0]
 
-    healthy_photo_id = db.add_photo(
-        healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
+    healthy_photo_id = photo_ingest.add_photo(
+        db, healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
     )
     _drop_jpeg(healthy_folder_path, "healthy.jpg")
     db.detections.save(
@@ -16655,8 +16655,8 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
     # different from what fake_detect_batch will return below so that
     # the pre-run id is NOT re-produced by the fresh detect — the
     # exact precondition that triggers the purge.
-    gone_photo_id = db.add_photo(
-        gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
+    gone_photo_id = photo_ingest.add_photo(
+        db, gone_folder_id, "gone.jpg", ".jpg", 4000, 4_000_000.0,
     )
     _drop_jpeg(gone_folder_path, "gone.jpg")
     old_gone_det_id = db.detections.save(
@@ -16677,8 +16677,8 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
     # Healthy photo is here to drive ``models_succeeded == 1`` so the
     # purge fires. Its pre-run boxes are the same as fresh, so it does
     # not exercise the purge itself.
-    healthy_photo_id = db.add_photo(
-        healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
+    healthy_photo_id = photo_ingest.add_photo(
+        db, healthy_folder_id, "healthy.jpg", ".jpg", 5000, 5_000_000.0,
     )
     _drop_jpeg(healthy_folder_path, "healthy.jpg")
     db.detections.save(
@@ -16866,7 +16866,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
     photo_ids = []
     for i in range(6):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -17047,7 +17047,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     name = "photo0.jpg"
-    pid = db.add_photo(folder_id, name, ".jpg", 4000, 4_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000, 4_000_000.0)
     _drop_jpeg(folder_path, name)
     db.detections.save(
         pid,
@@ -17236,8 +17236,8 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
     healthy_photo_ids: set = set()
     for i in range(3):
         name = f"gone{i}.jpg"
-        pid = db.add_photo(
-            gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, gone_folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i,
         )
         _drop_jpeg(gone_folder_path, name)
         db.detections.save(
@@ -17250,8 +17250,8 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
         gone_photo_ids.add(pid)
     for i in range(3):
         name = f"healthy{i}.jpg"
-        pid = db.add_photo(
-            healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
+        pid = photo_ingest.add_photo(
+            db, healthy_folder_id, name, ".jpg", 5000 + i, 5_000_000.0 + i,
         )
         _drop_jpeg(healthy_folder_path, name)
         db.detections.save(
@@ -17425,7 +17425,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -17545,7 +17545,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -17668,7 +17668,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
     photo_ids = []
     for i in range(3):
         name = f"photo{i}.jpg"
-        pid = db.add_photo(folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
+        pid = photo_ingest.add_photo(db, folder_id, name, ".jpg", 4000 + i, 4_000_000.0 + i)
         _drop_jpeg(folder_path, name)
         db.detections.save(
             pid,
@@ -18209,8 +18209,8 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
         _add_photo_with_detection(db, live_folder, live_path, "zz0.jpg"),
     ]
     for filename in ("zz1.jpg", "zz2.jpg"):
-        pid = db.add_photo(
-            live_folder, filename, ".jpg", 1000,
+        pid = photo_ingest.add_photo(
+            db, live_folder, filename, ".jpg", 1000,
             1_000_000.0 + hash(filename) % 1000,
         )
         _drop_jpeg(live_path, filename)
@@ -18341,7 +18341,7 @@ def test_extract_masks_preflight_ignores_photos_with_no_detection(
     folder_id = db.add_folder(folder_path)
 
     from PIL import Image
-    no_det = db.add_photo(folder_id, "nodet.jpg", ".jpg", 1000, 5_000_000.0)
+    no_det = photo_ingest.add_photo(db, folder_id, "nodet.jpg", ".jpg", 1000, 5_000_000.0)
     Image.new("RGB", (16, 16), "black").save(
         os.path.join(folder_path, "nodet.jpg")
     )
@@ -18462,8 +18462,8 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
     detection_ids = []
     for index, confidence in enumerate((0.9, 0.15, 0.9)):
         filename = f"burst{index}.jpg"
-        pid = db.add_photo(
-            folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+        pid = photo_ingest.add_photo(
+            db, folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
@@ -18538,7 +18538,7 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
     folder_id = db.add_folder(folder_path)
 
     from PIL import Image
-    pid = db.add_photo(folder_id, "weak.jpg", ".jpg", 1000, 7_000_000.0)
+    pid = photo_ingest.add_photo(db, folder_id, "weak.jpg", ".jpg", 1000, 7_000_000.0)
     Image.new("RGB", (16, 16), "black").save(
         os.path.join(folder_path, "weak.jpg")
     )

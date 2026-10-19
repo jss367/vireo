@@ -15,6 +15,7 @@ import re
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _total(page):
@@ -1130,7 +1131,7 @@ def test_top_species_narrows_match_any_collection(live_server, page):
 
 def test_extension_picker_multiple_formats_and_saved_values(live_server, page):
     db = live_server["db"]
-    db.add_photo(folder_id=live_server["data"]["folders"][0], filename="raw.nef",
+    photo_ingest.add_photo(db, folder_id=live_server["data"]["folders"][0], filename="raw.nef",
                  extension=".nef", file_size=1000, file_mtime=1.0)
     db.conn.commit()
     _open_browse(page, live_server)

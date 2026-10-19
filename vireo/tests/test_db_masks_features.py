@@ -23,7 +23,7 @@ import db as db_module
 import pytest
 from db import Database
 from repositories.masks_features import MaskQuality, MasksFeaturesRepository, PipelineFeatures
-from services import detection_store, subject_masks
+from services import detection_store, photo_ingest, subject_masks
 
 BOX = (0.1, 0.2, 0.3, 0.4)
 OTHER_BOX = (0.5, 0.5, 0.2, 0.2)
@@ -51,8 +51,8 @@ def _folder(db, path="/photos"):
 
 def _photo(db, name, folder_id=None):
     fid = folder_id if folder_id is not None else _folder(db)
-    return db.add_photo(
-        folder_id=fid, filename=name, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=40, height=30,
     )
 

@@ -22,7 +22,7 @@ from db import Database
 from detection_id import detection_id
 from repositories.detections import DetectionsRepository
 from repositories.model_runs import ModelRunsRepository
-from services import detection_store, miss_flags
+from services import detection_store, miss_flags, photo_ingest
 
 MODEL = "megadetector-v6"
 
@@ -45,8 +45,8 @@ def _folder(db, path="/photos"):
 
 def _photo(db, name="a.jpg", folder_id=None, timestamp=None):
     fid = folder_id if folder_id is not None else _folder(db)
-    return db.add_photo(
-        folder_id=fid, filename=name, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=timestamp, width=1, height=1,
     )
 

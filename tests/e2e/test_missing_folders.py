@@ -1,4 +1,5 @@
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _open_missing_folders(live_server, page):
@@ -13,13 +14,13 @@ def test_remove_all_missing_folders(live_server, page, tmp_path):
     db = live_server["db"]
     parent = live_server["data"]["folders"][0]
     child = db.add_folder("/photos/park/nested", name="nested", parent_id=parent)
-    db.add_photo(child, "nested.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child, "nested.jpg", ".jpg", 1000, 1.0)
     existing = tmp_path / "existing"
     existing.mkdir()
     original = existing / "keep.jpg"
     original.write_bytes(b"original")
     healthy = db.add_folder(str(existing), name="existing")
-    healthy_photo = db.add_photo(healthy, original.name, ".jpg", 8, 1.0)
+    healthy_photo = photo_ingest.add_photo(db, healthy, original.name, ".jpg", 8, 1.0)
 
     button = _open_missing_folders(live_server, page)
     expect(page.locator("#missingFoldersList .missing-folder-row")).to_have_count(3)

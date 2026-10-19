@@ -18,6 +18,7 @@ import pytest
 from dir_listing_cache import DirListingCache, ListingPass, read_directory
 from image_loader import safe_scan_walk
 from PIL import Image
+from services import photo_ingest
 
 HOUR = 3600
 
@@ -342,8 +343,8 @@ def test_new_images_reused_listing_follows_the_catalog(db_with_workspace):
     cache = DirListingCache()
     assert count_new_images_for_workspace(db, ws_id, listing_cache=cache)["new_count"] == 2
 
-    db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     result = count_new_images_for_workspace(db, ws_id, listing_cache=cache)
@@ -388,8 +389,8 @@ def test_check_again_clears_remembered_listings(tmp_path, monkeypatch):
 
 
 def _photo(db, folder_id, filename):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename,
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension=os.path.splitext(filename)[1], file_size=1, file_mtime=1.0,
     )
 

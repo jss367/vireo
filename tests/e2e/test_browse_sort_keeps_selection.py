@@ -16,6 +16,7 @@ import json
 import re
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.stack_seed import seed_browse_stack
 
@@ -29,8 +30,8 @@ def _seed_sortable_library(db, folder_id, count=160):
     """
     ids = []
     for i in range(count):
-        ids.append(db.add_photo(
-            folder_id=folder_id,
+        ids.append(photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"bird{count - 1 - i:03d}.jpg",
             extension=".jpg",
             file_size=1000 + i,

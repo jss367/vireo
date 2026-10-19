@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
-from services import dashboard_stats
+from services import dashboard_stats, photo_ingest
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -1030,7 +1030,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
     tagged, already, raw = (
-        db.add_photo(folder_id=folder_id, filename=name, extension=ext,
+        photo_ingest.add_photo(db, folder_id=folder_id, filename=name, extension=ext,
                      file_size=100, file_mtime=1.0)
         for name, ext in (("a.jpg", ".jpg"), ("b.jpg", ".jpg"), ("c.nef", ".nef"))
     )
@@ -1070,7 +1070,7 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"), name="photos")
     handled, blocked = (
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=100, file_mtime=1.0)
         for name in ("handled.jpg", "blocked.jpg")
     )
@@ -1113,7 +1113,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
     file_meta = {"XMP": {"Subject": ["Robin", "Hawk"],
                          "HierarchicalSubject": ["Birds|Robin"]}}
@@ -1149,7 +1149,7 @@ def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
     first = {"XMP": {"Subject": ["Robin"]}}
@@ -1180,7 +1180,7 @@ def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_pat
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
     first = {"XMP": {"HierarchicalSubject": ["Birds|Robin"]}}
@@ -1221,7 +1221,7 @@ def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_pa
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
     # First export carries a broken hierarchy: nothing imports, and the leaf
@@ -1251,7 +1251,7 @@ def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monke
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
     def _raise(*args, **kwargs):
@@ -1994,8 +1994,8 @@ def test_companion_metadata_fills_each_missing_coordinate_and_dimension(
 
     with Database(str(tmp_path / "catalog.db")) as db:
         folder_id = db.add_folder(str(tmp_path), name="photos")
-        raw_id = db.add_photo(folder_id, "IMG.cr3", ".cr3", 2000, 1.0)
-        jpeg_id = db.add_photo(folder_id, "IMG.jpg", ".jpg", 1000, 1.0)
+        raw_id = photo_ingest.add_photo(db, folder_id, "IMG.cr3", ".cr3", 2000, 1.0)
+        jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG.jpg", ".jpg", 1000, 1.0)
         db.conn.execute(
             "UPDATE photos SET latitude=?, longitude=?, width=?, height=? WHERE id=?",
             (*primary_values, raw_id),
@@ -3139,7 +3139,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
             evidence["attempted"] = True
             try:
                 writer.delete_photos([cat.raw_id])
-                replacement = writer.add_photo(None, "unrelated.jpg", ".jpg", 200, None)
+                replacement = photo_ingest.add_photo(writer, None, "unrelated.jpg", ".jpg", 200, None)
                 assert replacement == cat.raw_id
                 evidence["replaced"] = True
             except sqlite3.OperationalError as error:
@@ -3317,12 +3317,12 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    raw_id = db.add_photo(
-        folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
     db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
@@ -3379,12 +3379,12 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    raw_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
 
@@ -3416,9 +3416,9 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"))
-    jpeg = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    jpeg = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
-    raw = db.add_photo(folder_id=fid, filename="bird.cr3", extension=".cr3",
+    raw = photo_ingest.add_photo(db, folder_id=fid, filename="bird.cr3", extension=".cr3",
                        file_size=200, file_mtime=1.0)
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
@@ -3445,12 +3445,12 @@ def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
     img_dir.mkdir()
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(img_dir), name="photos")
-    raw_id = db.add_photo(
-        folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
 
@@ -3482,12 +3482,12 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    raw_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
 
@@ -3625,9 +3625,9 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
                           file_size=2000, file_mtime=1.0)
 
     # Both classified with same model + same box + same category.
@@ -3677,9 +3677,9 @@ def test_pairing_transfers_inat_submissions(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
                           file_size=2000, file_mtime=1.0)
 
     # JPEG was submitted to iNaturalist
@@ -3714,9 +3714,9 @@ def test_pairing_deduplicates_inat_submissions(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
                           file_size=2000, file_mtime=1.0)
 
     # Both photos submitted for the same observation (e.g., user submitted JPEG,
@@ -3856,9 +3856,9 @@ def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
     fid = db.add_folder(str(tmp_path), name="photos")
 
     # JPEG has GPS and metadata, RAW does not
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.nef", extension=".nef",
                           file_size=25000000, file_mtime=1.0)
 
     exif_json = json.dumps({"EXIF": {"Make": "Nikon", "Model": "Z9", "ISO": 400}})
@@ -3891,9 +3891,9 @@ def test_pair_raw_jpeg_transfers_promoted_exif_summary_columns(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.cr3", extension=".cr3",
                           file_size=20000000, file_mtime=1.0)
 
     db.conn.execute(
@@ -3927,9 +3927,9 @@ def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.cr3", extension=".cr3",
                           file_size=20000000, file_mtime=1.0)
 
     # Same camera: a make/model mismatch would mean two different shots,
@@ -3963,9 +3963,9 @@ def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.cr3", extension=".cr3",
                           file_size=20000000, file_mtime=1.0)
 
     # Both have GPS but different coords — primary should keep its own
@@ -3990,9 +3990,9 @@ def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.nef", extension=".nef",
                           file_size=25000000, file_mtime=1.0)
 
     # JPEG is on the equator/prime meridian (0.0, 0.0) — falsy but valid
@@ -4016,9 +4016,9 @@ def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
-    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
-    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.cr3", extension=".cr3",
                           file_size=20000000, file_mtime=1.0)
 
     # JPEG has non-zero GPS, RAW sits at equator (0.0, 0.0) — must not be overwritten
@@ -4137,8 +4137,8 @@ def test_working_copy_scope_supports_more_than_sqlite_expression_limit(
 
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(target_dir))
-    photo_id = db.add_photo(
-        folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id,
         raw_path.name,
         ".nef",
         raw_path.stat().st_size,
@@ -4185,8 +4185,8 @@ def test_working_copy_extractor_rechecks_excluded_path_before_read(
 
     db = Database(str(vireo_dir / "test.db"))
     folder_id = db.add_folder(str(target_dir))
-    photo_id = db.add_photo(
-        folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id,
         raw_path.name,
         ".nef",
         raw_path.stat().st_size,
@@ -5034,7 +5034,7 @@ def test_restricted_scan_links_only_exact_target_folder(tmp_path, monkeypatch):
     unrelated_id = db.add_folder(
         str(unrelated), name=unrelated.name, parent_id=root_id,
     )
-    db.add_photo(unrelated_id, "existing.jpg", ".jpg", 100, 1.0)
+    photo_ingest.add_photo(db, unrelated_id, "existing.jpg", ".jpg", 100, 1.0)
     db.set_active_workspace(active_ws)
 
     monkeypatch.setattr(
@@ -7496,8 +7496,8 @@ def test_scan_purges_derived_caches_when_new_photo_reuses_a_freed_rowid(
     db = Database(str(tmp_path / "test.db"))
     # Claim (and free) a rowid so the real scan's insert reuses it.
     placeholder_folder = db.add_folder(str(tmp_path / "gone"), name="gone")
-    doomed_id = db.add_photo(
-        folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
+    doomed_id = photo_ingest.add_photo(
+        db, folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     db.conn.execute("DELETE FROM photos WHERE id = ?", (doomed_id,))
@@ -7592,12 +7592,12 @@ def test_pairing_purges_the_merged_companion_derived_caches(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    raw_id = db.add_photo(
-        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
 
@@ -7643,8 +7643,8 @@ def test_scan_purges_variant_only_caches_when_new_photo_reuses_a_freed_rowid(
 
     db = Database(str(tmp_path / "test.db"))
     placeholder_folder = db.add_folder(str(tmp_path / "gone"), name="gone")
-    doomed_id = db.add_photo(
-        folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
+    doomed_id = photo_ingest.add_photo(
+        db, folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     db.conn.execute("DELETE FROM photos WHERE id = ?", (doomed_id,))
@@ -7720,12 +7720,12 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_003.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_003.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=fid, filename="IMG_003.cr3", extension=".cr3",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_003.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
     db.conn.commit()
@@ -8088,12 +8088,12 @@ def test_pairing_recovers_snapshot_when_rename_fails(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = db.add_photo(
-        folder_id=fid, filename="IMG_004.jpg", extension=".jpg",
+    jpeg_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_004.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
-    raw_id = db.add_photo(
-        folder_id=fid, filename="IMG_004.cr3", extension=".cr3",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG_004.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
     )
     # A recipe on the JPEG is what makes pairing transfer the row (and the
@@ -8359,8 +8359,8 @@ def test_recycled_id_purge_marks_surviving_previews_uncacheable(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"), name="photos")
-    photo_id = db.add_photo(
-        folder_id=fid, filename="gull.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     # Rename the seeded preview onto whatever rowid we actually got, so the
@@ -8452,8 +8452,8 @@ def test_preview_marker_written_even_when_backdating_fails(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="gull.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     survivor = vireo_dir / "previews" / f"{pid}_1920.jpg"
@@ -8507,8 +8507,8 @@ def test_prepared_render_survivor_does_not_get_a_preview_marker(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="gull.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
     render = vireo_dir / "originals" / f"{pid}_2048.jpg"
@@ -8947,7 +8947,7 @@ def _sidecar_with_vireo_location(tmp_path, db, chain):
     xmp_path = os.path.join(root, "bird.xmp")
 
     folder_id = db.add_folder(root, name="photos")
-    photo_id = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+    photo_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                             extension=".jpg", file_size=100, file_mtime=1.0)
     parent_id = None
     for name in chain:
@@ -9050,12 +9050,12 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path, monkeypatch):
     primary_ids = []
     # Three raw+JPEG pairs: three companions destined for three primaries.
     for i in range(3):
-        jpeg = db.add_photo(
-            folder_id=fid, filename=f"IMG_00{i}.jpg", extension=".jpg",
+        jpeg = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"IMG_00{i}.jpg", extension=".jpg",
             file_size=1000, file_mtime=1.0,
         )
-        raw = db.add_photo(
-            folder_id=fid, filename=f"IMG_00{i}.cr3", extension=".cr3",
+        raw = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"IMG_00{i}.cr3", extension=".cr3",
             file_size=2000, file_mtime=1.0,
         )
         companion_ids.append(jpeg)
@@ -9108,7 +9108,7 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    photo_id = db.add_photo(folder_id=folder_id, filename="a.jpg",
+    photo_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="a.jpg",
                             extension=".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET exif_data = ? WHERE id = ?",

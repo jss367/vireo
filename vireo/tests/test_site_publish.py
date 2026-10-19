@@ -4,6 +4,7 @@ import threading
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -37,8 +38,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
 
-    p1 = db.add_photo(
-        folder_id=fid,
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="cardinal.jpg",
         extension=".jpg",
         file_size=1000,
@@ -47,8 +48,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
         width=1200,
         height=800,
     )
-    p2 = db.add_photo(
-        folder_id=fid,
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="sparrow.jpg",
         extension=".jpg",
         file_size=1000,
@@ -57,8 +58,8 @@ def _seed_publish_app(tmp_path, monkeypatch):
         width=900,
         height=900,
     )
-    p3 = db.add_photo(
-        folder_id=fid,
+    p3 = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="mystery.jpg",
         extension=".jpg",
         file_size=1000,

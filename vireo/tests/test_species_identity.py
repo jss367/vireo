@@ -15,7 +15,7 @@ from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
-from services import detection_store
+from services import detection_store, photo_ingest
 from species_identity import (
     PREDICTION_TAXONOMY_COLUMNS,
     SpeciesResolver,
@@ -435,7 +435,7 @@ def test_source_taxon_id_survives_name_changes(taxonomy):
 
 def _photo(db, tmp_path, name="photo.jpg"):
     folder = db.add_folder(str(tmp_path), name="Photos")
-    pid = db.add_photo(folder, name, ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
+    pid = photo_ingest.add_photo(db, folder, name, ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
     det = db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5},
                                     "confidence": .99}], detector_model="megadetector-v6")[0]
     return pid, det

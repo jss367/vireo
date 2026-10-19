@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, subject_masks
+from services import detection_store, photo_ingest, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -297,9 +297,9 @@ def test_api_photos_extensions_returns_distinct_lowercased(app_and_db):
     # Fixture seeds three .jpg photos. Add a mixed-case + raw to verify
     # collapsing and sorting.
     fid = db.folders.tree()[0]['id']
-    db.add_photo(folder_id=fid, filename='upper.JPG', extension='.JPG',
+    photo_ingest.add_photo(db, folder_id=fid, filename='upper.JPG', extension='.JPG',
                  file_size=1, file_mtime=99.0)
-    db.add_photo(folder_id=fid, filename='raw.nef', extension='.nef',
+    photo_ingest.add_photo(db, folder_id=fid, filename='raw.nef', extension='.nef',
                  file_size=1, file_mtime=99.0)
 
     client = app.test_client()
@@ -316,7 +316,7 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     other_fid = db.add_folder('/other/photos', name='other')
-    db.add_photo(folder_id=other_fid, filename='only.cr2', extension='.cr2',
+    photo_ingest.add_photo(db, folder_id=other_fid, filename='only.cr2', extension='.cr2',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(default_ws)
 
@@ -1784,8 +1784,8 @@ def test_original_route_enforces_working_copy_quota(
         (os.path.getsize(tiff_path), source_mtime, source_mtime, photo_id),
     )
 
-    old_photo_id = db.add_photo(
-        folder_id=photo["folder_id"], filename="old.tiff", extension=".tiff",
+    old_photo_id = photo_ingest.add_photo(
+        db, folder_id=photo["folder_id"], filename="old.tiff", extension=".tiff",
         file_size=1, file_mtime=1.0, width=800, height=600,
     )
     working_dir = tmp_path / "vireo" / "working"
@@ -2635,8 +2635,8 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     )
     db.conn.commit()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="verdin.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="verdin.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Penduline tits")
@@ -2730,8 +2730,8 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     )
     db.conn.commit()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="subject-verdin.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="subject-verdin.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     parent = db.add_keyword("Penduline tits")
@@ -2808,8 +2808,8 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     )
     db.conn.commit()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="verdin-multi.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="verdin-multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo already carries Verdin through a hierarchy leaf so every
@@ -2904,8 +2904,8 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     )
     db.conn.commit()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="verdin-mixed.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="verdin-mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Photo carries NO species keyword up front, so the first accept in
@@ -4554,7 +4554,7 @@ def test_api_pipeline_photo_detail_rejects_other_workspace(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     other_fid = db.add_folder('/secret/ws', name='secret')
-    other_pid = db.add_photo(other_fid, 'hidden.jpg', '.jpg', 1000, 0.0)
+    other_pid = photo_ingest.add_photo(db, other_fid, 'hidden.jpg', '.jpg', 1000, 0.0)
     db.set_active_workspace(default_ws)
     client = app.test_client()
     resp = client.get(f"/api/pipeline/photo/{other_pid}")
@@ -7162,8 +7162,8 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
     p2 = by_name["bird2.jpg"]
     p3 = by_name["bird3.jpg"]
     missing_fid = db.add_folder("/photos/missing", name="missing")
-    missing_pid = db.add_photo(
-        folder_id=missing_fid,
+    missing_pid = photo_ingest.add_photo(
+        db, folder_id=missing_fid,
         filename="missing.jpg",
         extension=".jpg",
         file_size=1,
@@ -8013,7 +8013,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     ws_b = db.create_workspace("B")
     db.set_active_workspace(ws_b)
     fid_b = db.add_folder("/photos/b", name="b")
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     # Insert a case-variant of "Sparrow" directly to bypass dedup
     cur_b = db.conn.execute(
@@ -8116,7 +8116,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
     ws_b = db.create_workspace("B")
     db.set_active_workspace(ws_b)
     fid_b = db.add_folder("/photos/b", name="b")
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k_penguin = db.add_keyword("Penguin")
     db.tag_photo(pid_b, k_penguin)
@@ -8845,8 +8845,8 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
     photo_ids = []
     for i in range(7):
-        pid = db.add_photo(
-            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
             file_size=1, file_mtime=float(i),
         )
         db.tag_photo(pid, kid_old)
@@ -9015,8 +9015,8 @@ def _seed_anianiau_bucket(db):
     ]
     ids = {}
     for i, (label, quality, flag, ts) in enumerate(spec):
-        pid = db.add_photo(
-            folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
             file_size=1000 + i, file_mtime=float(i), timestamp=ts,
         )
         db.tag_photo(pid, kid)
@@ -9152,20 +9152,20 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     _app, db = app_and_db
     fid = db.add_folder('/photos/curate', name='curate')
     kid = db.add_keyword('Iiwi', is_species=True)
-    scored_a = db.add_photo(
-        folder_id=fid, filename='scored_a.jpg', extension='.jpg',
+    scored_a = photo_ingest.add_photo(
+        db, folder_id=fid, filename='scored_a.jpg', extension='.jpg',
         file_size=1000, file_mtime=1.0, timestamp='2024-01-01T10:00:00',
     )
-    scored_b = db.add_photo(
-        folder_id=fid, filename='scored_b.jpg', extension='.jpg',
+    scored_b = photo_ingest.add_photo(
+        db, folder_id=fid, filename='scored_b.jpg', extension='.jpg',
         file_size=1001, file_mtime=2.0, timestamp='2024-01-02T10:00:00',
     )
-    unscored_rep = db.add_photo(
-        folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
+    unscored_rep = photo_ingest.add_photo(
+        db, folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
         file_size=1002, file_mtime=3.0, timestamp='2024-01-03T10:00:00',
     )
-    unscored_tail = db.add_photo(
-        folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
+    unscored_tail = photo_ingest.add_photo(
+        db, folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
         file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
     )
     for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
@@ -9310,7 +9310,7 @@ def test_rename_keyword_queues_for_all_workspaces(app_and_db):
     ws2 = db.create_workspace("Second")
     fid2 = db.add_folder("/photos/ws2", name="ws2")
     db.add_workspace_folder(ws2, fid2)
-    p_ws2 = db.add_photo(folder_id=fid2, filename="ws2bird.jpg", extension=".jpg",
+    p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2bird.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
     # Tag photos in both workspaces with the same keyword
@@ -9351,7 +9351,7 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
     ws2 = db.create_workspace("Second")
     fid2 = db.add_folder("/photos/ws2del", name="ws2del")
     db.add_workspace_folder(ws2, fid2)
-    p_ws2 = db.add_photo(folder_id=fid2, filename="ws2del.jpg", extension=".jpg",
+    p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2del.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
     kid = db.add_keyword("SharedDelete")
@@ -9948,8 +9948,8 @@ def test_add_keyword_route_handles_non_string_type(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/p")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     client = app.test_client()
     resp = client.post(
@@ -9975,8 +9975,8 @@ def test_wildlife_excluded_route_does_not_add_landscape_keyword(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/p")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     client = app.test_client()
 
@@ -10035,8 +10035,8 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/q")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "q.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "q.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     client = app.test_client()
     resp = client.post(
@@ -10058,8 +10058,8 @@ def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/pe")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     client = app.test_client()
     before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
@@ -10086,8 +10086,8 @@ def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/qe")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     client = app.test_client()
     before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
@@ -10114,8 +10114,8 @@ def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/qn")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -10161,8 +10161,8 @@ def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/qb")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     db.conn.execute("DELETE FROM pending_changes")
     db.conn.commit()
@@ -10254,8 +10254,8 @@ def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
     app, db = app_and_db
     folder_id = db.folders.tree()[0]["id"]
     ids = [
-        db.add_photo(
-            folder_id,
+        photo_ingest.add_photo(
+            db, folder_id,
             f"large-suggestion-{idx}.jpg",
             extension=".jpg",
             file_size=1,
@@ -10325,8 +10325,8 @@ def test_selection_wildlife_state_ignores_photos_outside_active_workspace(app_an
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
     stray_folder = db.add_folder("/other-only", name="other-only")
-    stray = db.add_photo(
-        folder_id=stray_folder, filename="stray.jpg", extension=".jpg",
+    stray = photo_ingest.add_photo(
+        db, folder_id=stray_folder, filename="stray.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.set_active_workspace(original_ws)
@@ -10397,8 +10397,8 @@ def test_batch_wildlife_excluded_skips_missing_and_out_of_workspace(app_and_db):
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
     stray_folder = db.add_folder("/batch-stray", name="batch-stray")
-    stray = db.add_photo(
-        folder_id=stray_folder, filename="batch-stray.jpg", extension=".jpg",
+    stray = photo_ingest.add_photo(
+        db, folder_id=stray_folder, filename="batch-stray.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.set_active_workspace(original_ws)
@@ -10444,8 +10444,8 @@ def test_batch_wildlife_excluded_uses_chunked_workspace_lookup(app_and_db):
     folder_id = db.add_folder("/bulk", name="bulk")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
     photo_ids = [
-        db.add_photo(
-            folder_id=folder_id,
+        photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"bulk-{i:04d}.jpg",
             extension=".jpg",
             file_size=100,
@@ -10719,8 +10719,8 @@ def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
     app, db = app_and_db
     folder_id = db.folders.tree()[0]["id"]
     ids = [
-        db.add_photo(
-            folder_id,
+        photo_ingest.add_photo(
+            db, folder_id,
             f"large-batch-{idx}.jpg",
             extension=".jpg",
             file_size=1,
@@ -10748,8 +10748,8 @@ def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db)
     app, db = app_and_db
     folder_id = db.add_folder("/tmp/p")
     db.add_workspace_folder(db._active_workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
     # Pre-create an 'individual' keyword named "Charlie" (e.g. user's pet).
     existing_kid = db.add_keyword("Charlie", kw_type="individual")
@@ -10870,9 +10870,9 @@ def test_api_photos_missing(app_and_db, tmp_path):
     real_dir.mkdir()
     Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
     fid = db.add_folder(str(real_dir), name="live")
-    pid_present = db.add_photo(folder_id=fid, filename="here.jpg",
+    pid_present = photo_ingest.add_photo(db, folder_id=fid, filename="here.jpg",
                                extension=".jpg", file_size=1, file_mtime=1.0)
-    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                              extension=".nef", file_size=42, file_mtime=2.0,
                              timestamp="2024-03-08T10:00:00")
     # Pre-existing seed photos in /photos/2024 also have absent sources;
@@ -10913,8 +10913,8 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -10951,8 +10951,8 @@ def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -11002,8 +11002,8 @@ def test_api_photos_missing_automatic_gate_uses_scan_start_time(
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -11098,8 +11098,8 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -11277,8 +11277,8 @@ def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -11322,8 +11322,8 @@ def test_api_folder_relocate_invalidates_missing_cache(app_and_db, tmp_path):
     old_dir = tmp_path / "orig"
     old_dir.mkdir()
     fid = db.add_folder(str(old_dir), name="orig")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -11374,8 +11374,8 @@ def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path
     live_dir.mkdir()
     fid = db.add_folder(str(live_dir), name="live")
     (live_dir / "keep.NEF").write_bytes(b"stub")
-    db.add_photo(
-        folder_id=fid,
+    photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="keep.NEF",
         extension=".nef",
         file_size=len(b"stub"),
@@ -11946,8 +11946,8 @@ def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -12044,12 +12044,12 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     # hook doesn't reject either row on insert. We then set the shared
     # hash + the loser's rejected flag directly, which is the exact
     # state left behind by an earlier ``apply_duplicate_resolution``.
-    pid_winner = db.add_photo(
-        folder_id=fid, filename="winner.jpg", extension=".jpg",
+    pid_winner = photo_ingest.add_photo(
+        db, folder_id=fid, filename="winner.jpg", extension=".jpg",
         file_size=len(b"jpeg-winner"), file_mtime=1.0,
     )
-    pid_loser = db.add_photo(
-        folder_id=fid, filename="loser.jpg", extension=".jpg",
+    pid_loser = photo_ingest.add_photo(
+        db, folder_id=fid, filename="loser.jpg", extension=".jpg",
         file_size=len(b"jpeg-loser"), file_mtime=2.0,
     )
     db.conn.execute(
@@ -12072,8 +12072,8 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     # Introduce a ghost row so the cache actually contains something to
     # invalidate — otherwise the "cache cleared" assertion below is
     # trivially satisfied even without the fix.
-    pid_ghost = db.add_photo(
-        folder_id=fid, filename="ghost.NEF", extension=".nef",
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid, filename="ghost.NEF", extension=".nef",
         file_size=1, file_mtime=3.0,
     )
     cached = _run_missing_originals_check(client)
@@ -12124,8 +12124,8 @@ def test_batch_delete_invalidates_missing_cache_across_workspaces(
     fid = db.add_folder(str(shared_dir), name="shared")
     db.add_workspace_folder(other_ws, fid)
 
-    pid_ghost = db.add_photo(
-        folder_id=fid,
+    pid_ghost = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=42,
@@ -12189,9 +12189,9 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     decoy_xmp.write_text("<x:xmpmeta/>")
 
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
-    pid_decoy = db.add_photo(folder_id=fid, filename="decoy.jpg",
+    pid_decoy = photo_ingest.add_photo(db, folder_id=fid, filename="decoy.jpg",
                              extension=".jpg", file_size=1, file_mtime=1.0)
 
     resp = client.post("/api/photos/missing/delete-sidecars", json={
@@ -12221,10 +12221,10 @@ def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path
     real_dir.mkdir()
     # Ghost stays missing: nothing on disk for this row.
     fid = db.add_folder(str(real_dir), name="live")
-    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
     # Restored: original file is back on disk (simulated), sidecar too.
-    pid_restored = db.add_photo(folder_id=fid, filename="restored.NEF",
+    pid_restored = photo_ingest.add_photo(db, folder_id=fid, filename="restored.NEF",
                                 extension=".nef", file_size=1, file_mtime=1.0)
     (real_dir / "restored.NEF").write_bytes(b"raw")
     (real_dir / "restored.xmp").write_text("<x:xmpmeta/>")
@@ -12271,7 +12271,7 @@ def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
     # Ghost sidecar left on disk — must not be deleted while folder offline.
     (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
@@ -12312,8 +12312,8 @@ def test_api_photos_missing_remove_skips_unreadable_folder(
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=1,
@@ -12361,7 +12361,7 @@ def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
 
     import shutil
@@ -12393,8 +12393,8 @@ def test_api_photos_missing_delete_sidecars_skips_unreadable_folder(
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="ghost.NEF",
         extension=".nef",
         file_size=1,
@@ -12489,11 +12489,11 @@ def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid_sized = db.add_photo(folder_id=fid, filename="sized.NEF",
+    pid_sized = photo_ingest.add_photo(db, folder_id=fid, filename="sized.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
-    pid_legacy = db.add_photo(folder_id=fid, filename="legacy.NEF",
+    pid_legacy = photo_ingest.add_photo(db, folder_id=fid, filename="legacy.NEF",
                               extension=".nef", file_size=1, file_mtime=1.0)
-    pid_no_preview = db.add_photo(folder_id=fid, filename="bare.NEF",
+    pid_no_preview = photo_ingest.add_photo(db, folder_id=fid, filename="bare.NEF",
                                   extension=".nef", file_size=1, file_mtime=1.0)
     db.delete_photos([
         row["id"] for row in db.conn.execute(
@@ -12532,7 +12532,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     fid = db.add_folder(str(real_dir), name="live")
-    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
     db.delete_photos([
         row["id"] for row in db.conn.execute(
@@ -12564,7 +12564,7 @@ def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
     real_dir.mkdir()
     Image.new("RGB", (10, 10)).save(real_dir / "still_here.jpg")
     fid = db.add_folder(str(real_dir), name="ok")
-    db.add_photo(folder_id=fid, filename="still_here.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="still_here.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     db.delete_photos([
         row["id"] for row in db.conn.execute(
@@ -12739,8 +12739,8 @@ def test_api_folder_relocate_merge(app_and_db, tmp_path):
     (tmp_path / "folder_b" / "photo1.jpg").write_bytes(b"\xff\xd8")
 
     # Add a photo to each folder
-    db.add_photo(fid_a, "photo1.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(fid_b, "photo2.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, fid_a, "photo1.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, fid_b, "photo2.jpg", ".jpg", 1000, 1.0)
 
     client = app.test_client()
     resp = client.post(f"/api/folders/{fid_a}/relocate", json={"path": dir_b})
@@ -16449,8 +16449,8 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
         enc_offset = enc_idx * 300
         for i in range(3):
             ts = base_time + timedelta(seconds=enc_offset + i * 2)
-            pid = db.add_photo(
-                fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
+            pid = photo_ingest.add_photo(
+                db, fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
                 timestamp=ts.isoformat(), width=4000, height=3000,
             )
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
@@ -16549,8 +16549,8 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         enc_offset = enc_idx * 300
         for i in range(3):
             ts = base_time + timedelta(seconds=enc_offset + i * 2)
-            pid = db.add_photo(
-                fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
+            pid = photo_ingest.add_photo(
+                db, fid, f"enc{enc_idx}_p{i}.jpg", ".jpg", 1000, 1.0,
                 timestamp=ts.isoformat(), width=4000, height=3000,
             )
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
@@ -17586,7 +17586,7 @@ def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
     fid = db.folders.tree()[0]["id"]
     # More ids than one 900-param chunk so the query must split.
     photo_ids = [
-        db.add_photo(folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
                      file_size=1, file_mtime=1.0)
         for i in range(950)
     ]
@@ -18342,7 +18342,7 @@ def test_build_explorer_payload_rollup(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -18400,9 +18400,9 @@ def test_build_explorer_payload_multi_found_species_rollup(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=1, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
                       file_size=1, file_mtime=2.0)
     # Tag BOTH Melospiza species as found (two keywords, one per taxon).
     k1 = db.add_keyword('Song Sparrow')
@@ -18441,7 +18441,7 @@ def test_build_explorer_species_leaf(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -18492,7 +18492,7 @@ def test_build_explorer_rank_families(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -18523,7 +18523,7 @@ def test_build_explorer_rank_species_has_photo(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder('/p', name='p')
-    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+    p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
     db.tag_photo(p, k)
@@ -18600,8 +18600,8 @@ def test_explorer_uncounted_identifications_are_class_aware_and_reasoned(db):
         ('Mallard × hawaiian duck', None),
     ]
     for index, (name, taxon_id) in enumerate(tags, start=1):
-        photo_id = db.add_photo(
-            folder_id=fid, filename=f'{index}.jpg', extension='.jpg',
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f'{index}.jpg', extension='.jpg',
             file_size=1, file_mtime=float(index),
         )
         keyword_id = db.add_keyword(name, kw_type='taxonomy')
@@ -18686,8 +18686,8 @@ def _seed_prediction_photo(db, filename, species, confidence,
     """Add a photo with one detection carrying one prediction."""
     if folder_id is None:
         folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     detection_id = db.detections.save(
@@ -18932,8 +18932,8 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     other, _ = _seed_prediction_photo(db, "all-other.jpg", "Osprey", 0.8)
     existing, _ = _seed_prediction_photo(db, "all-existing.jpg", "Bald Eagle", 0.9)
     outside, _ = _seed_prediction_photo(db, "all-outside.jpg", "Bald Eagle", 0.9)
-    unclassified = db.add_photo(
-        folder_id=db.folders.tree()[0]["id"], filename="all-unclassified.jpg",
+    unclassified = photo_ingest.add_photo(
+        db, folder_id=db.folders.tree()[0]["id"], filename="all-unclassified.jpg",
         extension=".jpg", file_size=100, file_mtime=1.0,
     )
     eagle = db.add_keyword("Bald Eagle", is_species=True)
@@ -19326,8 +19326,8 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped(filename):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -19404,12 +19404,12 @@ def test_prediction_states_distinguish_empty_reasons(app_and_db):
     """Four different reasons a photo shows no predictions, kept apart."""
     app, db = app_and_db
     folder_id = db.folders.tree()[0]["id"]
-    untouched = db.add_photo(
-        folder_id=folder_id, filename="state-none.jpg", extension=".jpg",
+    untouched = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="state-none.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    detected_only = db.add_photo(
-        folder_id=folder_id, filename="state-detected.jpg", extension=".jpg",
+    detected_only = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="state-detected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(detected_only, "MDV6", box_count=1)
@@ -19442,8 +19442,8 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
     assert app is not None
     folder_id = db.folders.tree()[0]["id"]
 
-    fallback_only = db.add_photo(
-        folder_id=folder_id, filename="state-fallback.jpg", extension=".jpg",
+    fallback_only = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="state-fallback.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(fallback_only, "MDV6", box_count=0)
@@ -19454,8 +19454,8 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         detector_model="full-image",
     )
 
-    noise_only = db.add_photo(
-        folder_id=folder_id, filename="state-noise.jpg", extension=".jpg",
+    noise_only = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="state-noise.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(noise_only, "MDV6", box_count=1)
@@ -19620,8 +19620,8 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
     folder_id = db.folders.tree()[0]["id"]
 
     # Photo A: same species predicted on two separate detections.
-    photo_multi = db.add_photo(
-        folder_id=folder_id, filename="multi-det.jpg", extension=".jpg",
+    photo_multi = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="multi-det.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -19638,8 +19638,8 @@ def test_selection_prediction_suggestions_keeps_all_matching_ids_per_photo(app_a
     db.predictions.add(det_ids[1], "Cape Cormorant", 0.65, "bioclip")
 
     # Photo B: same species predicted by two classifier models on one detection.
-    photo_multi_model = db.add_photo(
-        folder_id=folder_id, filename="multi-model.jpg", extension=".jpg",
+    photo_multi_model = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="multi-model.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_b = db.detections.save(
@@ -19700,8 +19700,8 @@ def test_selection_prediction_suggestions_marks_photo_ambiguous_across_siblings(
     app, db = app_and_db
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="mixed.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="mixed.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -19762,8 +19762,8 @@ def test_selection_prediction_suggestions_uses_burst_consensus_species(app_and_d
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -19834,8 +19834,8 @@ def test_selection_prediction_suggestions_ignores_minority_frame_confidence(
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species, confidence):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -19896,8 +19896,8 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]
 
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="burst-sparrow-only.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="burst-sparrow-only.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_id = db.detections.save(
@@ -19950,8 +19950,8 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_photo(name, species, confidence):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -20002,8 +20002,8 @@ def test_predictions_api_exposes_consensus_species_for_burst(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="consensus.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="consensus.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_id = db.detections.save(
@@ -20176,8 +20176,8 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
     # the previous boundary.
     photos = []
     for i in range(600):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -20229,8 +20229,8 @@ def test_batch_accept_grouped_scopes_photos_per_model_bucket(app_and_db):
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_two_models(filename):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -20318,8 +20318,8 @@ def test_batch_accept_rejects_selection_beyond_photo_cap(app_and_db):
 
     pred_ids = []
     for i in range(1001):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21010,8 +21010,8 @@ def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch)
     app, db = app_and_db
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="drift.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="drift.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_id = db.detections.save(
@@ -21107,8 +21107,8 @@ def test_batch_accept_without_expected_species_still_accepts(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="no-expected.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="no-expected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_id = db.detections.save(
@@ -21206,8 +21206,8 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_member(name):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21277,8 +21277,8 @@ def test_batch_accept_dedup_still_rejects_skipped_detection_alternatives(
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_with_alternative(name):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21371,8 +21371,8 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
     # ``_SQL_PARAM_CHUNK``.
     photos = []
     for i in range(400):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"bulk-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21450,8 +21450,8 @@ def test_batch_prediction_payload_shares_the_selection_photo_cap(app_and_db):
 
     photos, pred_ids = [], []
     for i in range(MAX_SELECTION_PHOTOS + 1):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"cap-{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21509,8 +21509,8 @@ def test_batch_accept_scopes_grouped_accept_to_the_submitted_rows(app_and_db):
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_burst_member(filename):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21580,8 +21580,8 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
 
     pred_ids, photos = [], []
     for name in ("cover-a.jpg", "cover-b.jpg", "cover-c.jpg"):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -21708,8 +21708,8 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
 def _seed_two_subject_photo(db, filename, first_species, second_species):
     """A photo with two detections, each carrying one pending prediction."""
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -21833,8 +21833,8 @@ def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
     # Seed the Little Egret detection first; then promote the sparrow
     # row to a burst-minority frame whose consensus is Robin.
     folder_id = db.folders.tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     det_ids = db.detections.save(
@@ -21893,8 +21893,8 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
     folder_id = db.folders.tree()[0]["id"]
 
     def _seed_grouped_photo(filename):
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename=filename, extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=filename, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det_id = db.detections.save(
@@ -24643,8 +24643,8 @@ def test_grouped_accept_expansion_skips_reviewed_group_member(app_and_db):
     photo_ids = []
     pred_ids = []
     for name in ("burst-a.jpg", "burst-b.jpg"):
-        pid = db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
         det = db.detections.save(

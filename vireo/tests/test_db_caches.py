@@ -19,6 +19,7 @@ import db as db_module
 import pytest
 from db import Database
 from repositories.caches import CachesRepository
+from services import photo_ingest
 
 
 def _reader(db):
@@ -30,7 +31,7 @@ def _reader(db):
 
 def _photo(db, name="a.jpg"):
     folder_id = db.add_folder("/tmp/caches")
-    return db.add_photo(folder_id, name, ".jpg", file_size=100, file_mtime=1.0)
+    return photo_ingest.add_photo(db, folder_id, name, ".jpg", file_size=100, file_mtime=1.0)
 
 
 class _FlakyConn:

@@ -1,4 +1,4 @@
-"""Tests for ``Database.keep_duplicate_copy``.
+"""Tests for ``duplicate_resolution.keep_duplicate_copy``.
 
 Backs "Keep this copy instead" on the Duplicates page: the user overrides
 which copy of a resolved group is kept, so a rejected copy is promoted and
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import repositories.duplicates as dup_repo
 from db import Database
+from services import duplicate_resolution, photo_ingest
 
 
 def _resolved_pair(tmp_path, file_hash="HKEEP", touch=(True, True)):
@@ -26,8 +27,8 @@ def _resolved_pair(tmp_path, file_hash="HKEEP", touch=(True, True)):
         if make:
             (folder / "owl.jpg").write_bytes(b"x")
         fid = db.add_folder(str(folder))
-        ids.append(db.add_photo(
-            folder_id=fid, filename="owl.jpg", extension=".jpg",
+        ids.append(photo_ingest.add_photo(
+            db, folder_id=fid, filename="owl.jpg", extension=".jpg",
             file_size=1, file_mtime=100.0, file_hash=file_hash,
         ))
     flags = _flags(db, ids)
@@ -56,7 +57,7 @@ def _duplicate_rejections(db):
 def test_keep_promotes_rejected_copy_and_rejects_the_kept_one(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
 
-    result = db.keep_duplicate_copy(rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, rejected)
 
     assert result == {
         "file_hash": "HKEEP", "winner_id": rejected, "loser_ids": [kept],
@@ -77,7 +78,7 @@ def test_keep_moves_rating_and_keywords_to_the_chosen_copy(tmp_path):
     db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (kept,))
     db.conn.commit()
 
-    result = db.keep_duplicate_copy(rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, rejected)
 
     assert result["rating"] == 4
     row = db.conn.execute(
@@ -95,7 +96,7 @@ def test_keep_carries_the_pick_flag_to_the_chosen_copy(tmp_path):
     db.conn.execute("UPDATE photos SET flag = 'flagged' WHERE id = ?", (kept,))
     db.conn.commit()
 
-    result = db.keep_duplicate_copy(rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, rejected)
 
     assert result["flag"] == "flagged"
     assert _flags(db, [kept, rejected]) == {kept: "rejected", rejected: "flagged"}
@@ -104,8 +105,8 @@ def test_keep_carries_the_pick_flag_to_the_chosen_copy(tmp_path):
 def test_keep_switches_back(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
 
-    db.keep_duplicate_copy(rejected)
-    result = db.keep_duplicate_copy(kept)
+    duplicate_resolution.keep_duplicate_copy(db, rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, kept)
 
     assert result["loser_ids"] == [rejected]
     assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}
@@ -114,7 +115,7 @@ def test_keep_switches_back(tmp_path):
 def test_keep_already_kept_copy_is_a_noop(tmp_path):
     db, kept, rejected = _resolved_pair(tmp_path)
 
-    result = db.keep_duplicate_copy(kept)
+    result = duplicate_resolution.keep_duplicate_copy(db, kept)
 
     assert result["loser_ids"] == []
     assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}
@@ -127,14 +128,14 @@ def test_keep_rejects_every_other_kept_copy(tmp_path):
     folder = tmp_path / "c"
     folder.mkdir()
     fid = db.add_folder(str(folder))
-    third = db.add_photo(
-        folder_id=fid, filename="owl.jpg", extension=".jpg",
+    third = photo_ingest.add_photo(
+        db, folder_id=fid, filename="owl.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HKEEP",
     )
     db.conn.execute("UPDATE photos SET flag = 'none' WHERE id = ?", (third,))
     db.conn.commit()
 
-    result = db.keep_duplicate_copy(rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, rejected)
 
     assert sorted(result["loser_ids"]) == sorted([kept, third])
     assert _flags(db, [kept, rejected, third]) == {
@@ -146,7 +147,7 @@ def test_keep_refuses_copy_missing_on_disk(tmp_path):
     """Promoting a copy whose file is gone would reject the one that exists."""
     db, kept, rejected = _resolved_pair(tmp_path, touch=(True, False))
 
-    assert db.keep_duplicate_copy(rejected) == {"error": "missing on disk"}
+    assert duplicate_resolution.keep_duplicate_copy(db, rejected) == {"error": "missing on disk"}
     assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}
 
 
@@ -154,7 +155,7 @@ def test_keep_refuses_copy_on_offline_volume(tmp_path, monkeypatch):
     db, kept, rejected = _resolved_pair(tmp_path)
     monkeypatch.setattr(dup_repo, "_volume_offline", lambda path: True)
 
-    assert db.keep_duplicate_copy(rejected) == {"error": "volume offline"}
+    assert duplicate_resolution.keep_duplicate_copy(db, rejected) == {"error": "volume offline"}
     assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}
 
 
@@ -162,13 +163,13 @@ def test_keep_refuses_photo_without_duplicates(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     (tmp_path / "solo.jpg").write_bytes(b"x")
     fid = db.add_folder(str(tmp_path))
-    pid = db.add_photo(
-        folder_id=fid, filename="solo.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="solo.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HSOLO",
     )
 
-    assert db.keep_duplicate_copy(pid) == {"error": "not a duplicate"}
-    assert db.keep_duplicate_copy(pid + 999) == {"error": "not found"}
+    assert duplicate_resolution.keep_duplicate_copy(db, pid) == {"error": "not a duplicate"}
+    assert duplicate_resolution.keep_duplicate_copy(db, pid + 999) == {"error": "not found"}
 
 
 def test_keep_plans_under_the_writer_lock(tmp_path, monkeypatch):
@@ -184,7 +185,7 @@ def test_keep_plans_under_the_writer_lock(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dup_repo.DuplicatesRepository, "keep_copy_plan", plan_in_txn)
 
-    db.keep_duplicate_copy(rejected)
+    duplicate_resolution.keep_duplicate_copy(db, rejected)
 
     assert seen == [True]
     assert not db.in_transaction
@@ -197,14 +198,14 @@ def test_second_keep_in_a_group_rejects_the_first_choice(tmp_path):
     folder.mkdir()
     (folder / "owl.jpg").write_bytes(b"x")
     fid = db.add_folder(str(folder))
-    third = db.add_photo(
-        folder_id=fid, filename="owl.jpg", extension=".jpg",
+    third = photo_ingest.add_photo(
+        db, folder_id=fid, filename="owl.jpg", extension=".jpg",
         file_size=1, file_mtime=100.0, file_hash="HKEEP",
     )
     assert _flags(db, [third])[third] == "rejected"
 
-    db.keep_duplicate_copy(rejected)
-    result = db.keep_duplicate_copy(third)
+    duplicate_resolution.keep_duplicate_copy(db, rejected)
+    result = duplicate_resolution.keep_duplicate_copy(db, third)
 
     assert result["loser_ids"] == [rejected]
     assert _flags(db, [kept, rejected, third]) == {
@@ -219,6 +220,6 @@ def test_keep_rolls_back_when_the_photo_vanishes_under_the_lock(tmp_path, monkey
         lambda repo, photo_id: (None, "not found"),
     )
 
-    assert db.keep_duplicate_copy(rejected) == {"error": "not found"}
+    assert duplicate_resolution.keep_duplicate_copy(db, rejected) == {"error": "not found"}
     assert not db.in_transaction
     assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}

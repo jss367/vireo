@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 from test_site_publish import _seed_publish_app
 from wait import wait_for_job_via_client
 
@@ -45,7 +46,7 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
     other_ws = db.create_workspace('Other site')
     db.set_active_workspace(other_ws)
     other_folder = db.add_folder(str(tmp_path / 'other'), name='other')
-    foreign = db.add_photo(folder_id=other_folder, filename='private.jpg', extension='.jpg',
+    foreign = photo_ingest.add_photo(db, folder_id=other_folder, filename='private.jpg', extension='.jpg',
                            file_size=1, file_mtime=1)
     db.collections.add('Other album', '[]')
     db.set_active_workspace(original_ws)
@@ -100,14 +101,14 @@ def test_export_has_no_species_limit_and_disambiguates_filenames(tmp_path, monke
     for i in range(201):
         name = f'extra-{i}.jpg'
         Image.new('RGB', (8, 8)).save(meta['photos_dir'] / name)
-        pid = db.add_photo(folder_id=folder, filename=name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=folder, filename=name, extension='.jpg',
                            file_size=1, file_mtime=1)
         db.tag_photo(pid, keyword)
     duplicate_folder = tmp_path / 'duplicates'
     duplicate_folder.mkdir()
     Image.new('RGB', (8, 8)).save(duplicate_folder / 'cardinal.jpg')
     fid = db.add_folder(str(duplicate_folder), name='duplicates')
-    duplicate = db.add_photo(folder_id=fid, filename='cardinal.jpg', extension='.jpg',
+    duplicate = photo_ingest.add_photo(db, folder_id=fid, filename='cardinal.jpg', extension='.jpg',
                              file_size=1, file_mtime=1)
     job = _run_export(app, tmp_path / 'export')
     assert job['status'] == 'completed', job
@@ -420,7 +421,7 @@ def test_site_export_renders_preserved_photo_without_destination_siblings(tmp_pa
     destination.mkdir()
     Image.new('RGB', (16, 16)).save(destination / 'hidden.jpg')
     fid = db.add_folder(str(destination))
-    hidden = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    hidden = photo_ingest.add_photo(db, folder_id=fid, filename='hidden.jpg', extension='.jpg', file_size=1, file_mtime=1)
     result = move_photos(db, [photo], str(destination))
     assert result['moved'] == 1, result
     db.set_active_workspace(b)

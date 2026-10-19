@@ -4,6 +4,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_hummingbird_tree(db):
@@ -91,8 +92,8 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
     )
     db.tag_photo(existing_photo, redundant_id)
 
-    broad_photo = db.add_photo(
-        folder_id=folder_id, filename="broad-only.jpg", extension=".jpg",
+    broad_photo = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="broad-only.jpg", extension=".jpg",
         file_size=1, file_mtime=10.0,
     )
     broad_id = db.add_keyword("Reference gap", kw_type="taxonomy")
@@ -102,8 +103,8 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
     )
     db.tag_photo(broad_photo, broad_id)
 
-    unmatched_photo = db.add_photo(
-        folder_id=folder_id, filename="hybrid.jpg", extension=".jpg",
+    unmatched_photo = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="hybrid.jpg", extension=".jpg",
         file_size=1, file_mtime=11.0,
     )
     unmatched_id = db.add_keyword("Mystery hybrid", kw_type="taxonomy")

@@ -8,7 +8,7 @@ import json
 import os
 
 import pytest
-from services import stage_counts
+from services import photo_ingest, stage_counts
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -66,8 +66,8 @@ def _seed_workspace(db, name="WS1", folder_path="/photos/ws1", n_photos=2):
     fid = db.add_folder(folder_path, name=os.path.basename(folder_path))
     photo_ids = []
     for i in range(n_photos):
-        pid = db.add_photo(
-            folder_id=fid,
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid,
             filename=f"p{i}.jpg",
             extension=".jpg",
             file_size=1000 + i,

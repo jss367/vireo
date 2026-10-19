@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -20,7 +21,7 @@ def preview_photo(live_server, tmp_path):
     Image.new('RGB', (3072, 2048), (100, 140, 160)).save(path)
     db = live_server['db']
     folder_id = db.add_folder(str(folder))
-    return db.add_photo(folder_id=folder_id, filename=path.name, extension='.jpg',
+    return photo_ingest.add_photo(db, folder_id=folder_id, filename=path.name, extension='.jpg',
                         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                         width=3072, height=2048)
 

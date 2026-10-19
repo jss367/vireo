@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
+from services import photo_ingest
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -23,7 +24,7 @@ def _setup_photo_with_xmp(tmp_path, db, keywords=None):
     xmp_path = os.path.join(root, 'bird.xmp')
     write_sidecar(xmp_path, flat_keywords=keywords or set(), hierarchical_keywords=set())
 
-    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=100, file_mtime=os.path.getmtime(img_path),
                        xmp_mtime=os.path.getmtime(xmp_path))
     return pid, xmp_path
@@ -449,7 +450,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder('/nonexistent', name='gone')
-    pid = db.add_photo(folder_id=fid, filename='missing.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.queue_change(pid, 'keyword_add', 'Test')
 
@@ -1261,7 +1262,7 @@ def test_sync_failure_reasons_are_deduplicated(tmp_path, monkeypatch):
     missing_dir = tmp_path / 'gone'
     fid = db.add_folder(str(missing_dir), name='gone')
     for i in range(3):
-        pid = db.add_photo(folder_id=fid, filename=f'missing{i}.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=f'missing{i}.jpg',
                            extension='.jpg', file_size=100, file_mtime=1.0)
         db.queue_change(pid, 'keyword_add', 'Test')
 
@@ -1557,7 +1558,7 @@ def test_sync_keeps_photos_sharing_a_sidecar_on_one_writer(tmp_path):
     db.set_active_workspace(db.ensure_default_workspace())
     jpeg_id, xmp_path = _setup_photo_with_xmp(tmp_path, db)
     folder_id = db.photos.get(jpeg_id)["folder_id"]
-    raw_id = db.add_photo(folder_id=folder_id, filename="bird.nef",
+    raw_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(jpeg_id, "keyword_add", "Osprey")
     db.queue_change(raw_id, "keyword_add", "Kestrel")
@@ -1584,7 +1585,7 @@ def test_sync_resolves_paths_once_per_run_and_folder(tmp_path, monkeypatch):
     folder_id = db.photos.get(pid)["folder_id"]
     db.queue_change(pid, "keyword_add", "Osprey")
     for i in range(4):
-        sibling = db.add_photo(folder_id=folder_id, filename=f"more{i}.jpg",
+        sibling = photo_ingest.add_photo(db, folder_id=folder_id, filename=f"more{i}.jpg",
                                extension=".jpg", file_size=100, file_mtime=1.0)
         db.queue_change(sibling, "keyword_add", "Osprey")
 
@@ -1629,8 +1630,8 @@ def test_sync_serializes_photos_reached_through_folder_alias(tmp_path):
     alias_folder = str(tmp_path / "alias")
     os.symlink(real_folder, alias_folder)
     alias_fid = db.add_folder(alias_folder, name="alias")
-    raw_id = db.add_photo(
-        folder_id=alias_fid, filename="bird.nef", extension=".nef",
+    raw_id = photo_ingest.add_photo(
+        db, folder_id=alias_fid, filename="bird.nef", extension=".nef",
         file_size=100, file_mtime=1.0,
     )
     db.queue_change(jpeg_id, "keyword_add", "Osprey")
@@ -1677,8 +1678,8 @@ def test_sync_serializes_case_variant_sidecars_without_merging_them(tmp_path):
         "UPDATE photos SET filename = ?, extension = ? WHERE id = ?",
         ("Bird.CR3", ".CR3", a_id),
     )
-    b_id = db.add_photo(
-        folder_id=folder_id, filename="BIRD.JPG", extension=".JPG",
+    b_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="BIRD.JPG", extension=".JPG",
         file_size=100, file_mtime=1.0,
     )
     upper_path = os.path.join(folder, "BIRD.xmp")
@@ -1746,8 +1747,8 @@ def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
         "UPDATE photos SET filename = ?, extension = ? WHERE id = ?",
         ("Bird.CR3", ".CR3", a_id),
     )
-    b_id = db.add_photo(
-        folder_id=folder_id, filename="BIRD.JPG", extension=".JPG",
+    b_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="BIRD.JPG", extension=".JPG",
         file_size=100, file_mtime=1.0,
     )
     upper_path = os.path.join(folder, "BIRD.xmp")
@@ -1801,7 +1802,7 @@ def test_sync_serializes_photos_whose_sidecars_are_symlinked_together(tmp_path):
     target_id, target_xmp = _setup_photo_with_xmp(tmp_path, db)
     folder = os.path.dirname(target_xmp)
     folder_id = db.photos.get(target_id)["folder_id"]
-    link_id = db.add_photo(folder_id=folder_id, filename="hawk.jpg",
+    link_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="hawk.jpg",
                            extension=".jpg", file_size=100, file_mtime=1.0)
     os.symlink(target_xmp, os.path.join(folder, "hawk.xmp"))
 
@@ -1883,7 +1884,7 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     upper_fid = db.add_folder(upper_folder, name="PHOTOS")
     # Same basename as the photo in the lower-case row, so the two sidecar
     # paths differ only in the folder's spelling.
-    b_id = db.add_photo(folder_id=upper_fid, filename="bird.nef",
+    b_id = photo_ingest.add_photo(db, folder_id=upper_fid, filename="bird.nef",
                         extension=".nef", file_size=100, file_mtime=1.0)
     xmp_b = os.path.join(upper_folder, "bird.xmp")
     write_sidecar(xmp_b, flat_keywords=set(), hierarchical_keywords=set())
@@ -2550,7 +2551,7 @@ def test_sync_checkpoint_waits_for_shared_sidecar_group(tmp_path, db, monkeypatc
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, _ = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid in (first, second):
         db.queue_change(pid, "keyword_add", str(pid))
@@ -2722,7 +2723,7 @@ def test_shared_sidecar_preserves_interleaved_edits(tmp_path, db, alias, kind):
         link = tmp_path / "alias"
         os.symlink(os.path.dirname(path), link)
         folder_id = db.add_folder(str(link), name="alias")
-    second = db.add_photo(folder_id=folder_id, filename=filename,
+    second = photo_ingest.add_photo(db, folder_id=folder_id, filename=filename,
                           extension=os.path.splitext(filename)[1], file_size=100, file_mtime=1.0)
     if kind == "rating":
         db.queue_change(first, "rating", "1")
@@ -2749,7 +2750,7 @@ def test_shared_sidecar_keeps_latest_intent_per_field(tmp_path, db, monkeypatch)
     monkeypatch.setattr(sync, "_sync_flags_to_xmp_enabled", lambda db: True)
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "1")
     db.queue_change(second, "rating", "2")
@@ -2766,7 +2767,7 @@ def test_shared_sidecar_failure_retains_order_for_retry(tmp_path, db, monkeypatc
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid, rating in [(first, "1"), (second, "2"), (first, "3")]:
         db.queue_change(pid, "rating", rating)
@@ -2792,7 +2793,7 @@ def test_shared_sidecar_keyword_rename_stays_together(tmp_path, db):
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     write_sidecar(path, flat_keywords={"‘Birds"}, hierarchical_keywords={"Animals|Birds|Hawk"})
     # Legacy imported spelling bypasses queue_change's normalization.
@@ -2818,7 +2819,7 @@ def test_shared_sidecar_creating_keyword_keeps_earlier_rating(tmp_path, db):
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
     os.unlink(path)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "3")
     db.queue_change(second, "keyword_add", "Osprey")
@@ -2889,7 +2890,7 @@ def test_shared_sidecar_preparation_failure_retains_newer_edits(tmp_path, db):
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="bird.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "malformed")
     db.queue_change(second, "rating", "2")
@@ -2917,7 +2918,7 @@ def test_sync_case_aliases_preserve_order_and_retry(tmp_path, db, monkeypatch, f
         pytest.skip("needs a case-insensitive filesystem")
     if not existing:
         os.unlink(path)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     for pid, rating in [(first, "1"), (second, "2"), (first, "3")]:
         db.queue_change(pid, "rating", rating)
@@ -2952,7 +2953,7 @@ def test_sync_distinct_missing_aliases_make_independent_progress(
     os.unlink(initial)
     folder_id = db.photos.get(bad)["folder_id"]
     db.conn.execute("UPDATE photos SET filename = 'Bird.nef' WHERE id = ?", (bad,))
-    good = db.add_photo(folder_id=folder_id, filename="BIRD.jpg", extension=".jpg",
+    good = photo_ingest.add_photo(db, folder_id=folder_id, filename="BIRD.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
     folder = os.path.dirname(initial)
     bad_path, good_path = os.path.join(folder, "Bird.xmp"), os.path.join(folder, "BIRD.xmp")
@@ -2993,7 +2994,7 @@ def test_sync_missing_case_alias_preparation_failure_keeps_shared_queue(tmp_path
     if not os.path.exists(alias) or not os.path.samefile(path, alias):
         pytest.skip("needs a case-insensitive filesystem")
     os.unlink(path)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "rating", "malformed")
     db.queue_change(second, "keyword_add", "Osprey")
@@ -3020,7 +3021,7 @@ def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monke
     if not os.path.exists(alias) or not os.path.samefile(path, alias):
         pytest.skip("needs a case-insensitive filesystem")
     os.unlink(path)
-    second = db.add_photo(folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="BIRD.nef",
                           extension=".nef", file_size=100, file_mtime=1.0)
     db.queue_change(first, "keyword_add", "Osprey")
     db.queue_change(second, "keyword_remove", "Osprey")
@@ -3121,7 +3122,7 @@ def test_shared_sidecar_preserves_interleaved_intents(tmp_path, db, kind, values
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
     filename = 'alias.nef' if sidecar_alias else 'bird.nef'
-    second = db.add_photo(folder_id=db.photos.get(first)['folder_id'], filename=filename,
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename=filename,
                           extension='.nef', file_size=100, file_mtime=1)
     if sidecar_alias:
         try:
@@ -3146,7 +3147,7 @@ def test_shared_sidecar_failure_retries_the_whole_sequence(tmp_path, db, monkeyp
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)['folder_id'], filename='bird.nef',
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename='bird.nef',
                           extension='.nef', file_size=100, file_mtime=1)
     for pid, value in ((first, '1'), (second, '2'), (first, '3')):
         db.queue_change(pid, 'rating', value)
@@ -3215,7 +3216,7 @@ def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
                 folder_id = db.add_folder(str(folder_alias), name='Alias folder')
         except OSError:
             pytest.skip('symlink creation unavailable')
-    second = db.add_photo(folder_id=folder_id, filename=filename,
+    second = photo_ingest.add_photo(db, folder_id=folder_id, filename=filename,
                           extension='.nef', file_size=100, file_mtime=1)
     initial = 'keyword_remove' if initially_present else 'keyword_add'
     inverse = 'keyword_add' if initially_present else 'keyword_remove'
@@ -3239,7 +3240,7 @@ def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db
     write_sidecar(other_path, flat_keywords={'Osprey'}, hierarchical_keywords={'People|Osprey'})
     if os.path.samefile(path, other_path):
         pytest.skip('requires case-sensitive filenames')
-    second = db.add_photo(folder_id=db.photos.get(first)['folder_id'], filename='BIRD.nef',
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename='BIRD.nef',
                           extension='.nef', file_size=100, file_mtime=1)
     db.queue_change(first, 'keyword_add', 'Osprey')
     db.queue_change(second, 'keyword_add', 'Osprey')
@@ -3300,7 +3301,7 @@ def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_pa
         path = str(folder / (name + '.xmp'))
         write_sidecar(path, flat_keywords={'Osprey'}, hierarchical_keywords=set())
         paths.append(path)
-        photos.append(db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+        photos.append(photo_ingest.add_photo(db, folder_id=folder_id, filename=name + '.jpg',
                                    extension='.jpg', file_size=100, file_mtime=1))
     # Force the scheduling collision without depending on the host volume's
     # case sensitivity; the two real files and their write outcomes stay distinct.
@@ -3340,7 +3341,7 @@ def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path
     folder = tmp_path / 'photos'
     folder.mkdir()
     folder_id = db.add_folder(str(folder), name='Photos')
-    photos = [db.add_photo(folder_id=folder_id, filename=name + '.jpg',
+    photos = [photo_ingest.add_photo(db, folder_id=folder_id, filename=name + '.jpg',
                            extension='.jpg', file_size=100, file_mtime=1)
               for name in ('bird', 'BIRD')]
     paths = [str(folder / (name + '.xmp')) for name in ('bird', 'BIRD')]
@@ -3398,7 +3399,7 @@ def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
 
     db.set_active_workspace(db.ensure_default_workspace())
     first, path = _setup_photo_with_xmp(tmp_path, db)
-    second = db.add_photo(folder_id=db.photos.get(first)['folder_id'], filename='bird.nef',
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)['folder_id'], filename='bird.nef',
                           extension='.nef', file_size=100, file_mtime=1)
     db.queue_change(first, 'keyword_add', 'Osprey')
     db.queue_change(second, 'keyword_remove', 'osprey')

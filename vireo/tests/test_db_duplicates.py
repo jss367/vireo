@@ -21,6 +21,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.duplicates import DuplicatesRepository
+from services import duplicate_resolution, photo_ingest
 
 
 def _photo(db, folder_id, filename, file_hash=None, *, file_mtime=100.0,
@@ -116,11 +117,14 @@ def folder(db, tmp_path):
 @pytest.mark.parametrize("empty", [None, ""])
 def test_check_and_resolve_ignores_empty_hash(db, monkeypatch, empty):
     calls = []
-    monkeypatch.setattr(db, "apply_duplicate_resolution", calls.append)
+    monkeypatch.setattr(
+        duplicate_resolution, "apply_duplicate_resolution",
+        lambda _db, ids: calls.append(ids),
+    )
     # With no active workspace nothing workspace-scoped may be touched either.
     db.set_active_workspace(None)
     with _SqlRecorder(db) as rec:
-        assert db.check_and_resolve_duplicates_for_hash(empty) is None
+        assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, empty) is None
     assert rec.statements == []
     assert calls == []
 
@@ -130,10 +134,13 @@ def test_check_and_resolve_returns_none_below_two_live_rows(db, folder, monkeypa
     _photo(db, fid, "a.jpg", "H")
     _photo(db, fid, "b.jpg", "H", flag="rejected")
     calls = []
-    monkeypatch.setattr(db, "apply_duplicate_resolution", calls.append)
+    monkeypatch.setattr(
+        duplicate_resolution, "apply_duplicate_resolution",
+        lambda _db, ids: calls.append(ids),
+    )
 
-    assert db.check_and_resolve_duplicates_for_hash("H") is None
-    assert db.check_and_resolve_duplicates_for_hash("unknown") is None
+    assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H") is None
+    assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "unknown") is None
     assert calls == []
 
 
@@ -146,13 +153,13 @@ def test_check_and_resolve_routes_live_ids_through_the_facade(db, folder, monkey
     _photo(db, fid, "other.jpg", "OTHER")
     seen = []
 
-    def _resolve(ids):
+    def _resolve(_db, ids):
         seen.append(ids)
         return {"sentinel": True}
 
-    monkeypatch.setattr(db, "apply_duplicate_resolution", _resolve)
+    monkeypatch.setattr(duplicate_resolution, "apply_duplicate_resolution", _resolve)
 
-    assert db.check_and_resolve_duplicates_for_hash("H") == {"sentinel": True}
+    assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H") == {"sentinel": True}
     assert len(seen) == 1
     assert isinstance(seen[0], list)
     assert sorted(seen[0]) == sorted([a, b, c])
@@ -165,7 +172,7 @@ def test_check_and_resolve_runs_the_real_resolution(db, folder):
     _touch(os.path.join(path, "owl.jpg"))
     _touch(os.path.join(path, "owl (2).jpg"))
 
-    result = db.check_and_resolve_duplicates_for_hash("H")
+    result = duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H")
 
     assert result == {"winner_id": a, "loser_ids": [b], "rejected": 1}
     assert _flags(db, [a, b]) == {a: "none", b: "rejected"}
@@ -183,8 +190,8 @@ def test_check_and_resolve_swallows_a_failing_lookup(db, folder, caplog):
 
     db.conn.set_authorizer(_deny_photos)
     try:
-        with caplog.at_level(logging.WARNING, logger="db"):
-            assert db.check_and_resolve_duplicates_for_hash("H") is None
+        with caplog.at_level(logging.WARNING, logger="services.duplicate_resolution"):
+            assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H") is None
     finally:
         db.conn.set_authorizer(None)
 
@@ -196,12 +203,12 @@ def test_check_and_resolve_swallows_a_failing_resolution(db, folder, monkeypatch
     _photo(db, fid, "a.jpg", "H")
     _photo(db, fid, "b.jpg", "H")
 
-    def _boom(ids):
+    def _boom(_db, ids):
         raise sqlite3.OperationalError("synthetic")
 
-    monkeypatch.setattr(db, "apply_duplicate_resolution", _boom)
-    with caplog.at_level(logging.WARNING, logger="db"):
-        assert db.check_and_resolve_duplicates_for_hash("H") is None
+    monkeypatch.setattr(duplicate_resolution, "apply_duplicate_resolution", _boom)
+    with caplog.at_level(logging.WARNING, logger="services.duplicate_resolution"):
+        assert duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H") is None
     assert "Duplicate auto-resolve failed for hash H: synthetic" in caplog.text
 
 
@@ -210,23 +217,24 @@ def test_check_and_resolve_propagates_non_sqlite_errors(db, folder, monkeypatch)
     _photo(db, fid, "a.jpg", "H")
     _photo(db, fid, "b.jpg", "H")
 
-    def _boom(ids):
+    def _boom(_db, ids):
         raise ValueError("not a sqlite error")
 
-    monkeypatch.setattr(db, "apply_duplicate_resolution", _boom)
+    monkeypatch.setattr(duplicate_resolution, "apply_duplicate_resolution", _boom)
     with pytest.raises(ValueError, match="not a sqlite error"):
-        db.check_and_resolve_duplicates_for_hash("H")
+        duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "H")
 
 
 def test_add_photo_with_hash_runs_the_hook(db, folder, monkeypatch):
     fid, _ = folder
     seen = []
     monkeypatch.setattr(
-        db, "check_and_resolve_duplicates_for_hash", seen.append,
+        duplicate_resolution, "check_and_resolve_duplicates_for_hash",
+        lambda _db, file_hash: seen.append(file_hash),
     )
-    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0, file_hash="HOOK")
-    db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     assert seen == ["HOOK"]
 
@@ -313,7 +321,7 @@ _NOOP = {"winner_id": None, "loser_ids": [], "rejected": 0}
 @pytest.mark.parametrize("ids", [None, [], [1]])
 def test_apply_resolution_short_input_is_a_noop_without_sql(db, ids):
     with _SqlRecorder(db) as rec:
-        assert db.apply_duplicate_resolution(ids) == _NOOP
+        assert duplicate_resolution.apply_duplicate_resolution(db, ids) == _NOOP
     assert rec.statements == []
 
 
@@ -324,7 +332,7 @@ def test_apply_resolution_dedupes_ids_before_counting(db, folder, monkeypatch):
     monkeypatch.setattr(
         db, "_apply_winner_loser_merge", lambda w, l: merges.append((w, l)),
     )
-    assert db.apply_duplicate_resolution([a, a]) == _NOOP
+    assert duplicate_resolution.apply_duplicate_resolution(db, [a, a]) == _NOOP
     assert merges == []
 
 
@@ -336,7 +344,7 @@ def test_apply_resolution_ignores_rejected_and_unknown_ids(db, folder, monkeypat
     monkeypatch.setattr(
         db, "_apply_winner_loser_merge", lambda w, l: merges.append((w, l)),
     )
-    assert db.apply_duplicate_resolution([a, r, 999999]) == _NOOP
+    assert duplicate_resolution.apply_duplicate_resolution(db, [a, r, 999999]) == _NOOP
     assert merges == []
     assert _flags(db, [r]) == {r: "rejected"}
 
@@ -348,7 +356,7 @@ def test_apply_resolution_prefers_the_file_that_exists(db, folder):
     present = _photo(db, fid, "a_longer_name (2).jpg", "H", file_mtime=9.0)
     _touch(os.path.join(path, "a_longer_name (2).jpg"))
 
-    result = db.apply_duplicate_resolution([missing, present])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [missing, present])
 
     assert result == {"winner_id": present, "loser_ids": [missing], "rejected": 1}
     assert _flags(db, [missing, present]) == {missing: "rejected", present: "none"}
@@ -361,7 +369,7 @@ def test_apply_resolution_handles_rows_without_folder_or_mtime(db, folder):
     db.conn.execute("UPDATE photos SET file_mtime = NULL WHERE id IN (?, ?)", (a, b))
     db.conn.commit()
 
-    result = db.apply_duplicate_resolution([a, b])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [a, b])
 
     # Both missing on disk; "a.jpg" (no folder) is the shorter path.
     assert result == {"winner_id": a, "loser_ids": [b], "rejected": 1}
@@ -377,7 +385,7 @@ def test_apply_resolution_routes_the_merge_through_the_facade(db, folder, monkey
         db, "_apply_winner_loser_merge", lambda w, l: merges.append((w, list(l))),
     )
 
-    result = db.apply_duplicate_resolution([c, b, a])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [c, b, a])
 
     assert result["winner_id"] == a
     assert sorted(result["loser_ids"]) == sorted([b, c])
@@ -404,7 +412,7 @@ def test_apply_resolution_chunks_its_candidate_lookup(db, folder, monkeypatch):
     )
 
     with _SqlRecorder(db) as rec:
-        result = db.apply_duplicate_resolution(ids)
+        result = duplicate_resolution.apply_duplicate_resolution(db, ids)
 
     lookups = rec.matching("LEFT JOIN folders f ON f.id = p.folder_id")
     assert len(lookups) == 2  # 800 + 1
@@ -698,8 +706,8 @@ def test_bulk_resolve_reports_every_skip_reason_in_order(db, tmp_path):
     _photo(db, fo, "gone.jpg", "GONE")
     _touch(os.path.join(other, "gone.jpg"))
 
-    result = db.bulk_resolve_by_folder(
-        ["NOPE", "SOLO", "ELSEWHERE", "GONE"], keep,
+    result = duplicate_resolution.bulk_resolve_by_folder(
+        db, ["NOPE", "SOLO", "ELSEWHERE", "GONE"], keep,
     )
 
     assert result == {
@@ -732,7 +740,7 @@ def test_bulk_resolve_keeps_the_folder_copy_and_merges(db, tmp_path):
     _touch(os.path.join(keep, "b.jpg"))
 
     # Trailing separator on the choice still matches.
-    result = db.bulk_resolve_by_folder(["H1", "H2"], keep + os.sep)
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H1", "H2"], keep + os.sep)
 
     assert result == {
         "resolved": [
@@ -759,7 +767,7 @@ def test_bulk_resolve_matches_a_trailing_slash_folder_row(db, tmp_path):
     lo = _photo(db, fo, "a.jpg", "H")
     _touch(os.path.join(keep, "a.jpg"))
 
-    result = db.bulk_resolve_by_folder(["H"], keep)
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H"], keep)
 
     assert result["resolved"] == [{"file_hash": "H", "winner_id": w, "loser_ids": [lo]}]
 
@@ -775,7 +783,7 @@ def test_bulk_resolve_uses_the_resolver_among_same_folder_copies(db, tmp_path):
     _touch(os.path.join(keep, "owl (2).jpg"))
     _touch(os.path.join(keep, "owl.jpg"))
 
-    result = db.bulk_resolve_by_folder(["H"], keep)
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H"], keep)
 
     assert result["resolved"] == [{
         "file_hash": "H",
@@ -793,7 +801,7 @@ def test_bulk_resolve_empty_keep_folder_matches_nothing(db, tmp_path, keep_folde
     _photo(db, None, "a.jpg", "H")
     _photo(db, None, "b.jpg", "H")
 
-    result = db.bulk_resolve_by_folder(["H"], keep_folder)
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H"], keep_folder)
 
     assert result == {
         "resolved": [],
@@ -816,14 +824,14 @@ def test_bulk_resolve_routes_each_merge_through_the_facade(db, tmp_path, monkeyp
         db, "_apply_winner_loser_merge", lambda w, l: merges.append((w, l)),
     )
 
-    result = db.bulk_resolve_by_folder(["H1", "H2"], keep)
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H1", "H2"], keep)
 
     assert merges == [(w1, [l1]), (w2, [l2])]
     assert [r["winner_id"] for r in result["resolved"]] == [w1, w2]
 
 
 def test_bulk_resolve_empty_batch(db):
-    assert db.bulk_resolve_by_folder([], "/anywhere") == {"resolved": [], "skipped": []}
+    assert duplicate_resolution.bulk_resolve_by_folder(db, [], "/anywhere") == {"resolved": [], "skipped": []}
 
 
 # -- duplicates.reopen ----------------------------------------------------------
@@ -872,7 +880,7 @@ def test_resolution_records_which_rows_it_rejected(db, folder):
     a = _photo(db, fid, "owl.jpg", "H")
     b = _photo(db, fid, "owl-2.jpg", "H")
 
-    result = db.apply_duplicate_resolution([a, b])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [a, b])
 
     rows = db.conn.execute("SELECT photo_id FROM duplicate_rejections").fetchall()
     assert [r["photo_id"] for r in rows] == result["loser_ids"]
@@ -1009,16 +1017,16 @@ def test_photo_rows_with_folder_chunks_by_the_callers_cap(db, folder):
 
 # -- structure: the SQL lives in DuplicatesRepository ---------------------------
 #
+# The resolution workflows live in ``services/duplicate_resolution.py``.
 # ``_apply_winner_loser_merge`` keeps its provenance fold (keyword_source_max)
 # and its ``self.tag_photo`` calls on the façade: test_keyword_provenance_contract
 # pins that writer to ("db.py", "_apply_winner_loser_merge"), and patches of
 # ``Database.tag_photo`` must still reach the merge.
 
 
-DUPLICATE_METHODS = [
+DUPLICATE_WORKFLOWS = [
     "check_and_resolve_duplicates_for_hash",
     "apply_duplicate_resolution",
-    "_apply_winner_loser_merge",
     "keep_duplicate_copy",
     "bulk_resolve_by_folder",
 ]
@@ -1036,35 +1044,48 @@ _REMOVED_DUPLICATE_WRAPPERS = (
 )
 
 
-@pytest.mark.parametrize("name", DUPLICATE_METHODS)
-def test_duplicate_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
+def _attrs_on(fn_obj, receiver):
+    source = textwrap.dedent(inspect.getsource(fn_obj))
     fn = ast.parse(source).body[0]
-    attrs = {
+    return {
         node.attr
         for node in ast.walk(fn)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+        and node.value.id == receiver
     }
+
+
+@pytest.mark.parametrize("name", DUPLICATE_WORKFLOWS)
+def test_duplicate_workflow_delegates_to_repository(name):
+    attrs = _attrs_on(getattr(duplicate_resolution, name), "db")
     assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to DuplicatesRepository"
+        f"duplicate_resolution.{name} touches db.conn; move the SQL to DuplicatesRepository"
     )
-    assert "_duplicates_repository" in attrs, (
-        f"Database.{name} no longer delegates to DuplicatesRepository"
+    assert "duplicates" in attrs, (
+        f"duplicate_resolution.{name} no longer delegates to DuplicatesRepository"
     )
+    assert not hasattr(Database, name), f"Database.{name} came back"
 
 
-def test_facade_signatures_are_unchanged():
-    expected = {
-        "check_and_resolve_duplicates_for_hash": "(self, file_hash: str) -> dict | None",
-        "apply_duplicate_resolution": "(self, photo_ids)",
-        "_apply_winner_loser_merge": "(self, winner_id, loser_ids, winner_flag=None)",
-        "keep_duplicate_copy": "(self, photo_id)",
-        "bulk_resolve_by_folder": "(self, file_hashes, keep_folder)",
-    }
-    for name, sig in expected.items():
-        assert str(inspect.signature(getattr(Database, name))) == sig, name
+def test_winner_loser_merge_stays_on_the_facade():
+    attrs = _attrs_on(Database._apply_winner_loser_merge, "self")
+    assert "conn" not in attrs
+    assert {"_duplicates_repository", "tag_photo"} <= attrs
+
+
+def test_workflow_signatures_are_unchanged():
+    """The moved workflows take ``db`` where the methods took ``self``."""
+    def params(fn):
+        return [p.name for p in inspect.signature(fn).parameters.values()]
+
+    assert params(duplicate_resolution.check_and_resolve_duplicates_for_hash) == ["db", "file_hash"]
+    assert params(duplicate_resolution.apply_duplicate_resolution) == ["db", "photo_ids"]
+    assert params(duplicate_resolution.keep_duplicate_copy) == ["db", "photo_id"]
+    assert params(duplicate_resolution.bulk_resolve_by_folder) == ["db", "file_hashes", "keep_folder"]
+    assert str(inspect.signature(Database._apply_winner_loser_merge)) == (
+        "(self, winner_id, loser_ids, winner_flag=None)"
+    )
 
 
 def test_migrated_repository_signatures_match_the_old_wrappers():

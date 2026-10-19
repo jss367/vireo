@@ -16,6 +16,7 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 
 
@@ -48,8 +49,8 @@ def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path))
-    raw_id = db.add_photo(folder_id, "PAIR.cr3", ".cr3", 256, None)
-    jpeg_id = db.add_photo(folder_id, "PAIR.jpg", ".jpg", 256, None)
+    raw_id = photo_ingest.add_photo(db, folder_id, "PAIR.cr3", ".cr3", 256, None)
+    jpeg_id = photo_ingest.add_photo(db, folder_id, "PAIR.jpg", ".jpg", 256, None)
     jpeg_path = str(tmp_path / "PAIR.jpg")
     imported = _InPlaceImportRun.__new__(_InPlaceImportRun)
     imported.photo_ids, imported.seen_photo_ids, imported.indexed_paths = [], set(), set()
@@ -98,7 +99,7 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     writer = Database(str(tmp_path / "test.db"))
     first_id, unrelated_id = db.add_folder(str(first)), db.add_folder(str(unrelated))
-    old_id = db.add_photo(first_id, original.name, ".jpg", original.stat().st_size, original.stat().st_mtime)
+    old_id = photo_ingest.add_photo(db, first_id, original.name, ".jpg", original.stat().st_size, original.stat().st_mtime)
     collected = []
     run = SimpleNamespace(
         stages={"scan": {"count": 0}}, job={"id": "multi-root"},
@@ -129,8 +130,8 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
         )
         assert collected == [old_id]
         writer.delete_photos([old_id])
-        assert writer.add_photo(unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
-        raw_id = writer.add_photo(unrelated_id, "OTHER.cr3", ".cr3", 256, None)
+        assert photo_ingest.add_photo(writer, unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
+        raw_id = photo_ingest.add_photo(writer, unrelated_id, "OTHER.cr3", ".cr3", 256, None)
         stage._scan(
             str(second),
             options=ScanOptions(discovered_files=[other], skip_working_copies=True),
@@ -160,14 +161,14 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
     db = Database(db_path)
     writer = Database(db_path)
     folder_id = db.add_folder(str(tmp_path))
-    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
-    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    raw_id = photo_ingest.add_photo(db, folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG_001.jpg", ".jpg", 256, None)
     merged = scanner.companions._pair_raw_jpeg_companions(db)
     assert merged == {jpeg_id: raw_id}
     writer.delete_photos([raw_id])
     if reuse_id:
-        assert writer.add_photo(
-            folder_id, "unrelated.jpg", ".jpg", 256, None,
+        assert photo_ingest.add_photo(
+            writer, folder_id, "unrelated.jpg", ".jpg", 256, None,
         ) == raw_id
     pipeline = SimpleNamespace(
         _collected_ids={jpeg_id}, _reported_photo_ids={jpeg_id},
@@ -223,17 +224,17 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
     # Seed the unrelated RAW first so the original JPEG claims the
     # table's current max id; deleting it then frees the max rowid,
     # which SQLite (no AUTOINCREMENT) hands to the very next insert.
-    unrelated_raw_id = writer.add_photo(
-        folder_id, "OTHER.cr3", ".cr3", 256, None,
+    unrelated_raw_id = photo_ingest.add_photo(
+        writer, folder_id, "OTHER.cr3", ".cr3", 256, None,
     )
     original_jpeg_folder = folder_id
     original_jpeg_filename = "ORIG.jpg"
-    original_jpeg_id = db.add_photo(
-        original_jpeg_folder, original_jpeg_filename, ".jpg", 256, None,
+    original_jpeg_id = photo_ingest.add_photo(
+        db, original_jpeg_folder, original_jpeg_filename, ".jpg", 256, None,
     )
     writer.delete_photos([original_jpeg_id])
-    reused_jpeg_id = writer.add_photo(
-        folder_id, "OTHER.jpg", ".jpg", 256, None,
+    reused_jpeg_id = photo_ingest.add_photo(
+        writer, folder_id, "OTHER.jpg", ".jpg", 256, None,
     )
     assert reused_jpeg_id == original_jpeg_id
     merged = scanner.companions._pair_raw_jpeg_companions(db)
@@ -297,8 +298,8 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     writer = Database(db_path)
     writer.conn.execute("PRAGMA busy_timeout=0")
     folder_id = db.add_folder(str(tmp_path))
-    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
-    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    raw_id = photo_ingest.add_photo(db, folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG_001.jpg", ".jpg", 256, None)
     merged = scanner.companions._pair_raw_jpeg_companions(db)
     published = []
 
@@ -621,7 +622,7 @@ def test_new_photo_preserves_collection_created_after_insert(
     db = Database(db_path)
     writer = Database(db_path)
     writer.conn.execute("PRAGMA busy_timeout=0")
-    real_add = db.add_photo
+    real_add = photo_ingest.add_photo
     state = {}
 
     def add_membership(photo_id):
@@ -642,7 +643,7 @@ def test_new_photo_preserves_collection_created_after_insert(
             writer.conn.rollback()
         return result
 
-    monkeypatch.setattr(db, "add_photo", insert_then_user_selection)
+    monkeypatch.setattr(photo_ingest, "add_photo", insert_then_user_selection)
     try:
         scan(str(card), db)
         if "collection_id" not in state:
@@ -903,7 +904,7 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
     folder.mkdir()
     Image.new("RGB", (32, 32), "red").save(str(folder / "heron.jpg"))
 
-    real_add_photo = Database.add_photo
+    real_add_photo = photo_ingest.add_photo
     raced_photo_ids = []
 
     def racing_add_photo(self, *args, **kwargs):
@@ -929,7 +930,7 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
             )
         return real_add_photo(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "add_photo", racing_add_photo)
+    monkeypatch.setattr(photo_ingest, "add_photo", racing_add_photo)
     scanner_mod.scan(str(folder), db)
 
     assert raced_photo_ids, "racing_add_photo never fired"
@@ -1177,8 +1178,8 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
                 writer.conn.rollback()
                 blocked.append(True)
             else:
-                replacement = writer.add_photo(
-                    other_folder, "OTHER.jpg", ".jpg", 0, None,
+                replacement = photo_ingest.add_photo(
+                    writer, other_folder, "OTHER.jpg", ".jpg", 0, None,
                 )
                 assert replacement == raw_id
             row = db.photos.get(photo_id)
@@ -1199,8 +1200,8 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
         assert blocked == [True]
         # The publication guard must release when the scan finishes.
         writer.delete_photos([raw_id])
-        assert writer.add_photo(
-            other_folder, "OTHER.jpg", ".jpg", 0, None,
+        assert photo_ingest.add_photo(
+            writer, other_folder, "OTHER.jpg", ".jpg", 0, None,
         ) == raw_id
     finally:
         writer.close()
@@ -1292,7 +1293,7 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
         if wait_kind == "owner_replaced":
             consumer.delete_photos([raw_id])
             folder_id = consumer.add_folder(str(tmp_path / "other"))
-            assert consumer.add_photo(folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
+            assert photo_ingest.add_photo(consumer, folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
     finally:
         resume.set()
         if wait_kind != "pause":
@@ -1335,7 +1336,7 @@ def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
 
 
 def test_database_add_photo_returning_inserted(tmp_path):
-    """``Database.add_photo(return_inserted=True)`` surfaces the signal and
+    """``photo_ingest.add_photo(return_inserted=True)`` surfaces the signal and
     the plain ``add_photo`` still returns just the id.
     """
     from db import Database
@@ -1343,22 +1344,22 @@ def test_database_add_photo_returning_inserted(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "shoot"))
 
-    first = db.add_photo(
-        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+    first = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="owl.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     assert isinstance(first, int)
 
-    second_id, second_inserted = db.add_photo(
-        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+    second_id, second_inserted = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="owl.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
         return_inserted=True,
     )
     assert second_id == first
     assert second_inserted is False
 
-    third_id, third_inserted = db.add_photo(
-        folder_id=folder_id, filename="falcon.jpg", extension=".jpg",
+    third_id, third_inserted = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="falcon.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
         return_inserted=True,
     )

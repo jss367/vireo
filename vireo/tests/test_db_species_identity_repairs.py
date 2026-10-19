@@ -18,12 +18,13 @@ from pathlib import Path
 import pytest
 from db import Database
 from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
+from services import photo_ingest
 
 
 @pytest.fixture
 def det(db, tmp_path):
     folder = db.add_folder(str(tmp_path), name="Photos")
-    pid = db.add_photo(folder, "photo.jpg", ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
+    pid = photo_ingest.add_photo(db, folder, "photo.jpg", ".jpg", 1000, 1.0, timestamp="2026-09-01T10:00:00")
     return db.detections.save(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5},
                                      "confidence": .99}], detector_model="megadetector-v6")[0]
 

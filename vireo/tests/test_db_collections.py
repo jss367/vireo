@@ -22,6 +22,7 @@ from db import (
     NEEDS_IDENTIFICATION_RULES,
     Database,
 )
+from services import photo_ingest
 
 
 @pytest.fixture(autouse=True)
@@ -44,8 +45,8 @@ def folder(db, tmp_path):
 
 
 def _photo(db, folder_id, filename, **cols):
-    pid = db.add_photo(
-        folder_id=folder_id, filename=filename, extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     if cols:

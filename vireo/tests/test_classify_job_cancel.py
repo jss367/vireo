@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from resource_ledger import ResourceWaitCancelled
-from services import detection_store
+from services import detection_store, photo_ingest
 
 BOX = {"x": 0, "y": 0, "w": 1, "h": 1}
 
@@ -56,8 +56,8 @@ def db(tmp_path, monkeypatch):
 def _add_photos(db, n):
     photos = []
     for i in range(n):
-        pid = db.add_photo(
-            db.folder_id, f"p{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, db.folder_id, f"p{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=float(i),
         )
         photos.append(

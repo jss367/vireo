@@ -18,6 +18,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import local_masks
+from services import photo_ingest
 
 
 def _write_mask(path, width=80, height=60, box=(20, 10, 40, 40)):
@@ -325,8 +326,8 @@ def test_gc_respects_references_history_and_grace(tmp_path, monkeypatch):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, width=800, height=600,
     )
 
@@ -385,8 +386,8 @@ def test_gc_rechecks_mtime_before_deleting(tmp_path, monkeypatch):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, width=800, height=600,
     )
 

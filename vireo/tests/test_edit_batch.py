@@ -3,6 +3,7 @@
 import pytest
 from edit_batch import compose_recipe, decode_preset, encode_preset
 from image_edits import RecipeError
+from services import photo_ingest
 
 
 def test_selective_white_balance_preserves_exposure_crop_and_other_white_balance():
@@ -157,14 +158,14 @@ def test_denoise_method_survives_selective_presets_and_can_reset():
 def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder('/large-selection')
-    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+    ids = [photo_ingest.add_photo(db, folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
                         file_size=1, file_mtime=1) for i in range(1601)]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
     original_ws = db._active_workspace_id
     other_ws = db.create_workspace('Other photos')
     db.set_active_workspace(other_ws)
     hidden_folder = db.add_folder('/hidden-selection')
-    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+    hidden_id = photo_ingest.add_photo(db, folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
                              file_size=1, file_mtime=1)
     db.set_photo_edit_recipe(hidden_id, {"adjustments": {"contrast": 90}})
     db.set_active_workspace(original_ws)
@@ -257,13 +258,13 @@ def test_geometry_crop_transform_accounts_for_straightening_and_aspect():
 def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
     app, db = app_and_db
     folder_id = db.add_folder('/large-edit-selection')
-    ids = [db.add_photo(folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
+    ids = [photo_ingest.add_photo(db, folder_id=folder_id, filename=f'{i}.jpg', extension='.jpg',
                         file_size=1, file_mtime=1) for i in range(1601)]
     db.set_photo_edit_recipe(ids[0], {"adjustments": {"exposure": 1}})
     original_ws = db._active_workspace_id
     db.set_active_workspace(db.create_workspace('Hidden edits'))
     hidden_folder = db.add_folder('/hidden-edit-selection')
-    hidden_id = db.add_photo(folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
+    hidden_id = photo_ingest.add_photo(db, folder_id=hidden_folder, filename='hidden.jpg', extension='.jpg',
                              file_size=1, file_mtime=1)
     db.set_active_workspace(original_ws)
     from db import Database

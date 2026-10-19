@@ -9,6 +9,7 @@ import pytest
 from db import Database
 from PIL import Image
 from scanner import ScanOptions
+from services import photo_ingest
 
 
 def _touch_image(path):
@@ -447,8 +448,8 @@ def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
 
     # Ingest only day1's IMG_0001.JPG.
     day1_id = db.add_folder(str(root / "day1"), name="day1", parent_id=root_id)
-    db.add_photo(
-        folder_id=day1_id, filename="IMG_0001.JPG", extension=".JPG",
+    photo_ingest.add_photo(
+        db, folder_id=day1_id, filename="IMG_0001.JPG", extension=".JPG",
         file_size=1, file_mtime=0.0,
     )
 
@@ -471,8 +472,8 @@ def test_count_new_images_reports_jpg_until_it_is_attached_to_existing_raw(
     # NEF is already in the database; the .jpg sidecar is on disk only.
     _touch_image(str(root / "_D851928.jpg"))
     root_id = db.add_folder(str(root), name="shoot")
-    photo_id = db.add_photo(
-        folder_id=root_id, filename="_D851928.NEF", extension=".nef",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=root_id, filename="_D851928.NEF", extension=".nef",
         file_size=1, file_mtime=0.0,
     )
 
@@ -500,8 +501,8 @@ def test_count_new_images_reports_jpg_companion_for_all_raw_extensions(db_with_w
     for i, ext in enumerate(raw_exts):
         stem = f"IMG_{i:04d}"
         _touch_image(str(root / f"{stem}.jpg"))
-        db.add_photo(
-            folder_id=root_id, filename=f"{stem}{ext.upper()}", extension=ext,
+        photo_ingest.add_photo(
+            db, folder_id=root_id, filename=f"{stem}{ext.upper()}", extension=ext,
             file_size=1, file_mtime=0.0,
         )
 
@@ -517,8 +518,8 @@ def test_count_new_images_reports_long_jpeg_extension_companion(db_with_workspac
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.jpeg"))
     root_id = db.add_folder(str(root), name="shoot")
-    db.add_photo(
-        folder_id=root_id, filename="IMG_0001.CR3", extension=".cr3",
+    photo_ingest.add_photo(
+        db, folder_id=root_id, filename="IMG_0001.CR3", extension=".cr3",
         file_size=1, file_mtime=0.0,
     )
 
@@ -553,8 +554,8 @@ def test_count_new_images_counts_raw_alongside_existing_jpg(db_with_workspace):
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.NEF"))
     root_id = db.add_folder(str(root), name="shoot")
-    db.add_photo(
-        folder_id=root_id, filename="IMG_0001.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=root_id, filename="IMG_0001.jpg", extension=".jpg",
         file_size=1, file_mtime=0.0,
     )
 
@@ -579,8 +580,8 @@ def test_count_new_images_jpg_companion_in_different_folder_is_new(db_with_works
     root_id = db.add_folder(str(root), name="shoot")
     day1_id = db.add_folder(str(day1), name="day1", parent_id=root_id)
     db.add_folder(str(day2), name="day2", parent_id=root_id)
-    db.add_photo(
-        folder_id=day1_id, filename="IMG_0001.NEF", extension=".nef",
+    photo_ingest.add_photo(
+        db, folder_id=day1_id, filename="IMG_0001.NEF", extension=".nef",
         file_size=1, file_mtime=0.0,
     )
 
@@ -653,7 +654,7 @@ def test_scan_job_invalidates_cache(db_with_workspace):
     assert r1["new_count"] == 1
 
     # Simulate a scan by inserting the photo row and invalidating.
-    db.add_photo(folder_id=root_id, filename="a.JPG", extension=".JPG",
+    photo_ingest.add_photo(db, folder_id=root_id, filename="a.JPG", extension=".JPG",
                  file_size=1, file_mtime=0.0)
     db.invalidate_new_images_cache_for_folders([root_id])
 
@@ -1257,12 +1258,12 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
     root_id = db.add_folder(str(root), name="shoot")
 
     # Ingest both so they're not "new".
-    a_id = db.add_photo(
-        folder_id=root_id, filename="a.JPG", extension=".JPG",
+    a_id = photo_ingest.add_photo(
+        db, folder_id=root_id, filename="a.JPG", extension=".JPG",
         file_size=1, file_mtime=0.0,
     )
-    db.add_photo(
-        folder_id=root_id, filename="b.JPG", extension=".JPG",
+    photo_ingest.add_photo(
+        db, folder_id=root_id, filename="b.JPG", extension=".JPG",
         file_size=1, file_mtime=0.0,
     )
 

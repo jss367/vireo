@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 
 from PIL import Image
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_phase, wait_for_job_via_client, wait_for_job_via_runner
 
@@ -39,8 +40,8 @@ def _collection_with_photo_count(db, count):
     while len(photo_ids) < count:
         idx = len(photo_ids)
         photo_ids.append(
-            db.add_photo(
-                folder_id=fid,
+            photo_ingest.add_photo(
+                db, folder_id=fid,
                 filename=f"runtime-warning-{idx}.jpg",
                 extension=".jpg",
                 file_size=1000 + idx,

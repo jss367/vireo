@@ -25,6 +25,7 @@ from repositories.edit_history import EditHistoryRepository
 from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
 from repositories.species_curation import SpeciesCurationRepository
+from services import photo_ingest
 
 
 @contextlib.contextmanager
@@ -42,7 +43,7 @@ def _reader(db):
 def pids(db):
     fid = db.add_folder("/photos", name="photos")
     return [
-        db.add_photo(fid, f"IMG_{i}.jpg", ".jpg", 100, 1700000000.0 + i)
+        photo_ingest.add_photo(db, fid, f"IMG_{i}.jpg", ".jpg", 100, 1700000000.0 + i)
         for i in range(3)
     ]
 

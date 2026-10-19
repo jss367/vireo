@@ -24,6 +24,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from services import photo_ingest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 2
 VIEWS = {'quick': 1024, 'fit': 2048, 'native': None}
@@ -140,7 +142,7 @@ def corpus_entries(manifest):
         names.add(name)
         path = (manifest.parent / Path(entry['path']).expanduser()).resolve()
         # Distinct names resolving to one RAW collapse to a single row in
-        # Database.add_photo (filename is unique per folder), so navigation
+        # photo_ingest.add_photo (filename is unique per folder), so navigation
         # and multi-tab scenarios would silently reuse one photo id.
         if str(path) in paths:
             raise ValueError(f'Corpus entry {name!r} resolves to {path}, already used by another entry')
@@ -177,8 +179,8 @@ def run_worker(spec):
         with Database(db_path) as db:
             db.set_active_workspace(db.ensure_default_workspace())
             folder = db.add_folder(str(path.parent))
-            photo = db.add_photo(
-                folder_id=folder, filename=path.name, extension=path.suffix.lower(),
+            photo = photo_ingest.add_photo(
+                db, folder_id=folder, filename=path.name, extension=path.suffix.lower(),
                 file_size=stat.st_size, file_mtime=stat.st_mtime,
                 width=spec['source_dimensions'][0], height=spec['source_dimensions'][1],
             )

@@ -7,6 +7,7 @@ import time
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.viewport_test_support import install_viewport_test_helpers
 
@@ -200,16 +201,16 @@ def test_browse_lightbox_single_photo_window_waits_for_previous_page(
     folder_id = live_server["data"]["folders"][0]
     existing = len(db.photos.list_page(folder_id=folder_id))
     for idx in range(50 - existing):
-        db.add_photo(
-            folder_id=folder_id,
+        photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"newer-{idx:02d}.jpg",
             extension=".jpg",
             file_size=1000,
             file_mtime=100 + idx,
             timestamp=f"2025-01-{(idx % 28) + 1:02d}T12:00:00",
         )
-    target_id = db.add_photo(
-        folder_id=folder_id,
+    target_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="newest-target.jpg",
         extension=".jpg",
         file_size=1000,
@@ -644,8 +645,8 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
         Image.new("RGB", (1200, 800), (30 * index, 80, 120)).save(
             folder_path / filename
         )
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=filename,
             extension=".png",
             file_size=(folder_path / filename).stat().st_size,
@@ -812,8 +813,8 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     folder_path = tmp_path / "paired"
     folder_path.mkdir()
     folder_id = db.add_folder(str(folder_path), name="paired")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="developed.nef",
         extension=".nef",
         file_size=1000,
@@ -968,8 +969,8 @@ def test_non_raw_jpeg_companions_do_not_enable_pair_controls(
     folder_path = tmp_path / "non-pair"
     folder_path.mkdir()
     folder_id = db.add_folder(str(folder_path), name="non-pair")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="developed.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1597,8 +1598,8 @@ def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, p
     target_id = live_server["data"]["photos"][3]  # first photo in folder_b
 
     for idx in range(60):
-        db.add_photo(
-            folder_id=folder_a,
+        photo_ingest.add_photo(
+            db, folder_id=folder_a,
             filename=f"older-{idx:02d}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -1630,8 +1631,8 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
     page.on("request", capture_target_query)
 
     for idx in range(560):
-        db.add_photo(
-            folder_id=folder_b,
+        photo_ingest.add_photo(
+            db, folder_id=folder_b,
             filename=f"yard-before-{idx:02d}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -1870,8 +1871,8 @@ def test_browse_photo_id_deep_link_discards_loads_started_before_folder_switch(
     folder_b_ids = {live_server["data"]["photos"][3], target_id}
     for idx in range(560):
         folder_b_ids.add(
-            db.add_photo(
-                folder_id=folder_b,
+            photo_ingest.add_photo(
+                db, folder_id=folder_b,
                 filename=f"yard-before-{idx:02d}.jpg",
                 extension=".jpg",
                 file_size=1000,
@@ -1883,8 +1884,8 @@ def test_browse_photo_id_deep_link_discards_loads_started_before_folder_switch(
     # name_desc, so the workspace-scoped page 1 we hold is made entirely of
     # foreign rows: a leak is unmistakable in the grid.
     for idx in range(60):
-        db.add_photo(
-            folder_id=folder_a,
+        photo_ingest.add_photo(
+            db, folder_id=folder_a,
             filename=f"zz-park-extra-{idx:02d}.jpg",
             extension=".jpg",
             file_size=1000,

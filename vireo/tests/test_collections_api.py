@@ -1,5 +1,7 @@
 import json
 
+from services import photo_ingest
+
 
 def _clear_default_collections(app, db):
     """Remove default collections so tests start from a clean slate."""
@@ -72,9 +74,9 @@ def test_collection_list_keeps_offline_members_in_total(app_and_db):
 
     ok_folder = db.add_folder("/available", name="available")
     offline_folder = db.add_folder("/offline", name="offline")
-    db.add_photo(folder_id=ok_folder, filename="online.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=ok_folder, filename="online.jpg", extension=".jpg",
                  file_size=100, file_mtime=1.0)
-    db.add_photo(folder_id=offline_folder, filename="offline.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=offline_folder, filename="offline.jpg", extension=".jpg",
                  file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?",

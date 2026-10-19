@@ -23,6 +23,7 @@ from db import Database
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -47,8 +48,8 @@ def _folder(db, path, parent_id=None, *, root=False, link=True):
 
 
 def _photo(db, folder_id, filename, **kw):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename,
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension="." + filename.rsplit(".", 1)[-1],
         file_size=kw.pop("file_size", 10), file_mtime=kw.pop("file_mtime", 1.0),
         **kw,

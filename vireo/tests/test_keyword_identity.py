@@ -12,7 +12,7 @@ from keyword_identity import (
     reconcile_location,
     resolve_import_path,
 )
-from services import dashboard_stats
+from services import dashboard_stats, photo_ingest
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def catalog(tmp_path):
     db.set_active_workspace(ws)
     folder = db.add_folder(str(tmp_path / 'photos'), name='Photos')
     db.add_workspace_folder(ws, folder)
-    photos = [db.add_photo(folder_id=folder, filename=f'{i}.jpg', extension='.jpg',
+    photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg', extension='.jpg',
                            file_size=10, file_mtime=1,
                            timestamp=f'2024-0{6 if i < 2 else 7}-15T10:00:00')
               for i in range(3)]
@@ -112,7 +112,7 @@ def test_dashboard_does_not_borrow_species_labels_from_other_workspaces(catalog)
     db.set_active_workspace(other)
     folder = db.add_folder('/other-vocabulary', name='Other')
     db.add_workspace_folder(other, folder)
-    photo = db.add_photo(folder_id=folder, filename='other.jpg', extension='.jpg', file_size=10, file_mtime=1)
+    photo = photo_ingest.add_photo(db, folder_id=folder, filename='other.jpg', extension='.jpg', file_size=10, file_mtime=1)
     db.tag_photo(photo, root)
     db.set_active_workspace(workspace)
     entry, = dashboard_stats.get_dashboard_stats(db)['top_keywords']
@@ -1794,7 +1794,7 @@ def test_manual_merge_count_includes_retained_children_and_other_workspaces(cata
     db.set_active_workspace(other)
     folder = db.add_folder('/other-merge-photos', name='Other photos')
     db.add_workspace_folder(other, folder)
-    photo = db.add_photo(folder_id=folder, filename='elsewhere.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    photo = photo_ingest.add_photo(db, folder_id=folder, filename='elsewhere.jpg', extension='.jpg', file_size=1, file_mtime=1)
     db.tag_photo(photo, source)
     db.set_active_workspace(ws)
     preview = preview_keyword_merge(db, [source, target], target)
@@ -1932,7 +1932,7 @@ def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog,
     monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
     folder = db.add_folder('D:\\Pictures\\Trip', name='Trip')
     db.add_workspace_folder(db._ws_id(), folder)
-    photo = db.add_photo(folder_id=folder, filename='DSC_1.jpg', extension='.jpg',
+    photo = photo_ingest.add_photo(db, folder_id=folder, filename='DSC_1.jpg', extension='.jpg',
                          file_size=10, file_mtime=1, timestamp='2024-06-15T10:00:00')
     monkeypatch.setattr('importer.read_catalog', lambda *args, **kwargs: {
         'd:/Pictures/Trip/DSC_1.jpg': {
@@ -2042,7 +2042,7 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     Image.new('RGB', (2, 2)).save(directory / 'photo.jpg')
     folder = db.add_folder(str(directory), name='Merge photo')
     db.add_workspace_folder(db._ws_id(), folder)
-    photo = db.add_photo(folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    photo = photo_ingest.add_photo(db, folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
     old_parent = db.add_keyword('Old parent')
     new_parent = db.add_keyword('New parent')
     source = db.add_keyword('Old leaf', parent_id=old_parent)
@@ -2096,7 +2096,7 @@ def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, t
     directory.mkdir()
     folder = db.add_folder(str(directory), name='Homonym photo')
     db.add_workspace_folder(db._ws_id(), folder)
-    photo = db.add_photo(folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    photo = photo_ingest.add_photo(db, folder_id=folder, filename='photo.jpg', extension='.jpg', file_size=1, file_mtime=1)
     people = db.add_keyword('People', kw_type='individual')
     individual = db.add_keyword('Robin', parent_id=people, kw_type='individual')
     source = db.add_keyword('Old Robin', kw_type='taxonomy')

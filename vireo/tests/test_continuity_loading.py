@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
-from services import detection_store
+from services import detection_store, photo_ingest
 
 
 @pytest.fixture
@@ -17,8 +17,8 @@ def sequence_db(tmp_path, monkeypatch):
     ids = []
     for i in range(3):
         ids.append(
-            db.add_photo(
-                folder,
+            photo_ingest.add_photo(
+                db, folder,
                 f"{i}.jpg",
                 ".jpg",
                 100,

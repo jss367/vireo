@@ -20,6 +20,7 @@ import textwrap
 
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, KEYWORD_SOURCE_MANUAL, Database
+from services import photo_ingest
 
 # -- helpers ------------------------------------------------------------------
 
@@ -32,8 +33,8 @@ def _reader(db):
 
 
 def _photo(db, fid, name, lat=None, lng=None, timestamp=None):
-    pid = db.add_photo(
-        folder_id=fid, filename=name, extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=".jpg",
         file_size=10, file_mtime=1.0, timestamp=timestamp,
     )
     if lat is not None or lng is not None:

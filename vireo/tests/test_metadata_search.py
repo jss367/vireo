@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
+from services import photo_ingest
 
 
 def parse_queries(queries, options=None):
@@ -36,7 +37,7 @@ def catalog(tmp_path, monkeypatch):
     folder = db.add_folder("/photos/Wetlands", name="Lake visit")
     ids = {}
     for name in ("hawk", "owl", "robin", "empty"):
-        ids[name] = db.add_photo(folder_id=folder, filename=f"{name}.jpg", extension=".jpg",
+        ids[name] = photo_ingest.add_photo(db, folder_id=folder, filename=f"{name}.jpg", extension=".jpg",
                                  file_size=100, file_mtime=1.0)
     db.conn.execute(
         "UPDATE photos SET camera_make='Canon', camera_model='EOS R5', lens='600mm', "
@@ -139,11 +140,11 @@ def test_number_search_matches_where_a_number_starts(catalog):
     its digits: hashes, scores, byte counts, coefficients, shutter counts."""
     db, ids = catalog
     folder = db.add_folder("/photos/20240712", name="20240712")
-    filename = db.add_photo(folder_id=folder, filename="_D857688.NEF", extension=".nef",
+    filename = photo_ingest.add_photo(db, folder_id=folder, filename="_D857688.NEF", extension=".nef",
                             file_size=1, file_mtime=1.0)
-    file_number = db.add_photo(folder_id=folder, filename="a.nef", extension=".nef",
+    file_number = photo_ingest.add_photo(db, folder_id=folder, filename="a.nef", extension=".nef",
                                file_size=1, file_mtime=1.0)
-    noise = db.add_photo(folder_id=folder, filename="b.nef", extension=".nef",
+    noise = photo_ingest.add_photo(db, folder_id=folder, filename="b.nef", extension=".nef",
                          file_size=31837688, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({
         "MakerNotes": {"FileNumber": "100-7688"},

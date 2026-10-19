@@ -84,6 +84,7 @@ from hypothesis.stateful import (  # noqa: E402
 )
 from PIL import ExifTags, Image  # noqa: E402
 from scanner import ScanHooks, ScanOptions  # noqa: E402
+from services import photo_ingest
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg")
 # RAW+JPEG shooting puts IMG.cr3 beside IMG.jpg; a scan pairs them into one
@@ -979,8 +980,8 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
         db.set_active_workspace(mine)
         folder_id = db.add_folder(str(shared), name="shared")
         db.add_workspace_folder(theirs, folder_id)
-        photo_id = db.add_photo(
-            folder_id=folder_id, filename="DSC_0001.jpg", extension=".jpg",
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename="DSC_0001.jpg", extension=".jpg",
             file_size=os.path.getsize(shared / "DSC_0001.jpg"), file_mtime=1.0,
         )
 

@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from db import Database
 from scanner import ScanOptions
+from services import photo_ingest
 
 
 def _tmp_folds_case():
@@ -55,9 +56,9 @@ def move_env(tmp_path):
     (src / "bird1.xmp").write_text("<xmp/>")
     (src / "bird2.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 200)
 
-    p1 = db.add_photo(folder_id=fid_src, filename="bird1.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid_src, filename="bird1.jpg", extension=".jpg",
                        file_size=102, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid_src, filename="bird2.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid_src, filename="bird2.jpg", extension=".jpg",
                        file_size=202, file_mtime=2.0)
 
     return {
@@ -101,7 +102,7 @@ def test_move_photos_leaves_photos_already_in_destination_alone(move_env):
     db = env["db"]
     (env["dst"] / "owl.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     (env["dst"] / "owl.xmp").write_text("<xmp/>")
-    in_place = db.add_photo(folder_id=env["fid_dst"], filename="owl.jpg",
+    in_place = photo_ingest.add_photo(db, folder_id=env["fid_dst"], filename="owl.jpg",
                             extension=".jpg", file_size=52, file_mtime=3.0)
 
     result = move_photos(
@@ -187,12 +188,12 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     (src / "first.jpg").write_bytes(b"first")
     (src / "first.xmp").write_text("<xmp/>")
     (src / "second.jpg").write_bytes(b"second")
-    p1 = db.add_photo(
-        folder_id=fid, filename="first.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="first.jpg", extension=".jpg",
         file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    p2 = db.add_photo(
-        folder_id=fid, filename="second.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="second.jpg", extension=".jpg",
         file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -239,12 +240,12 @@ def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpeg")
     (src / "IMG.xmp").write_bytes(b"shared-xmp")
-    db.add_photo(
-        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.CR3", extension=".cr3",
         file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.JPG", extension=".jpg",
         file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -275,12 +276,12 @@ def test_move_photos_reuses_shared_xmp_within_one_destination(tmp_path):
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpeg")
     (src / "IMG.xmp").write_bytes(b"shared-xmp")
-    raw_pid = db.add_photo(
-        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+    raw_pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.CR3", extension=".cr3",
         file_size=3, file_mtime=1.0,
     )
-    jpeg_pid = db.add_photo(
-        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+    jpeg_pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.JPG", extension=".jpg",
         file_size=4, file_mtime=2.0,
     )
 
@@ -314,12 +315,12 @@ def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
 
     (src / "first.jpg").write_bytes(b"first")
     (src / "second.jpg").write_bytes(b"second")
-    db.add_photo(
-        folder_id=fid, filename="first.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="first.jpg", extension=".jpg",
         file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid, filename="second.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="second.jpg", extension=".jpg",
         file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -363,8 +364,8 @@ def test_move_folder_by_date_without_developed_dir_leaves_disk_alone(tmp_path):
     archive.mkdir()
     fid = db.add_folder(str(src), name="card")
     (src / "first.jpg").write_bytes(b"first")
-    db.add_photo(
-        folder_id=fid, filename="first.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="first.jpg", extension=".jpg",
         file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
 
@@ -475,8 +476,8 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
     db.add_folder(str(dst), name="dst")
 
     (src / "bird.cr3").write_bytes(b"raw")
-    pid = db.add_photo(
-        folder_id=fid_src, filename="bird.cr3", extension=".cr3",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid_src, filename="bird.cr3", extension=".cr3",
         file_size=3, file_mtime=1.0,
     )
 
@@ -515,8 +516,8 @@ def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
 
     source_file = src / "bird.cr3"
     source_file.write_bytes(b"raw")
-    pid = db.add_photo(
-        folder_id=fid_src, filename=source_file.name, extension=".cr3",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid_src, filename=source_file.name, extension=".cr3",
         file_size=3, file_mtime=1.0,
     )
     blocked = dst / "developed"
@@ -556,8 +557,8 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
 
     incoming = src / "img.cr3"
     incoming.write_bytes(b"raw")
-    pid = db.add_photo(
-        folder_id=fid_src, filename=incoming.name, extension=".cr3",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid_src, filename=incoming.name, extension=".cr3",
         file_size=3, file_mtime=1.0,
     )
     stale_dev_dir = dst / "developed"
@@ -592,8 +593,8 @@ def test_move_photos_out_of_developed_folder_ignores_source_original(
     )
     source_file = source / "bird.jpg"
     source_file.write_bytes(b"original")
-    pid = db.add_photo(
-        folder_id=source_id, filename=source_file.name, extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=source_id, filename=source_file.name, extension=".jpg",
         file_size=source_file.stat().st_size, file_mtime=1.0,
     )
 
@@ -628,12 +629,12 @@ def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
-    pid_raw = db.add_photo(
-        folder_id=fid_src, filename="IMG.raw", extension=".raw",
+    pid_raw = photo_ingest.add_photo(
+        db, folder_id=fid_src, filename="IMG.raw", extension=".raw",
         file_size=3, file_mtime=1.0,
     )
-    pid_jpg = db.add_photo(
-        folder_id=fid_src, filename="IMG.jpg", extension=".jpg",
+    pid_jpg = photo_ingest.add_photo(
+        db, folder_id=fid_src, filename="IMG.jpg", extension=".jpg",
         file_size=4, file_mtime=2.0,
     )
 
@@ -673,12 +674,12 @@ def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
-    moved_pid = db.add_photo(
-        folder_id=fid, filename="IMG.raw", extension=".raw",
+    moved_pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.raw", extension=".raw",
         file_size=3, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
         file_size=4, file_mtime=2.0,
     )
     source_developed = src / "developed"
@@ -725,12 +726,12 @@ def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
 
     (src / "first.jpg").write_bytes(b"first")
     (src / "second.jpg").write_bytes(b"second")
-    db.add_photo(
-        folder_id=fid, filename="first.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="first.jpg", extension=".jpg",
         file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid, filename="second.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="second.jpg", extension=".jpg",
         file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -774,12 +775,12 @@ def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
     # to mistake the child's tracked original for a generated render.
     (src / "bird.jpg").write_bytes(b"parent")
     (tracked_child / "bird.jpg").write_bytes(b"child")
-    db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    child_pid = db.add_photo(
-        folder_id=child_fid, filename="bird.jpg", extension=".jpg",
+    child_pid = photo_ingest.add_photo(
+        db, folder_id=child_fid, filename="bird.jpg", extension=".jpg",
         file_size=5, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -813,12 +814,12 @@ def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
 
     (src / "IMG.raw").write_bytes(b"raw")
     (src / "IMG.jpg").write_bytes(b"jpeg")
-    db.add_photo(
-        folder_id=fid, filename="IMG.raw", extension=".raw",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.raw", extension=".raw",
         file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
         file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
     default_developed = src / "developed"
@@ -864,12 +865,12 @@ def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
 
     (src / "IMG.CR3").write_bytes(b"raw")
     (src / "IMG.JPG").write_bytes(b"jpg")
-    db.add_photo(
-        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.CR3", extension=".cr3",
         file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="IMG.JPG", extension=".jpg",
         file_size=3, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -916,12 +917,12 @@ def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
 
     (first_src / "IMG.CR3").write_bytes(b"first-raw")
     (second_src / "IMG.NEF").write_bytes(b"second-raw")
-    first_pid = db.add_photo(
-        folder_id=first_fid, filename="IMG.CR3", extension=".cr3",
+    first_pid = photo_ingest.add_photo(
+        db, folder_id=first_fid, filename="IMG.CR3", extension=".cr3",
         file_size=9, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    second_pid = db.add_photo(
-        folder_id=second_fid, filename="IMG.NEF", extension=".nef",
+    second_pid = photo_ingest.add_photo(
+        db, folder_id=second_fid, filename="IMG.NEF", extension=".nef",
         file_size=10, file_mtime=2.0, timestamp="2026-07-12T10:15:00",
     )
     (first_src / "developed").mkdir()
@@ -979,8 +980,8 @@ def test_move_folder_by_date_lists_developed_dir_once_per_source(
     ]
     for name, ts in photos:
         (src / name).write_bytes(b"x")
-        db.add_photo(
-            folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension=".jpg",
             file_size=1, file_mtime=1.0, timestamp=ts,
         )
 
@@ -1030,8 +1031,8 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path, te
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
     (src / "unknown.jpg").write_bytes(b"x")
-    db.add_photo(
-        folder_id=fid, filename="unknown.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="unknown.jpg", extension=".jpg",
         file_size=1, file_mtime=None,
     )
 
@@ -1057,8 +1058,8 @@ def test_folder_subtree_photos_reads_only_date_columns(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
 
@@ -1078,8 +1079,8 @@ def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive = tmp_path / "archive"
@@ -1101,8 +1102,8 @@ def test_plan_folder_date_moves_rejects_dot_only_template(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
 
@@ -1130,8 +1131,8 @@ def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_pa
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
     (src / "photo.jpg").write_bytes(b"x")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
 
@@ -1151,8 +1152,8 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive = tmp_path / "archive"
@@ -1181,8 +1182,8 @@ def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     # ``archive`` is a regular file, not a directory. Any nested template
@@ -1217,8 +1218,8 @@ def test_plan_folder_date_moves_rejects_parent_of_missing_destination_root(tmp_p
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     # ``archive`` is a regular file — a nested destination root under it
@@ -1247,8 +1248,8 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_parent_of_root(tmp_path
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive_parent = tmp_path / "archive"
@@ -1278,8 +1279,8 @@ def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive = tmp_path / "archive"
@@ -1313,8 +1314,8 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_ancestor(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive = tmp_path / "archive"
@@ -1349,8 +1350,8 @@ def test_plan_folder_date_moves_rejects_dangling_symlink_destination(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
-    db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     archive = tmp_path / "archive"
@@ -1404,12 +1405,12 @@ def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
 
     fid_target = db.add_folder(str(backslash_dir), name="a\\b")
     fid_nested = db.add_folder(str(slash_nested), name="nested")
-    db.add_photo(
-        folder_id=fid_target, filename="target.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid_target, filename="target.jpg", extension=".jpg",
         file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=fid_nested, filename="sibling.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid_nested, filename="sibling.jpg", extension=".jpg",
         file_size=7, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
     )
 
@@ -1483,16 +1484,16 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     )
     db.conn.commit()
 
-    db.add_photo(
-        folder_id=parent_fid, filename="root.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=parent_fid, filename="root.jpg", extension=".jpg",
         file_size=4, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
-    db.add_photo(
-        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=child_fid, filename="child.jpg", extension=".jpg",
         file_size=5, file_mtime=2.0, timestamp="2026-07-13T09:30:00",
     )
-    db.add_photo(
-        folder_id=alias_fid, filename="alias.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=alias_fid, filename="alias.jpg", extension=".jpg",
         file_size=5, file_mtime=3.0, timestamp="2026-07-14T09:30:00",
     )
 
@@ -1531,8 +1532,8 @@ def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
         (child_alias, child_fid),
     )
     db.conn.commit()
-    child_pid = db.add_photo(
-        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+    child_pid = photo_ingest.add_photo(
+        db, folder_id=child_fid, filename="child.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
     # Simulate a case-insensitive POSIX filesystem while retaining the
@@ -1582,8 +1583,8 @@ def test_plan_folder_date_moves_matches_symlink_alias_descendants_on_posix(
 
     parent_fid = db.add_folder(str(alias_root), name="card")
     child_fid = db.add_folder(str(target_root / "day"), name="day")
-    child_pid = db.add_photo(
-        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+    child_pid = photo_ingest.add_photo(
+        db, folder_id=child_fid, filename="child.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
     )
 
@@ -1608,13 +1609,13 @@ def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
     jpeg = src / "IMG.JPG"
     raw.write_bytes(b"raw")
     jpeg.write_bytes(b"jpeg")
-    raw_pid = db.add_photo(
-        folder_id=db.add_folder(str(src), name="src"),
+    raw_pid = photo_ingest.add_photo(
+        db, folder_id=db.add_folder(str(src), name="src"),
         filename=raw.name, extension=".cr3", file_size=3, file_mtime=1.0,
     )
     source_fid = db.photos.get(raw_pid)["folder_id"]
-    jpeg_pid = db.add_photo(
-        folder_id=source_fid, filename=jpeg.name, extension=".jpg",
+    jpeg_pid = photo_ingest.add_photo(
+        db, folder_id=source_fid, filename=jpeg.name, extension=".jpg",
         file_size=4, file_mtime=2.0,
     )
     developed = src / "developed"
@@ -1649,12 +1650,12 @@ def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
     existing = destination / "IMG.JPG"
     incoming.write_bytes(b"unrelated-raw")
     existing.write_bytes(b"existing-jpeg")
-    incoming_pid = db.add_photo(
-        folder_id=source_fid, filename=incoming.name, extension=".cr3",
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=source_fid, filename=incoming.name, extension=".cr3",
         file_size=incoming.stat().st_size, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=destination_fid, filename=existing.name, extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=destination_fid, filename=existing.name, extension=".jpg",
         file_size=existing.stat().st_size, file_mtime=2.0,
     )
 
@@ -1688,8 +1689,8 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
     original_fid = db.add_folder(str(original_source), name="original")
     original_file = original_source / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -1719,8 +1720,8 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
 
     incoming_file = replacement_source / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=original_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -1759,8 +1760,8 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     original_fid = db.add_folder(str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -1771,8 +1772,8 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     # and there is nothing left for ``delete_folder``'s cascade to clear.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
-    db.add_photo(
-        folder_id=original_fid, filename=sibling_file.name,
+    photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=sibling_file.name,
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -1810,8 +1811,8 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     db.add_workspace_folder(ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=replacement_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=replacement_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -1851,8 +1852,8 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     original_fid = db.add_folder(str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -1862,8 +1863,8 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     # test would have nothing to clear.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
-    db.add_photo(
-        folder_id=original_fid, filename=sibling_file.name,
+    photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=sibling_file.name,
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -1917,8 +1918,8 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     db.add_workspace_folder(ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=replacement_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=replacement_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -1961,12 +1962,12 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     sibling_file = old_child / "IMG.CR3"
     moved_file.write_bytes(b"jpeg")
     sibling_file.write_bytes(b"raw")
-    moved_pid = db.add_photo(
-        folder_id=child_id, filename=moved_file.name, extension=".jpg",
+    moved_pid = photo_ingest.add_photo(
+        db, folder_id=child_id, filename=moved_file.name, extension=".jpg",
         file_size=4, file_mtime=1.0,
     )
-    db.add_photo(
-        folder_id=child_id, filename=sibling_file.name, extension=".cr3",
+    photo_ingest.add_photo(
+        db, folder_id=child_id, filename=sibling_file.name, extension=".cr3",
         file_size=3, file_mtime=2.0,
     )
 
@@ -2014,8 +2015,8 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
     replacement_id = db.add_folder(str(old_child), name="child")
     incoming = old_child / "IMG.NEF"
     incoming.write_bytes(b"replacement")
-    incoming_pid = db.add_photo(
-        folder_id=replacement_id, filename=incoming.name, extension=".nef",
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=replacement_id, filename=incoming.name, extension=".nef",
         file_size=incoming.stat().st_size, file_mtime=3.0,
     )
 
@@ -2052,8 +2053,8 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     original_fid = db.add_folder(str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2063,8 +2064,8 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     # has nothing to rebase.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
-    db.add_photo(
-        folder_id=original_fid, filename=sibling_file.name,
+    photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=sibling_file.name,
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2103,8 +2104,8 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     db.add_workspace_folder(ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=replacement_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=replacement_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -2143,8 +2144,8 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
     src_fid = db.add_folder(str(source_path), name="CARD")
     src_file = source_path / "IMG.JPG"
     src_file.write_bytes(b"original-jpeg")
-    src_pid = db.add_photo(
-        folder_id=src_fid, filename=src_file.name,
+    src_pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=src_file.name,
         extension=".jpg", file_size=src_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2169,8 +2170,8 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
     # the earlier row, but they don't share a developed render.
     incoming_file = source_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=src_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -2205,12 +2206,12 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
     jpeg = source_path / "IMG.JPG"
     raw.write_bytes(b"raw")
     jpeg.write_bytes(b"jpeg")
-    raw_pid = db.add_photo(
-        folder_id=src_fid, filename=raw.name, extension=".cr3",
+    raw_pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=raw.name, extension=".cr3",
         file_size=3, file_mtime=1.0,
     )
-    jpeg_pid = db.add_photo(
-        folder_id=src_fid, filename=jpeg.name, extension=".jpg",
+    jpeg_pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=jpeg.name, extension=".jpg",
         file_size=4, file_mtime=2.0,
     )
 
@@ -2235,8 +2236,8 @@ def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
     jpeg.unlink()
     incoming = source_path / "IMG.NEF"
     incoming.write_bytes(b"replacement")
-    incoming_pid = db.add_photo(
-        folder_id=src_fid, filename=incoming.name, extension=".nef",
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=incoming.name, extension=".nef",
         file_size=incoming.stat().st_size, file_mtime=3.0,
     )
 
@@ -2272,12 +2273,12 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
     file_a.write_bytes(b"jpeg-bytes")
     file_b = source_path / "IMG.CR3"
     file_b.write_bytes(b"raw-bytes")
-    pid_a = db.add_photo(
-        folder_id=src_fid, filename=file_a.name, extension=".jpg",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=file_a.name, extension=".jpg",
         file_size=file_a.stat().st_size, file_mtime=1.0,
     )
-    pid_b = db.add_photo(
-        folder_id=src_fid, filename=file_b.name, extension=".cr3",
+    pid_b = photo_ingest.add_photo(
+        db, folder_id=src_fid, filename=file_b.name, extension=".cr3",
         file_size=file_b.stat().st_size, file_mtime=2.0,
     )
     db.add_workspace_folder(ws_id, src_fid)
@@ -2332,8 +2333,8 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     original_fid = db.add_folder(str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2343,8 +2344,8 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     # nothing to rebase.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
-    db.add_photo(
-        folder_id=original_fid, filename=sibling_file.name,
+    photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=sibling_file.name,
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2389,8 +2390,8 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     db.add_workspace_folder(ws_id, replacement_fid)
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=replacement_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=replacement_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -2435,8 +2436,8 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     original_fid = db.add_folder(str(reusable_path), name="CARD")
     original_file = reusable_path / "IMG.JPG"
     original_file.write_bytes(b"original-jpeg")
-    original_pid = db.add_photo(
-        folder_id=original_fid, filename=original_file.name,
+    original_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=original_file.name,
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2445,8 +2446,8 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     # by its own test. This one exercises the health-check cascade.
     sibling_file = reusable_path / "IMG.NEF"
     sibling_file.write_bytes(b"sibling-raw")
-    db.add_photo(
-        folder_id=original_fid, filename=sibling_file.name,
+    photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=sibling_file.name,
         extension=".nef", file_size=sibling_file.stat().st_size,
         file_mtime=1.0,
     )
@@ -2494,8 +2495,8 @@ def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_pa
     reusable_path.mkdir()
     incoming_file = reusable_path / "IMG.CR3"
     incoming_file.write_bytes(b"replacement-raw")
-    incoming_pid = db.add_photo(
-        folder_id=original_fid, filename=incoming_file.name,
+    incoming_pid = photo_ingest.add_photo(
+        db, folder_id=original_fid, filename=incoming_file.name,
         extension=".cr3", file_size=incoming_file.stat().st_size,
         file_mtime=2.0,
     )
@@ -2547,14 +2548,14 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
 
     file_a = source_a / "IMG.CR3"
     file_a.write_bytes(b"raw-a")
-    pid_a = db.add_photo(
-        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=fid_a, filename=file_a.name, extension=".cr3",
         file_size=file_a.stat().st_size, file_mtime=1.0,
     )
     file_b = source_b / "img.NEF"
     file_b.write_bytes(b"raw-b")
-    pid_b = db.add_photo(
-        folder_id=fid_b, filename=file_b.name, extension=".nef",
+    pid_b = photo_ingest.add_photo(
+        db, folder_id=fid_b, filename=file_b.name, extension=".nef",
         file_size=file_b.stat().st_size, file_mtime=2.0,
     )
 
@@ -2606,12 +2607,12 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
     file_b = source_b / "img.NEF"
     file_a.write_bytes(b"raw-a")
     file_b.write_bytes(b"raw-b")
-    pid_a = db.add_photo(
-        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=fid_a, filename=file_a.name, extension=".cr3",
         file_size=file_a.stat().st_size, file_mtime=1.0,
     )
-    pid_b = db.add_photo(
-        folder_id=fid_b, filename=file_b.name, extension=".nef",
+    pid_b = photo_ingest.add_photo(
+        db, folder_id=fid_b, filename=file_b.name, extension=".nef",
         file_size=file_b.stat().st_size, file_mtime=2.0,
     )
 
@@ -2656,8 +2657,8 @@ def test_move_photos_rejects_same_source_case_only_stem_collision(
     for index, (filename, content) in enumerate(files.items(), start=1):
         path = source / filename
         path.write_bytes(content)
-        pids[filename] = db.add_photo(
-            folder_id=fid, filename=filename,
+        pids[filename] = photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename,
             extension=os.path.splitext(filename)[1].lower(),
             file_size=len(content), file_mtime=float(index),
         )
@@ -2713,14 +2714,14 @@ def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
 
     file_a = source_a / "IMG.CR3"
     file_a.write_bytes(b"raw-a")
-    pid_a = db.add_photo(
-        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+    pid_a = photo_ingest.add_photo(
+        db, folder_id=fid_a, filename=file_a.name, extension=".cr3",
         file_size=file_a.stat().st_size, file_mtime=1.0,
     )
     file_b = source_b / "img.NEF"
     file_b.write_bytes(b"raw-b")
-    pid_b = db.add_photo(
-        folder_id=fid_b, filename=file_b.name, extension=".nef",
+    pid_b = photo_ingest.add_photo(
+        db, folder_id=fid_b, filename=file_b.name, extension=".nef",
         file_size=file_b.stat().st_size, file_mtime=2.0,
     )
 
@@ -2746,8 +2747,8 @@ def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     src.mkdir()
     fid = db.add_folder(str(src), name="src")
     (src / "photo.jpg").write_bytes(b"x")
-    pid = db.add_photo(
-        folder_id=fid, filename="photo.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="photo.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
 
@@ -2779,8 +2780,8 @@ def test_move_photos_refuses_broken_symlink_destination(tmp_path):
     fid = db.add_folder(str(src), name="src")
     photo = src / "photo.jpg"
     photo.write_bytes(b"x")
-    pid = db.add_photo(
-        folder_id=fid, filename=photo.name, extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename=photo.name, extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
     blocked = tmp_path / "blocked"
@@ -3037,7 +3038,7 @@ def test_move_folder_copies_tree(move_env):
     sub.mkdir()
     (sub / "nest.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     fid_sub = env["db"].add_folder(str(sub), name="sub", parent_id=env["fid_src"])
-    env["db"].add_photo(folder_id=fid_sub, filename="nest.jpg", extension=".jpg",
+    photo_ingest.add_photo(env["db"], folder_id=fid_sub, filename="nest.jpg", extension=".jpg",
                         file_size=52, file_mtime=3.0)
 
     result = move_folder(db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]))
@@ -3100,7 +3101,7 @@ def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
     dst.mkdir()
 
     fid = db.add_folder(str(src), name=" shoot ")
-    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=102, file_mtime=1.0)
 
     result = move_folder(
@@ -3151,7 +3152,7 @@ def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
     )
     db.conn.commit()
 
-    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=102, file_mtime=1.0)
 
     result = move_folder(
@@ -4246,7 +4247,7 @@ def test_move_folder_merges_into_tracked_when_allowed(move_env):
     # workspace-root folder.
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     fid_archive = db.add_folder(str(landing), name="src")
-    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
                  file_size=52, file_mtime=3.0)
 
     staged_prefix = str(env["src"])
@@ -4309,7 +4310,7 @@ def test_move_folder_merge_alias_destination_uses_stored_tracked_path(
     landing.mkdir(parents=True)
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     fid_archive = db.add_folder(str(landing), name="src")
-    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
                  file_size=52, file_mtime=3.0)
 
     alias_dst = env["tmp_path"] / "alias_dst"
@@ -4621,7 +4622,7 @@ def test_move_folder_merge_moved_excludes_already_present(move_env):
     # from a rsync-copied phantom in the post-copy path). Pre-seed both
     # rows with the same hash, and stamp the staged fixture row with it
     # too so the drop path fires.
-    db.add_photo(folder_id=fid_archive, filename="bird1.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid_archive, filename="bird1.jpg", extension=".jpg",
                  file_size=len(identical_bytes), file_mtime=3.0,
                  file_hash="BIRD1HASH")
     db.conn.execute(
@@ -4676,7 +4677,7 @@ def test_move_folder_merge_reports_dropped_ids_for_cache_cleanup(move_env):
     fid_archive = db.add_folder(str(landing), name="src")
     # Matching ``file_hash`` on both rows exercises the real-collision
     # drop path (see merge_staged_tree_into_archive's hash-only invariant).
-    db.add_photo(folder_id=fid_archive, filename="bird1.jpg",
+    photo_ingest.add_photo(db, folder_id=fid_archive, filename="bird1.jpg",
                  extension=".jpg",
                  file_size=len(identical_bytes), file_mtime=3.0,
                  file_hash="BIRD1HASH")
@@ -6473,8 +6474,8 @@ def _catalog_folder_with_current_stats(tmp_path, names=("a.jpg", "b.jpg"),
         path_.write_bytes(b"\xff\xd8" + b"\x00" * (64 + index))
         os.utime(path_, (1577880000, 1577880000))
         st = path_.stat()
-        ids[name] = db.add_photo(
-            folder_id=fid, filename=name, extension=".jpg",
+        ids[name] = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension=".jpg",
             file_size=st.st_size, file_mtime=st.st_mtime,
         )
     # Leave nothing else for a scan to do: with a hash and extracted
@@ -6642,7 +6643,7 @@ def test_tracked_merge_restamps_mtimes_a_copy_did_not_preserve(
     landing.mkdir()
     (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     fid_archive = db.add_folder(str(landing), name="shoot")
-    prior = db.add_photo(folder_id=fid_archive, filename="prior.jpg",
+    prior = photo_ingest.add_photo(db, folder_id=fid_archive, filename="prior.jpg",
                          extension=".jpg", file_size=52, file_mtime=3.0)
 
     _lose_timestamps_in_transfer(monkeypatch)
@@ -6683,8 +6684,8 @@ def test_mtime_plan_ignores_a_sibling_tree_a_like_pattern_would_match(
     decoy.write_bytes(b"\xff\xd8" + b"\x00" * 64)
     os.utime(decoy, (1577880000, 1577880000))
     fid_decoy = db.add_folder(str(decoy_dir), name="sub")
-    decoy_id = db.add_photo(
-        folder_id=fid_decoy, filename="decoy.jpg", extension=".jpg",
+    decoy_id = photo_ingest.add_photo(
+        db, folder_id=fid_decoy, filename="decoy.jpg", extension=".jpg",
         file_size=decoy.stat().st_size, file_mtime=decoy.stat().st_mtime)
 
     # The file the escaped path would land on: same size, different mtime.
@@ -6733,7 +6734,7 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
         path_.write_bytes(b"\xff\xd8" + b"\x00" * 64)
         os.utime(path_, (mtime, mtime))
         st = path_.stat()
-        return db.add_photo(folder_id=folder_id, filename=name,
+        return photo_ingest.add_photo(db, folder_id=folder_id, filename=name,
                             extension=".jpg", file_size=st.st_size,
                             file_mtime=st.st_mtime)
 
@@ -6777,7 +6778,7 @@ def test_move_folder_tolerates_a_catalog_row_whose_source_is_gone(
     from move import move_folder
 
     db, _src, dst, fid, ids = _catalog_folder_with_current_stats(tmp_path)
-    ghost = db.add_photo(folder_id=fid, filename="ghost.jpg", extension=".jpg",
+    ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.jpg", extension=".jpg",
                          file_size=66, file_mtime=1577880000)
 
     _lose_timestamps_in_transfer(monkeypatch)
@@ -7138,7 +7139,7 @@ def test_a_symlinked_photo_row_is_never_restamped(tmp_path, monkeypatch):
     os.utime(src / "target.jpg", (1577880000, 1577880000))
     os.symlink("target.jpg", src / "link.jpg")
     st = os.stat(src / "link.jpg")
-    link_id = db.add_photo(folder_id=fid, filename="link.jpg",
+    link_id = photo_ingest.add_photo(db, folder_id=fid, filename="link.jpg",
                            extension=".jpg", file_size=st.st_size,
                            file_mtime=st.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash = 'hash-' || id,"
@@ -7296,7 +7297,7 @@ def test_date_move_reports_photos_already_in_each_destination(tmp_path):
     with Database(str(tmp_path / "catalog.db")) as db:
         root_id = db.add_folder(str(archive))
         date_id = db.add_folder(str(date), parent_id=root_id)
-        db.add_photo(date_id, "bird.jpg", ".jpg", 4, 1.0, timestamp="2026-07-12T09:30:00")
+        photo_ingest.add_photo(db, date_id, "bird.jpg", ".jpg", 4, 1.0, timestamp="2026-07-12T09:30:00")
         result = move_folder_by_date(db, root_id, str(archive), "%Y-%m-%d")
         assert result["errors"] == []
         assert result["moved"] == 0

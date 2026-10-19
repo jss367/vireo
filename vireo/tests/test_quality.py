@@ -12,7 +12,7 @@ from PIL import Image, ImageFilter
 from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
+from services import photo_ingest
 
 # -- Background ring --
 
@@ -339,7 +339,7 @@ def test_compute_all_features_compatible_with_db(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="root")
-    pid = db.add_photo(fid, "bird.jpg", ".jpg", 100, 1.0)
+    pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     arr = np.full((200, 200, 3), 128, dtype=np.uint8)
     arr[60:140, 60:140] = [200, 100, 50]

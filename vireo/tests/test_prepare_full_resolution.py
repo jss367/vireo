@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -446,8 +447,8 @@ def test_preparation_skips_concurrently_deleted_photos(
     # A later photo proves rollback/skip allows the job to keep working.
     other_path = os.path.join(folder, "survivor.jpg")
     Image.new("RGB", (80, 60), "blue").save(other_path)
-    other_id = db.add_photo(
-        folder_id=photo["folder_id"], filename="survivor.jpg", extension=".jpg",
+    other_id = photo_ingest.add_photo(
+        db, folder_id=photo["folder_id"], filename="survivor.jpg", extension=".jpg",
         file_size=os.path.getsize(other_path), file_mtime=os.path.getmtime(other_path),
         width=80, height=60,
     )
@@ -615,8 +616,8 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
             cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
             Image.new("RGB", (800, 600), "blue").save(replacement_path)
             replacement_bytes.append(Path(replacement_path).read_bytes())
-            new_id = other_db.add_photo(
-                folder_id=selected["folder_id"], filename="replacement.jpg", extension=".jpg",
+            new_id = photo_ingest.add_photo(
+                other_db, folder_id=selected["folder_id"], filename="replacement.jpg", extension=".jpg",
                 file_size=selected["file_size"], file_mtime=selected["file_mtime"],
                 width=800, height=600,
             )
@@ -796,8 +797,8 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
         cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
         replacement = Path(folder) / "replacement.jpg"
         Image.new("RGB", (800, 600), "blue").save(replacement)
-        new_id = db.add_photo(
-            folder_id=selected["folder_id"], filename=replacement.name, extension=".jpg",
+        new_id = photo_ingest.add_photo(
+            db, folder_id=selected["folder_id"], filename=replacement.name, extension=".jpg",
             file_size=replacement.stat().st_size, file_mtime=replacement.stat().st_mtime,
             width=800, height=600,
         )
@@ -1022,8 +1023,8 @@ def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, 
                 Image.new("RGB", (800, 600), "blue").save(
                     os.path.join(folder, "replacement.jpg"),
                 )
-                new_id = other_db.add_photo(
-                    folder_id=selected["folder_id"], filename="replacement.jpg",
+                new_id = photo_ingest.add_photo(
+                    other_db, folder_id=selected["folder_id"], filename="replacement.jpg",
                     extension=".jpg", file_size=selected["file_size"],
                     file_mtime=selected["file_mtime"], width=800, height=600,
                 )
@@ -1073,8 +1074,8 @@ def test_cross_photo_eviction_demotes_earlier_ready_photo(
     folder_id, folder_path = row["folder_id"], row["path"]
     src2 = os.path.join(folder_path, "test2.jpg")
     Image.new("RGB", (800, 600), (40, 180, 90)).save(src2, "JPEG", quality=85)
-    pid2 = db.add_photo(
-        folder_id=folder_id, filename="test2.jpg", extension=".jpg",
+    pid2 = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="test2.jpg", extension=".jpg",
         file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
         width=800, height=600,
     )

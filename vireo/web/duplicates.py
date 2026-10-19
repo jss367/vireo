@@ -19,6 +19,7 @@ import threading
 from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
+from services import duplicate_resolution
 from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ def create_duplicates_blueprint(
             ids = db.duplicates.live_ids_for_hash(h)
             if len(ids) < 2:
                 continue
-            result = db.apply_duplicate_resolution(ids)
+            result = duplicate_resolution.apply_duplicate_resolution(db, ids)
             total_rejected += result.get("rejected", 0)
             if result.get("deferred"):
                 deferred_hashes.append(h)
@@ -111,7 +112,7 @@ def create_duplicates_blueprint(
 
         Body: ``{"photo_id": int}``. The copy is un-rejected if needed and
         every other kept copy of the same file is rejected, with rating and
-        keywords merged onto it (``Database.keep_duplicate_copy``). Returns
+        keywords merged onto it (``duplicate_resolution.keep_duplicate_copy``). Returns
         ``{"ok": True, "file_hash", "winner_id", "loser_ids", "rating",
         "flag"}``; a copy missing on disk or on an offline volume is refused
         with 409 so it can never displace the copy that exists.
@@ -128,7 +129,7 @@ def create_duplicates_blueprint(
                 message="Files are being moved to Trash. Try again when that finishes.",
             )
         try:
-            result = get_db().keep_duplicate_copy(photo_id)
+            result = duplicate_resolution.keep_duplicate_copy(get_db(), photo_id)
         finally:
             loser_cleanup_lock.release()
         reason = result.get("error")
@@ -167,7 +168,7 @@ def create_duplicates_blueprint(
                 return json_error("file_hashes must be a list of non-empty strings")
 
         db = get_db()
-        result = db.bulk_resolve_by_folder(file_hashes, keep_folder)
+        result = duplicate_resolution.bulk_resolve_by_folder(db, file_hashes, keep_folder)
         return jsonify({
             "ok": True,
             "resolved_count": len(result["resolved"]),

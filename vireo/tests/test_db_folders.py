@@ -28,6 +28,7 @@ from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
+from services import photo_ingest
 
 
 class _RecordingCache:
@@ -84,8 +85,8 @@ def _links(db, folder_id):
 
 
 def _photo(db, folder_id, filename, **kw):
-    return db.add_photo(
-        folder_id=folder_id, filename=filename, extension=os.path.splitext(filename)[1],
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename, extension=os.path.splitext(filename)[1],
         file_size=kw.pop("file_size", 10), file_mtime=kw.pop("file_mtime", 1.0), **kw,
     )
 
