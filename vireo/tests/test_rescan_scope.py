@@ -9,7 +9,7 @@ import os
 
 import pytest
 from db import Database
-from services import photo_ingest
+from services import missing_originals, photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -62,11 +62,11 @@ def test_get_missing_photos_scoped_to_folder(tmp_path):
     (a / "a1.jpg").unlink()
 
     # Whole-workspace check finds A's ghost.
-    assert [r["id"] for r in db.get_missing_photos()] == [pa]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db)] == [pa]
     # Scoped to B (whose file still exists) finds nothing.
-    assert db.get_missing_photos(folder_id=fb) == []
+    assert missing_originals.get_missing_photos(db, folder_id=fb) == []
     # Scoped to A finds only A's ghost.
-    assert [r["id"] for r in db.get_missing_photos(folder_id=fa)] == [pa]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db, folder_id=fa)] == [pa]
     db.close()
 
 
@@ -83,7 +83,7 @@ def test_get_missing_photos_scope_includes_subtree(tmp_path):
     (sub / "s1.jpg").unlink()
 
     # Scoping by the root catches ghosts in descendant folders too.
-    assert [r["id"] for r in db.get_missing_photos(folder_id=froot)] == [ps]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db, folder_id=froot)] == [ps]
     db.close()
 
 
@@ -97,9 +97,7 @@ def test_get_missing_photos_scope_uses_temp_table_over_variable_cap(tmp_path, mo
     Force the chunk size down to a handful and verify the query still
     returns the right ghosts via the temp-table branch.
     """
-    import db as db_module
-
-    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+    monkeypatch.setattr(missing_originals, "SQLITE_PARAM_CHUNK_SIZE", 3)
 
     db = _db_with_active_ws(tmp_path)
     root = tmp_path / "root"
@@ -115,7 +113,7 @@ def test_get_missing_photos_scope_uses_temp_table_over_variable_cap(tmp_path, mo
         (sub / f"g{i}.jpg").unlink()
         ghost_ids.append(pid)
 
-    got = sorted(r["id"] for r in db.get_missing_photos(folder_id=froot))
+    got = sorted(r["id"] for r in missing_originals.get_missing_photos(db, folder_id=froot))
     assert got == sorted(ghost_ids)
     db.close()
 
@@ -139,7 +137,7 @@ def test_get_missing_photos_scope_includes_legacy_null_parent_descendants(tmp_pa
 
     (sub / "s1.jpg").unlink()
 
-    assert [r["id"] for r in db.get_missing_photos(folder_id=froot)] == [ps]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db, folder_id=froot)] == [ps]
     db.close()
 
 

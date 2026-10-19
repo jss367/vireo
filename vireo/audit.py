@@ -9,6 +9,7 @@ from image_loader import (
     is_excluded_scan_path,
     safe_scan_walk,
 )
+from services import missing_originals
 from xmp import read_keyword_snapshot
 
 log = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ def check_orphans(db):
     orphans = [
         {"photo_id": photo["id"], "filename": photo["filename"],
          "folder_path": photo["folder_path"]}
-        for photo in db.get_missing_photos()
+        for photo in missing_originals.get_missing_photos(db)
     ]
 
     log.info("Orphan check: %d orphaned entries found", len(orphans))

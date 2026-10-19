@@ -22,7 +22,7 @@ import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
-from services import browse_queries, workspace_config
+from services import browse_queries, missing_originals, workspace_config
 from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
 from web.app_hooks import claim_search_lane
@@ -448,7 +448,7 @@ def create_browse_blueprint(
         # remains to repair the mixed response (Codex reviews r3686317681 and
         # r3687501744).
         missing_folder_ids = [f["id"] for f in db.folders.missing()]
-        folder_health_version = db.get_folder_health_version()
+        folder_health_version = missing_originals.get_folder_health_version(db)
 
         # First paint is scope-only (folder / collection / sort); metadata
         # filter deep links compile into the filter bar client-side, which
