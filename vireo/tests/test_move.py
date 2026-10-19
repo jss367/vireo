@@ -443,6 +443,63 @@ def test_move_photos_relocates_developed_output_per_photo(move_env):
     assert (developed / old_key / "bird2.jpg").read_bytes() == b"bird2-dev"
 
 
+@pytest.mark.parametrize("sep", ["\\", "/"])
+def test_move_folder_relocates_subfolder_renders_for_either_separator(tmp_path, sep):
+    """``move_folder`` rebases the developed renders of every moved
+    subfolder, whichever separator the catalog stores.
+
+    Windows stores folder paths with ``\\``. The subfolder lookup used to
+    match ``base + "/"`` (in SQL and in Python), so on Windows only the top
+    folder's renders moved and every subfolder's exports fell back to the
+    RAW. The stored paths are plain strings here, so this runs on every OS.
+    """
+    from types import SimpleNamespace
+
+    from export import developed_folder_key
+    from move.folder_catalog import _FolderCatalogRewrite
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+
+    def path(*parts):
+        return sep.join(("C:" if sep == "\\" else "", *parts))
+
+    src = path("Staging", "Birds")
+    dst = path("Archive", "Birds")
+    # The catalog as ``update_catalog`` leaves it: rows already rebased.
+    root = db.add_folder(dst, name="Birds")
+    sub = db.add_folder(path("Archive", "Birds", "Day 1"), name="Day 1",
+                        parent_id=root)
+    db.add_folder(path("Archive", "Birds", "Day 1", "Eagles"), name="Eagles",
+                  parent_id=sub)
+    # A sibling whose name only shares a prefix is not part of the move.
+    db.add_folder(path("Archive", "Birds2"), name="Birds2")
+
+    developed = tmp_path / "developed"
+    renders = {
+        src: "top.jpg",
+        path("Staging", "Birds", "Day 1"): "day1.jpg",
+        path("Staging", "Birds", "Day 1", "Eagles"): "eagle.jpg",
+    }
+    for folder, render in renders.items():
+        (developed / developed_folder_key(folder)).mkdir(parents=True)
+        (developed / developed_folder_key(folder) / render).write_bytes(b"dev")
+
+    target = SimpleNamespace(merge_into_tracked=None, catalog_path=dst,
+                             merge_reconcile_base=None)
+    rewrite = _FolderCatalogRewrite(
+        db, root, src, "Birds", target, progress=lambda *a: None,
+        pre_commit_check=None, thumb_cache_dir=None,
+        developed_dir=str(developed),
+    )
+    rewrite.relocate_developed_dirs()
+
+    for old, render in renders.items():
+        new = dst + old[len(src):]
+        assert (developed / developed_folder_key(new) / render).exists(), new
+        assert not (developed / developed_folder_key(old)).exists(), old
+
+
 def test_move_photos_rejects_stale_developed_render_at_destination(move_env):
     """A pre-existing render at the destination key blocks the move.
 
@@ -6064,6 +6121,48 @@ def test_merge_copy_progress_finishes_with_skipped_files(move_env, monkeypatch, 
     copy = [(cur, total) for cur, total, _, phase in calls if phase == "Copying files"]
     assert copy[0] == (0, 3) and copy[-1] == (3, 3)
     assert not env["src"].exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("launch_error", [
+    PermissionError(13, "Permission denied"),
+    OSError(7, "Argument list too long"),
+])
+def test_move_folder_reports_rsync_launch_failure(move_env, monkeypatch,
+                                                  launch_error, merge):
+    """An rsync that cannot be started (not executable, E2BIG, ...) is a
+    reported move failure, not a raw exception out of ``move_folder``.
+
+    Only ``FileNotFoundError`` used to be caught; any other ``OSError`` from
+    launching rsync escaped the job. The originals and catalog stay put.
+    """
+    import move as move_mod
+
+    def _cannot_start(*a, **k):
+        raise launch_error
+
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _cannot_start)
+
+    env = move_env
+    if merge:
+        (env["dst"] / "src").mkdir()
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=merge,
+    )
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "rsync" in error and str(launch_error.strerror) in error
+    assert "Originals untouched" in error
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    folder = env["db"].conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)).fetchone()
+    assert folder["path"] == str(env["src"])
+    # A merge target that already existed is never removed.
+    assert (env["dst"] / "src").exists() is merge
 
 
 def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
