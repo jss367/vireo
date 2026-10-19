@@ -26,7 +26,7 @@ def test_delete_photos_removes_keywords(app_and_db):
     photos = db.photos.list_page()
     # bird1.jpg has keyword 'Cardinal' (from conftest)
     pid = photos[0]["id"]
-    assert len(db.keywords.get_for_photo(pid)) > 0
+    assert len(db.photo_keywords.get_for_photo(pid)) > 0
 
     db.delete_photos([pid])
 

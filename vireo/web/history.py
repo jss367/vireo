@@ -99,7 +99,7 @@ def create_history_blueprint(
         if not photo_ids:
             return
         try:
-            species_by_photo = db.keywords.get_species_for_photos(photo_ids)
+            species_by_photo = db.photo_species.get_species_for_photos(photo_ids)
             # Photos with no surviving species tags must still be included so
             # the cache clears their confirmed_species_list — get_species_
             # keywords_for_photos omits them entirely.

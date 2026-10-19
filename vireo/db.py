@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from repositories.job_history import JobHistoryRepository
     from repositories.keyword_merges import KeywordMergeRepository
     from repositories.keyword_provenance import KeywordProvenanceRepository
+    from repositories.keyword_taxa import KeywordTaxonRepository
+    from repositories.keyword_tree import KeywordTreeRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
@@ -46,9 +48,11 @@ if TYPE_CHECKING:
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
+    from repositories.photo_keywords import PhotoKeywordRepository
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
+    from repositories.photo_species import PhotoSpeciesRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
     from repositories.pipeline_features import PipelineFeaturesRepository
@@ -2290,7 +2294,7 @@ class Database:
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             transfer_gps_review=self.moves_merge.transfer_gps_review,
-            transfer_embedded_offered=self.keywords.transfer_embedded_offered_keys,
+            transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -3942,7 +3946,7 @@ class Database:
 
     @property
     def keywords(self) -> KeywordRepository:
-        """Keyword rows and tagging reads: ``db.keywords.get_for_photo(photo_id)`` and friends.
+        """Keyword rows: ``db.keywords.name_of(keyword_id)``, ``db.keywords.ensure_default_genres()`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
@@ -3960,23 +3964,125 @@ class Database:
         passed as a resolver), so methods keep raising at the point they
         always did. Every façade method a moved body calls is handed over
         bound, under its ``Database`` name, so monkeypatches keep reaching
-        the moved code; the class attributes and ``db`` module names the
-        bodies read (``_chunks``, ``log``, ``resolve_import_alias``, the
-        keyword-type and sentinel constants) are read here, at call time.
+        the moved code; the ``db`` module names the bodies read
+        (``resolve_import_alias``, ``KEYWORD_TYPES``) are read here, at call
+        time.
         """
         from repositories.keywords import KeywordRepository
 
         return KeywordRepository(
             self.conn,
             self._ws_id,
-            chunks=_chunks,
             keyword_types=KEYWORD_TYPES,
-            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
-            taxon_lookup_variants=_taxon_lookup_variants,
             resolve_import_alias=resolve_import_alias,
-            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
             facade=self,
         )
+
+    def _keyword_taxon_repository(self) -> KeywordTaxonRepository:
+        """Build the keyword species-name and taxon-link repository on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. The façade
+        methods its bodies call are handed over bound, under their
+        ``Database`` names; the detection sentinel and the taxon-name variant
+        helper are read here, at call time.
+        """
+        from repositories.keyword_taxa import KeywordTaxonRepository
+
+        return KeywordTaxonRepository(
+            self.conn,
+            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
+            taxon_lookup_variants=_taxon_lookup_variants,
+            facade=self,
+        )
+
+    @property
+    def keyword_taxa(self) -> KeywordTaxonRepository:
+        """Species names and taxon links of keywords: ``db.keyword_taxa.mark_species(taxonomy)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_keyword_taxon_repository``. Catalog-wide,
+        so it needs no active workspace. The lookups other keyword
+        repositories bind by name (``detect_keyword_case_convention``,
+        ``resolve_species_display_name``, ``_species_root_name_for_taxon``,
+        ``_lookup_taxon_id_for_keyword``, ``_resolve_species_by_lineage``)
+        keep their ``Database`` wrappers.
+        """
+        return self._keyword_taxon_repository()
+
+    def _keyword_tree_repository(self) -> KeywordTreeRepository:
+        """Build the keyword-tree repository on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is
+        passed as a resolver). The façade methods its bodies call (the
+        duplicate-merge pass, the dependent-rename carry and the
+        species-curation renames) are handed over bound, under their
+        ``Database`` names, so monkeypatches keep reaching the moved code.
+        """
+        from repositories.keyword_tree import KeywordTreeRepository
+
+        return KeywordTreeRepository(
+            self.conn, self._ws_id, chunks=_chunks, facade=self,
+        )
+
+    @property
+    def keyword_tree(self) -> KeywordTreeRepository:
+        """The keyword hierarchy and its edits: ``db.keyword_tree.get_tree()``, ``db.keyword_tree.delete(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped methods resolve the workspace at use.
+        Do not retain one across a workspace switch.
+        """
+        return self._keyword_tree_repository()
+
+    def _photo_keyword_repository(self) -> PhotoKeywordRepository:
+        """Build the photo-keyword association reads on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. ``_chunks``,
+        ``KEYWORD_TYPES`` and the subject-filter chunk size are read here, at
+        call time.
+        """
+        from repositories.photo_keywords import PhotoKeywordRepository
+
+        return PhotoKeywordRepository(
+            self.conn,
+            chunks=_chunks,
+            keyword_types=KEYWORD_TYPES,
+            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
+        )
+
+    @property
+    def photo_keywords(self) -> PhotoKeywordRepository:
+        """Which keywords photos carry: ``db.photo_keywords.get_for_photo(photo_id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photo_keyword_repository``. The domain is
+        catalog-wide, so it needs no active workspace. ``untag_photo`` keeps
+        its ``Database`` wrapper beside ``tag_photo``.
+        """
+        return self._photo_keyword_repository()
+
+    def _photo_species_repository(self) -> PhotoSpeciesRepository:
+        """Build the photo-species reads on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is passed
+        as a resolver), so ``get_accepted_species`` raises at the point it
+        always did.
+        """
+        from repositories.photo_species import PhotoSpeciesRepository
+
+        return PhotoSpeciesRepository(self.conn, self._ws_id, chunks=_chunks)
+
+    @property
+    def photo_species(self) -> PhotoSpeciesRepository:
+        """The species photos carry: ``db.photo_species.get_species_for_photos(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped method resolves the workspace at use.
+        Do not retain one across a workspace switch.
+        ``get_photos_with_equivalent_species`` keeps its ``Database`` wrapper:
+        ``repositories/keyword_provenance.py`` binds it by name.
+        """
+        return self._photo_species_repository()
 
     def _keyword_provenance_repository(self):
         """Build the keyword-provenance repository on this connection.
@@ -4045,7 +4151,7 @@ class Database:
             'upper' if most are ALL CAPS
             None if not enough data to determine
         """
-        return self._keyword_repository().detect_case_convention()
+        return self._keyword_taxon_repository().detect_case_convention()
 
     def _apply_case_convention(self, name, convention):
         """Apply a casing convention to a species name."""
@@ -4137,7 +4243,7 @@ class Database:
         predicting where add_keyword will land but wrong to show a user as
         though a model or the catalog had said it.
         """
-        return self._keyword_repository().resolve_species_display(
+        return self._keyword_taxon_repository().resolve_species_display(
             name, apply_case_convention=apply_case_convention, case_convention=case_convention,
         )
 
@@ -4166,7 +4272,7 @@ class Database:
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
-        return self._keyword_repository().species_root_name_for_taxon(taxon_id)
+        return self._keyword_taxon_repository().species_root_name_for_taxon(taxon_id)
 
     def _lookup_taxon_id_for_keyword(
         self, name, prefer_species=False, species_only=False,
@@ -4211,7 +4317,7 @@ class Database:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        return self._keyword_repository().lookup_taxon_id(
+        return self._keyword_taxon_repository().lookup_taxon_id(
             name, prefer_species=prefer_species, species_only=species_only,
         )
 
@@ -4285,7 +4391,7 @@ class Database:
     def merge_taxonomy_root_twins(self):
         """Fold each top-level species twin into the row filed in the tree.
 
-        The pairs are ``KeywordRepository.taxonomy_root_twins``. Both rows
+        The pairs are ``KeywordTreeRepository.taxonomy_root_twins``. Both rows
         carry the same name, so the sidecars already hold the survivor's
         flat keyword and the merge queues no XMP change. All-or-nothing;
         returns the number of rows merged away.
@@ -4294,7 +4400,7 @@ class Database:
         with self.transaction():
             if not self.in_transaction:
                 self.begin_immediate()
-            for root_id, placed_id in self.keywords.taxonomy_root_twins():
+            for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
                 merged += self._merge_keyword_into(
                     root_id, placed_id, pending_source_only=True,
                 )
@@ -4586,7 +4692,7 @@ class Database:
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            rows = self._keyword_repository().duplicate_scope_rows(ws)
+            rows = self._keyword_tree_repository().duplicate_scope_rows(ws)
             grouped = {}
             for row in rows:
                 key = keyword_match_key(row["name"])
@@ -4627,12 +4733,12 @@ class Database:
                 # re-queries and picks a fresh survivor) and drop dead
                 # remove_ids so we don't UPDATE photo_keywords toward a
                 # non-existent FK target.
-                alive = self._keyword_repository().live_ids(all_ids)
+                alive = self._keyword_tree_repository().live_ids(all_ids)
                 if keep_id not in alive:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
-                self.keywords.normalize_row_name(keep_id)
+                self.keyword_tree.normalize_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(
                         rid, keep_id, pending_source_only=True,
@@ -4656,7 +4762,7 @@ class Database:
         ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
         change does not touch it. Caller commits.
         """
-        return self._keyword_repository().rename_dependents(keyword_id, old_name, new_name)
+        return self._keyword_tree_repository().rename_dependents(keyword_id, old_name, new_name)
 
 
 
@@ -4671,7 +4777,7 @@ class Database:
         writing the retired name into XMP and drops starred photos out of the
         highlight and life-list queries. Caller commits.
         """
-        return self._keyword_repository().reparent_disambiguated(child, dst_id, new_name)
+        return self._keyword_tree_repository().reparent_disambiguated(child, dst_id, new_name)
 
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -4833,7 +4939,7 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
+        return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
         self, photo_ids, keyword_id, exclude_keyword_ids=None,
@@ -4851,7 +4957,7 @@ class Database:
         the "already carries this species" answer must reflect only the rows
         that will survive the mutation.
         """
-        return self._keyword_repository().get_photos_with_equivalent_species(
+        return self._photo_species_repository().get_photos_with_equivalent_species(
             photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
         )
 
@@ -4933,7 +5039,7 @@ class Database:
         # 400. For NULL parents a cross-type peer is allowed to
         # coexist (mirrors add_keyword).
         if parent_id is not None:
-            cross = self._keyword_repository().cross_type_peer(
+            cross = self._keyword_tree_repository().cross_type_peer(
                 new_name, parent_id, keyword_id,
             )
             if cross is not None:
@@ -4980,7 +5086,7 @@ class Database:
         # would otherwise leave two same-name taxonomy rows — NULL parents
         # bypass UNIQUE(name, parent_id).
         if 'name' in updates or 'type' in updates:
-            current = self._keyword_repository().get_update_target(keyword_id)
+            current = self._keyword_tree_repository().get_update_target(keyword_id)
             if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
@@ -5015,7 +5121,7 @@ class Database:
                     # (name, parent_id, type), so a rename onto a
                     # different-type peer must NOT silently retag photos
                     # across types.
-                    peer = self._keyword_repository().same_type_peer(
+                    peer = self._keyword_tree_repository().same_type_peer(
                         new_name, parent_id, effective_type, keyword_id,
                     )
                     if peer:
@@ -5028,7 +5134,7 @@ class Database:
                         self._merge_keyword_into(
                             keyword_id, peer["id"], pending_source_only=True,
                         )
-                        self._keyword_repository().commit()
+                        self._keyword_tree_repository().commit()
                         return peer["id"]
                     self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
@@ -5040,7 +5146,7 @@ class Database:
                 if name_changed:
                     _apply_rename_retype(updates, cur_type, taxon_id)
 
-        self._keyword_repository().apply_update(keyword_id, updates)
+        self._keyword_tree_repository().apply_update(keyword_id, updates)
         return keyword_id
 
     # -- Predictions --
@@ -6904,7 +7010,7 @@ class Database:
         zero matches, or multiple matches all return ``None`` rather than
         permanently crediting the wrong Life List species/class.
         """
-        return self._keyword_repository().resolve_species_by_lineage(
+        return self._keyword_taxon_repository().resolve_species_by_lineage(
             species_name, expected_ancestors,
         )
 

@@ -1157,7 +1157,7 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
         if changed:
             return
         if operation == 'delete':
-            writer.keywords.delete(selected)
+            writer.keyword_tree.delete(selected)
         else:
             writer._merge_keyword_into(selected, remaining)
             writer.commit()

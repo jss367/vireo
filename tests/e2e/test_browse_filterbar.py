@@ -963,14 +963,17 @@ def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_c
                 }
             });
         }""")
-    search = page.locator(".vf-search input")
-    search.fill("hawk")
-    search.press("Enter")
+    # Quick search and visual search replace each other. Use a regular
+    # metadata rule to exercise saving both rules and a visual clause.
+    page.evaluate("VireoFilter.addRule('metadata', 'contains', 'hawk')")
     _wait_total(page, 3)
     page.evaluate("VireoFilter.visualSearch('a soaring hawk')")
-    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    # Narrow panes can move the chip behind the overflow button even
+    # before the collection is saved. Inspect its content in Filters below.
+    page.wait_for_selector(".vf-chip.visual", state="attached", timeout=8000)
 
     page.click(".vf-filters-btn")
+    expect(page.locator(".vf-visual-row")).to_contain_text("a soaring hawk")
     page.click(".vf-save-collection")
     page.wait_for_selector(".vf-save-modal:not([hidden])", timeout=8000)
     # Fixed overlays belong to the viewport, outside the query container.
@@ -1011,8 +1014,12 @@ def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_c
     page.wait_for_selector(".vf-chip.visual", state="attached", timeout=8000)
     chips = page.evaluate("document.querySelector('.vf-chips').textContent")
     assert "a soaring hawk" in chips
-    # Quick-search group round-trips too (the hawk text clause).
+    # The metadata rule round-trips alongside the visual clause.
     assert "hawk" in chips
+    assert page.evaluate("VireoFilter.getRules()") == {
+        "mode": "all",
+        "rules": [{"field": "metadata", "op": "contains", "value": "hawk"}],
+    }
     assert page.evaluate("VireoFilter.getVisual().prompt") == "a soaring hawk"
     page.click(".vf-filters-btn")
     expect(page.locator(".vf-visual-row")).to_be_visible()

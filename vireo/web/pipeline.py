@@ -884,7 +884,7 @@ def create_pipeline_blueprint(
     def attach_live_pipeline_decisions(db, results):
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
-        species = db.keywords.get_species_for_photos(photo_ids)
+        species = db.photo_species.get_species_for_photos(photo_ids)
         live = db.photos.flags_ratings_and_eyes(photo_ids)
         for photo in results.get("photos", []):
             row = live.get(photo["id"])
@@ -1479,7 +1479,7 @@ def create_pipeline_blueprint(
             has_kw = False
             has_kws = {}
             if species_kid is not None or list_kids:
-                attached = {k["id"] for k in db.keywords.get_for_photo(pid)}
+                attached = {k["id"] for k in db.photo_keywords.get_for_photo(pid)}
                 if species_kid is not None:
                     has_kw = species_kid in attached
                 has_kws = {
@@ -1797,7 +1797,7 @@ def create_pipeline_blueprint(
         )
 
         # Get keywords
-        keywords = db.keywords.get_for_photo(photo_id)
+        keywords = db.photo_keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
         # Compute crop info from primary detection (highest confidence)

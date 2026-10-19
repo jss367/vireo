@@ -931,7 +931,7 @@ class ImportService:
                 for photo_id in photo_ids:
                     if cancel_requested(pause_safe=False):
                         break
-                    exists = thread_db.keywords.association_row(photo_id, keyword_id)
+                    exists = thread_db.photo_keywords.association_row(photo_id, keyword_id)
                     if exists is not None:
                         continue
                     thread_db.tag_photo(

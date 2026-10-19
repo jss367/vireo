@@ -191,14 +191,14 @@ def test_catalog_import_does_not_attach_flat_and_hierarchical_leaf(catalog, monk
         },
     })
     execute_import(['dummy.lrcat'], db, write_xmp=False)
-    leaves = [k for k in db.keywords.get_for_photo(photos[0]) if k['name'] == 'Lake Hodges']
+    leaves = [k for k in db.photo_keywords.get_for_photo(photos[0]) if k['name'] == 'Lake Hodges']
     assert len(leaves) == 1
     assert leaves[0]['parent_id'] is not None
     target = db.upsert_place_chain({'place_id': 'test-place', 'name': 'Lake Hodges', 'lat': 33, 'lng': -117,
                                     'address_components': []})
     reconcile_location(db, leaves[0]['id'], target)
     execute_import(['dummy.lrcat'], db, write_xmp=False)
-    assert [k['id'] for k in db.keywords.get_for_photo(photos[0])] == [target]
+    assert [k['id'] for k in db.photo_keywords.get_for_photo(photos[0])] == [target]
 
 
 def test_identity_and_reconciliation_api(app_and_db):
@@ -227,7 +227,7 @@ def test_reconciliation_accepts_an_existing_descendant_location(catalog):
     db.set_photo_location(photos[0], child)
     assert location_candidates(db)[0]['conflicting_photo_count'] == 0
     reconcile_location(db, source, target)
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target, child}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, child}
     assert db.get_assigned_photo_location(photos[0])['place_id'] == 'picnic-place'
 
 
@@ -264,12 +264,12 @@ def test_rescanning_and_syncing_renamed_place_keep_confirmed_import_alias(catalo
     hierarchy = 'Imported places|Lake Hodges' if nested else 'Lake Hodges'
     write_sidecar(str(sidecar), {'Lake Hodges'} if flat_present else set(), {hierarchy})
     _import_keywords_for_photo(db, photos[0], str(sidecar))
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target}
     sync_from_xmp(db, [photos[0]])
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target}
     db.untag_photo(photos[0], target)
     sync_from_xmp(db, [photos[0]])
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target}
 
 
 @pytest.mark.parametrize('nested', [False, True])
@@ -304,7 +304,7 @@ def test_api_add_keyword_does_not_attach_reconciled_place_for_homonym(app_and_db
     ]
     db.tag_photo(seed_photo, source)
     reconcile_location(db, source, target)
-    before = {k['id'] for k in db.keywords.get_for_photo(target_photo)}
+    before = {k['id'] for k in db.photo_keywords.get_for_photo(target_photo)}
     response = client.post(
         f'/api/photos/{target_photo}/keywords',
         json={'name': 'Lake Hodges'},
@@ -319,7 +319,7 @@ def test_api_add_keyword_does_not_attach_reconciled_place_for_homonym(app_and_db
     ).fetchone()
     assert row['place_id'] is None
     assert row['type'] != 'location'
-    tagged = {k['id'] for k in db.keywords.get_for_photo(target_photo)}
+    tagged = {k['id'] for k in db.photo_keywords.get_for_photo(target_photo)}
     assert target not in tagged
     assert tagged - before == {kid}
 
@@ -347,7 +347,7 @@ def test_linking_a_place_to_an_existing_place_preserves_import_aliases(catalog):
     assert result == {'keyword_id': survivor, 'merged': True}
     assert db.conn.execute('SELECT keyword_id FROM keyword_import_aliases').fetchone()[0] == survivor
     assert db.add_keyword('Lake Hodges', parent_id=parent, _resolve_alias=True) == survivor
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {survivor}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {survivor}
 
 
 @pytest.mark.parametrize('reader', ['scanner', 'embedded', 'sync', 'catalog'])
@@ -374,7 +374,7 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
     db.tag_photo(photos[2], original)
     if existing_place:
         db.tag_photo(photos[2], targets[0])
-    before = {k['id'] for k in db.keywords.get_for_photo(photos[2])}
+    before = {k['id'] for k in db.photo_keywords.get_for_photo(photos[2])}
     hierarchy = {'Missouri|Springfield'} if existing_place else {'Illinois|Springfield', 'Missouri|Springfield'}
     # Including Springfield keeps an existing same-name location during
     # Sync from XMP too; adding the other alias must not leave both assigned.
@@ -401,7 +401,7 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
                 _import_keywords_for_photo(db, photos[2], str(sidecar))
             else:
                 sync_from_xmp(db, [photos[2]])
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[2])} == before
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[2])} == before
 
 
 def _sidecar_with_marker(path, *, marker, owned, flat, hierarchical):
@@ -547,7 +547,7 @@ def test_manual_merge_multiple_keywords_and_coordinate_pair(catalog):
     merge_keywords(db, ids, ids[0], preview['preview_token'])
     row = db.conn.execute('SELECT * FROM keywords WHERE id = ?', (ids[0],)).fetchone()
     assert (row['latitude'], row['longitude']) == (32, -117)
-    assert all(db.keywords.get_for_photo(p)[0]['id'] == ids[0] for p in photos)
+    assert all(db.photo_keywords.get_for_photo(p)[0]['id'] == ids[0] for p in photos)
 
 
 def test_manual_merge_stale_preview_and_rollback(catalog, monkeypatch):
@@ -566,7 +566,7 @@ def test_manual_merge_stale_preview_and_rollback(catalog, monkeypatch):
     monkeypatch.setattr(db, 'queue_change', fail)
     with pytest.raises(RuntimeError, match='queue failed'):
         merge_keywords(db, ids, target, preview['preview_token'])
-    assert db.keywords.get_for_photo(photos[0])[0]['id'] == source
+    assert db.photo_keywords.get_for_photo(photos[0])[0]['id'] == source
     assert not db.conn.execute('SELECT 1 FROM keyword_import_aliases').fetchone()
     assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
 
@@ -1858,7 +1858,7 @@ def test_manual_merge_same_name_hierarchy_survives_sync_and_rescan(catalog, tmp_
             assert sync_to_xmp(db, change_ids=changes)['failed'] == 0
         _import_keywords_for_photo(db, photos[0], sidecar)
         sync_from_xmp(db, [photos[0]])
-        assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target, unrelated}
+        assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, unrelated}
         assert not db.conn.execute('SELECT 1 FROM keywords WHERE name = ? AND parent_id = ?',
                                    ('Shared leaf', old_parent)).fetchone()
 
@@ -1910,7 +1910,7 @@ def test_catalog_import_resolves_multiple_non_location_merge_aliases(catalog, mo
         },
     })
     execute_import(['dummy.lrcat'], db, write_xmp=False)
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == expected
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == expected
 
 
 def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog, monkeypatch):
@@ -1942,7 +1942,7 @@ def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog,
     })
     result = execute_import(['dummy.lrcat'], db, write_xmp=False)
     assert result['skipped'] == 0
-    assert [k['name'] for k in db.keywords.get_for_photo(photo)] == ['Osprey']
+    assert [k['name'] for k in db.photo_keywords.get_for_photo(photo)] == ['Osprey']
 
 
 def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp_path):
@@ -1977,7 +1977,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
     assert result['failed'] == 0
     assert read_keywords(sidecar) == {'Retained spelling'}
     sync_from_xmp(db, [photos[1]])
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[1])} == {target}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[1])} == {target}
 
 
 @pytest.mark.parametrize('remove_before_sync', [False, True])
@@ -2014,7 +2014,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
         assert set(read_hierarchical_keywords(sidecar)) == {'New parent|New leaf', 'Things|Old leaf|Detail'}
         _import_keywords_for_photo(db, photos[0], sidecar)
         sync_from_xmp(db, [photos[0]])
-        assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {target, unrelated}
+        assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {target, unrelated}
     db.untag_photo(photos[0], target)
     db.remove_pending_changes(photos[0], 'keyword_add', 'New leaf')
     db.queue_change(photos[0], 'keyword_remove', 'New leaf')
@@ -2023,7 +2023,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
     assert set(read_hierarchical_keywords(sidecar)) == {'Things|Old leaf|Detail'}
     _import_keywords_for_photo(db, photos[0], sidecar)
     sync_from_xmp(db, [photos[0]])
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[0])} == {unrelated}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[0])} == {unrelated}
 
 
 @pytest.mark.parametrize('cancel_add', [False, True])
@@ -2066,7 +2066,7 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
         # pending edits are written; aliases must respect that removal too.
         _import_keywords_for_photo(db, photo, sidecar)
         sync_from_xmp(db, [photo])
-        assert not db.keywords.get_for_photo(photo)
+        assert not db.photo_keywords.get_for_photo(photo)
     pending = [dict(r) for r in db.pending_changes.list_all() if r['photo_id'] == photo]
     preview = client.get('/api/sync/preview').get_json()
     preview_photo = next(p for p in preview['photos'] if p['photo_id'] == photo)
@@ -2083,7 +2083,7 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
     assert set(read_hierarchical_keywords(sidecar)) == (set() if cancel_add else {'New parent|' + target_name})
     _import_keywords_for_photo(db, photo, sidecar)
     sync_from_xmp(db, [photo])
-    assert {k['id'] for k in db.keywords.get_for_photo(photo)} == (set() if cancel_add else {target})
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photo)} == (set() if cancel_add else {target})
 
 
 def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, tmp_path):
@@ -2115,7 +2115,7 @@ def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, t
     assert read_keywords(sidecar) == {'Robin'}
     assert set(read_hierarchical_keywords(sidecar)) == {'People|Robin'}
     sync_from_xmp(db, [photo])
-    assert {k['id'] for k in db.keywords.get_for_photo(photo)} == {individual}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photo)} == {individual}
 
 
 def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, tmp_path):
@@ -2173,7 +2173,7 @@ def test_flat_only_import_resolves_unambiguous_merged_nested_leaf(catalog, tmp_p
             },
         })
         execute_import(['dummy.lrcat'], db, write_xmp=False)
-    assert {k['id'] for k in db.keywords.get_for_photo(photos[2])} == {target}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photos[2])} == {target}
     assert not db.conn.execute('SELECT 1 FROM keywords WHERE name = ?', ('Old leaf',)).fetchone()
 
 
@@ -2518,7 +2518,7 @@ def test_location_merge_preserves_directly_tagged_ancestor(catalog, tmp_path, mo
     assert sync_to_xmp(db)['failed'] == 0
     assert read_keywords(sidecar) == {'New County', 'Lake'}
     assert 'New County|Lake' in read_hierarchical_keywords(sidecar)
-    assert {k['id'] for k in db.keywords.get_for_photo(photo)} == {target, leaf}
+    assert {k['id'] for k in db.photo_keywords.get_for_photo(photo)} == {target, leaf}
     # Clearing the exported leaf must leave the separately assigned ancestor.
     db.untag_photo(photo, leaf)
     db.queue_change(photo, 'location', 'effective')
