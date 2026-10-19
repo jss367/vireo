@@ -654,6 +654,7 @@ class _WorkingCopyBatch:
             with Image.open(wc_abs) as _wc:
                 wc_w, wc_h = _wc.size
         except Exception:
+            # broad: PIL raises a wide set on bad files.
             # PIL couldn't open the file: corrupt / truncated /
             # unsupported. Treat as a failed extraction so the
             # companion fallback runs instead of caching an
@@ -662,7 +663,7 @@ class _WorkingCopyBatch:
                 "RAW working-copy extraction for photo %s produced "
                 "an unreadable file %s; retrying from companion "
                 "JPEG %s",
-                row["id"], wc_abs, companion_path,
+                row["id"], wc_abs, companion_path, exc_info=True,
             )
             return False
         # Use a 1% relative tolerance (not the request paths' 1px slack):
@@ -1069,7 +1070,7 @@ class _WorkingCopyBatch:
                 self.db, self.vireo_dir,
                 protect_paths=set(self.retained_new_files) - {wc_abs},
             )
-        except Exception:
+        except Exception:  # broad: quota maintenance is best-effort; the copies written so far are valid
             log.exception(
                 "Working-copy quota enforcement failed mid-batch"
             )
@@ -1394,7 +1395,7 @@ class _WorkingCopyBatch:
                 self.working_copy_stats(self.vireo_dir)["size"] - batch_bytes,
             )
         except Exception:
-            # Accounting failure must not strand the batch; fall back to
+            # broad: accounting failure must not strand the batch; fall back to
             # the batch-only comparison the trim used before.
             log.exception(
                 "Working-copy usage accounting failed; trimming "
@@ -1531,6 +1532,7 @@ class _WorkingCopyBatch:
             else:
                 self.evict_if_over_quota(self.db, self.vireo_dir)
         except Exception:
+            # broad: quota maintenance is best-effort.
             # The working copies themselves are valid even if quota
             # maintenance hits a transient filesystem/database error. Keep
             # the scan result and retry enforcement at startup or on the

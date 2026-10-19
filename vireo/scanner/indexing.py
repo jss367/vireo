@@ -307,14 +307,14 @@ class _FileIndexer:
                     with rawpy.imread(str(image_path)) as raw:
                         width = raw.sizes.width
                         height = raw.sizes.height
-                except Exception:
-                    log.debug("Could not read RAW dimensions from %s", image_path)
+                except Exception:  # broad: rawpy raises undocumented errors; dimensions stay unknown
+                    log.debug("Could not read RAW dimensions from %s", image_path, exc_info=True)
             else:
                 try:
                     with Image.open(str(image_path)) as img:
                         width, height = img.size
-                except Exception:
-                    log.debug("Could not read dimensions from %s", image_path)
+                except Exception:  # broad: PIL raises a wide set on bad files; dimensions stay unknown
+                    log.debug("Could not read dimensions from %s", image_path, exc_info=True)
 
         # Timestamp from ExifTool
         timestamp = _extract_timestamp(exif_group)

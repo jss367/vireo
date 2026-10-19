@@ -7,7 +7,6 @@ caller pauses.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import multiprocessing
 import time
@@ -197,12 +196,13 @@ class _FeatureHasher:
             # held so a replacement scan cannot claim the same
             # permits while old workers are still consuming CPU.
             for proc in list(getattr(pool, "_processes", {}).values()):
-                # Best-effort kill of a worker that may already be
-                # gone; shutdown(wait=True) below reaps the rest.
-                with contextlib.suppress(Exception):
+                try:
                     proc.terminate()
+                except Exception:  # broad: the worker may already be gone; shutdown(wait=True) below reaps the rest
+                    log.debug("Could not terminate a feature worker", exc_info=True)
             pool.shutdown(wait=True, cancel_futures=True)
         except BaseException:
+            # broad: stops the workers on any exit, cancel and interrupt included, then re-raises.
             # Actively terminate the worker processes so their CPU
             # work stops now, then wait for them to actually exit
             # before letting ``_claim_worker_count`` release its
@@ -213,9 +213,10 @@ class _FeatureHasher:
             # process-wide budget, and ``JobRunner.shutdown()``
             # could report completion while hashing continued.
             for proc in list(getattr(pool, "_processes", {}).values()):
-                # Must not replace the in-flight exception.
-                with contextlib.suppress(Exception):
+                try:
                     proc.terminate()
+                except Exception:  # broad: must not replace the in-flight exception
+                    log.debug("Could not terminate a feature worker", exc_info=True)
             pool.shutdown(wait=True, cancel_futures=True)
             raise
         else:

@@ -185,7 +185,7 @@ def _link_duplicate_twin_dirs(
             db.add_workspace_folder(
                 workspace_id, folder_row["id"], is_root=True,
             )
-        except Exception as exc:
+        except Exception as exc:  # broad: per-folder boundary; the failure is recorded and the other folders still link
             db.rollback()
             failures[folder_path] = str(exc)
             log.exception(
