@@ -670,7 +670,14 @@
     // Workspace folder rows are rendered independently from the Work Locally
     // panel. Refresh them as soon as the server accepts a transition so the
     // button the user clicked cannot continue to look idle.
-    if (typeof loadWsFolders === 'function') loadWsFolders();
+    reloadPageFolderRows();
+  }
+
+  // The open page's folder rows (Workspace) render separately from the Work
+  // Locally panel; the page hands over their loader as a page hook.
+  function reloadPageFolderRows() {
+    var loadWsFolders = Vireo.pageHook('loadWsFolders');
+    if (loadWsFolders) loadWsFolders();
   }
 
   /** @param {string} jobId @param {WorkLocalProgress} progress */ function publishJobProgress(jobId, progress) {
@@ -810,7 +817,7 @@
       }
       publishFolderStatus();
       render();
-      if (typeof loadWsFolders === 'function') loadWsFolders();
+      reloadPageFolderRows();
       updateStageDialogBlocker();
       scheduleBlockingJobRefresh();
       return data;

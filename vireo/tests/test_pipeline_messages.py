@@ -48,6 +48,7 @@ def test_workspace_job_history_prefers_the_summary(app_and_db):
     app, _ = app_and_db
     page = page_with_scripts(app.test_client(), "/workspace")
     history = page[page.index("async function loadHistory("):]
-    history = history[:history.index("\nfunction ", 1)]
+    history = history[:history.index("</script>")]
     assert "if (r.summary)" in history
-    assert history.index("result = r.summary") < history.index("JSON.parse(r.result)")
+    # The raw key dump (resultKeysText) is only the fallback.
+    assert history.index("result = r.summary") < history.index("resultKeysText(r.result)")

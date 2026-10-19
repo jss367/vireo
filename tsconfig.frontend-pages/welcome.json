@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/welcome.d.ts",
+    "../vireo/static/welcome/boot.js",
+    "../vireo/static/welcome/labels-step.js",
+    "../vireo/static/welcome/model-step.js",
+    "../vireo/static/welcome/shared.js",
+    "../vireo/static/welcome/state.js",
+    "../vireo/static/welcome/system-check.js"
+  ]
+}

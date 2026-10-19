@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/audit.d.ts",
+    "../vireo/static/audit/boot.js",
+    "../vireo/static/audit/drift.js",
+    "../vireo/static/audit/helpers.js",
+    "../vireo/static/audit/integrity.js",
+    "../vireo/static/audit/orphans.js",
+    "../vireo/static/audit/shared.js",
+    "../vireo/static/audit/sidecars.js",
+    "../vireo/static/audit/state.js",
+    "../vireo/static/audit/summary.js",
+    "../vireo/static/audit/untracked.js"
+  ]
+}
