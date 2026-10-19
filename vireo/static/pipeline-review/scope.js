@@ -34,8 +34,10 @@ function dismissDegradedBanner() {
 // different entries do not let one inverse success hide the warning while
 // the other entry's cache is still out of sync. An undo/redo on an id that
 // is not in the set is a different edit (different photos usually) and the
-// outstanding staleness still stands, so the set is left alone.
-/** @type {Set<number>} */ var _historyCacheStaleEntryIds = new Set();
+// outstanding staleness still stands, so the set is left alone. A failure
+// without an id remains as null until the user leaves the page; no known
+// entry's success can prove that unidentified failure was repaired.
+/** @type {Set<number | null>} */ var _historyCacheStaleEntryIds = new Set();
 
 /**
  * An undo or redo stood, but the saved review results could not follow it
@@ -51,7 +53,7 @@ function renderHistoryCacheStaleBanner(change) {
   var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
   if (!banner || !text || !change) return;
   if (change.pipeline_cache_stale) {
-    if (change.entry_id != null) _historyCacheStaleEntryIds.add(Number(change.entry_id));
+    _historyCacheStaleEntryIds.add(change.entry_id != null ? Number(change.entry_id) : null);
     var undo = change.undone !== undefined;
     var description = (undo ? change.undone : change.redone) || 'the last edit';
     text.innerHTML = '<strong>These review results may be out of date.</strong> '
