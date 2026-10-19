@@ -229,7 +229,7 @@ class _HomonymConflicts:
         if cache_key in self.cache:
             return self.cache[cache_key]
         conflict = False
-        for name in self.db.keywords.other_linked_species_names(
+        for name in self.db.keyword_taxa.other_linked_species_names(
             target_taxon_id, target_kid_id,
         ):
             if keyword_match_key(name) == self.old_target_key:
@@ -477,7 +477,7 @@ class _SpeciesConfirmation:
         # type='taxonomy' (the Keywords type dropdown) doesn't set the
         # legacy is_species column, and the rest of the app treats
         # (is_species = 1 OR type = 'taxonomy') as species.
-        self.old_kid_row = self.db.keywords.species_root_by_name(previous_species)
+        self.old_kid_row = self.db.keyword_taxa.species_root_by_name(previous_species)
         if self.old_kid_row is not None and self.old_kid_row["taxon_id"] is None:
             # Unlinked root: ``previous_species`` names a specific
             # legacy row whose identity is that row's own id, not a
@@ -570,7 +570,7 @@ class _SpeciesConfirmation:
         if self.remove_mode:
             # Nothing is being added: never create a keyword row just to
             # remove it. Report the existing root's id when one exists.
-            stored = db.keywords.species_root_by_name(
+            stored = db.keyword_taxa.species_root_by_name(
                 self.species, prefer_taxonomy=True,
             )
             self.kid = stored["id"] if stored else None

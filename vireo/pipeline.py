@@ -21,7 +21,7 @@ from contextlib import suppress
 import numpy as np
 from file_replace import replace_file
 from repositories.masks_features import PipelineFeatures
-from services import dashboard_stats, stage_counts
+from services import dashboard_stats, stage_counts, subject_masks
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _atomic_json_dump(data, path):
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
         replace_file(tmp_path, path)
-    except Exception:
+    except Exception:  # broad: remove the temp file on any failure, then re-raise
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
@@ -2438,7 +2438,7 @@ def _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids):
         photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
         if not photo_ids:
             return []
-    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
+    photos = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=photo_ids)
     if exclude_set and photo_ids is None:
         photos = [p for p in photos if p["id"] not in exclude_set]
     return photos
@@ -2451,7 +2451,7 @@ def detect_eye_keypoints_stage(
 ):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
-    For each eligible photo (see Database.list_photos_for_eye_keypoint_stage),
+    For each eligible photo (see subject_masks.list_photos_for_eye_keypoint_stage),
     run the routed keypoint model, apply the four-gate trust policy, and
     persist (eye_x, eye_y, eye_conf, eye_tenengrad) for gated-through photos.
     Per-photo exceptions are logged and do not abort the stage.
@@ -2519,7 +2519,7 @@ def detect_eye_keypoints_stage(
             # takes over with an accurate processed count.
             aborted = True
             break
-        except Exception:
+        except Exception:  # broad: per-photo boundary; keypoint inference raises undocumented errors
             log.warning(
                 "Eye keypoint detection failed for photo %s", row["id"],
                 exc_info=True,

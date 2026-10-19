@@ -139,7 +139,7 @@ def place_details(
 
     try:
         payload = _get_json(url)
-    except Exception:  # noqa: BLE001 — log + degrade
+    except Exception:  # noqa: BLE001  # broad: Places HTTP/JSON errors degrade to no details
         logger.warning("place_details: HTTP/JSON failure for place_id=%s", place_id, exc_info=True)
         return None
 
@@ -290,7 +290,7 @@ def _google_results(url: str, where: str) -> list[dict] | None:
     """Fetch a Google search/geocode URL; ``None`` means a true no-match."""
     try:
         payload = _get_json(url)
-    except Exception as e:  # noqa: BLE001 — log + raise transient
+    except Exception as e:  # noqa: BLE001  # broad: Places HTTP/JSON errors re-raise as transient
         logger.warning("%s: HTTP/JSON failure", where, exc_info=True)
         raise PlacesTransientError("HTTP/JSON failure") from e
     status = payload.get("status", "")

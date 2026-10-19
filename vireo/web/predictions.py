@@ -221,7 +221,7 @@ def create_predictions_blueprint(
                 keywords = db.photo_keywords.get_for_photo(d["photo_id"])
                 d["existing_species"] = [
                     k["name"] for k in keywords
-                    if db.keywords.is_species(k["id"])
+                    if db.keyword_taxa.is_species(k["id"])
                 ]
             # Attach alternatives
             key = (d.get("detection_id"), d.get("model"))

@@ -4,7 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import dashboard_stats, stage_counts
+from services import dashboard_stats, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -638,7 +638,7 @@ def test_keyword_hierarchy(tmp_path):
     db.tag_photo(pid, raptors)
     db.tag_photo(pid, hawk)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) == 3
 
     hawk_row = [k for k in tree if k['name'] == 'Red-tailed hawk'][0]
@@ -2088,7 +2088,7 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -2118,7 +2118,7 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
                 return {"taxon_id": 123, "scientific_name": "California"}
             return None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
 
     assert updated == 0
     row = db.conn.execute(
@@ -3557,7 +3557,7 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    db.keywords.mark_species(FakeTaxonomy())
+    db.keyword_taxa.mark_species(FakeTaxonomy())
 
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -3589,7 +3589,7 @@ def test_mark_species_keywords_fixes_type_taxonomy_with_is_species_zero(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
@@ -3634,7 +3634,7 @@ def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path)
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -3667,7 +3667,7 @@ def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -5093,7 +5093,7 @@ def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
     # Active ws = A. Even if caller passes B's folder id by mistake,
     # results must not include B's photo.
     db._active_workspace_id = ws_a
-    hits = db.get_photos_missing_masks(folder_ids=[fa, fb])
+    hits = subject_masks.get_photos_missing_masks(db, folder_ids=[fa, fb])
     hit_ids = {h["id"] for h in hits}
     assert pa in hit_ids
     assert pb not in hit_ids, "workspace B photo must not leak into workspace A"
@@ -5238,8 +5238,8 @@ def test_is_keyword_species(tmp_path):
     kid_species = db.add_keyword('Robin', is_species=True)
     kid_location = db.add_keyword('The Park', is_species=False)
 
-    assert db.keywords.is_species(kid_species) is True
-    assert db.keywords.is_species(kid_location) is False
+    assert db.keyword_taxa.is_species(kid_species) is True
+    assert db.keyword_taxa.is_species(kid_location) is False
 
 
 # --- Cluster 5: Calendar Data ---
@@ -6097,7 +6097,7 @@ def test_keyword_tree_includes_type(tmp_path):
     kid = db.add_keyword('Cardinal', is_species=True)
     db.tag_photo(pid, kid)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) >= 1
     cardinal = [k for k in tree if k['name'] == 'Cardinal'][0]
     assert cardinal['type'] == 'taxonomy'
@@ -6493,7 +6493,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     # Top-confidence prediction has species but no taxonomy_class/scientific_name.
     db.predictions.add(
         det_ids[0],
@@ -6515,7 +6515,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         },
     )
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     assert rows[0]["taxonomy_class"] == "Mammalia"
     assert rows[0]["scientific_name"] == "Vulpes vulpes"
@@ -6553,7 +6553,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     db.predictions.add(
         det_ids[0],
         species="Turdus migratorius",
@@ -6571,7 +6571,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         taxonomy={"class": "Aves", "scientific_name": "Corvus corax"},
     )
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     assert rows[0]["scientific_name"] == "Turdus migratorius"
 
@@ -6598,7 +6598,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
         detector_model="MegaDetector",
         prompt=(0, 0, 1, 1),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     # Stale fingerprint — high confidence + bird taxonomy.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
@@ -6619,7 +6619,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     )
     db.conn.commit()
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     # Must pick the current-fingerprint row, not the stale higher-confidence one.
     assert rows[0]["taxonomy_class"] == "Mammalia", (
@@ -6658,7 +6658,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
             detector_model="MegaDetector",
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
-        db.set_active_mask_variant(pid, "test")
+        subject_masks.set_active_mask_variant(db, pid, "test")
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -6666,12 +6666,12 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
         )
 
     # No filter: both photos.
-    assert {r["id"] for r in db.list_photos_for_eye_keypoint_stage()} == {pid_a, pid_b}
+    assert {r["id"] for r in subject_masks.list_photos_for_eye_keypoint_stage(db)} == {pid_a, pid_b}
     # Scoped to one photo.
-    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=[pid_a])
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=[pid_a])
     assert [r["id"] for r in rows] == [pid_a]
     # Empty iterable short-circuits to [].
-    assert db.list_photos_for_eye_keypoint_stage(photo_ids=set()) == []
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=set()) == []
 
 
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
@@ -18768,8 +18768,8 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     assert db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
     ).fetchone()["taxon_id"] == taxa["Verdin"]
-    assert db.keywords.is_species(family) is False
-    assert db.keywords.is_species(nested) is True
+    assert db.keyword_taxa.is_species(family) is False
+    assert db.keyword_taxa.is_species(nested) is True
     assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
     assert db.get_photos_with_equivalent_species([pid], root) == {pid}
 
@@ -21504,7 +21504,7 @@ def test_set_active_mask_variant_denormalizes(tmp_path):
             crop_complete=0.9,
         ),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant, subject_size, "
         "subject_tenengrad, bg_tenengrad, crop_complete FROM photos WHERE id=1"
@@ -21524,7 +21524,7 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
     with pytest.raises(ValueError):
-        db.set_active_mask_variant(1, "sam3-small")
+        subject_masks.set_active_mask_variant(db, 1, "sam3-small")
 
 
 def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
@@ -21569,7 +21569,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
     )
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
-        db.set_active_mask_variant(1, "sam2-large")
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     # The photos row must remain unactivated — no denormalised
     # mask_path or subject_size from the obsolete mask.
     row = db.conn.execute(
@@ -21609,10 +21609,10 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
         cfg.save({**original, "detector_confidence": 0.5})
         import pytest
         with pytest.raises(ValueError, match="another subject"):
-            db.set_active_mask_variant(1, "sam2-large")
+            subject_masks.set_active_mask_variant(db, 1, "sam2-large")
         with pytest.raises(ValueError, match="another subject"):
-            db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.19)
-        db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.12)
+            subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.19)
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.12)
         row = db.conn.execute(
             "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
         ).fetchone()
@@ -21640,7 +21640,7 @@ def test_set_active_mask_variant_allows_migration_without_detections(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="md", prompt=(1, 2, 3, 4),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -21680,7 +21680,7 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
     )
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
-        db.set_active_mask_variant(1, "sam2-large")
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -21738,7 +21738,7 @@ def test_delete_masks_for_variant_refuses_active(tmp_path):
         1, "sam2-small", str(p),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-small")
     with pytest.raises(ValueError):
         db.masks_features.delete_for_variant("sam2-small")
 
@@ -21764,7 +21764,7 @@ def test_delete_inactive_masks(tmp_path):
         1, "sam2-large", str(pb),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     n = db.masks_features.delete_inactive()
     assert n == 1
     assert not pa.exists()
@@ -22047,11 +22047,11 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
     )
     # Without a floor the (matching, low-confidence) detection keeps
     # the mask fresh.
-    assert db.delete_stale_masks() == 0
+    assert subject_masks.delete_stale_masks(db) == 0
     assert p.exists()
     # With a floor above the detection's confidence the mask becomes
     # stale and gets removed.
-    assert db.delete_stale_masks(detector_confidence=0.5) == 1
+    assert subject_masks.delete_stale_masks(db, detector_confidence=0.5) == 1
     assert not p.exists()
 
 
@@ -22141,7 +22141,7 @@ def test_delete_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(99, 20, 100, 200),
     )
-    deleted = db.delete_stale_masks()
+    deleted = subject_masks.delete_stale_masks(db)
     assert deleted == 1
     assert fresh.exists()
     assert not stale_path.exists()
@@ -22240,7 +22240,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-large", str(inside),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     db.masks_features.delete_inactive()
     assert outside.exists(), "delete_inactive_masks unlinked outside path"
     # Active variant inside masks dir is preserved.
@@ -22259,7 +22259,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-small", str(stale_outside),
         detector_model="md", prompt=(1, 1, 1, 1),
     )
-    db.delete_stale_masks()
+    subject_masks.delete_stale_masks(db)
     assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
 
 
@@ -22286,7 +22286,7 @@ def test_mask_variants_summary(tmp_path):
             pid, var, str(p),
             detector_model="md", prompt=(0, 0, 0, 0),
         )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
 
     summary = {s["variant"]: s for s in db.masks_features.variants_summary()}
     assert summary["sam2-small"]["count"] == 2
@@ -22328,7 +22328,7 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
     db.masks_features.upsert_mask(p3, "sam2-large", "/p/c.large.png",
         detector_model="md", prompt=(0, 0, 0, 0))
 
-    db.set_active_mask_variant(p1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-large")
 
     db.set_active_workspace(ws_in)
     cov = {c["variant"]: c for c in db.masks_features.variant_coverage()}
@@ -22670,7 +22670,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
             detector_model="MegaDetector",
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
-        db.set_active_mask_variant(pid, "test")
+        subject_masks.set_active_mask_variant(db, pid, "test")
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -22680,7 +22680,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
 
     _cap_sqlite_vars(db)
     scope = pids + list(range(1_000_000, 1_001_200))  # 1202 ids > 999 cap
-    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=scope)
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=scope)
     assert {r["id"] for r in rows} == set(pids)
 
 
@@ -23751,7 +23751,7 @@ def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -23813,7 +23813,7 @@ def test_mark_species_keywords_links_subspecies_to_species_ancestor(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
         (keyword_id,),
@@ -23874,7 +23874,7 @@ def test_mark_species_keywords_rejects_sole_wrong_lineage_candidate(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 0
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -23959,7 +23959,7 @@ def test_mark_species_keywords_disambiguates_homonym_species_by_lineage(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -24013,7 +24013,7 @@ def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24064,7 +24064,7 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -24120,7 +24120,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",

@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from repositories.job_history import JobHistoryRepository
     from repositories.keyword_merges import KeywordMergeRepository
     from repositories.keyword_provenance import KeywordProvenanceRepository
+    from repositories.keyword_taxa import KeywordTaxonRepository
+    from repositories.keyword_tree import KeywordTreeRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
@@ -3840,10 +3842,12 @@ class Database:
         reads and writes work in any workspace. Do not hold the returned
         repository across ``set_active_workspace``.
 
-        Work that reads the workspace config or the photo scope first stays
-        on ``Database`` (``set_active_mask_variant``, ``delete_stale_masks``,
-        ``sam_variant_rerun_warning``, ``get_photos_missing_masks``,
-        ``list_photos_for_eye_keypoint_stage``, ``upsert_photo_embedding``).
+        Work that reads the workspace config or the photo scope first lives
+        in ``services/subject_masks.py`` (``set_active_mask_variant``,
+        ``delete_stale_masks``, ``sam_variant_rerun_warning``,
+        ``get_photos_missing_masks``, ``list_photos_for_eye_keypoint_stage``);
+        ``upsert_photo_embedding`` stays on ``Database`` behind its workspace
+        guard.
         """
         return self._masks_features_repository()
 
@@ -3889,25 +3893,6 @@ class Database:
         hold the returned repository across a connection swap.
         """
         return self._culling_repository()
-
-    def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
-        """Mark `variant` as active for `photo_id` and denormalize its
-        fields into the photos row (mask_path + per-mask features) so
-        downstream readers (scoring, pipeline) see the active mask.
-
-        ``_commit=False`` lets bulk callers (e.g. the
-        ``/api/pipeline/active-mask-variant`` endpoint) batch many
-        per-photo updates into a single commit, instead of paying a WAL
-        fsync per photo. Bulk callers MUST call ``commit_with_retry``
-        themselves once the loop completes.
-        """
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
-        min_conf = effective.get("detector_confidence", 0.2)
-        self._masks_features_repository().set_active_variant(
-            photo_id, variant, min_conf, _commit,
-            weak_rescue_min_conf=weak_rescue_min_conf,
-        )
 
     def _masks_dir_real(self):
         """Realpath of the masks directory, used as the containment root
@@ -3957,137 +3942,11 @@ class Database:
         except OSError:
             log.warning("Failed to remove mask file %s", abs_path)
 
-    def delete_stale_masks(self, detector_confidence=None):
-        """Remove rows + files for masks whose prompt no longer matches
-        the current primary detection. Skips active variants (caller can
-        re-run them through the pipeline instead of dropping the
-        currently-displayed mask).
-
-        ``detector_confidence`` is forwarded to ``find_stale`` so the
-        deletion set matches the count the storage card shows.
-        """
-        repo = self._masks_features_repository()
-        stale = repo.find_stale(detector_confidence=detector_confidence)
-        return repo.delete_stale(stale)
-
-    def sam_variant_rerun_warning(
-        self,
-        sam2_variant,
-        photo_ids=None,
-        min_conf=None,
-        selected_max_ratio=0.25,
-        alternate_min_ratio=0.80,
-    ):
-        """Warn when selected SAM coverage is poor but another variant is high.
-
-        The target set matches the extract-masks stage's existing-photo
-        eligibility: active-workspace photos in scope with at least one real
-        detection above the workspace detector-confidence floor. This keeps a
-        workspace-level SAM configuration from looking empty just because a
-        different variant already produced masks for those same target photos.
-        """
-        if not sam2_variant or sam2_variant == "unknown":
-            return None
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-
-        # Resolve the workspace before staging the photo scope, as the
-        # eagerly scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        scope_sql, scope_params = self.stats.scope_clause(photo_ids)
-        return repo.sam_variant_rerun_warning(
-            sam2_variant, min_conf, scope_sql, scope_params,
-            selected_max_ratio=selected_max_ratio,
-            alternate_min_ratio=alternate_min_ratio,
-        )
-
-    def get_photos_missing_masks(self, folder_ids=None):
-        """Get photos that have detections but no masks yet.
-
-        Returns photos that have at least one detection in the current workspace
-        but no mask_path set. Each row includes the selected primary
-        detection box.
-
-        Args:
-            folder_ids: optional list of folder IDs to filter by.
-                        If None, returns all workspace photos without masks.
-        Returns:
-            list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
-        """
-        import config as cfg
-        # Resolve the workspace before reading the config, as the eagerly
-        # scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        return repo.photos_missing_masks(folder_ids, min_conf)
-
-    def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
-        """Return photos eligible for the eye-focus keypoint stage.
-
-        Eligibility:
-          * photo is in the active workspace (via workspace_folders)
-          * mask_path is set (SAM2 produced a subject mask)
-          * has at least one non-synthetic detection (excludes full-image
-            rows that exist only to anchor predictions)
-          * has at least one prediction on that detection
-          * has not been attempted with the current keypoint model fingerprint
-            yet. The stage stamps eye_kp_fingerprint even when no trustworthy
-            eye is found, so no-eye photos do not rerun forever.
-          * (optional) photo.id is in ``photo_ids`` when provided — lets the
-            caller scope the stage to a collection so a pipeline run doesn't
-            touch unrelated photos elsewhere in the workspace
-
-        Returns one row per photo. Only the effective primary detection
-        can supply eye predictions, resolved with the same
-        threshold-aware ordering (``subjects.primary_order_sql``) that
-        mask extraction and ``set_active_mask_variant`` use: user
-        override in ``photo_subject_choices`` → subject-analysis quality
-        score → detector confidence. Anchoring on the current floor
-        (not the cached ``photo_subject_state``) means a workspace
-        raising ``detector_confidence`` above the previously stored
-        subject still surfaces the new primary for the eye stage.
-        Within the chosen detection, predictions carrying routable
-        taxonomy info (``taxonomy_class`` or ``scientific_name`` set)
-        rank ahead of predictions missing both, so a top-confidence but
-        taxonomy-less prediction never masks a routable one that
-        ``_resolve_keypoint_model`` could actually run. Each row is a
-        dict with the fields the eye stage needs to run without further
-        DB calls: id, folder_id, filename, width, height, mask_path,
-        box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
-        scientific_name, species.
-        """
-        import config as cfg
-        from pipeline import EYE_KP_FINGERPRINT_VERSION
-        # Resolve the workspace before reading the config or staging the
-        # photo scope (an empty scope returns early), as the eagerly scoped
-        # repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        if photo_ids is not None:
-            photo_ids = list(photo_ids)
-            if not photo_ids:
-                return []
-        extra_where, scope_params = self.stats.scope_clause(photo_ids)
-        return repo.list_photos_for_eye_keypoint_stage(
-            min_conf, extra_where, scope_params,
-            eye_kp_fingerprint_version=EYE_KP_FINGERPRINT_VERSION,
-        )
-
     # -- Keywords --
 
     @property
     def keywords(self) -> KeywordRepository:
-        """Keyword rows, tree and species names: ``db.keywords.get_tree()`` and friends.
+        """Keyword rows: ``db.keywords.name_of(keyword_id)``, ``db.keywords.ensure_default_genres()`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
@@ -4105,22 +3964,75 @@ class Database:
         passed as a resolver), so methods keep raising at the point they
         always did. Every façade method a moved body calls is handed over
         bound, under its ``Database`` name, so monkeypatches keep reaching
-        the moved code; the class attributes and ``db`` module names the
-        bodies read (``_chunks``, ``log``, ``resolve_import_alias``, the
-        keyword-type and sentinel constants) are read here, at call time.
+        the moved code; the ``db`` module names the bodies read
+        (``resolve_import_alias``, ``KEYWORD_TYPES``) are read here, at call
+        time.
         """
         from repositories.keywords import KeywordRepository
 
         return KeywordRepository(
             self.conn,
             self._ws_id,
-            chunks=_chunks,
             keyword_types=KEYWORD_TYPES,
-            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
-            taxon_lookup_variants=_taxon_lookup_variants,
             resolve_import_alias=resolve_import_alias,
             facade=self,
         )
+
+    def _keyword_taxon_repository(self) -> KeywordTaxonRepository:
+        """Build the keyword species-name and taxon-link repository on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. The façade
+        methods its bodies call are handed over bound, under their
+        ``Database`` names; the detection sentinel and the taxon-name variant
+        helper are read here, at call time.
+        """
+        from repositories.keyword_taxa import KeywordTaxonRepository
+
+        return KeywordTaxonRepository(
+            self.conn,
+            detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
+            taxon_lookup_variants=_taxon_lookup_variants,
+            facade=self,
+        )
+
+    @property
+    def keyword_taxa(self) -> KeywordTaxonRepository:
+        """Species names and taxon links of keywords: ``db.keyword_taxa.mark_species(taxonomy)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_keyword_taxon_repository``. Catalog-wide,
+        so it needs no active workspace. The lookups other keyword
+        repositories bind by name (``detect_keyword_case_convention``,
+        ``resolve_species_display_name``, ``_species_root_name_for_taxon``,
+        ``_lookup_taxon_id_for_keyword``, ``_resolve_species_by_lineage``)
+        keep their ``Database`` wrappers.
+        """
+        return self._keyword_taxon_repository()
+
+    def _keyword_tree_repository(self) -> KeywordTreeRepository:
+        """Build the keyword-tree repository on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is
+        passed as a resolver). The façade methods its bodies call (the
+        duplicate-merge pass, the dependent-rename carry and the
+        species-curation renames) are handed over bound, under their
+        ``Database`` names, so monkeypatches keep reaching the moved code.
+        """
+        from repositories.keyword_tree import KeywordTreeRepository
+
+        return KeywordTreeRepository(
+            self.conn, self._ws_id, chunks=_chunks, facade=self,
+        )
+
+    @property
+    def keyword_tree(self) -> KeywordTreeRepository:
+        """The keyword hierarchy and its edits: ``db.keyword_tree.get_tree()``, ``db.keyword_tree.delete(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped methods resolve the workspace at use.
+        Do not retain one across a workspace switch.
+        """
+        return self._keyword_tree_repository()
 
     def _photo_keyword_repository(self) -> PhotoKeywordRepository:
         """Build the photo-keyword association reads on this connection.
@@ -4239,7 +4151,7 @@ class Database:
             'upper' if most are ALL CAPS
             None if not enough data to determine
         """
-        return self._keyword_repository().detect_case_convention()
+        return self._keyword_taxon_repository().detect_case_convention()
 
     def _apply_case_convention(self, name, convention):
         """Apply a casing convention to a species name."""
@@ -4331,7 +4243,7 @@ class Database:
         predicting where add_keyword will land but wrong to show a user as
         though a model or the catalog had said it.
         """
-        return self._keyword_repository().resolve_species_display(
+        return self._keyword_taxon_repository().resolve_species_display(
             name, apply_case_convention=apply_case_convention, case_convention=case_convention,
         )
 
@@ -4360,7 +4272,7 @@ class Database:
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
-        return self._keyword_repository().species_root_name_for_taxon(taxon_id)
+        return self._keyword_taxon_repository().species_root_name_for_taxon(taxon_id)
 
     def _lookup_taxon_id_for_keyword(
         self, name, prefer_species=False, species_only=False,
@@ -4405,7 +4317,7 @@ class Database:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        return self._keyword_repository().lookup_taxon_id(
+        return self._keyword_taxon_repository().lookup_taxon_id(
             name, prefer_species=prefer_species, species_only=species_only,
         )
 
@@ -4479,7 +4391,7 @@ class Database:
     def merge_taxonomy_root_twins(self):
         """Fold each top-level species twin into the row filed in the tree.
 
-        The pairs are ``KeywordRepository.taxonomy_root_twins``. Both rows
+        The pairs are ``KeywordTreeRepository.taxonomy_root_twins``. Both rows
         carry the same name, so the sidecars already hold the survivor's
         flat keyword and the merge queues no XMP change. All-or-nothing;
         returns the number of rows merged away.
@@ -4488,7 +4400,7 @@ class Database:
         with self.transaction():
             if not self.in_transaction:
                 self.begin_immediate()
-            for root_id, placed_id in self.keywords.taxonomy_root_twins():
+            for root_id, placed_id in self.keyword_tree.taxonomy_root_twins():
                 merged += self._merge_keyword_into(
                     root_id, placed_id, pending_source_only=True,
                 )
@@ -4780,7 +4692,7 @@ class Database:
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            rows = self._keyword_repository().duplicate_scope_rows(ws)
+            rows = self._keyword_tree_repository().duplicate_scope_rows(ws)
             grouped = {}
             for row in rows:
                 key = keyword_match_key(row["name"])
@@ -4821,12 +4733,12 @@ class Database:
                 # re-queries and picks a fresh survivor) and drop dead
                 # remove_ids so we don't UPDATE photo_keywords toward a
                 # non-existent FK target.
-                alive = self._keyword_repository().live_ids(all_ids)
+                alive = self._keyword_tree_repository().live_ids(all_ids)
                 if keep_id not in alive:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
-                self.keywords.normalize_row_name(keep_id)
+                self.keyword_tree.normalize_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(
                         rid, keep_id, pending_source_only=True,
@@ -4850,7 +4762,7 @@ class Database:
         ``keywords`` UPDATE: only ``photo_keywords`` is read, and a name
         change does not touch it. Caller commits.
         """
-        return self._keyword_repository().rename_dependents(keyword_id, old_name, new_name)
+        return self._keyword_tree_repository().rename_dependents(keyword_id, old_name, new_name)
 
 
 
@@ -4865,7 +4777,7 @@ class Database:
         writing the retired name into XMP and drops starred photos out of the
         highlight and life-list queries. Caller commits.
         """
-        return self._keyword_repository().reparent_disambiguated(child, dst_id, new_name)
+        return self._keyword_tree_repository().reparent_disambiguated(child, dst_id, new_name)
 
     def _merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -5127,7 +5039,7 @@ class Database:
         # 400. For NULL parents a cross-type peer is allowed to
         # coexist (mirrors add_keyword).
         if parent_id is not None:
-            cross = self._keyword_repository().cross_type_peer(
+            cross = self._keyword_tree_repository().cross_type_peer(
                 new_name, parent_id, keyword_id,
             )
             if cross is not None:
@@ -5174,7 +5086,7 @@ class Database:
         # would otherwise leave two same-name taxonomy rows — NULL parents
         # bypass UNIQUE(name, parent_id).
         if 'name' in updates or 'type' in updates:
-            current = self._keyword_repository().get_update_target(keyword_id)
+            current = self._keyword_tree_repository().get_update_target(keyword_id)
             if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
@@ -5209,7 +5121,7 @@ class Database:
                     # (name, parent_id, type), so a rename onto a
                     # different-type peer must NOT silently retag photos
                     # across types.
-                    peer = self._keyword_repository().same_type_peer(
+                    peer = self._keyword_tree_repository().same_type_peer(
                         new_name, parent_id, effective_type, keyword_id,
                     )
                     if peer:
@@ -5222,7 +5134,7 @@ class Database:
                         self._merge_keyword_into(
                             keyword_id, peer["id"], pending_source_only=True,
                         )
-                        self._keyword_repository().commit()
+                        self._keyword_tree_repository().commit()
                         return peer["id"]
                     self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
@@ -5234,7 +5146,7 @@ class Database:
                 if name_changed:
                     _apply_rename_retype(updates, cur_type, taxon_id)
 
-        self._keyword_repository().apply_update(keyword_id, updates)
+        self._keyword_tree_repository().apply_update(keyword_id, updates)
         return keyword_id
 
     # -- Predictions --
@@ -7546,7 +7458,7 @@ class Database:
         zero matches, or multiple matches all return ``None`` rather than
         permanently crediting the wrong Life List species/class.
         """
-        return self._keyword_repository().resolve_species_by_lineage(
+        return self._keyword_taxon_repository().resolve_species_by_lineage(
             species_name, expected_ancestors,
         )
 

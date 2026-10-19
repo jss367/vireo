@@ -11,6 +11,7 @@ import glob as _glob
 import logging
 import os
 import shutil
+import sqlite3
 
 log = logging.getLogger(__name__)
 
@@ -640,7 +641,7 @@ def _neutralize_recycled_survivor(path, photo_id, dirs, db, backdate_target):
             return False
         try:
             mark_preview_cache_invalid(db, photo_id, size)
-        except Exception:
+        except sqlite3.Error:
             log.warning(
                 "Could not mark surviving preview %s invalid", path,
                 exc_info=True,

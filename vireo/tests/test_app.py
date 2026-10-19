@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
+from services import subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -16214,8 +16215,8 @@ def _seed_masks(db, tmp_path):
     # realistic state. delete_inactive_masks now skips photos with NULL
     # active (the partial-state case) rather than treating them as
     # entirely-inactive.
-    db.set_active_mask_variant(p1, "sam2-small")
-    db.set_active_mask_variant(p2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p2, "sam2-small")
     return masks_dir, p1, p2
 
 
@@ -24203,11 +24204,11 @@ def _run_id_conflicts_batch(html, payload):
     # From the first of the helpers ``batchAction`` leans on, so the code
     # under test is the shipped one rather than a paraphrase of it.
     start = html.find("function loadedPhoto(")
-    # Up to the page's startup, which follows ``batchAction`` and runs once
-    # the document has loaded.
-    end = html.rfind("document.addEventListener('DOMContentLoaded', function() { updateConflictThresholdControl(); });")
+    # To the end of static/id-conflicts/decisions.js, whose last function is
+    # ``batchAction`` (page_with_scripts inlines each file in its own tag).
+    end = html.find("</script>", start)
     assert start != -1 and end > start, (
-        "id_conflicts.html's batch action code could not be located"
+        "ID Conflicts' batch action code could not be located"
     )
     import json as _json
 
@@ -24237,7 +24238,7 @@ def test_id_conflicts_batch_accept_reports_group_expanded_rows_as_applied(
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/id-conflicts").get_data(as_text=True)
+    html = _page_with_scripts(client, "/id-conflicts")
     photos = [
         {"photo_id": 1, "best_prediction_id": 11},
         {"photo_id": 2, "best_prediction_id": 12},
@@ -24274,7 +24275,7 @@ def test_id_conflicts_batch_accept_reports_group_expanded_rows_as_applied(
 def test_id_conflicts_batch_unconfirmed_accept_fully_reloads(app_and_db):
     """A lost grouped-write response cannot be reconciled by selected IDs."""
     app, _ = app_and_db
-    html = app.test_client().get("/id-conflicts").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/id-conflicts")
     photos = [
         {"photo_id": 1, "best_prediction_id": 11},
         {"photo_id": 2, "best_prediction_id": 12},

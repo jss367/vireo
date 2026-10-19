@@ -8,6 +8,7 @@ rewrite and the developed-render relocation.
 
 import logging
 import os
+import stat
 from dataclasses import dataclass, field
 
 from .paths import (
@@ -784,32 +785,73 @@ class _PhotoFileTransfer:
 
         The catalog and developed outputs are already at the new location,
         so a cleanup failure here is post-commit: report it as a per-photo
-        error so the caller can surface the leftover originals, but keep the
+        error so the caller can surface the leftover files, but keep the
         batch moving. Without this catch a single OSError (read-only source
         directory, locked file on Windows) would abort every remaining photo
         in the batch with the catalog already repointed for the ones
         processed so far.
+
+        The error says which files were left: the original (and with it the
+        companions, which stay beside it), or only companions once the
+        original is gone.
         """
+        filename = item.photo["filename"]
+        src_dir = item.src_dir
+        # Keep a shared XMP at the source until the final same-stem catalog
+        # row leaves. Date-organized moves call move_photos once per
+        # destination group; preserving the sidecar after an early group
+        # lets each later group copy the metadata before the final sibling
+        # removes it.
+        companions = [
+            comp for comp in item.companions
+            if not (comp == item.xmp_companion and item.preserve_source_render)
+        ]
         try:
             os.remove(item.src_file)
-            for comp in item.companions:
-                # Keep a shared XMP at the source until the final
-                # same-stem catalog row leaves. Date-organized moves call
-                # move_photos once per destination group; preserving the
-                # sidecar after an early group lets each later group copy
-                # the metadata before the final sibling removes it.
-                if comp == item.xmp_companion and item.preserve_source_render:
-                    continue
-                comp_src = os.path.join(item.src_dir, comp)
-                if os.path.isfile(comp_src):
-                    os.remove(comp_src)
         except OSError as exc:
-            log.warning(
-                "Post-commit cleanup of %s failed: %s",
-                item.src_file, exc,
+            log.warning("Post-commit cleanup of %s failed: %s",
+                        item.src_file, exc)
+            # No companion was attempted on this branch, so every one in
+            # ``companions`` is still beside the original. Report them
+            # directly rather than probing with ``isfile``: when the source
+            # directory or mount is inaccessible (a likely reason the
+            # original delete failed), ``isfile`` silently returns False
+            # for files that are actually still there.
+            with_companions = (
+                f"; its companions were left with it: {', '.join(companions)}"
+                if companions else ""
             )
             self.errors.append(
-                f"{item.photo['filename']}: original not deleted ({exc})"
+                f"{filename}: moved to {self.destination}, but the original "
+                f"could not be deleted from {src_dir} ({exc})"
+                f"{with_companions}"
+            )
+            return
+        leftovers = []
+        for comp in companions:
+            comp_src = os.path.join(src_dir, comp)
+            try:
+                mode = os.stat(comp_src).st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                log.warning("Post-commit inspection of %s failed: %s",
+                            comp_src, exc)
+                leftovers.append(f"{comp} (could not inspect; left untouched: {exc})")
+                continue
+            if not stat.S_ISREG(mode):
+                continue
+            try:
+                os.remove(comp_src)
+            except OSError as exc:
+                log.warning("Post-commit cleanup of %s failed: %s",
+                            comp_src, exc)
+                leftovers.append(f"{comp} ({exc})")
+        if leftovers:
+            self.errors.append(
+                f"{filename}: moved to {self.destination} and the original "
+                f"deleted, but companion files could not be deleted from "
+                f"{src_dir}: {', '.join(leftovers)}"
             )
 
 

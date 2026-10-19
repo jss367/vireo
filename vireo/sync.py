@@ -95,7 +95,7 @@ def _xmp_sync_setting_enabled(db, key):
         import config as cfg
 
         return bool(db.get_effective_config(cfg.load()).get(key, False))
-    except Exception:
+    except Exception:  # broad: config reads raise a wide set; the setting reads as off
         log.warning("Failed to read %s config", key, exc_info=True)
         return False
 
@@ -123,7 +123,7 @@ def _xmp_sync_setting_state(db, key):
 
         val = bool(db.get_effective_config(cfg.load_strict()).get(key, False))
         return "on" if val else "off"
-    except Exception:
+    except Exception:  # broad: config reads raise a wide set; the setting reads as unknown
         log.warning("Failed to read %s config", key, exc_info=True)
         return "unknown"
 
@@ -505,7 +505,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
     """Apply durable merge work only to its recorded photo and keyword identity."""
     if not any(plan.keyword_merges for plan in plans.values()):
         return
-    rows = db.keywords.parent_rows()
+    rows = db.keyword_tree.parent_rows()
     paths = keyword_paths(rows)
     location_leaves = db.get_photo_location_keyword_ids([
         pid for pid, plan in plans.items() if plan.sync_location_keywords
@@ -793,7 +793,7 @@ class _XmpSyncRun:
                 photo_changes, self.sync_flags, self.sync_locations,
                 self.sync_location_keywords_state,
             )
-        except Exception as e:
+        except Exception as e:  # broad: per-photo boundary; a malformed queue row fails only its own photo
             log.warning("Could not plan XMP sync for photo %s", photo_id, exc_info=True)
             # A malformed queue row -- a rating whose value is NULL or not an
             # integer, which the schema permits -- must fail its own photo, as
@@ -830,7 +830,7 @@ class _XmpSyncRun:
                     # photo and leave the edit queued forever.
                     allow_sync_only=True,
                 )
-            except Exception as e:
+            except Exception as e:  # broad: per-photo boundary; the lookup fails only its own photo
                 log.warning("Could not read location for XMP sync of photo %s", photo_id, exc_info=True)
                 # Historically this lookup ran inside the per-photo try, so a
                 # photo the workspace can no longer see failed alone rather
@@ -920,7 +920,7 @@ class _XmpSyncRun:
                     self.location_paths.get(photo_id),
                     create_missing_sidecars=self.create_missing_sidecars,
                 )
-            except Exception as e:
+            except Exception as e:  # broad: per-photo boundary; XMP writing raises undocumented errors
                 log.warning("XMP sidecar write failed for photo %s", photo_id, exc_info=True)
                 errors.setdefault(photo_id, e)
         if not errors:

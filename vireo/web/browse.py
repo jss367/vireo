@@ -274,7 +274,7 @@ def _species_keyword_ids_by_key(db, resolver):
     # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
     # Look up existing rows only — asking here must not create keywords.
     kids_by_key = {}
-    for row in db.keywords.species_identity_rows():
+    for row in db.keyword_taxa.species_identity_rows():
         source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
         identity = resolver.resolve(row["name"], row["scientific_name"], source)
         kids_by_key.setdefault(identity.key, []).append(row["id"])
@@ -470,7 +470,7 @@ def create_browse_blueprint(
                 db.rollback()
                 return json_error(str(exc), 400)
         folders = db.folders.tree()
-        keywords = db.keywords.get_tree()
+        keywords = db.keyword_tree.get_tree()
         collections = db.collections.list_all()
 
         photo_dicts = prepare_browse_photo_dicts(db, photos)
