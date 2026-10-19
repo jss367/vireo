@@ -7,8 +7,9 @@ prefix it declared each namespace with, on the element it declared it on.
 ElementTree's own serializer drops the first three, declares every namespace
 on the root, and renames each namespace it has no registered prefix for to
 ``ns0``...``nsN``. Readers that resolve names by URI don't mind, but the
-sidecar Lightroom gets back no longer looks like the one it wrote, and a tool
-that matches prefixes textually breaks.
+sidecar Lightroom gets back no longer looks like the one it wrote, and a
+tool that matches prefixes textually against the standard sidecar writers'
+output breaks.
 
 ``parse_sidecar`` records that markup beside the tree (``SourceMarkup``) and
 ``serialize_sidecar`` writes it back: each namespace declaration on its
@@ -19,6 +20,15 @@ when there is none) -- where Adobe's XMP Toolkit, ExifTool and Exiv2 declare
 them -- with the prefix the sidecar already uses for it, else the standard
 one from ``namespaces.STANDARD_PREFIXES``. A sidecar Vireo creates from
 scratch takes the same path with nothing recorded.
+
+Element and attribute names are written through whichever in-scope prefix
+maps to their URI. In the common case where each URI has one prefix in
+scope -- which is what Lightroom, ACR, ExifTool, digiKam, Capture One and
+Exiv2 emit -- that preserves each name's original prefix. When a scope
+binds two prefixes to the same URI, names under that scope resolve by URI
+and may consolidate onto one of the prefixes; the output stays equivalent
+under RDF's expanded-name addressing, and a consumer facing such a sidecar
+should resolve by URI rather than compare prefix strings.
 
 Prefixes are chosen per document. Nothing here reads or writes
 ElementTree's process-wide prefix registry, so writes on concurrent pool
