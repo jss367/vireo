@@ -2881,6 +2881,72 @@ def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
                for v in listing_cache.values())
 
 
+def test_move_photos_reports_leftover_companion_not_original(move_env, monkeypatch):
+    """When the original is deleted but a companion is left behind, the error
+    names the companion and does not claim the original was kept.
+
+    Before the fix every post-commit cleanup failure read "original not
+    deleted", which sends the user looking for a duplicate original that is
+    not there.
+    """
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.xmp")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by an editor")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"], env["p2"]],
+        destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 2
+    assert not (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert (env["dst"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original not deleted" not in error
+    assert "bird1.xmp" in error and "locked by an editor" in error
+    assert str(env["src"]) in error
+
+
+def test_move_photos_original_left_behind_names_kept_companions(move_env, monkeypatch):
+    """When the original itself cannot be deleted, the error says so and
+    that its companions were left at the source with it."""
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by an editor")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original" in error and "locked by an editor" in error
+    assert "bird1.xmp" in error
+
+
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """A post-commit os.remove failure must not roll back the catalog and
     must not abort remaining photos in the batch.
