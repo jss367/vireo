@@ -2594,11 +2594,11 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     captured = {}
     orig = subject_masks.list_photos_for_eye_keypoint_stage
 
-    def _spy(photo_ids=None):
+    def _spy(db, photo_ids=None):
         captured["photo_ids"] = (
             set(photo_ids) if photo_ids is not None else None
         )
-        return orig(photo_ids=photo_ids)
+        return orig(db, photo_ids=photo_ids)
 
     monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
@@ -2767,11 +2767,11 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
     captured = {}
     orig = subject_masks.list_photos_for_eye_keypoint_stage
 
-    def _spy(photo_ids=None):
+    def _spy(db, photo_ids=None):
         captured["photo_ids"] = (
             set(photo_ids) if photo_ids is not None else None
         )
-        return orig(photo_ids=photo_ids)
+        return orig(db, photo_ids=photo_ids)
 
     monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
