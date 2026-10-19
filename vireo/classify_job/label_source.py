@@ -139,7 +139,7 @@ def _describe_cached_label_source(
         if not sidecar:
             return "Reused cached predictions (label source unavailable)"
         return _cached_label_sidecar_text(sidecar)
-    except Exception:
+    except Exception:  # broad: this only describes the summary's label source; a failure leaves it unnamed
         log.debug(
             "Could not describe cached label source", exc_info=True,
         )

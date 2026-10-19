@@ -56,7 +56,7 @@ def attach_species(db, photo_dicts):
     if not photo_dicts:
         return photo_dicts
     ids = [p["id"] for p in photo_dicts]
-    species_map = db.keywords.get_species_for_photos(ids)
+    species_map = db.photo_species.get_species_for_photos(ids)
     for p in photo_dicts:
         p["species"] = species_map.get(p["id"], [])
     return photo_dicts
@@ -80,7 +80,7 @@ def attach_species_representatives(db, photo_dicts):
         pid = p.get("photo_id", p.get("id"))
         if isinstance(pid, int) and not isinstance(pid, bool):
             ids.append(pid)
-    species_map = db.keywords.get_species_for_photos(ids)
+    species_map = db.photo_species.get_species_for_photos(ids)
     # Gate representatives on current DB eligibility so a stale preference
     # row (photo later rejected, folder removed from workspace, or species
     # keyword untagged) doesn't light up a Representative badge on views

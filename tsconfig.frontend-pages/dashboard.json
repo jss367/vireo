@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/dashboard.d.ts",
+    "../vireo/static/dashboard/boot.js",
+    "../vireo/static/dashboard/charts.js",
+    "../vireo/static/dashboard/coverage.js",
+    "../vireo/static/dashboard/details.js",
+    "../vireo/static/dashboard/drill.js",
+    "../vireo/static/dashboard/inventory.js",
+    "../vireo/static/dashboard/loading.js",
+    "../vireo/static/dashboard/overview.js",
+    "../vireo/static/dashboard/scope.js",
+    "../vireo/static/dashboard/shared.js",
+    "../vireo/static/dashboard/state.js"
+  ]
+}

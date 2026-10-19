@@ -111,7 +111,7 @@ def _compute_file_features(path_str: str) -> FileFeatures:
     failure yields None for that field rather than raising.
     """
     phash = None
-    # PIL raises a wide set on bad files (OSError, SyntaxError,
+    # broad: PIL raises a wide set on bad files (OSError, SyntaxError,
     # DecompressionBombError); a missing pHash only disables near-duplicate
     # grouping for this photo. This runs in a pool worker, whose log
     # records never reach the app log, so nothing is logged here.

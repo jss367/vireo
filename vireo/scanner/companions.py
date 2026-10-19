@@ -543,7 +543,7 @@ def _delete_companion_row(
     # user removal survives this pairing. The FK on
     # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
     # a leftover row would also block the ``DELETE FROM photos`` below.
-    db.keywords.transfer_embedded_offered_keys(
+    db.photo_keywords.transfer_embedded_offered_keys(
         companion["id"], primary["id"],
     )
     # Transfer effective visibility before cascade deletion removes the
@@ -637,7 +637,7 @@ def _run_post_commit_fs_actions(post_commit_fs_actions: Iterable[Callable[[], ob
     for action in post_commit_fs_actions:
         try:
             action()
-        except Exception:
+        except Exception:  # broad: post-commit file cleanup is best-effort; the pairing already committed
             log.exception(
                 "Deferred filesystem cleanup after raw+JPEG pairing "
                 "failed; may leave stale derivative files that the "

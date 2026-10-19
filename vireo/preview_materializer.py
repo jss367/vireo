@@ -285,7 +285,7 @@ def _encode_preview(
         img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
         return encoded.getvalue()
     finally:
-        # Cleanup must not replace the render's own exception.
+        # broad: cleanup must not replace the render's own exception (or its bytes)
         with contextlib.suppress(Exception):
             img.close()
 
@@ -393,7 +393,7 @@ def _publish_preview(
         with guard:
             try:
                 atomic_write_bytes(data, cache_path)
-            except Exception:
+            except Exception:  # broad: best-effort publication is the caller's choice; otherwise re-raises
                 if not publish_best_effort:
                     raise
                 log.warning(

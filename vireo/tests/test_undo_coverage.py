@@ -6,7 +6,7 @@ import pytest
 
 
 def _location_ids(db, pid):
-    return {k['id'] for k in db.keywords.get_for_photo(pid) if k['type'] == 'location'}
+    return {k['id'] for k in db.photo_keywords.get_for_photo(pid) if k['type'] == 'location'}
 
 
 @pytest.mark.parametrize('route', ['saved', 'text', 'place', 'clear', 'batch-saved', 'batch-text', 'batch-place'])
@@ -108,7 +108,7 @@ def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
     pids = [p['id'] for p in db.photos.list_page()][:2]
     group = 'burst' if mode == 'burst' else None
     ids = [_predictions(db, pid, group) for pid in pids]
-    keywords_before = [db.keywords.get_for_photo(pid) for pid in pids]
+    keywords_before = [db.photo_keywords.get_for_photo(pid) for pid in pids]
     before = {pred_id: db.predictions.current_status(pred_id) for rows in ids for pred_id in rows}
     if mode == 'batch':
         response = client.post('/api/predictions/batch-reject', json={'prediction_ids': [rows[0] for rows in ids]})
@@ -127,7 +127,7 @@ def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
         assert client.post('/api/redo').status_code == 200
         assert {pid: db.predictions.current_status(pid) for pid in before} == after
     # Status-only undo never invents keywords.
-    assert [db.keywords.get_for_photo(pid) for pid in pids] == keywords_before
+    assert [db.photo_keywords.get_for_photo(pid) for pid in pids] == keywords_before
 
 
 def test_legacy_incomplete_audit_rows_stay_excluded(app_and_db):

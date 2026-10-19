@@ -243,7 +243,7 @@ class RawAnalysisSession:
             # pipeline stage aborts promptly.
             raise
         except Exception:
-            # Weight setup and ONNX session initialization failures cannot
+            # broad: weight setup and ONNX session initialization failures cannot
             # recover per subject. Retry only on the next pipeline session.
             self._masking_unavailable = True
             # Unavailable weights, corrupt ONNX, or an inference error must

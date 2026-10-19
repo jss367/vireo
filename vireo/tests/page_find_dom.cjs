@@ -59,17 +59,19 @@ test('Unicode lowercase expansion preserves following match offsets',()=>{const 
 test('Single native Find command completes actual shortcut recorder without keydown',()=>{
  const a=setup();
  a.doc.removeEventListener=(name,fn)=>{a.doc.listeners=a.doc.listeners.filter(f=>f!==fn);};
- const template=fs.readFileSync(root+'/../templates/shortcuts.html','utf8');
- const capture=template.slice(template.indexOf('function startCapture('),template.indexOf('function resetShortcut('));
+ // The recorder is an ES module (static/shortcuts/capture.js): drop its
+ // imports and supply them as context globals, as module-source.mjs does.
+ const capture=fs.readFileSync(root+'/shortcuts/capture.js','utf8')
+  .replace(/^import\s[^;]*?\sfrom\s+'[^']+';\n/gm,'').replace(/^export (?=function )/gm,'');
  let saves=0,renders=0;
- Object.assign(a.ctx,{capturingBtn:null,currentShortcuts:{global:{test:''}},isBarePageShortcut:()=>false,findConflict:()=>null,renderShortcutsEditor:()=>renders++,saveShortcuts:()=>saves++});
+ Object.assign(a.ctx,{state:{capturingBtn:null,currentShortcuts:{global:{test:''}}},SHORTCUT_LABELS:{},isBarePageShortcut:()=>false,findConflict:()=>null,renderShortcutsEditor:()=>renders++,saveShortcuts:()=>saves++,pauseKeymapDispatch:handler=>a.ctx.Keymap.pauseDispatch(handler),resumeKeymapDispatch:()=>a.ctx.Keymap.resumeDispatch()});
  vm.runInContext(capture,a.ctx);
  const blurs=[];const btn={classList:{add(){},remove(){}},style:{},addEventListener(name,fn){if(name==='blur')blurs.push(fn);},removeEventListener(name,fn){const i=blurs.indexOf(fn);if(i>=0)blurs.splice(i,1);}};
  a.ctx.startCapture(btn,'global','test');
  assert(a.ctx.Keymap.isDispatchPaused());
  a.ctx.handleNativeMenuCommand('find');
- assert.equal(a.ctx.currentShortcuts.global.test,'ctrl+f');
- assert.equal(saves,1);assert.equal(renders,1);assert.equal(a.ctx.capturingBtn,null);
+ assert.equal(a.ctx.state.currentShortcuts.global.test,'ctrl+f');
+ assert.equal(saves,1);assert.equal(renders,1);assert.equal(a.ctx.state.capturingBtn,null);
  assert(!a.ctx.Keymap.isDispatchPaused());assert(a.elements.pageFindPanel.hidden);
  // Normal Find resumes after capture, and a canceled recorder is not retained.
  a.ctx.handleNativeMenuCommand('find');assert(!a.elements.pageFindPanel.hidden);

@@ -854,9 +854,9 @@ def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
     db.conn.commit()
     survivor = _photo(db, target, "bird.jpg")
     dup = _photo(db, source, "bird.jpg")
-    db.keywords.record_embedded_offered_keys(dup, ["robin"])
-    assert db.keywords.embedded_offered_keys(dup) == {"robin"}
-    assert db.keywords.embedded_offered_keys(survivor) == set()
+    db.photo_keywords.record_embedded_offered_keys(dup, ["robin"])
+    assert db.photo_keywords.embedded_offered_keys(dup) == {"robin"}
+    assert db.photo_keywords.embedded_offered_keys(survivor) == set()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
 
@@ -886,7 +886,7 @@ def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
     phantom = _photo(db, source, "gone.jpg")
-    db.keywords.record_embedded_offered_keys(phantom, ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(phantom, ["robin"])
 
     db.folders.merge_into_existing(source, target, str(target_dir))
 
@@ -926,7 +926,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
         "VALUES (?, ?, NULL)",
         (dup, robin_id),
     )
-    db.keywords.record_embedded_offered_keys(dup, ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(dup, ["robin"])
     db.conn.commit()
 
     db.folders.merge_into_existing(source, target, str(target_dir))
@@ -972,12 +972,12 @@ def test_folder_merge_respects_embedded_keyword_removals(
     _import_embedded_keywords_for_photo(db, duplicate, metadata)
     if removed_on_survivor:
         _import_embedded_keywords_for_photo(db, survivor, metadata)
-        for keyword in db.keywords.get_for_photo(survivor):
+        for keyword in db.photo_keywords.get_for_photo(survivor):
             db.untag_photo(survivor, keyword["id"])
 
     db.folders.merge_into_existing(source, target, str(target_dir))
 
-    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
 
@@ -1457,7 +1457,7 @@ def test_folders_accessor_builds_a_fresh_repository_and_resolves_the_workspace_l
 _FACADE_CALLBACKS = {
     "_folder_repository": {
         "transfer_gps_review": "moves_merge.transfer_gps_review",
-        "transfer_embedded_offered": "keywords.transfer_embedded_offered_keys",
+        "transfer_embedded_offered": "photo_keywords.transfer_embedded_offered_keys",
     },
     "delete_folder": {
         "delete_photos": "delete_photos",

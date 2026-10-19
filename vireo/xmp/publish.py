@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from file_replace import replace_file
+from xmp.markup import serialize_sidecar
 
 # Every module of the package logs as ``xmp``, the logger the single-module
 # version used.
@@ -228,7 +229,8 @@ def _preserve_sidecar_access(source, destination, source_stat):
 def _write_tree_atomic(tree, xmp_path):
     """Publish a complete sidecar without truncating the previous version.
 
-    Keep the temporary file on the same filesystem for atomic replacement,
+    ``tree`` is serialized by ``xmp.markup.serialize_sidecar``, which writes
+    a ``SidecarTree``'s source markup back. Keep the temporary file on the same filesystem for atomic replacement,
     preserve existing permissions, and follow sidecar symlinks just as the
     former direct write did. Failed writes leave the original intact.
     """
@@ -249,8 +251,12 @@ def _write_tree_atomic(tree, xmp_path):
         # matching a direct write (mkstemp would silently restrict to 0600).
         fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         temp_path = candidate
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            tree.write(stream, xml_declaration=True, encoding="unicode")
+        # Binary mode so Windows does not translate the serializer's "\n" to
+        # "\r\n". The serializer emits bytes exactly as the sidecar's source
+        # had them, and a sidecar is read as bytes, not platform-newlined
+        # text.
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(serialize_sidecar(tree).encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
         if source_stat is not None:
