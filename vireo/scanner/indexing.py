@@ -11,9 +11,11 @@ photo's recycled id.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -300,21 +302,27 @@ class _FileIndexer:
         # Fallback if ExifTool didn't provide dimensions
         if width is None or height is None:
             ext = image_path.suffix.lower()
-            if ext in RAW_EXTENSIONS:
+            dimensions_read = False
+            # broad: decoder and diagnostic failures leave dimensions unknown
+            with contextlib.suppress(Exception):
                 try:
-                    import rawpy
+                    if ext in RAW_EXTENSIONS:
+                        import rawpy
 
-                    with rawpy.imread(str(image_path)) as raw:
-                        width = raw.sizes.width
-                        height = raw.sizes.height
-                except Exception:
-                    log.debug("Could not read RAW dimensions from %s", image_path)
-            else:
-                try:
-                    with Image.open(str(image_path)) as img:
-                        width, height = img.size
-                except Exception:
-                    log.debug("Could not read dimensions from %s", image_path)
+                        with rawpy.imread(str(image_path)) as raw:
+                            width = raw.sizes.width
+                            height = raw.sizes.height
+                    else:
+                        with Image.open(str(image_path)) as img:
+                            width, height = img.size
+                    dimensions_read = True
+                finally:
+                    if not dimensions_read and isinstance(sys.exception(), Exception):
+                        message = (
+                            "Could not read RAW dimensions from %s"
+                            if ext in RAW_EXTENSIONS else "Could not read dimensions from %s"
+                        )
+                        log.debug(message, image_path, exc_info=True)
 
         # Timestamp from ExifTool
         timestamp = _extract_timestamp(exif_group)

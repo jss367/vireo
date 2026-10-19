@@ -202,7 +202,7 @@ def create_session_with_self_heal(model_path, redownload=None):
     """
     try:
         return create_session(model_path)
-    except Exception as first_err:
+    except Exception as first_err:  # broad: onnxruntime raises undocumented errors; anything but corruption re-raises unchanged
         if not _looks_like_corrupt_model(first_err):
             raise
         if redownload is None:
@@ -214,7 +214,7 @@ def create_session_with_self_heal(model_path, redownload=None):
         log.warning(
             "ONNX model %s failed to load, looks like corruption: %s. "
             "Deleting on-disk files and triggering redownload.",
-            model_path, first_err,
+            model_path, first_err, exc_info=True,
         )
 
         # Delete the graph and any external-data sidecar BEFORE invoking

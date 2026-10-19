@@ -39,7 +39,7 @@ def _invalidate_new_images(db: Database, root: str) -> None:
     try:
         from new_images import invalidate_new_images_after_scan
         invalidate_new_images_after_scan(db, root)
-    except Exception:
+    except Exception:  # broad: cache invalidation is best-effort; the import already landed
         log.exception(
             "Failed to invalidate new-images cache for %s", root,
         )
@@ -107,7 +107,7 @@ def _catalog_scan_and_prescan(
             scan, destination, db, batch_st, landed_paths, params,
             runner=runner, job=job,
         )
-    except Exception as e:  # scan failure fails the whole batch
+    except Exception as e:  # broad: any scan failure fails the whole batch, each file recorded as failed
         log.warning("Catalog scan failed for import batch %s", rel, exc_info=True)
         # Each entry was already booked into copied or
         # skipped_duplicate — reclassify (roll back origin, add
@@ -647,7 +647,7 @@ def _extract_deferred_working_copies(
                 status_callback=_working_copy_status,
                 cancel_check=lambda: runner.is_cancelled(job["id"]),
             )
-        except Exception:
+        except Exception:  # broad: working copies are derived and re-extracted later; the imported originals stand
             log.exception(
                 "Working-copy extraction failed for %s",
                 sorted(state.wc_dest_folders),

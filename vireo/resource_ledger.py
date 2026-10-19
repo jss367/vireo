@@ -893,7 +893,7 @@ class ResourceLedger:
                 wait_token = _RESOURCE_ACTIVE_WAIT.set(wait_timing)
             try:
                 cancelled = self._cancel_requested(cancel_check)
-            except BaseException:
+            except BaseException:  # broad: record the wait on any exit, cancel included, then re-raise
                 if wait_timing is not None:
                     with self._condition:
                         self._record_wait_locked(owner_id, wait_timing)
@@ -913,7 +913,7 @@ class ResourceLedger:
                 if on_wait is not None:
                     try:
                         on_wait(request)
-                    except BaseException:
+                    except BaseException:  # broad: record the wait on any exit, cancel included, then re-raise
                         with self._condition:
                             self._record_wait_locked(owner_id, wait_timing)
                         raise
