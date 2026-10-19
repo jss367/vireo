@@ -533,7 +533,7 @@ class _FeatureLoad:
         with multiple species tags we keep the alphabetically-first entry so
         the choice stays deterministic across runs.
         """
-        self.confirmed_identities = self.db.keywords.get_species_for_photos(
+        self.confirmed_identities = self.db.photo_species.get_species_for_photos(
             self.photo_ids_for_dets, include_identities=True,
         )
         species_names_by_photo = {pid: [entry["name"] for entry in entries] for pid, entries in self.confirmed_identities.items()}
@@ -1504,7 +1504,7 @@ def attach_species_identities(data, resolver):
     names = set()
     source_keys = defaultdict(set)
     if resolver.db is not None:
-        by_photo = resolver.db.keywords.get_species_for_photos(
+        by_photo = resolver.db.photo_species.get_species_for_photos(
             [p["id"] for p in data.get("photos", [])], include_identities=True,
         )
         for photo in data.get("photos", []):
@@ -1783,7 +1783,7 @@ def refresh_cache_species_for_photos(
     """Rewrite the on-disk pipeline cache so its per-photo, per-burst, and
     per-encounter species fields match ``species_by_photo`` — a
     ``{photo_id: [name, ...]}`` mapping as returned by
-    ``db.keywords.get_species_for_photos``.
+    ``db.photo_species.get_species_for_photos``.
 
     Called after undo / redo of a species-affecting edit (``keyword_add``,
     ``keyword_remove``, ``species_replace``, ``prediction_accept``): the DB

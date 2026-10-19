@@ -1,4 +1,10 @@
 {
+  "best-batch": {
+    "route": "/best-batch",
+    "template": "best_batch.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "browse": {
     "route": "/browse",
     "template": "browse.html",
@@ -39,6 +45,18 @@
       "_vireoShortcuts"
     ]
   },
+  "lightroom": {
+    "route": "/lightroom",
+    "template": "lightroom.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "logs": {
+    "route": "/logs",
+    "template": "logs.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "misses": {
     "route": "/misses",
     "template": "misses.html",
@@ -49,6 +67,12 @@
       "loadMisses",
       "openBrowseShortcutPhoto"
     ],
+    "sharedWrites": []
+  },
+  "shortcuts": {
+    "route": "/shortcuts",
+    "template": "shortcuts.html",
+    "pageHooks": [],
     "sharedWrites": []
   }
 }

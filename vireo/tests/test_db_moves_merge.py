@@ -1119,7 +1119,7 @@ def test_merge_moves_embedded_keyword_offered_onto_the_survivor(db, tmp_path):
     the archive-side photo with a keyword the user had already removed.
     """
     t = _collision_tree(db, tmp_path)
-    db.keywords.record_embedded_offered_keys(t["staged"], ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(t["staged"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1142,7 +1142,7 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
     aborts on the FK.
     """
     t = _collision_tree(db, tmp_path, same_hash=False)
-    db.keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1168,7 +1168,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
     assert _import_embedded_keywords_for_photo(db, losing, metadata)
-    keyword = db.keywords.get_for_photo(losing)[0]
+    keyword = db.photo_keywords.get_for_photo(losing)[0]
     source = db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (losing, keyword["id"]),
@@ -1179,10 +1179,10 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
-    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
-    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     if not removed_on_survivor:
         assert db.conn.execute(
@@ -1199,7 +1199,7 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
     losing, survivor = ((t["staged"], t["survivor"]) if same_hash
                         else (t["survivor"], t["staged"]))
     _import_embedded_keywords_for_photo(db, losing, {"XMP": {"Subject": ["Robin"]}})
-    keyword = db.keywords.get_for_photo(losing)[0]
+    keyword = db.photo_keywords.get_for_photo(losing)[0]
     db.tag_photo(survivor, keyword["id"])
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
@@ -1336,6 +1336,41 @@ def test_merge_scoped_workspace_prunes_instead_of_linking_broad_base(db):
     assert "/arch/USA" not in links and "/arch" not in links
     assert "/arch/USA/2027" not in links
     assert links["/arch/USA/2026"] == 1
+
+
+def _visible_to(db, ws):
+    return {
+        r["filename"] for r in db.conn.execute(
+            "SELECT p.filename FROM photos p JOIN photo_workspace_visibility v "
+            "ON v.photo_id = p.id WHERE v.workspace_id = ?", (ws,))
+    }
+
+
+def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
+    """A staged photo folded into an existing archive folder stays visible to
+    a workspace that shared the staged folder, without exposing that
+    workspace to the archive folder's other photos."""
+    ws = db._active_workspace_id
+    sharing = db.create_workspace("Sharing")
+    linked = db.create_workspace("Linked")
+    db.set_active_workspace(ws)
+    arch = _folder(db, "/arch", root=True)
+    _photo(db, arch, "old.jpg")
+    db.add_workspace_folder(linked, arch)
+    stage = _folder(db, "/stage", root=True)
+    _photo(db, stage, "new.jpg")
+    db.add_workspace_folder(sharing, stage)
+    db.add_workspace_folder(linked, stage)
+
+    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+
+    assert counts["new_photos"] == 1 and counts["merged_folders"] == 1
+    assert _visible_to(db, ws) == {"old.jpg", "new.jpg"}
+    assert _visible_to(db, sharing) == {"new.jpg"}
+    assert _visible_to(db, linked) == {"old.jpg", "new.jpg"}
+    # Only the workspace without a link to the archive folder needs a grant.
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT workspace_id FROM workspace_photos")] == [(sharing,)]
 
 
 def test_merge_new_path_roots_deepest_tracked_ancestor(db):

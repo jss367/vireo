@@ -39,7 +39,10 @@ from dataclasses import dataclass, field
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
 from repositories.photo_row_deletion import photo_row_deletion
-from repositories.photo_visibility import remap_photo_visibility
+from repositories.photo_visibility import (
+    keep_photo_visible_across_folder_change,
+    remap_photo_visibility,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1867,6 +1870,10 @@ class _StagedTreeMerge:
         pid = match.pid
         if match.collision is not None:
             self._replace_phantom_target(pid, match.collision)
+        # The staged folder's workspace links are deleted with it below, so
+        # a sibling workspace sharing that folder would lose this photo.
+        keep_photo_visible_across_folder_change(
+            self.conn, pid, fold.target_id, except_workspace=self.ws)
         self.conn.execute(
             "UPDATE photos SET folder_id = ? "
             "WHERE id = ?",

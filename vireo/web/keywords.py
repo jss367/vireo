@@ -315,7 +315,7 @@ def create_keywords_blueprint(get_db, json_error):
             # Count photos per variant within this workspace
             variants = []
             for kid in ids:
-                row = db.keywords.workspace_photo_count(kid, ws)
+                row = db.photo_keywords.workspace_photo_count(kid, ws)
                 if row and row["cnt"] > 0:
                     variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
             if len(variants) > 1:
@@ -354,7 +354,7 @@ def create_keywords_blueprint(get_db, json_error):
         # empty list and XMP keeps exporting the old spelling until another
         # edit occurs.
         if body.get("name") or body.get("type"):
-            affected = db.keywords.photo_workspaces_tagged_with(keyword_id)
+            affected = db.photo_keywords.photo_workspaces_tagged_with(keyword_id)
         # Additionally snapshot photos whose SIDECAR LOCATION path would go
         # stale from this update. A location-keyword rename does not just
         # change ``dc:subject`` (the flat leaf, which the ``affected`` set
@@ -373,7 +373,7 @@ def create_keywords_blueprint(get_db, json_error):
             old_row["type"] == "location"
             or (isinstance(body.get("type"), str) and body["type"] == "location")
         ):
-            location_affected = db.keywords.subtree_photo_workspaces(keyword_id)
+            location_affected = db.photo_keywords.subtree_photo_workspaces(keyword_id)
         # Reject '|' in a rename that lands on a location keyword before we
         # ever touch the row (see _location_pipe_rename_error).
         invalid = _location_pipe_rename_error(body, old_row)
@@ -409,7 +409,7 @@ def create_keywords_blueprint(get_db, json_error):
         if kw_row is None:
             return json_error("keyword not found", 404)
         if kw_row:
-            affected = db.keywords.photo_workspaces_tagged_with(keyword_id)
+            affected = db.photo_keywords.photo_workspaces_tagged_with(keyword_id)
             for row in affected:
                 queue_keyword_remove(db, row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
             # Deleting a location ancestor detaches its children (they
@@ -427,7 +427,7 @@ def create_keywords_blueprint(get_db, json_error):
             # so the same photo appearing under ``affected`` above is
             # harmless.
             if kw_row["type"] == "location":
-                location_descendants = db.keywords.subtree_photo_workspaces(keyword_id)
+                location_descendants = db.photo_keywords.subtree_photo_workspaces(keyword_id)
                 for row in location_descendants:
                     db.queue_change(
                         row["photo_id"],

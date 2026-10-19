@@ -46,9 +46,11 @@ if TYPE_CHECKING:
     from repositories.model_runs import ModelRunsRepository
     from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
+    from repositories.photo_keywords import PhotoKeywordRepository
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_metadata import PhotoMetadataRepository
     from repositories.photo_review import PhotoReviewRepository
+    from repositories.photo_species import PhotoSpeciesRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.photos import PhotoRepository
     from repositories.pipeline_features import PipelineFeaturesRepository
@@ -2290,7 +2292,7 @@ class Database:
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             transfer_gps_review=self.moves_merge.transfer_gps_review,
-            transfer_embedded_offered=self.keywords.transfer_embedded_offered_keys,
+            transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -3942,7 +3944,7 @@ class Database:
 
     @property
     def keywords(self) -> KeywordRepository:
-        """Keyword rows and tagging reads: ``db.keywords.get_for_photo(photo_id)`` and friends.
+        """Keyword rows, tree and species names: ``db.keywords.get_tree()`` and friends.
 
         A domain accessor, not a cached attribute: every access builds a
         fresh repository, whose scoped methods resolve the workspace at use.
@@ -3974,9 +3976,58 @@ class Database:
             detect_case_convention_sentinel=_DETECT_CASE_CONVENTION,
             taxon_lookup_variants=_taxon_lookup_variants,
             resolve_import_alias=resolve_import_alias,
-            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
             facade=self,
         )
+
+    def _photo_keyword_repository(self) -> PhotoKeywordRepository:
+        """Build the photo-keyword association reads on this connection.
+
+        Catalog-wide: nothing in it needs the active workspace. ``_chunks``,
+        ``KEYWORD_TYPES`` and the subject-filter chunk size are read here, at
+        call time.
+        """
+        from repositories.photo_keywords import PhotoKeywordRepository
+
+        return PhotoKeywordRepository(
+            self.conn,
+            chunks=_chunks,
+            keyword_types=KEYWORD_TYPES,
+            filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
+        )
+
+    @property
+    def photo_keywords(self) -> PhotoKeywordRepository:
+        """Which keywords photos carry: ``db.photo_keywords.get_for_photo(photo_id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photo_keyword_repository``. The domain is
+        catalog-wide, so it needs no active workspace. ``untag_photo`` keeps
+        its ``Database`` wrapper beside ``tag_photo``.
+        """
+        return self._photo_keyword_repository()
+
+    def _photo_species_repository(self) -> PhotoSpeciesRepository:
+        """Build the photo-species reads on this connection.
+
+        The active workspace is resolved lazily (``Database._ws_id`` is passed
+        as a resolver), so ``get_accepted_species`` raises at the point it
+        always did.
+        """
+        from repositories.photo_species import PhotoSpeciesRepository
+
+        return PhotoSpeciesRepository(self.conn, self._ws_id, chunks=_chunks)
+
+    @property
+    def photo_species(self) -> PhotoSpeciesRepository:
+        """The species photos carry: ``db.photo_species.get_species_for_photos(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository, whose scoped method resolves the workspace at use.
+        Do not retain one across a workspace switch.
+        ``get_photos_with_equivalent_species`` keeps its ``Database`` wrapper:
+        ``repositories/keyword_provenance.py`` binds it by name.
+        """
+        return self._photo_species_repository()
 
     def _keyword_provenance_repository(self):
         """Build the keyword-provenance repository on this connection.
@@ -4833,7 +4884,7 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
-        return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
+        return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
         self, photo_ids, keyword_id, exclude_keyword_ids=None,
@@ -4851,7 +4902,7 @@ class Database:
         the "already carries this species" answer must reflect only the rows
         that will survive the mutation.
         """
-        return self._keyword_repository().get_photos_with_equivalent_species(
+        return self._photo_species_repository().get_photos_with_equivalent_species(
             photo_ids, keyword_id, exclude_keyword_ids=exclude_keyword_ids,
         )
 
