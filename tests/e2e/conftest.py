@@ -87,7 +87,7 @@ def seed_e2e_data(db, thumb_dir):
         "American Robin", "American Robin",
     ]
     for pid, species in zip(photos, species_for_photo, strict=True):
-        det_ids = db.save_detections(pid, [
+        det_ids = db.detections.save(pid, [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.95, "category": "animal"},
         ], detector_model="test-detector")

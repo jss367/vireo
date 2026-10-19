@@ -103,7 +103,7 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
 
     # Bbox covers the subject area of the fixture — loose enough to include
     # the eye. If your fixture's subject is in a different region, tune this.
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",

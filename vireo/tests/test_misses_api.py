@@ -59,7 +59,7 @@ def db_with_misses(tmp_path, monkeypatch):
         "WHERE id=?", (p_oof,),
     )
     db.conn.commit()
-    db.save_detections(
+    db.detections.save(
         p_ns,
         [{
             "box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
@@ -419,7 +419,7 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
         fid, "weak-bird.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.04, "category": "animal"}],
@@ -483,7 +483,7 @@ def test_api_misses_preview_ignores_non_animal_detection_confidence(
     client, db_with_misses,
 ):
     _, db, ids = db_with_misses
-    db.save_detections(
+    db.detections.save(
         ids["no_subject"],
         [{
             "box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.4},
@@ -569,7 +569,7 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
         fid, "weak-bird.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
-    det_id = db.save_detections(
+    det_id = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.04, "category": "animal"}],

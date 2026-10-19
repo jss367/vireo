@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from services import detection_store
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -393,8 +394,8 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
     detector_input, detector_input_fp = source_input(
         PHOTO_HASH, "vireo-detector-source-v1",
     )
-    detection_id = source.write_detection_batch(
-        source_photo,
+    detection_id = detection_store.write_detection_batch(
+        source, source_photo,
         "megadetector-v6",
         [{"box": box, "confidence": 0.91, "category": "animal"}],
         runtime_fingerprint=RUNTIME,
@@ -539,8 +540,8 @@ def test_computation_cache_http_export_and_import(app_and_db, tmp_path, monkeypa
     db.conn.commit()
     _input, input_fp = source_input(PHOTO_HASH, "vireo-detector-source-v1")
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
-    db.write_detection_batch(
-        photo_id,
+    detection_store.write_detection_batch(
+        db, photo_id,
         "megadetector-v6",
         [{"box": box, "confidence": 0.91, "category": "animal"}],
         runtime_fingerprint=RUNTIME,
@@ -640,8 +641,8 @@ def test_fresh_classifier_run_is_promoted_and_published(tmp_path):
         PHOTO_HASH, "vireo-detector-source-v1",
     )
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
-    detection_id = source.write_detection_batch(
-        photo_id,
+    detection_id = detection_store.write_detection_batch(
+        source, photo_id,
         "megadetector-v6",
         [{"box": box, "confidence": 0.91, "category": "animal"}],
         runtime_fingerprint=RUNTIME,
@@ -725,8 +726,8 @@ def test_evicted_working_copy_classifier_run_stays_local_only(tmp_path):
         PHOTO_HASH, "vireo-detector-source-v1",
     )
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
-    detection_id = source.write_detection_batch(
-        photo_id,
+    detection_id = detection_store.write_detection_batch(
+        source, photo_id,
         "megadetector-v6",
         [{"box": box, "confidence": 0.91, "category": "animal"}],
         runtime_fingerprint=RUNTIME,
@@ -1461,8 +1462,8 @@ def test_match_strength_survives_publish_and_export(tmp_path):
         PHOTO_HASH, "vireo-detector-source-v1",
     )
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
-    detection_id = source.write_detection_batch(
-        photo_id,
+    detection_id = detection_store.write_detection_batch(
+        source, photo_id,
         "megadetector-v6",
         [{"box": box, "confidence": 0.91, "category": "animal"}],
         runtime_fingerprint=RUNTIME,
@@ -1560,8 +1561,8 @@ def test_zero_candidate_run_is_publishable_when_it_recorded_a_match(tmp_path):
     _input, detector_input_fp = source_input(
         PHOTO_HASH, "vireo-detector-source-v1",
     )
-    detection_id = source.write_detection_batch(
-        photo_id,
+    detection_id = detection_store.write_detection_batch(
+        source, photo_id,
         "megadetector-v6",
         [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
           "confidence": 0.91, "category": "animal"}],
@@ -2266,8 +2267,8 @@ def test_exported_classification_keeps_input_recipe(tmp_path):
     source, _folder_id, photo_id = _database_with_photo(tmp_path / "s.db", "a.jpg")
     box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
     _block, detector_fp = source_input(PHOTO_HASH, "vireo-detector-source-v1")
-    detection_id = source.write_detection_batch(
-        photo_id, "megadetector-v6",
+    detection_id = detection_store.write_detection_batch(
+        source, photo_id, "megadetector-v6",
         [{"box": box, "confidence": 0.9, "category": "animal"}],
         runtime_fingerprint=RUNTIME, input_fingerprint=detector_fp,
     )[0]

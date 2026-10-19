@@ -250,7 +250,7 @@ def _attach_primary_detections(db, photos, detector_confidence):
 
     A preview card must show what the same photo would show once the
     thresholds are applied, so the box is drawn only when a detection
-    clears ``detector_confidence`` — exactly the filter ``db.list_misses``
+    clears ``detector_confidence`` — exactly the filter ``miss_flags.list_misses``
     applies to persisted rows.  ``raw_detection_conf`` still carries the
     best below-threshold candidate so the card can explain why nothing
     qualified.
@@ -324,7 +324,7 @@ def preview_misses_for_workspace(db, pipeline_config, detector_confidence=None,
         # Stamp the floor actually used to derive this card so the "No
         # detection above N%" message on the Misses page reflects the
         # live-preview slider rather than the previously saved
-        # missConfig fallback.  Mirrors ``db.list_misses`` for persisted
+        # missConfig fallback.  Mirrors ``miss_flags.list_misses`` for persisted
         # rows.
         photo["detector_confidence_threshold"] = detector_confidence
         if flags["no_subject"]:

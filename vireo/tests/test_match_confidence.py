@@ -24,7 +24,7 @@ def _photo(db, filename="DSC_0320.NEF"):
         file_size=25_000_000, file_mtime=1_700_000_000.0,
         timestamp="2026-04-25T10:30:00", width=6000, height=4000,
     )
-    det = db.save_detections(pid, [_DET], detector_model="MDV6")[0]
+    det = db.detections.save(pid, [_DET], detector_model="MDV6")[0]
     return pid, det
 
 
@@ -393,13 +393,13 @@ def test_pipeline_inspector_reports_runs_the_prediction_table_hides(app_and_db):
     """
     app, db = app_and_db
     photo_id = db.photos.list_page()[0]["id"]
-    weak = db.save_detections(
+    weak = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.04,
           "category": "animal"}],
         detector_model="megadetector-v6",
     )[0]
-    full = db.save_detections(
+    full = db.detections.save(
         photo_id,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0,
           "category": "animal"}],
@@ -426,7 +426,7 @@ def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
     app, db = app_and_db
     photo_id = db.photos.list_page()[0]["id"]
     for conf, score in ((0.04, 0.11), (0.9, 0.31)):
-        det = db.save_detections(
+        det = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
               "confidence": conf, "category": "animal"}],
@@ -446,7 +446,7 @@ def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
 def test_predictions_api_reports_match_state_per_photo(app_and_db):
     app, db = app_and_db
     photo_id = db.photos.list_page()[0]["id"]
-    det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+    det = db.detections.save(photo_id, [_DET], detector_model="MDV6")[0]
     db.predictions.add(detection_id=det, species="House Sparrow",
                       confidence=0.8, model="BioCLIP-2.5", match_score=0.11)
     db.model_runs.record_classifier_match_score(
@@ -479,7 +479,7 @@ def test_calibrated_threshold_reaches_the_api(app_and_db):
     db.conn.commit()
 
     photo_id = db.photos.list_page()[0]["id"]
-    det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+    det = db.detections.save(photo_id, [_DET], detector_model="MDV6")[0]
     db.predictions.add(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5", match_score=0.11)
     db.model_runs.record_classifier_match_score(
@@ -668,7 +668,7 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
     )
     db.conn.commit()
     photo_id = db.photos.list_page()[0]["id"]
-    det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+    det = db.detections.save(photo_id, [_DET], detector_model="MDV6")[0]
     db.predictions.add(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="us-wide", match_score=0.40)

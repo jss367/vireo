@@ -1623,7 +1623,7 @@ def test_accept_prediction_records_history(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Blue Jay', 0.95, 'test-model')
@@ -1646,7 +1646,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Blue Jay', 0.95, 'test-model')
@@ -1686,7 +1686,7 @@ def test_reject_prediction_records_history(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    det_ids = db.detections.save(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'House Sparrow', 0.60, 'test-model')
     preds = db.predictions.get_rows(photo_ids=[pid])
     pred_id = preds[0]['id']
