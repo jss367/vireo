@@ -119,6 +119,10 @@ interface VireoPageHooks {
   /** The name-deciding settings for the collision preflight, or null when the
    * controls cannot describe an export yet. */
   buildExportPreflightRequest?(): VireoExportPreflightRequest | null;
+
+  // ---- Releasing local originals (vireo-release-originals.js) ----
+  /** Reload the Storage overview after a release job frees space. */
+  loadStoragePanel?(): Promise<void>;
 }
 
 interface VireoExportPreflightRequest {photo_ids: number[]; destination: string}

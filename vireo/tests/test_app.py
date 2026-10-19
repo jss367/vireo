@@ -857,28 +857,31 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     client = app.test_client()
     resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
-    assert b'&limit=' in resp.data
-    assert b'Select all shown' in resp.data
-    assert b'Delete Entire Cache' in resp.data
+    html = _page_with_scripts(client, '/storage')
+    assert 'STORAGE_MODAL_FILE_LIMIT = 500' in html
+    assert '&limit=' in html
+    assert 'Select all shown' in html
+    assert 'Delete Entire Cache' in html
 
 
 def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
     """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
     assert page.status_code == 200
+    html = _page_with_scripts(client, '/storage')
     for marker in (
-        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
-        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
-        b'Download again', b'cannot currently be reclaimed separately',
-        b'loadMasksCard(s && s.masks)', b'cfgWorkingCopyCacheMaxGb',
-        b"{name: 'Working Copies'", b'Oldest files are removed first',
-        b'storageBreakdown', b'View files and folders',
+        'storageFreeSize', 'storageReclaimableSize', 'clearSafeCaches',
+        'openStorageFolder', 'refreshStoragePage', 'Safe to clear',
+        'Download again', 'cannot currently be reclaimed separately',
+        'loadMasksCard(s && s.masks)', 'cfgWorkingCopyCacheMaxGb',
+        "{name: 'Working Copies'", 'Oldest files are removed first',
+        'storageBreakdown', 'View files and folders',
     ):
-        assert marker in page.data
-    assert page.data.count(b"{name: 'Database'") == 1
-    assert b'Other Vireo Data' not in page.data
+        assert marker in html
+    assert html.count("{name: 'Database'") == 1
+    assert 'Other Vireo Data' not in html
 
 
 def test_storage_page_confirms_destructive_working_copy_quota_reduction(
@@ -886,43 +889,45 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
 ):
     """Quota input stays pending until Apply and explains cache eviction."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
 
     assert page.status_code == 200
-    assert b'oninput="updateWorkingCopyLimitState()"' in page.data
-    assert b'onchange="saveStorageConfig()"' not in page.data.split(
-        b'id="cfgWorkingCopyCacheMaxGb"', 1,
-    )[1].split(b'</div>', 1)[0]
+    html = _page_with_scripts(client, '/storage')
+    assert 'data-storage-on="input:updateWorkingCopyLimitState"' in html
+    assert 'change:saveStorageConfig' not in html.split(
+        'id="cfgWorkingCopyCacheMaxGb"', 1,
+    )[1].split('</div>', 1)[0]
     for marker in (
-        b'applyWorkingCopyLimitBtn',
-        b'<dialog class="modal-overlay" id="workingCopyLimitModal"',
-        b'modal.showModal()',
-        b'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        b'quotaMb > _committedWorkingCopyQuotaMb',
-        b'Lower working-copy storage limit?',
-        b'Lower limit and remove copies',
-        b'Your original photos will not be deleted',
-        b'working_copy_cache_max_mb: workingCopyQuotaMb',
+        'applyWorkingCopyLimitBtn',
+        '<dialog class="modal-overlay" id="workingCopyLimitModal"',
+        'modal.showModal()',
+        'MAX_WORKING_COPY_QUOTA_MB = 1048576',
+        'quotaMb > _committedWorkingCopyQuotaMb',
+        'Lower working-copy storage limit?',
+        'Lower limit and remove copies',
+        'Your original photos will not be deleted',
+        'working_copy_cache_max_mb: workingCopyQuotaMb',
         # 409 recovery flow: confirm flag sent after modal confirmation,
         # and stale-cache 409 rerouted back into the modal.
-        b'_confirm_working_copy_eviction = true',
-        b"'working_copy_eviction_confirmation_required'",
-        b'previous_working_copy_quota_mb',
+        '_confirm_working_copy_eviction = true',
+        "'working_copy_eviction_confirmation_required'",
+        'previous_working_copy_quota_mb',
         # Apply must flush a queued autosave for the other storage
         # controls instead of dropping it via clearTimeout.
-        b'await flushPendingStorageAutosave()',
-        b'function flushPendingStorageAutosave',
-        b'saveStorageConfig();',
-        b'throw e;',
-        b'the working-copy limit was not updated',
+        'await flushPendingStorageAutosave()',
+        'function flushPendingStorageAutosave',
+        'saveStorageConfig();',
+        'throw e;',
+        'the working-copy limit was not updated',
         # Refresh syncs the cached committed quota from the server's
         # authoritative working.quota_bytes so a concurrent quota change
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
-        b'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        b'currentInputMb === _committedWorkingCopyQuotaMb',
+        'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
+        'currentInputMb === _committedWorkingCopyQuotaMb',
     ):
-        assert marker in page.data
+        assert marker in html
 
 
 def test_api_storage_includes_offline_originals(app_and_db):
@@ -4858,7 +4863,7 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     client = app.test_client()
     resp = client.get('/cull')
     assert resp.status_code == 200
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/cull')
     assert 'id="slRejectCrop"' in html
     assert 'id="slWTime"' in html
     assert 'id="slEncCut"' in html

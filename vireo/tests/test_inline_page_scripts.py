@@ -21,12 +21,9 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "_sync_panel.html": 876,
     "audit.html": 480,
     "card_cleanup.html": 915,
-    "cull.html": 780,
-    "duplicates.html": 820,
     "highlights.html": 1151,
     "id_conflicts.html": 968,
     "stats.html": 992,
-    "storage.html": 867,
     "welcome.html": 374,
     "workspace.html": 366,
 }
@@ -86,6 +83,9 @@ SPLIT_PAGES = {
     "/review": "review",
     "/move": "move",
     "/keywords": "keywords",
+    "/cull": "cull",
+    "/duplicates": "duplicates",
+    "/storage": "storage",
 }
 
 
