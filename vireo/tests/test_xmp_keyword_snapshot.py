@@ -5,6 +5,7 @@ import ast
 import contextlib
 import copy
 import re
+import sqlite3
 import unicodedata
 import urllib.parse
 import weakref
@@ -235,7 +236,8 @@ class _MemorySidecar:
 
 
 def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp_mtime=9):
-    row = {"exists": existing, "xmp_mtime": 5 if existing else None}
+    row = {"exists": existing, "xmp_mtime": 5 if existing else None,
+           "file_mtime": 5, "file_size": 50}
     events = []
 
     def add_photo(**values):
@@ -249,9 +251,16 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
         row["xmp_mtime"] = value
 
     def update_photo(photo_id, assignments, values):
-        for assignment, value in zip(assignments, values, strict=True):
-            if assignment == "xmp_mtime=?":
-                row["xmp_mtime"] = value
+        events.append("photo-update")
+        bindings = iter(values)
+        for assignment in assignments:
+            if assignment == "xmp_mtime=NULL":
+                row["xmp_mtime"] = None
+            else:
+                value = next(bindings)
+                if assignment in ("xmp_mtime=?", "file_mtime=?", "file_size=?"):
+                    row[assignment.removesuffix("=?")] = value
+        assert list(bindings) == []
 
     db.add_photo = add_photo
     db._commits_held = contextlib.nullcontext
@@ -366,3 +375,83 @@ def test_full_catalog_clears_a_deleted_sidecar_stamp_without_importing():
     row, _, catalog = _catalog_boundary(ns, db, existing=True, xmp_mtime=None)
     catalog()
     assert row["xmp_mtime"] is None and calls == [] and imported == []
+
+
+def test_no_sidecar_reuses_photo_update_without_an_extra_transaction():
+    for prior_stamp in (None, 5):
+        ns, db, calls, imported = _namespace()
+        row, events, catalog = _catalog_boundary(ns, db, existing=True, xmp_mtime=None)
+        row["xmp_mtime"] = prior_stamp
+        catalog()
+        assert row["xmp_mtime"] is None
+        assert events == ["photo-update", "commit"]
+        assert calls == [] and imported == []
+
+
+def test_deleted_sidecar_clears_stamp_when_nonempty_image_hash_is_unavailable():
+    ns, db, calls, imported = _namespace()
+    row, events, catalog = _catalog_boundary(
+        ns, db, existing=True, file_hash=None, xmp_mtime=None,
+    )
+    catalog()
+    assert row["xmp_mtime"] is None
+    assert (row["file_mtime"], row["file_size"]) == (5, 50)
+    assert events == ["photo-update", "commit"]
+    assert calls == [] and imported == []
+
+
+def test_catalog_read_success_and_failure_keep_ownership_and_acknowledgement_boundaries():
+    for error in (None, PermissionError("invented unreadable sidecar"), ET.ParseError("invented malformed sidecar")):
+        ns, db, calls, imported = _namespace(initial_error=error)
+        row, events, catalog = _catalog_boundary(ns, db, existing=True)
+        catalog()
+        assert len(calls) == 1
+        assert events.count("photo-update") == 1
+        assert events.count("commit") == (2 if error is None else 1)
+        assert row["xmp_mtime"] == (9 if error is None else 5)
+        assert imported == ([({"Paris"}, [])] if error is None else [])
+        assert events.count("acknowledged") == (1 if error is None else 0)
+
+
+def test_failed_catalog_read_retries_incrementally_without_a_sidecar_mtime_change():
+    ns, db, _, imported = _namespace()
+    parse = ns["ET"].parse
+    unreadable = [True]
+    attempts = []
+
+    def transient_parse(path):
+        attempts.append(path)
+        if unreadable[0]:
+            raise PermissionError("invented temporary failure")
+        return parse(path)
+
+    ns["ET"].parse = transient_parse
+    full_row, _, catalog = _catalog_boundary(ns, db, existing=True, file_hash=None)
+    catalog()
+    assert full_row["xmp_mtime"] == 5 and not imported
+    row, commits, reuse = _incremental_boundary(ns, db)
+    row["xmp_mtime"] = full_row["xmp_mtime"]
+    unreadable[0] = False
+    assert reuse(9) is True and reuse(9) is True
+    assert row["xmp_mtime"] == 9 and commits == ["commit"]
+    assert len(attempts) == 2 and imported == [({"Paris"}, [])]
+
+
+def test_literal_null_assignment_and_bound_columns_use_one_invented_sqlite_update():
+    tree = ast.parse((VIREO / "repositories" / "scanning.py").read_text(encoding="utf-8"))
+    node = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "update_photo")
+    namespace = {}
+    _execute([node], namespace)
+    with contextlib.closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE photos(id INTEGER PRIMARY KEY, xmp_mtime REAL, file_mtime REAL)")
+        conn.execute("INSERT INTO photos VALUES(731, 5, 5)")
+        conn.commit()
+        trace = []
+        conn.set_trace_callback(trace.append)
+        namespace["update_photo"](
+            SimpleNamespace(conn=conn), 731, ["file_mtime=?", "xmp_mtime=NULL"], [9],
+        )
+        assert conn.execute("SELECT xmp_mtime, file_mtime FROM photos").fetchone() == (None, 9)
+        assert sum(sql.startswith("UPDATE ") for sql in trace) == 1
+        assert "COMMIT" not in trace

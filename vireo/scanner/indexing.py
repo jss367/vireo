@@ -272,12 +272,9 @@ class _FileIndexer:
         # the loser its keywords are visible to apply_duplicate_resolution's
         # metadata query and get merged onto the winner. Otherwise the
         # keywords would be stranded on the rejected row.
-        if item.xmp_mtime is None:
-            # A deleted sidecar must clear a previous acknowledgement.
-            if item.row_already_existed:
-                db.scanning.set_xmp_mtime(photo_id, None)
-                db.commit_with_retry()
-        elif _import_keywords_for_photo(db, photo_id, str(xmp_path)):
+        if item.xmp_mtime is not None and _import_keywords_for_photo(
+            db, photo_id, str(xmp_path),
+        ):
             # A stat alone cannot vouch for an unreadable sidecar's keywords.
             db.scanning.set_xmp_mtime(photo_id, item.xmp_mtime)
             db.commit_with_retry()
@@ -465,6 +462,9 @@ class _FileIndexer:
             # caches; leaving the old mtime in place retries it instead.
             updates.extend(["file_mtime=?", "file_size=?"])
             update_params.extend([item.file_mtime, file_size])
+        if row_already_existed and item.xmp_mtime is None:
+            # A deleted sidecar needs no read to clear its acknowledgement.
+            updates.append("xmp_mtime=NULL")
         # catalog_file acknowledges XMP only after its keyword read succeeds.
         if updates:
             self.db.scanning.update_photo(photo_id, updates, update_params)
