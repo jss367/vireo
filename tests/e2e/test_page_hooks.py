@@ -61,6 +61,10 @@ EXPECTED_HOOKS = {
     "/workspace": set(),
     "/dashboard": set(),
     "/storage": set(),
+    "/logs": set(),
+    "/lightroom": set(),
+    "/best-batch": set(),
+    "/shortcuts": set(),
 }
 
 

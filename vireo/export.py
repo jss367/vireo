@@ -762,7 +762,7 @@ class _PhotoExportBatch:
         )
 
         # Get species keywords for all photos in one query
-        self.species_map = db.keywords.get_species_for_photos(self.photo_ids)
+        self.species_map = db.photo_species.get_species_for_photos(self.photo_ids)
         self.edit_recipes = db.edits.get_photo_recipes(self.photo_ids)
 
     def run(self):
@@ -2182,7 +2182,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
 
     photos_map = db.photos.get_by_ids(photo_ids)
     folders = {folder["id"]: folder["path"] for folder in db.folders.tree()}
-    species_map = db.keywords.get_species_for_photos(photo_ids)
+    species_map = db.photo_species.get_species_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)
     edit_recipes = db.edits.get_photo_recipes(photo_ids)
     developed_index = _DevelopedDirIndex()

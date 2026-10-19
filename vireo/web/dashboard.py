@@ -10,6 +10,7 @@ scope.
 from __future__ import annotations
 
 from flask import Blueprint, jsonify
+from services import dashboard_stats
 from services.visual_scope import collection_rules_state
 from web.request_args import dashboard_scope_args, reject_visual_collection
 
@@ -63,7 +64,7 @@ def create_dashboard_blueprint(get_db, json_error):
         if err is not None:
             return err
         try:
-            stats = db.get_dashboard_stats(**scope)
+            stats = dashboard_stats.get_dashboard_stats(db, **scope)
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify(stats)
@@ -85,8 +86,8 @@ def create_dashboard_blueprint(get_db, json_error):
             return err
         try:
             return jsonify({
-                "overall": db.get_coverage_stats(**scope),
-                "folders": db.get_folder_coverage_stats(**scope),
+                "overall": dashboard_stats.get_coverage_stats(db, **scope),
+                "folders": dashboard_stats.get_folder_coverage_stats(db, **scope),
             })
         except ValueError as exc:
             return json_error(str(exc), 400)

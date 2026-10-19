@@ -26,7 +26,7 @@ def create_species_blueprint(get_db):
     @blueprint.route("/api/species")
     def api_species():
         db = get_db()
-        species = db.keywords.get_accepted_species()
+        species = db.photo_species.get_accepted_species()
         return jsonify({"species": species})
 
     @blueprint.route("/api/species/search")
