@@ -94,8 +94,8 @@ for (const missingFirst of [false, true]) {
   test('unidentified failure survives known repairs; missing first=' + missingFirst, async () => {
     const h = harness();
     for (const id of missingFirst ? [undefined, 1, 2] : [1, 2, undefined]) await h.change(response(id, true));
-    await h.change(response(1));
-    await h.change(response(2));
+    await h.change(response(1, false, 'redone'));
+    await h.change(response(2, false, 'redone'));
     await h.change(response(undefined));
     assert.equal(h.banner.style.display, 'flex');
   });
@@ -106,7 +106,7 @@ test('success without an ID cannot repair a known entry', async () => {
   await h.change(response(1, true));
   await h.change(response(undefined));
   assert.equal(h.banner.style.display, 'flex');
-  await h.change(response(1));
+  await h.change(response(1, false, 'redone'));
   assert.equal(h.banner.style.display, 'none');
 });
 
@@ -114,7 +114,7 @@ test('null-ID failure remains conservative after a known inverse', async () => {
   const h = harness();
   await h.change(response(1, true));
   await h.change({...response(undefined, true), entry_id: null});
-  await h.change(response(1));
+  await h.change(response(1, false, 'redone'));
   assert.equal(h.banner.style.display, 'flex');
 });
 
@@ -159,4 +159,54 @@ test('no-change and unrelated successful history do not invent a warning', async
   await h.change(undefined);
   await h.change(response(77));
   assert.equal(h.banner.style.display, 'none');
+});
+
+test('reused ID cannot repair the discarded entry, even after its own inverse succeeds', async () => {
+  for (const failedOperation of ['undone', 'redone']) {
+    const h = harness();
+    await h.change(response(1, true, failedOperation));
+    await h.change(response(1, false, failedOperation));
+    assert.equal(h.banner.style.display, 'flex');
+    await h.change(response(1, false, failedOperation === 'undone' ? 'redone' : 'undone'));
+    assert.equal(h.banner.style.display, 'flex');
+  }
+});
+
+test('a reused entry that also fails cannot replace the discarded stale warning', async () => {
+  const h = harness();
+  await h.change(response(1, true));
+  await h.change(response(1, true));
+  await h.change(response(1, false, 'redone'));
+  assert.equal(h.banner.style.display, 'flex');
+});
+
+test('a genuine inverse clears failed undo or failed redo without relying on description', async () => {
+  for (const operation of ['undone', 'redone']) {
+    const h = harness();
+    await h.change(response(1, true, operation));
+    await h.change(response(99));
+    assert.equal(h.banner.style.display, 'flex');
+    await h.change(response(1, false, operation === 'undone' ? 'redone' : 'undone'));
+    assert.equal(h.banner.style.display, 'none');
+  }
+});
+
+test('unknown operation cannot acknowledge a stale entry', async () => {
+  const h = harness();
+  await h.change(response(1, true));
+  await h.change({ok: true, entry_id: 1});
+  assert.equal(h.banner.style.display, 'flex');
+  await h.change(response(1, false, 'redone'));
+  assert.equal(h.banner.style.display, 'none');
+});
+
+test('discarded redo warning survives repair of other outstanding entries', async () => {
+  const h = harness();
+  await h.change(response(2, true, 'redone'));
+  await h.change(response(1, true, 'undone'));
+  await h.change(response(1, false, 'undone'));
+  await h.change(response(2, false, 'undone'));
+  assert.equal(h.banner.style.display, 'flex');
+  await h.change(response(1, false, 'redone'));
+  assert.equal(h.banner.style.display, 'flex');
 });

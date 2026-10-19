@@ -25,19 +25,13 @@ function dismissDegradedBanner() {
   /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
-// The edit_history row ids of undo/redo operations whose cache refresh
-// failed and whose photos may still be stale on screen. The next undo/redo
-// on any of these ids is that operation's own inverse — its successful
-// refresh resyncs the same photos the failed one left stale, so that id
-// drops out. The banner stays up while any id remains, and comes down only
-// once every stale entry has been repaired, so two consecutive failures on
-// different entries do not let one inverse success hide the warning while
-// the other entry's cache is still out of sync. An undo/redo on an id that
-// is not in the set is a different edit (different photos usually) and the
-// outstanding staleness still stands, so the set is left alone. A failure
-// without an id remains as null until the user leaves the page; no known
-// entry's success can prove that unidentified failure was repaired.
-/** @type {Set<number | null>} */ var _historyCacheStaleEntryIds = new Set();
+// Remember each failed entry's last undo/redo direction. Only its opposite
+// can be the entry's own inverse. New edits delete the redo stack and SQLite
+// can reuse its row ids: another operation in the same direction therefore
+// cannot prove that the original stale cache was repaired. Keep that warning
+// as an unidentified entry (null), including through the replacement's inverse.
+// Missing ids/directions are likewise retained until the user leaves the page.
+/** @type {Map<number | null, 'undo' | 'redo' | null>} */ var _historyCacheStaleEntryIds = new Map();
 
 /**
  * An undo or redo stood, but the saved review results could not follow it
@@ -52,8 +46,15 @@ function renderHistoryCacheStaleBanner(change) {
   var banner = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBanner'));
   var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
   if (!banner || !text || !change) return;
+  var entryId = change.entry_id != null ? Number(change.entry_id) : null;
+  /** @type {'undo' | 'redo' | null} */ var operation = change.undone !== undefined ? 'undo' : change.redone !== undefined ? 'redo' : null;
+  var previous = _historyCacheStaleEntryIds.get(entryId);
   if (change.pipeline_cache_stale) {
-    _historyCacheStaleEntryIds.add(change.entry_id != null ? Number(change.entry_id) : null);
+    if (entryId == null || operation == null) _historyCacheStaleEntryIds.set(null, null);
+    else {
+      if (previous === operation) _historyCacheStaleEntryIds.set(null, null);
+      _historyCacheStaleEntryIds.set(entryId, operation);
+    }
     var undo = change.undone !== undefined;
     var description = (undo ? change.undone : change.redone) || 'the last edit';
     text.innerHTML = '<strong>These review results may be out of date.</strong> '
@@ -64,10 +65,10 @@ function renderHistoryCacheStaleBanner(change) {
     banner.style.display = 'flex';
     return;
   }
-  if (change.entry_id != null
-      && _historyCacheStaleEntryIds.delete(Number(change.entry_id))
-      && _historyCacheStaleEntryIds.size === 0) {
-    banner.style.display = 'none';
+  if (entryId != null && operation != null && _historyCacheStaleEntryIds.has(entryId)) {
+    if (previous === operation) _historyCacheStaleEntryIds.set(null, null);
+    _historyCacheStaleEntryIds.delete(entryId);
+    if (_historyCacheStaleEntryIds.size === 0) banner.style.display = 'none';
   }
 }
 
