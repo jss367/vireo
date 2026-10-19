@@ -98,7 +98,7 @@
   "scanner/companions.py": 1,
   "scanner/features.py": 3,
   "scanner/hashing.py": 1,
-  "scanner/indexing.py": 2,
+  "scanner/indexing.py": 1,
   "scanner/scan_run.py": 5,
   "scanner/triage.py": 3,
   "scanner/working_copy_batch.py": 4,

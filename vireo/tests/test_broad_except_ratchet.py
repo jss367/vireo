@@ -60,6 +60,8 @@ DOCUMENTED_ROOTS: tuple[str, ...] = (
     "classify_job/",
     "job_runner/",
     "jobs.py",
+    "scanner/",
+    "import_job/",
 )
 
 BROAD_NAMES = {"Exception", "BaseException"}
