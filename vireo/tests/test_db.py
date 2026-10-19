@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
+from services import dashboard_stats, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -637,7 +638,7 @@ def test_keyword_hierarchy(tmp_path):
     db.tag_photo(pid, raptors)
     db.tag_photo(pid, hawk)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) == 3
 
     hawk_row = [k for k in tree if k['name'] == 'Red-tailed hawk'][0]
@@ -653,12 +654,12 @@ def test_tag_and_untag_photo(tmp_path):
     kid = db.add_keyword('Cardinal')
 
     db.tag_photo(pid, kid)
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert len(keywords) == 1
     assert keywords[0]['name'] == 'Cardinal'
 
     db.untag_photo(pid, kid)
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert len(keywords) == 0
 
 
@@ -2087,7 +2088,7 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -2117,7 +2118,7 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
                 return {"taxon_id": 123, "scientific_name": "California"}
             return None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
 
     assert updated == 0
     row = db.conn.execute(
@@ -3556,7 +3557,7 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    db.keywords.mark_species(FakeTaxonomy())
+    db.keyword_taxa.mark_species(FakeTaxonomy())
 
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -3588,7 +3589,7 @@ def test_mark_species_keywords_fixes_type_taxonomy_with_is_species_zero(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
@@ -3633,7 +3634,7 @@ def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path)
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -3666,7 +3667,7 @@ def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -3938,7 +3939,7 @@ def _make_workspace_with_photos(tmp_path, photo_overrides=None):
 def test_get_dashboard_stats_empty(tmp_path):
     """Returns sensible defaults when workspace has photos but no metadata."""
     db, _ = _make_workspace_with_photos(tmp_path, [{}])
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert stats['top_keywords'] == []
     assert stats['photos_by_month'] == []
     assert stats['classified_count'] == 0
@@ -3966,7 +3967,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Robin', 0.95, 'test')
 
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
 
     # top_keywords: only the explicit Robin taxonomy term is stored.
     by_name = {k['name']: k['photo_count'] for k in stats['top_keywords']}
@@ -4032,12 +4033,12 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
         "date_from": "2024-06-01",
         "date_to": "2024-06-30",
     }
-    stats = db.get_dashboard_stats(**scope)
+    stats = dashboard_stats.get_dashboard_stats(db, **scope)
     assert stats["total_photos"] == 2
     assert stats["folder_count"] == 2
     assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
-    assert db.get_coverage_stats(**scope)["total"] == 2
-    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+    assert dashboard_stats.get_coverage_stats(db, **scope)["total"] == 2
+    assert {row["path"] for row in dashboard_stats.get_folder_coverage_stats(db, **scope)} == {
         "/photos/park", "/photos/yard",
     }
 
@@ -4085,7 +4086,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
     )
     db.conn.commit()
 
-    stats = db.get_dashboard_stats(collection_id=collection_id)
+    stats = dashboard_stats.get_dashboard_stats(db, collection_id=collection_id)
     assert stats["total_photos"] == 2, (
         "Dashboard totals must count the offline photo when scoped by "
         f"a collection that matches it; got {stats['total_photos']}"
@@ -4099,7 +4100,7 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
 
     # Coverage still restricts to accessible folders in its outer join, so
     # the collection scope must not further shrink that count either.
-    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+    assert dashboard_stats.get_coverage_stats(db, collection_id=collection_id)["total"] == 1
 
     # Regression guard: Browse and pipeline callers must still filter out
     # photos in offline folders even when the collection rules match them.
@@ -4129,8 +4130,8 @@ def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
     )
     db.conn.commit()
 
-    attention = db.get_dashboard_stats(
-        date_from="2024-06-01", date_to="2024-06-30",
+    attention = dashboard_stats.get_dashboard_stats(
+        db, date_from="2024-06-01", date_to="2024-06-30",
     )["attention"]
     assert attention == {
         "unclassified": 1,
@@ -4151,7 +4152,7 @@ def test_get_coverage_stats_empty_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats['total'] == 0
     for key in ('thumbnail', 'phash', 'quality', 'detected', 'classified',
                 'gps', 'file_hash', 'working_copy', 'mask', 'rating'):
@@ -4181,7 +4182,7 @@ def test_get_coverage_stats_counts_each_stage(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Robin', 0.95, 'test')
 
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats['total'] == 3
     assert stats['thumbnail'] == 2
     assert stats['phash'] == 2
@@ -4221,9 +4222,9 @@ def test_coverage_stats_scoped_to_active_workspace(tmp_path):
     db.add_photo(folder_id=fid2, filename='c.jpg', extension='.jpg',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(ws1)
-    assert db.get_coverage_stats()['total'] == 1
+    assert dashboard_stats.get_coverage_stats(db)['total'] == 1
     db.set_active_workspace(ws2)
-    assert db.get_coverage_stats()['total'] == 2
+    assert dashboard_stats.get_coverage_stats(db)['total'] == 2
 
 
 def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
@@ -4246,7 +4247,7 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
                  file_size=1, file_mtime=1.0)
     db.conn.commit()
 
-    folders = db.get_folder_coverage_stats()
+    folders = dashboard_stats.get_folder_coverage_stats(db)
     by_path = {f['path']: f for f in folders}
     assert by_path['/A']['total'] == 1
     assert by_path['/A']['thumbnail'] == 1
@@ -4276,14 +4277,14 @@ def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
         file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
     )
 
-    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    no_matches = dashboard_stats.get_folder_coverage_stats(db, date_from="2024-02-01")
     assert {row["path"]: row["total"] for row in no_matches} == {
         "/A": 0,
         "/B": 0,
     }
 
-    folder_scoped = db.get_folder_coverage_stats(
-        folder_id=folder_a, date_from="2024-02-01",
+    folder_scoped = dashboard_stats.get_folder_coverage_stats(
+        db, folder_id=folder_a, date_from="2024-02-01",
     )
     assert [(row["path"], row["total"]) for row in folder_scoped] == [
         ("/A", 0),
@@ -4569,7 +4570,7 @@ def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_p
     )
     db.conn.commit()
 
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     # detected_count applies threshold → only photo A qualifies.
     assert stats["detected_count"] == 1
     # classified_count must match — NOT 2 (ignored threshold) and NOT 3
@@ -5092,7 +5093,7 @@ def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
     # Active ws = A. Even if caller passes B's folder id by mistake,
     # results must not include B's photo.
     db._active_workspace_id = ws_a
-    hits = db.get_photos_missing_masks(folder_ids=[fa, fb])
+    hits = subject_masks.get_photos_missing_masks(db, folder_ids=[fa, fb])
     hit_ids = {h["id"] for h in hits}
     assert pa in hit_ids
     assert pb not in hit_ids, "workspace B photo must not leak into workspace A"
@@ -5237,8 +5238,8 @@ def test_is_keyword_species(tmp_path):
     kid_species = db.add_keyword('Robin', is_species=True)
     kid_location = db.add_keyword('The Park', is_species=False)
 
-    assert db.keywords.is_species(kid_species) is True
-    assert db.keywords.is_species(kid_location) is False
+    assert db.keyword_taxa.is_species(kid_species) is True
+    assert db.keyword_taxa.is_species(kid_location) is False
 
 
 # --- Cluster 5: Calendar Data ---
@@ -5771,7 +5772,7 @@ def test_get_accepted_species(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    species = db.keywords.get_accepted_species()
+    species = db.photo_species.get_accepted_species()
     assert 'Great Blue Heron' in species
     assert 'Red-tailed Hawk' in species
     assert len(species) == 2
@@ -5795,7 +5796,7 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     # table; absent rows are 'pending'.
     db.set_review_status(preds[0]['id'], db._active_workspace_id, 'accepted')
 
-    species = db.keywords.get_accepted_species()
+    species = db.photo_species.get_accepted_species()
     assert species == []
 
 
@@ -5814,7 +5815,7 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
 
-    species = db.keywords.get_accepted_species()
+    species = db.photo_species.get_accepted_species()
     assert species == []
 
 
@@ -5839,7 +5840,7 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    species = db.keywords.get_accepted_species()
+    species = db.photo_species.get_accepted_species()
     # Both species keywords tagged on the photo appear, alphabetical.
     assert species == ["Cooper's Hawk", 'Red-tailed Hawk']
 
@@ -5874,7 +5875,7 @@ def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    assert db.keywords.get_accepted_species() == ['Red-tailed Hawk']
+    assert db.photo_species.get_accepted_species() == ['Red-tailed Hawk']
 
 
 def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
@@ -5906,7 +5907,7 @@ def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    assert db.keywords.get_accepted_species() == []
+    assert db.photo_species.get_accepted_species() == []
 
 
 def test_count_photos_without_gps(tmp_path):
@@ -6096,7 +6097,7 @@ def test_keyword_tree_includes_type(tmp_path):
     kid = db.add_keyword('Cardinal', is_species=True)
     db.tag_photo(pid, kid)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) >= 1
     cardinal = [k for k in tree if k['name'] == 'Cardinal'][0]
     assert cardinal['type'] == 'taxonomy'
@@ -6113,7 +6114,7 @@ def test_photo_keywords_includes_type(tmp_path):
     kid = db.add_keyword('MyTag')
     db.tag_photo(pid, kid)
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert len(keywords) == 1
     assert keywords[0]['type'] == 'general'
 
@@ -6311,7 +6312,7 @@ def test_undo_last_edit_keyword_add(tmp_path):
                    [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}])
 
     db.undo_last_edit()
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert not any(k['name'] == 'Eagle' for k in keywords)
 
     db.redo_last_undo()
@@ -6334,7 +6335,7 @@ def test_undo_last_edit_keyword_remove(tmp_path):
                    [{'photo_id': pid, 'old_value': str(kid), 'new_value': ''}])
 
     db.undo_last_edit()
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert any(k['id'] == kid for k in keywords)
     source = db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
@@ -6492,7 +6493,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     # Top-confidence prediction has species but no taxonomy_class/scientific_name.
     db.predictions.add(
         det_ids[0],
@@ -6514,7 +6515,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         },
     )
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     assert rows[0]["taxonomy_class"] == "Mammalia"
     assert rows[0]["scientific_name"] == "Vulpes vulpes"
@@ -6552,7 +6553,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     db.predictions.add(
         det_ids[0],
         species="Turdus migratorius",
@@ -6570,7 +6571,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         taxonomy={"class": "Aves", "scientific_name": "Corvus corax"},
     )
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     assert rows[0]["scientific_name"] == "Turdus migratorius"
 
@@ -6597,7 +6598,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
         detector_model="MegaDetector",
         prompt=(0, 0, 1, 1),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     # Stale fingerprint — high confidence + bird taxonomy.
     db.conn.execute(
         "INSERT INTO predictions (detection_id, classifier_model, "
@@ -6618,7 +6619,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     )
     db.conn.commit()
 
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert len(rows) == 1
     # Must pick the current-fingerprint row, not the stale higher-confidence one.
     assert rows[0]["taxonomy_class"] == "Mammalia", (
@@ -6657,7 +6658,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
             detector_model="MegaDetector",
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
-        db.set_active_mask_variant(pid, "test")
+        subject_masks.set_active_mask_variant(db, pid, "test")
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -6665,12 +6666,12 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
         )
 
     # No filter: both photos.
-    assert {r["id"] for r in db.list_photos_for_eye_keypoint_stage()} == {pid_a, pid_b}
+    assert {r["id"] for r in subject_masks.list_photos_for_eye_keypoint_stage(db)} == {pid_a, pid_b}
     # Scoped to one photo.
-    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=[pid_a])
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=[pid_a])
     assert [r["id"] for r in rows] == [pid_a]
     # Empty iterable short-circuits to [].
-    assert db.list_photos_for_eye_keypoint_stage(photo_ids=set()) == []
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=set()) == []
 
 
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
@@ -7193,7 +7194,7 @@ def test_accept_prediction_tags_photo(tmp_path):
     preds = db.predictions.get_rows()
     result = db.accept_prediction(preds[0]["id"])
     assert result["species"] == "Elk"
-    kws = db.keywords.get_for_photo(pid)
+    kws = db.photo_keywords.get_for_photo(pid)
     assert any(k["name"] == "Elk" for k in kws)
 
 
@@ -7226,7 +7227,7 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     result = db.accept_prediction(prediction_id, replace_species=True)
 
     root = result["keyword_id"]
-    tagged = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert nested in tagged
     assert root not in tagged
     assert stale not in tagged
@@ -7353,7 +7354,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
 
     result = db.accept_prediction(prediction_id, replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Cactus Wren" in names
     assert "Desert Verdin" not in names
 
@@ -7447,7 +7448,7 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
 
     result = db.accept_prediction(prediction_id, replace_species=True)
 
-    tagged = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert european in tagged, (
         "Linked target must be attached even though a same-key legacy row "
         "existed"
@@ -7519,7 +7520,7 @@ def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
     # distinct species, not the unlinked target — and untag it.
     db.accept_prediction(prediction_id, replace_species=True)
 
-    tagged = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    tagged = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert legacy_target in tagged, (
         "Unlinked accept target must be attached to the photo"
     )
@@ -7581,7 +7582,7 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
     changed = [a["changed_tag"] for a in result["affected"]]
     assert changed.count(True) == 1
     assert changed.count(False) == 1
-    assert {row["name"] for row in db.keywords.get_for_photo(photo_id)} >= {
+    assert {row["name"] for row in db.photo_keywords.get_for_photo(photo_id)} >= {
         "American Wigeon", "Blue-winged Teal",
     }
     statuses = {
@@ -7633,7 +7634,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
 
     result = db.accept_prediction(teal_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names        # this subject's corrected ID
     assert "American Wigeon" in names          # other subject preserved
     assert "Green-winged Teal" not in names    # this subject's stale ID gone
@@ -7700,7 +7701,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
 
     result = db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
     assert "American Wigeon" in names          # protected by current fp
     assert "Green-winged Teal" not in names    # stale fp must not protect it
@@ -7764,7 +7765,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
 
     result = db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
     assert "apapane" in names                  # protected across normalization
     assert "Green-winged Teal" not in names    # this subject's stale ID gone
@@ -7825,7 +7826,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
 
     result = db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
     assert "Green-winged Teal" not in names    # alternative must not protect it
     assert "Green-winged Teal" in result["affected"][0]["old_species"]
@@ -7883,7 +7884,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
 
     result = db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
     # Dormant (below-threshold) neighbour must not protect the stale tag.
     assert "Green-winged Teal" not in names
@@ -7942,7 +7943,7 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
 
     db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Blue-winged Teal" in names
     assert "American Wigeon" in names          # visible neighbour still protects
     assert "Green-winged Teal" not in names
@@ -8105,7 +8106,7 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
 
     result = db.accept_prediction(target_pred["id"], replace_species=True)
 
-    names = {k["name"] for k in db.keywords.get_for_photo(pid)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
     assert "Wood Duck" in names                # target's corrected identity
     assert "American Wigeon" in names           # exact-text neighbour survives
     assert "Anatidae" in names                  # taxonomy ancestor survives
@@ -8395,7 +8396,7 @@ def test_accept_prediction_grouped_skips_already_decided_members(tmp_path):
     )
     assert _review_status(db, pred_accepted) == "accepted"
     assert "Elk" not in {
-        k["name"] for k in db.keywords.get_for_photo(photo_rejected)
+        k["name"] for k in db.photo_keywords.get_for_photo(photo_rejected)
     }, "the rejected sibling's photo was tagged with the denied species"
     # The already-accepted member keeps whatever it had; it simply is not
     # re-decided by this call, so undoing this accept cannot reset it.
@@ -10679,7 +10680,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     db.photo_review.set_rating(p2, 3)
 
     # Sanity: stats populated when folder is ok.
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert len(stats["photos_by_month"]) == 2
     assert len(stats["rating_distribution"]) >= 1
 
@@ -10687,7 +10688,7 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     db.conn.commit()
 
     # Metadata aggregates still populated — they don't depend on disk presence.
-    stats = db.get_dashboard_stats()
+    stats = dashboard_stats.get_dashboard_stats(db)
     assert len(stats["photos_by_month"]) == 2, \
         "photos_by_month went empty when folder marked missing"
     assert len(stats["rating_distribution"]) >= 1, \
@@ -11112,7 +11113,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     assert db.photo_labels.get_for_photos([pid]) == {}  # removal applied
 
     # Scope-clause consumers and the reclassify purge must not raise either.
-    counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
+    counts = stage_counts.count_real_detections_in_scope(db, photo_ids=huge, min_conf=0.2)
     assert counts is not None
     db.predictions.clear(model="some-model", collection_photo_ids=huge)
 
@@ -11123,7 +11124,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     # get_detections_for_photos twice.
     photos_map = db.photos.get_by_ids(huge)
     assert pid in photos_map  # the one real row survives the chunked select
-    species_map = db.keywords.get_species_for_photos(huge)
+    species_map = db.photo_species.get_species_for_photos(huge)
     assert species_map == {}  # no keywords attached, but no OperationalError
     det_map = db.get_detections_for_photos(huge, min_conf=0)
     assert det_map == {}
@@ -16898,7 +16899,7 @@ def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
     db.tag_photo(p1, scene_kid)
     db.tag_photo(p2, gen_kid)
 
-    kept = db.keywords.filter_out_subject_tagged([p1, p2], {"genre"})
+    kept = db.photo_keywords.filter_out_subject_tagged([p1, p2], {"genre"})
     assert kept == [p2]
 
 
@@ -16929,7 +16930,7 @@ def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    assert db.keywords.filter_out_subject_tagged([p1], set()) == [p1]
+    assert db.photo_keywords.filter_out_subject_tagged([p1], set()) == [p1]
 
 
 def test_filter_out_subject_tagged_empty_photo_ids_returns_empty(tmp_path):
@@ -16937,7 +16938,7 @@ def test_filter_out_subject_tagged_empty_photo_ids_returns_empty(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    assert db.keywords.filter_out_subject_tagged([], {"genre"}) == []
+    assert db.photo_keywords.filter_out_subject_tagged([], {"genre"}) == []
 
 
 def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
@@ -16959,7 +16960,7 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     # No subject-tagged photos here — all three should be kept.
     # Provide ids in non-sorted order to confirm the helper preserves input order.
     ordered = [p_c, p_a, p_b]
-    assert db.keywords.filter_out_subject_tagged(ordered, {"genre"}) == ordered
+    assert db.photo_keywords.filter_out_subject_tagged(ordered, {"genre"}) == ordered
 
 
 def test_get_subject_types_drops_non_string_entries(tmp_path, monkeypatch):
@@ -17030,7 +17031,7 @@ def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
         if i % 2 == 0:
             db.tag_photo(p, genre_kid)
 
-    kept = db.keywords.filter_out_subject_tagged(pids, {"genre"})
+    kept = db.photo_keywords.filter_out_subject_tagged(pids, {"genre"})
     expected = [p for i, p in enumerate(pids) if i % 2 == 1]
     assert kept == expected, (
         f"Chunking corrupted result. Expected odd-index photos, got {kept}"
@@ -17066,7 +17067,7 @@ def test_filter_out_subject_tagged_excludes_legacy_is_species_when_taxonomy_requ
     )
     db.conn.commit()
 
-    kept = db.keywords.filter_out_subject_tagged([p1, p2], {"taxonomy"})
+    kept = db.photo_keywords.filter_out_subject_tagged([p1, p2], {"taxonomy"})
     assert kept == [p2], (
         "Legacy is_species=1 rows must count as taxonomy-tagged so upgraded "
         "DBs don't re-run classify on already-identified photos."
@@ -17095,7 +17096,7 @@ def test_filter_out_subject_tagged_ignores_legacy_is_species_when_taxonomy_exclu
     )
     db.conn.commit()
 
-    kept = db.keywords.filter_out_subject_tagged([p1], {"genre"})
+    kept = db.photo_keywords.filter_out_subject_tagged([p1], {"genre"})
     assert kept == [p1], (
         "is_species=1 must only count when 'taxonomy' is one of the "
         "requested subject_types; otherwise the legacy-species fallback "
@@ -18707,13 +18708,13 @@ def test_update_keyword_rename_general_to_matching_taxon_visible_to_species_quer
     db.tag_photo(pid, kid)
 
     # Before rename: general keyword, species query returns nothing.
-    assert db.keywords.get_species_for_photos([pid]) == {}
+    assert db.photo_species.get_species_for_photos([pid]) == {}
 
     db.update_keyword(kid, name="Lesser Scaup")
 
     # After rename: auto-promoted to taxonomy + is_species=1, so the
     # species query now includes it.
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Lesser Scaup"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
 def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_path):
@@ -18736,7 +18737,7 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     )
     db.conn.commit()
 
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Lesser Scaup"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
 def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
@@ -18767,12 +18768,12 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     assert db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
     ).fetchone()["taxon_id"] == taxa["Verdin"]
-    assert db.keywords.is_species(family) is False
-    assert db.keywords.is_species(nested) is True
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.keyword_taxa.is_species(family) is False
+    assert db.keyword_taxa.is_species(nested) is True
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
     assert db.get_photos_with_equivalent_species([pid], root) == {pid}
 
-    rows = {row["id"]: row for row in db.keywords.get_for_photos([pid])[pid]}
+    rows = {row["id"]: row for row in db.photo_keywords.get_for_photos([pid])[pid]}
     assert rows[family]["taxon_rank"] == "family"
     assert rows[nested]["taxon_rank"] == "species"
 
@@ -18993,7 +18994,7 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
     # Only the leaf is attached (repair detached the redundant root), but
     # both root and leaf share the taxon — the returned name must be the
     # canonical root spelling used by species_representatives.
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
 
 
 def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
@@ -19028,7 +19029,7 @@ def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
 
     # The attached row's own stored spelling wins so downstream curation
     # lookups match the actually-attached name.
-    assert db.keywords.get_species_for_photos([pid]) == {
+    assert db.photo_species.get_species_for_photos([pid]) == {
         pid: ["Auriparus flaviceps"]
     }
 
@@ -19065,7 +19066,7 @@ def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
 
     # Both distinct spellings survive the dedup so downstream lookups
     # (species_representatives, species_highlights) can match either key.
-    result = db.keywords.get_species_for_photos([pid])
+    result = db.photo_species.get_species_for_photos([pid])
     assert set(result[pid]) == {"Foo", "foo"}
 
 
@@ -20139,7 +20140,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
         # tag on pid_had_both is preserved.
         db.undo_last_edit()
         keep_tags_had_both = {
-            r["id"] for r in db.keywords.get_for_photo(pid_had_both)
+            r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }
         assert keep_id in keep_tags_had_both, (
             "undo removed the pre-existing survivor tag from pid_had_both"
@@ -20147,7 +20148,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
         # And pid_only_src, whose add was legitimately retargeted, no
         # longer carries the survivor tag after undo.
         keep_tags_only_src = {
-            r["id"] for r in db.keywords.get_for_photo(pid_only_src)
+            r["id"] for r in db.photo_keywords.get_for_photo(pid_only_src)
         }
         assert keep_id not in keep_tags_only_src
     finally:
@@ -20217,12 +20218,12 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tm
         # because survivor was already there).
         db.undo_last_edit()
         assert keep_id in {
-            r["id"] for r in db.keywords.get_for_photo(pid_had_both)
+            r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }
         # Redo (would untag survivor from pid_had_both without the fix).
         db.redo_last_undo()
         assert keep_id in {
-            r["id"] for r in db.keywords.get_for_photo(pid_had_both)
+            r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }, "redo of keyword_remove stripped the pre-existing survivor tag"
     finally:
         db.close()
@@ -20290,7 +20291,7 @@ def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept
 
         db.undo_last_edit()
         assert keep_id in {
-            r["id"] for r in db.keywords.get_for_photo(pid_had_both)
+            r["id"] for r in db.photo_keywords.get_for_photo(pid_had_both)
         }, "undo of prediction_accept stripped the pre-existing survivor tag"
     finally:
         db.close()
@@ -21503,7 +21504,7 @@ def test_set_active_mask_variant_denormalizes(tmp_path):
             crop_complete=0.9,
         ),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant, subject_size, "
         "subject_tenengrad, bg_tenengrad, crop_complete FROM photos WHERE id=1"
@@ -21523,7 +21524,7 @@ def test_set_active_mask_variant_missing_row_raises(tmp_path):
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
     with pytest.raises(ValueError):
-        db.set_active_mask_variant(1, "sam3-small")
+        subject_masks.set_active_mask_variant(db, 1, "sam3-small")
 
 
 def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
@@ -21568,7 +21569,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
     )
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
-        db.set_active_mask_variant(1, "sam2-large")
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     # The photos row must remain unactivated — no denormalised
     # mask_path or subject_size from the obsolete mask.
     row = db.conn.execute(
@@ -21608,10 +21609,10 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
         cfg.save({**original, "detector_confidence": 0.5})
         import pytest
         with pytest.raises(ValueError, match="another subject"):
-            db.set_active_mask_variant(1, "sam2-large")
+            subject_masks.set_active_mask_variant(db, 1, "sam2-large")
         with pytest.raises(ValueError, match="another subject"):
-            db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.19)
-        db.set_active_mask_variant(1, "sam2-large", weak_rescue_min_conf=.12)
+            subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.19)
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large", weak_rescue_min_conf=.12)
         row = db.conn.execute(
             "SELECT active_mask_variant, subject_size FROM photos WHERE id=1"
         ).fetchone()
@@ -21639,7 +21640,7 @@ def test_set_active_mask_variant_allows_migration_without_detections(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="md", prompt=(1, 2, 3, 4),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -21679,7 +21680,7 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
     )
     db.conn.commit()
     with pytest.raises(ValueError, match="another subject"):
-        db.set_active_mask_variant(1, "sam2-large")
+        subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     row = db.conn.execute(
         "SELECT mask_path, active_mask_variant FROM photos WHERE id=1"
     ).fetchone()
@@ -21737,7 +21738,7 @@ def test_delete_masks_for_variant_refuses_active(tmp_path):
         1, "sam2-small", str(p),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-small")
     with pytest.raises(ValueError):
         db.masks_features.delete_for_variant("sam2-small")
 
@@ -21763,7 +21764,7 @@ def test_delete_inactive_masks(tmp_path):
         1, "sam2-large", str(pb),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     n = db.masks_features.delete_inactive()
     assert n == 1
     assert not pa.exists()
@@ -22046,11 +22047,11 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
     )
     # Without a floor the (matching, low-confidence) detection keeps
     # the mask fresh.
-    assert db.delete_stale_masks() == 0
+    assert subject_masks.delete_stale_masks(db) == 0
     assert p.exists()
     # With a floor above the detection's confidence the mask becomes
     # stale and gets removed.
-    assert db.delete_stale_masks(detector_confidence=0.5) == 1
+    assert subject_masks.delete_stale_masks(db, detector_confidence=0.5) == 1
     assert not p.exists()
 
 
@@ -22140,7 +22141,7 @@ def test_delete_stale_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(99, 20, 100, 200),
     )
-    deleted = db.delete_stale_masks()
+    deleted = subject_masks.delete_stale_masks(db)
     assert deleted == 1
     assert fresh.exists()
     assert not stale_path.exists()
@@ -22239,7 +22240,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-large", str(inside),
         detector_model="md", prompt=(0, 0, 0, 0),
     )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
     db.masks_features.delete_inactive()
     assert outside.exists(), "delete_inactive_masks unlinked outside path"
     # Active variant inside masks dir is preserved.
@@ -22258,7 +22259,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
         1, "sam2-small", str(stale_outside),
         detector_model="md", prompt=(1, 1, 1, 1),
     )
-    db.delete_stale_masks()
+    subject_masks.delete_stale_masks(db)
     assert stale_outside.exists(), "delete_stale_masks unlinked outside path"
 
 
@@ -22285,7 +22286,7 @@ def test_mask_variants_summary(tmp_path):
             pid, var, str(p),
             detector_model="md", prompt=(0, 0, 0, 0),
         )
-    db.set_active_mask_variant(1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, 1, "sam2-large")
 
     summary = {s["variant"]: s for s in db.masks_features.variants_summary()}
     assert summary["sam2-small"]["count"] == 2
@@ -22327,7 +22328,7 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
     db.masks_features.upsert_mask(p3, "sam2-large", "/p/c.large.png",
         detector_model="md", prompt=(0, 0, 0, 0))
 
-    db.set_active_mask_variant(p1, "sam2-large")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-large")
 
     db.set_active_workspace(ws_in)
     cov = {c["variant"]: c for c in db.masks_features.variant_coverage()}
@@ -22647,7 +22648,7 @@ def _cap_sqlite_vars(db, cap=999):
 def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
     """Pipeline callers pass the full resolved collection scope as
     photo_ids; a single IN clause would exceed the bind-var cap for big
-    collections. Must route through _scope_clause like its count siblings."""
+    collections. Must route through stats.scope_clause like its count siblings."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
@@ -22669,7 +22670,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
             detector_model="MegaDetector",
             prompt=(0.1, 0.1, 0.8, 0.8),
         )
-        db.set_active_mask_variant(pid, "test")
+        subject_masks.set_active_mask_variant(db, pid, "test")
         db.predictions.add(
             det_ids[0], species="Vulpes vulpes", confidence=0.9,
             model="bioclip-2.5", category="match",
@@ -22679,7 +22680,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
 
     _cap_sqlite_vars(db)
     scope = pids + list(range(1_000_000, 1_001_200))  # 1202 ids > 999 cap
-    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=scope)
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=scope)
     assert {r["id"] for r in rows} == set(pids)
 
 
@@ -22730,7 +22731,7 @@ def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
     _cap_sqlite_vars(db)
     # pid appears twice, in what would be different chunks.
     scope = [pid] + list(range(1_000_000, 1_001_200)) + [pid]
-    result = db.keywords.get_for_photos(scope)
+    result = db.photo_keywords.get_for_photos(scope)
     assert list(result.keys()) == [pid]
     assert [k["name"] for k in result[pid]] == ["Robin"]
 
@@ -23750,7 +23751,7 @@ def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -23812,7 +23813,7 @@ def test_mark_species_keywords_links_subspecies_to_species_ancestor(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
         (keyword_id,),
@@ -23873,7 +23874,7 @@ def test_mark_species_keywords_rejects_sole_wrong_lineage_candidate(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 0
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -23958,7 +23959,7 @@ def test_mark_species_keywords_disambiguates_homonym_species_by_lineage(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -24012,7 +24013,7 @@ def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24063,7 +24064,7 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -24119,7 +24120,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24643,7 +24644,7 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
     db.accept_prediction(pred_id, replace_species=True)
 
     # Both stale Robin rows must have been detached.
-    tagged_ids = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    tagged_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert upper_id not in tagged_ids
     assert lower_id not in tagged_ids
 
@@ -25028,7 +25029,7 @@ def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_p
     db.tag_photo(pid, leaf)
 
     # Sanity check: the canonical species surfaced elsewhere is "Verdin".
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
 
     count = db.collections.count_photos_for_rules
     # `is`/`equals` on the root name matches the taxon-linked leaf.
@@ -26882,7 +26883,7 @@ def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
 
     # Sanity check: displayed species is the root spelling ``Verdin``,
     # not the leaf ``Auriparus flaviceps``.
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
 
     count = db.collections.count_photos_for_rules
     # The displayed name matches.
@@ -26932,7 +26933,7 @@ def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
     ).fetchone()[0] == 0
 
     # The displayed species falls back to the leaf's own spelling.
-    assert db.keywords.get_species_for_photos([pid]) == {pid: ["Desert Verdin"]}
+    assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Desert Verdin"]}
 
     count = db.collections.count_photos_for_rules
     # The leaf name matches ``is`` / ``equals`` / ``contains``.
@@ -26992,7 +26993,7 @@ def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path
 
     # Sanity: display keeps each attached root's own spelling and
     # canonicalizes the hierarchy leaf to MIN(id) root.
-    displayed = db.keywords.get_species_for_photos([p_verdin, p_sci, p_leaf])
+    displayed = db.photo_species.get_species_for_photos([p_verdin, p_sci, p_leaf])
     assert displayed[p_verdin] == ["Verdin"]
     assert displayed[p_sci] == ["Auriparus flaviceps"]
     assert displayed[p_leaf] == ["Verdin"]
@@ -27111,7 +27112,7 @@ def test_universal_filter_species_count(tmp_path):
     assert count([{"field": "species_count", "op": ">", "value": 0}]) == 3
 
     # Agrees with the resolver the UI renders from.
-    resolved = db.keywords.get_species_for_photos([one_p, two_p, dupe_p])
+    resolved = db.photo_species.get_species_for_photos([one_p, two_p, dupe_p])
     assert len(resolved[dupe_p]) == 1
     assert len(resolved[two_p]) == 2
 

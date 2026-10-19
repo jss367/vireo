@@ -21,7 +21,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "audit.html": 480,
     "cull.html": 780,
     "duplicates.html": 820,
-    "highlights.html": 1151,
     "storage.html": 867,
     "welcome.html": 374,
     "workspace.html": 366,

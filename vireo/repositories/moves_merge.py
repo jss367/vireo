@@ -39,7 +39,10 @@ from dataclasses import dataclass, field
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
 from repositories.photo_row_deletion import photo_row_deletion
-from repositories.photo_visibility import remap_photo_visibility
+from repositories.photo_visibility import (
+    keep_photo_visible_across_folder_change,
+    remap_photo_visibility,
+)
 
 log = logging.getLogger(__name__)
 
@@ -798,15 +801,37 @@ class MovesMergeRepository:
         )
 
     def folder_paths_below(self, base):
-        """Rows (``path``) of folders whose path is ``LIKE base + '/%'``.
+        """``(path, relative)`` for every folder strictly below ``base``.
 
-        ``LIKE`` wildcards in ``base`` match too; callers filter on a literal
-        prefix.
+        Matches like ``move_folder_path``'s cascade: either separator, so a
+        Windows catalog (``C:\\Photos\\Birds\\Day 1``) matches too, and a
+        literal prefix, so ``_`` and ``%`` in ``base`` are not wildcards.
+        ``relative`` is the path below ``base``, ``/``-separated for Windows;
+        POSIX backslashes, including a trailing one in ``base``, stay literal.
+
+        The SQL ``REPLACE`` fold is only a prefilter: a literal
+        ``base + separator`` containment check in Python then rejects any
+        row whose stored path is not actually under ``base``. ``\\`` is a
+        legal filename character on POSIX, so a POSIX base (one that
+        starts with ``/``) treats only ``/`` as a separator — otherwise a
+        base like ``/archive/a\\b`` would wrongly match the unrelated
+        subtree ``/archive/a/b/...``, and the base's own siblings whose
+        names begin with its stem plus ``\\`` would be read as its
+        children.
         """
-        return self.conn.execute(
-            "SELECT path FROM folders WHERE path LIKE ?",
-            (base + "/%",),
+        prefix = self._subtree_prefix(base)
+        rows = self.conn.execute(
+            "SELECT path FROM folders "
+            "WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?",
+            (len(prefix), prefix),
         ).fetchall()
+        posix = base.startswith("/")
+        stem = base.rstrip("/") if posix else base.replace("\\", "/").rstrip("/")
+        return [(row["path"], row["path"][len(stem) + 1:] if posix
+                 else self._subtree_relative(row["path"], base))
+                for row in rows
+                if (row["path"] if posix else row["path"].replace("\\", "/"))
+                .startswith(stem + "/")]
 
     def date_move_subtree_photos(self, folder_id, descendant_predicate,
                                  descendant_params, sql_functions=()):
@@ -1867,6 +1892,10 @@ class _StagedTreeMerge:
         pid = match.pid
         if match.collision is not None:
             self._replace_phantom_target(pid, match.collision)
+        # The staged folder's workspace links are deleted with it below, so
+        # a sibling workspace sharing that folder would lose this photo.
+        keep_photo_visible_across_folder_change(
+            self.conn, pid, fold.target_id, except_workspace=self.ws)
         self.conn.execute(
             "UPDATE photos SET folder_id = ? "
             "WHERE id = ?",

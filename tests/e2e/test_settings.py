@@ -845,3 +845,59 @@ def test_all_settings_text_field_saves_on_commit_not_per_keystroke(live_server, 
     expect(refreshed).to_be_focused()
     values = page.request.get(f"{url}/api/settings/values").json()
     assert values["global"]["darktable_style"] == "half-typed"
+
+
+@pytest.mark.parametrize("scope", ["global", "workspace"])
+def test_failed_location_keyword_cleanup_is_shown_after_save(
+    live_server, page, monkeypatch, scope,
+):
+    """Turning off location keywords says so when their removal can't queue.
+
+    The save stands, but the keywords Vireo wrote stay in the sidecars, so
+    the row must not report a plain "Saved": it keeps the server's warning
+    on screen, and a warning toast points at it.
+    """
+    import sqlite3
+
+    from db import Database
+
+    def _locked(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        Database, "queue_location_changes_for_tagged_photos", _locked,
+    )
+    url = live_server["url"]
+    key = "write_location_keywords_to_xmp"
+    turn_on = page.request.patch(
+        f"{url}/api/settings/{scope}", data={"key": key, "value": True},
+    )
+    assert turn_on.ok
+
+    page.goto(f"{url}/settings", timeout=5000)
+    _wait_for_settings_idle(page)
+    if scope == "workspace":
+        page.locator('.scope-tab[data-scope="workspace"]').click()
+
+    row = page.locator(f'#allSettingsCategories .setting-row-card[data-key="{key}"]')
+    checkbox = row.locator(f'input[data-input-key="{key}"]')
+    expect(checkbox).to_be_checked(timeout=10_000)
+    with page.expect_response(
+        lambda r: r.request.method == "PATCH" and f"/api/settings/{scope}" in r.url
+    ) as saved:
+        checkbox.uncheck()
+    assert saved.value.json()["ok"] is True
+
+    notice = row.locator(".setting-row-warning")
+    expect(notice).to_be_visible(timeout=10_000)
+    expect(notice).to_contain_text(
+        "could not queue removal of the location keywords it wrote to XMP sidecars"
+    )
+    expect(notice).to_contain_text('"Default"')
+    expect(notice).to_contain_text("Queue location writes")
+    expect(row.locator(".setting-row-status")).to_have_text("Saved with a warning")
+    toast = page.locator('#toastContainer [data-type="warning"]')
+    expect(toast).to_contain_text("Those keywords stay in the sidecars")
+
+    values = page.request.get(f"{url}/api/settings/values").json()
+    assert values["effective"][key] is False

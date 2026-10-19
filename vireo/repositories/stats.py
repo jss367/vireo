@@ -1,13 +1,15 @@
 """Persistence for the dashboard, coverage and pipeline-plan counters.
 
 Everything here is a read over the active workspace's photos, detections,
-classifier runs, masks and caches. ``Database`` keeps the composition: it
-resolves the workspace-effective ``detector_confidence`` and
-``preview_max_size`` through ``Database.get_effective_config``, builds the
-photo scope (``_scope_clause`` / ``_dashboard_scope_clause``, which reach
-into the folder and collection domains), and passes the resulting SQL
-fragment and parameters in. The query text is unchanged from ``db.py``; the
-large-library budgets in ``docs/ARCHITECTURE.md`` depend on it.
+classifier runs, masks and caches. The composition lives in
+``services/stage_counts.py`` and ``services/dashboard_stats.py``: they
+resolve the workspace-effective ``detector_confidence`` and
+``preview_max_size`` through ``Database.get_effective_config``, build the
+photo scope (``scope_clause`` here, or the Dashboard's
+``dashboard_scope_clause``, which reaches into the folder and collection
+domains), and pass the resulting SQL fragment and parameters in. The query
+text is unchanged from ``db.py``; the large-library budgets in
+``docs/ARCHITECTURE.md`` depend on it.
 
 The active workspace is resolved lazily through ``workspace_id_fn``
 (``Database._ws_id``): each workspace-scoped read resolves it before running
@@ -27,12 +29,51 @@ from keyword_identity import identity_sql
 class StatsRepository:
     def __init__(self, conn: sqlite3.Connection,
                  workspace_id_fn: Callable[[], int], *,
-                 coverage_photo_columns: Sequence[tuple[str, str]]) -> None:
+                 coverage_photo_columns: Sequence[tuple[str, str]],
+                 chunk_size: int) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
         # ``Database._COVERAGE_PHOTO_COLUMNS``: the (key, predicate) pairs
         # behind the coverage SELECT fragment, in result order.
         self.coverage_photo_columns = coverage_photo_columns
+        # Largest photo-id scope bound inline; a larger one is staged.
+        self.chunk_size = chunk_size
+
+    def coverage_select_fragment(self) -> str:
+        """The ``SUM(CASE ...) AS <key>`` columns of the coverage SELECT."""
+        parts = [
+            f"SUM(CASE WHEN {pred} THEN 1 ELSE 0 END) AS {key}"
+            for key, pred in self.coverage_photo_columns
+        ]
+        return ",\n                ".join(parts)
+
+    def scope_clause(
+        self, photo_ids: Iterable[int] | None, table_alias: str = "p",
+    ) -> tuple[str, list[int]]:
+        """Build a (clause, params) pair to scope a query to photo_ids.
+
+        Returns ('', []) when photo_ids is None (whole-workspace scope).
+        Returns (' AND p.id IN (NULL)', []) for an empty set, which is the
+        intentional "no photos in scope" sentinel — callers asked for
+        "this collection" and the collection resolved to zero photos.
+
+        Scopes larger than one parameter chunk are staged in a
+        connection-local temp table instead of inline placeholders, which
+        would exceed SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds) for
+        big collections. The staged scope is only valid for the query the
+        caller runs immediately after this call — the next large-scope call
+        overwrites it.
+        """
+        if photo_ids is None:
+            return "", []
+        ids = list(photo_ids)
+        if not ids:
+            return f" AND {table_alias}.id IN (NULL)", []
+        if len(ids) <= self.chunk_size:
+            placeholders = ",".join("?" for _ in ids)
+            return f" AND {table_alias}.id IN ({placeholders})", ids
+        self.stage_scope_ids("scope_ids", ids)
+        return f" AND {table_alias}.id IN (SELECT id FROM scope_ids)", []
 
     def folder_linked(self, folder_id):
         """Return whether ``folder_id`` is linked to the workspace."""

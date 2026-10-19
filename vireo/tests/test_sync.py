@@ -483,7 +483,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kw_names = {k['name'] for k in keywords}
     assert 'Cardinal' in kw_names
     assert 'Sparrow' not in kw_names
@@ -531,7 +531,7 @@ def test_sync_from_xmp_does_not_restore_keyword_with_pending_removal(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    assert db.keywords.get_for_photo(pid) == []
+    assert db.photo_keywords.get_for_photo(pid) == []
 
 
 def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
@@ -558,7 +558,7 @@ def test_sync_from_xmp_flat_removal_preserves_same_name_hierarchy(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keyword_ids = {row["id"] for row in db.keywords.get_for_photo(pid)}
+    keyword_ids = {row["id"] for row in db.photo_keywords.get_for_photo(pid)}
     assert flat not in keyword_ids
     assert nested in keyword_ids
 
@@ -582,7 +582,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'Sparrow'}
 
 
@@ -614,7 +614,7 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'apapane'}
 
 
@@ -649,7 +649,7 @@ def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {'Sparrow', 'Cardinal'}
 
 
@@ -1212,7 +1212,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
     sync_from_xmp(db, [pid])
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     # Both distinct-slot homonyms must survive; sidecar reconciliation
     # cannot pick between them.
     surviving_ids = {kw['id'] for kw in keywords}
@@ -2436,7 +2436,7 @@ def test_sync_from_xmp_keeps_the_assigned_location(tmp_path, monkeypatch):
 
     sync_from_xmp(db, [pid])
 
-    names = {row["name"] for row in db.keywords.get_for_photo(pid)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(pid)}
     assert "Kumeyaay Lake" in names
     db.close()
 
@@ -2464,7 +2464,7 @@ def test_sync_from_xmp_ignores_a_stale_vireo_location_keyword(tmp_path, monkeypa
 
     sync_from_xmp(db, [pid])
 
-    names = {row["name"] for row in db.keywords.get_for_photo(pid)}
+    names = {row["name"] for row in db.photo_keywords.get_for_photo(pid)}
     assert names == {"Pont de Gau"}
     db.close()
 
@@ -3279,10 +3279,10 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
         result = sync.sync_to_xmp(db)
         assert result['failed'] == (0 if first_sync == 'success' else 1)
     db.undo_last_edit()
-    assert not db.keywords.get_for_photo(pid)
+    assert not db.photo_keywords.get_for_photo(pid)
     if redo:
         db.redo_last_undo()
-        assert [k['id'] for k in db.keywords.get_for_photo(pid)] == [keyword]
+        assert [k['id'] for k in db.photo_keywords.get_for_photo(pid)] == [keyword]
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == ({'Osprey'} if redo else set())
     assert not db.pending_changes.list_all()

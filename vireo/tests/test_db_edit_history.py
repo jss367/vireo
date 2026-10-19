@@ -436,10 +436,10 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
 
     db.undo_last_edit()
     assert _status(db, p["a_top"]) == "alternative"
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
     db.redo_last_undo()
     assert _status(db, p["a_top"]) == "rejected"
-    assert any(k["id"] == kid for k in db.keywords.get_for_photo(pid))
+    assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pid))
     assert curation_calls == [
         ("restore", ws, pid, "Robin", curation),
         ("reapply", ws, pid, "Robin", curation),
@@ -453,9 +453,9 @@ def test_keyword_remove_redo_untags_again(db, pids):
         [{"photo_id": pids[0], "old_value": str(kid), "new_value": ""}],
     )
     db.undo_last_edit()
-    assert any(k["id"] == kid for k in db.keywords.get_for_photo(pids[0]))
+    assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
     db.redo_last_undo()
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pids[0]))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
 
 
 def _item_rows(db, edit_id):
@@ -618,7 +618,7 @@ def test_undo_keyword_remove_of_deleted_keyword_is_noop(db, pids):
         [{"photo_id": pids[0], "old_value": "987654", "new_value": ""}],
     )
     assert db.undo_last_edit()["id"] == edit_id
-    assert db.keywords.get_for_photo(pids[0]) == []
+    assert db.photo_keywords.get_for_photo(pids[0]) == []
 
 
 def _pending(db, pid):
@@ -845,11 +845,11 @@ def test_prediction_accept_undo_redo_round_trip(db, pids):
     db.undo_last_edit()
     assert _status(db, p["a_top"]) == "pending"
     assert _status(db, p["a_mid"]) == "alternative"
-    assert not any(k["id"] == kid for k in db.keywords.get_for_photo(pids[0]))
+    assert not any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
     db.redo_last_undo()
     assert _status(db, p["a_mid"]) == "accepted"
     assert _status(db, p["a_top"]) == "rejected"
-    assert any(k["id"] == kid for k in db.keywords.get_for_photo(pids[0]))
+    assert any(k["id"] == kid for k in db.photo_keywords.get_for_photo(pids[0]))
 
 
 # -- relabel curation -----------------------------------------------------

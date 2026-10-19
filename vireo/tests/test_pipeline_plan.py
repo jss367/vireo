@@ -11,6 +11,7 @@ import sys
 
 import pytest
 from repositories.masks_features import PipelineFeatures
+from services import stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -45,7 +46,7 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(photo_id, variant)
+    subject_masks.set_active_mask_variant(db, photo_id, variant)
 
 
 def _tol_weights(tmp_path, name="bioclip-2"):
@@ -179,7 +180,7 @@ def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
         detector_model="full-image",
     )
 
-    counts = db.count_real_detections_in_scope()
+    counts = stage_counts.count_real_detections_in_scope(db)
     assert counts["total_dets"] == 1
     assert counts["photos_with_dets"] == 1
 
@@ -189,8 +190,8 @@ def test_count_real_detections_respects_min_conf(tmp_path):
     _add_photo_with_detection(db, folder_id, "high.jpg", conf=0.9)
     _add_photo_with_detection(db, folder_id, "low.jpg", conf=0.05)
 
-    assert db.count_real_detections_in_scope(min_conf=0.2)["total_dets"] == 1
-    assert db.count_real_detections_in_scope(min_conf=0.0)["total_dets"] == 2
+    assert stage_counts.count_real_detections_in_scope(db, min_conf=0.2)["total_dets"] == 1
+    assert stage_counts.count_real_detections_in_scope(db, min_conf=0.0)["total_dets"] == 2
 
 
 def test_count_real_detections_scopes_to_photo_ids(tmp_path):
@@ -198,13 +199,13 @@ def test_count_real_detections_scopes_to_photo_ids(tmp_path):
     pid_a, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
     pid_b, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
 
-    counts = db.count_real_detections_in_scope(photo_ids=[pid_a])
+    counts = stage_counts.count_real_detections_in_scope(db, photo_ids=[pid_a])
     assert counts["total_dets"] == 1
     assert counts["photos_with_dets"] == 1
 
     # Empty scope is a real "no photos" sentinel — must return zero, not
     # the whole-workspace count.
-    counts = db.count_real_detections_in_scope(photo_ids=set())
+    counts = stage_counts.count_real_detections_in_scope(db, photo_ids=set())
     assert counts == {"total_dets": 0, "photos_with_dets": 0}
 
 
@@ -219,8 +220,8 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
     pid_weak, _ = _add_photo_with_detection(db, folder_id, "weak.jpg", conf=0.05)
     db.model_runs.record_detector_run(pid_weak, "megadetector-v6", box_count=1)
 
-    assert db.count_full_image_fallback_photos() == 1
-    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
+    assert stage_counts.count_full_image_fallback_photos(db) == 1
+    assert stage_counts.count_full_image_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 1
 
     full_det_id = db.save_detections(
         pid_empty,
@@ -228,7 +229,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
           "confidence": 0, "category": "animal"}],
         detector_model="full-image",
     )[0]
-    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
+    assert stage_counts.count_full_image_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 1
 
     db.model_runs.record_classifier_run(full_det_id, "BioCLIP-2", "fp1", prediction_count=1)
     # ``count_classifier_runs`` (via ``get_classifier_run_cache_hits``)
@@ -243,7 +244,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
         model="BioCLIP-2",
         labels_fingerprint="fp1",
     )
-    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 0
+    assert stage_counts.count_full_image_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 0
     assert db.count_classifier_runs([pid_empty, pid_weak], "BioCLIP-2", "fp1") == 1
 
 
@@ -276,12 +277,12 @@ def test_full_image_fallback_counts_noise_only_boxes_at_workspace_floor(
 
     # Default min_conf=0 preserves the pre-noise-fallback semantics: only
     # the truly empty run qualifies.
-    assert db.count_full_image_fallback_photos() == 1
+    assert stage_counts.count_full_image_fallback_photos(db) == 1
     # At the workspace floor both empty and noise-only runs qualify, but the
     # confident real detection stays out.
-    assert db.count_full_image_fallback_photos(min_conf=0.2) == 2
-    assert db.count_full_image_classify_pending_pairs(
-        "BioCLIP-2", "fp1", min_conf=0.2,
+    assert stage_counts.count_full_image_fallback_photos(db, min_conf=0.2) == 2
+    assert stage_counts.count_full_image_classify_pending_pairs(
+        db, "BioCLIP-2", "fp1", min_conf=0.2,
     ) == 2
 
 
@@ -293,12 +294,12 @@ def test_full_image_fallback_counts_reject_torn_detector_run(tmp_path):
     )
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
 
-    assert db.count_full_image_fallback_photos(min_conf=0.2) == 0
-    assert db.count_full_image_classify_pending_pairs(
-        "BioCLIP-2", "fp1", min_conf=0.2,
+    assert stage_counts.count_full_image_fallback_photos(db, min_conf=0.2) == 0
+    assert stage_counts.count_full_image_classify_pending_pairs(
+        db, "BioCLIP-2", "fp1", min_conf=0.2,
     ) == 0
-    assert db.count_full_image_classify_stale(
-        "BioCLIP-2", "fp1", min_conf=0.2,
+    assert stage_counts.count_full_image_classify_stale(
+        db, "BioCLIP-2", "fp1", min_conf=0.2,
     ) == 0
 
 
@@ -348,25 +349,25 @@ def test_count_classify_pending_excludes_recorded_runs(tmp_path):
     _, did_b = _add_photo_with_detection(db, folder_id, "b.jpg")
 
     # Both pending against (BioCLIP-2, fp1)
-    assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 2
+    assert stage_counts.count_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 2
 
     db.model_runs.record_classifier_run(did_a, "BioCLIP-2", "fp1", prediction_count=1)
-    assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 1
+    assert stage_counts.count_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 1
 
     db.model_runs.record_classifier_run(did_b, "BioCLIP-2", "fp1", prediction_count=1)
-    assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 0
+    assert stage_counts.count_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 0
 
     # A different (model, fp) must NOT see those rows as done — adding a
     # new model is the headline failure mode the plan must catch.
-    assert db.count_classify_pending_pairs("BioCLIP-2", "fp2") == 2
-    assert db.count_classify_pending_pairs("OtherModel", "fp1") == 2
+    assert stage_counts.count_classify_pending_pairs(db, "BioCLIP-2", "fp2") == 2
+    assert stage_counts.count_classify_pending_pairs(db, "OtherModel", "fp1") == 2
 
 
 def test_count_classify_stale_zero_when_no_runs(tmp_path):
     from labels_fingerprint import TOL_SENTINEL
     db, folder_id = _make_db(tmp_path)
     _add_photo_with_detection(db, folder_id, "a.jpg")
-    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+    assert stage_counts.count_classify_stale(db, "BioCLIP-2", TOL_SENTINEL) == 0
 
 
 def test_count_classify_stale_zero_when_current_run_present(tmp_path):
@@ -377,7 +378,7 @@ def test_count_classify_stale_zero_when_current_run_present(tmp_path):
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
     db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
-    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
+    assert stage_counts.count_classify_stale(db, "BioCLIP-2", TOL_SENTINEL) == 0
 
 
 def test_count_classify_stale_counts_old_only_runs(tmp_path):
@@ -387,7 +388,7 @@ def test_count_classify_stale_counts_old_only_runs(tmp_path):
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
-    assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 1
+    assert stage_counts.count_classify_stale(db, "BioCLIP-2", TOL_SENTINEL) == 1
 
 
 def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
@@ -415,10 +416,10 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP-2", "fp1", prediction_count=1)
     db.model_runs.record_classifier_run(det_ids[1], "BioCLIP-2", "fp_old", prediction_count=1)
 
-    assert db.count_real_detections_in_scope()["total_dets"] == 2
-    assert db.count_primary_detections_in_scope()["total_dets"] == 1
-    assert db.count_primary_classify_pending_pairs("BioCLIP-2", "fp1") == 0
-    assert db.count_primary_classify_stale("BioCLIP-2", "fp1") == 0
+    assert stage_counts.count_real_detections_in_scope(db)["total_dets"] == 2
+    assert stage_counts.count_primary_detections_in_scope(db)["total_dets"] == 1
+    assert stage_counts.count_primary_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 0
+    assert stage_counts.count_primary_classify_stale(db, "BioCLIP-2", "fp1") == 0
 
 
 def test_primary_classify_counts_ignore_confident_non_animal_boxes(
@@ -438,9 +439,9 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
     )
     db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
 
-    assert db.count_primary_detections_in_scope()["total_dets"] == 0
-    assert db.count_primary_classify_pending_pairs("BioCLIP-2", "fp1") == 0
-    assert db.count_full_image_fallback_photos(min_conf=0.2) == 0
+    assert stage_counts.count_primary_detections_in_scope(db)["total_dets"] == 0
+    assert stage_counts.count_primary_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 0
+    assert stage_counts.count_full_image_fallback_photos(db, min_conf=0.2) == 0
 
     import labels as labels_mod
     import models as models_mod
@@ -476,7 +477,7 @@ def test_count_photos_pending_masks(tmp_path):
     )
     db.conn.commit()
 
-    counts = db.count_photos_pending_masks()
+    counts = stage_counts.count_photos_pending_masks(db)
     assert counts == {"eligible": 2, "pending": 1}
 
 
@@ -490,11 +491,11 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
-    assert db.count_photos_pending_masks() == {"eligible": 2, "pending": 0}
-    assert db.count_photos_pending_masks(
-        sam2_variant="sam2-small",
+    assert stage_counts.count_photos_pending_masks(db) == {"eligible": 2, "pending": 0}
+    assert stage_counts.count_photos_pending_masks(
+        db, sam2_variant="sam2-small",
     ) == {"eligible": 2, "pending": 2}
 
 
@@ -508,7 +509,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(p_done, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p_done, "sam2-small")
     db.conn.execute(
         "UPDATE photos SET mask_path='/m/legacy.png' WHERE id=?",
         (p_legacy,),
@@ -522,8 +523,8 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
     )
     db.conn.commit()
 
-    assert db.count_photos_pending_masks(
-        sam2_variant="sam2-small",
+    assert stage_counts.count_photos_pending_masks(
+        db, sam2_variant="sam2-small",
     ) == {"eligible": 2, "pending": 1}
 
 
@@ -540,8 +541,8 @@ def test_count_photos_pending_masks_treats_empty_variant_path_as_pending(tmp_pat
     )
     db.conn.commit()
 
-    assert db.count_photos_pending_masks(
-        sam2_variant="sam2-small",
+    assert stage_counts.count_photos_pending_masks(
+        db, sam2_variant="sam2-small",
     ) == {"eligible": 1, "pending": 1}
 
 
@@ -557,7 +558,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
     plan = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
@@ -616,7 +617,7 @@ def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_p
           "confidence": 1.0, "category": "anchor"}],
         detector_model="full-image",
     )
-    counts = db.count_photos_pending_masks()
+    counts = stage_counts.count_photos_pending_masks(db)
     assert counts == {"eligible": 0, "pending": 0}
 
 
@@ -649,7 +650,7 @@ def test_count_eye_keypoint_eligible_requires_mask_and_prediction(tmp_path):
     _mark_sam_done(db, pid_c, "/m/c.png")
     db.conn.commit()
 
-    assert db.count_eye_keypoint_eligible() == 1
+    assert stage_counts.count_eye_keypoint_eligible(db) == 1
 
 
 def test_count_eye_keypoint_stale_zero_when_all_current(tmp_path):
@@ -671,7 +672,7 @@ def test_count_eye_keypoint_stale_zero_when_all_current(tmp_path):
         (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
     )
     db.conn.commit()
-    assert db.count_eye_keypoint_stale() == 0
+    assert stage_counts.count_eye_keypoint_stale(db) == 0
 
 
 def test_count_eye_keypoint_stale_counts_old_fingerprint(tmp_path):
@@ -692,7 +693,7 @@ def test_count_eye_keypoint_stale_counts_old_fingerprint(tmp_path):
         (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
     )
     db.conn.commit()
-    assert db.count_eye_keypoint_stale() == 1
+    assert stage_counts.count_eye_keypoint_stale(db) == 1
 
 
 def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
@@ -712,7 +713,7 @@ def test_count_eye_keypoint_stale_ignores_never_processed(tmp_path):
         (did, "BioCLIP-2", TOL_SENTINEL, "robin", 0.9),
     )
     db.conn.commit()
-    assert db.count_eye_keypoint_stale() == 0
+    assert stage_counts.count_eye_keypoint_stale(db) == 0
 
 
 def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
@@ -756,8 +757,8 @@ def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
 
     # list_photos_for_eye_keypoint_stage cannot produce work here — the
     # count must agree.
-    assert db.list_photos_for_eye_keypoint_stage() == []
-    assert db.count_eye_keypoint_eligible() == 0
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db) == []
+    assert stage_counts.count_eye_keypoint_eligible(db) == 0
 
 
 def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
@@ -794,15 +795,15 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
     )
     db.conn.commit()
 
-    assert db.list_photos_for_eye_keypoint_stage() == []
-    assert db.count_eye_keypoint_eligible() == 0
-    assert db.count_eye_keypoint_stale() == 0
+    assert subject_masks.list_photos_for_eye_keypoint_stage(db) == []
+    assert stage_counts.count_eye_keypoint_eligible(db) == 0
+    assert stage_counts.count_eye_keypoint_stale(db) == 0
 
 
 def test_count_extract_stale_zero_when_no_masks(tmp_path):
     db, folder_id = _make_db(tmp_path)
     _add_photo_with_detection(db, folder_id, "a.jpg")
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_count_extract_stale_zero_when_prompt_matches(tmp_path):
@@ -820,7 +821,7 @@ def test_count_extract_stale_zero_when_prompt_matches(tmp_path):
     )
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_count_extract_stale_counts_prompt_mismatch(tmp_path):
@@ -837,7 +838,7 @@ def test_count_extract_stale_counts_prompt_mismatch(tmp_path):
     )
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
-    assert db.count_extract_stale("sam2-small") == 1
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 1
 
 
 def test_count_extract_stale_filters_by_variant(tmp_path):
@@ -854,8 +855,8 @@ def test_count_extract_stale_filters_by_variant(tmp_path):
     )
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
-    assert db.count_extract_stale("sam2-small") == 0
-    assert db.count_extract_stale("sam2-large") == 1
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-large") == 1
 
 
 def test_count_extract_stale_excludes_photos_with_null_mask_path(tmp_path):
@@ -879,8 +880,8 @@ def test_count_extract_stale_excludes_photos_with_null_mask_path(tmp_path):
     # extract run that inserted a photo_masks row before updating
     # photos.mask_path.
     db.conn.commit()
-    assert db.count_photos_pending_masks()["pending"] == 1
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_photos_pending_masks(db)["pending"] == 1
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_count_extract_stale_excludes_incomplete_variant_paths(tmp_path):
@@ -911,10 +912,10 @@ def test_count_extract_stale_excludes_incomplete_variant_paths(tmp_path):
     )
     db.conn.commit()
 
-    counts = db.count_photos_pending_masks(sam2_variant="sam2-small")
+    counts = stage_counts.count_photos_pending_masks(db, sam2_variant="sam2-small")
     assert counts["eligible"] == 2
     assert counts["pending"] == 2
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
@@ -941,7 +942,7 @@ def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
         (pid,),
     )
     db.conn.commit()
-    assert db.count_extract_stale("sam2-small") == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small") == 0
 
 
 def test_count_extract_stale_ignores_photos_below_confidence_floor(tmp_path):
@@ -962,9 +963,9 @@ def test_count_extract_stale_ignores_photos_below_confidence_floor(tmp_path):
     db.conn.commit()
     # detector_confidence floor of 0.2 means the 0.05-conf detection is
     # invisible; the photo has no eligible primary, so no stale work.
-    assert db.count_extract_stale("sam2-small", detector_confidence=0.2) == 0
+    assert stage_counts.count_extract_stale(db, "sam2-small", detector_confidence=0.2) == 0
     # Lower the floor and the same photo's prompt mismatch reappears.
-    assert db.count_extract_stale("sam2-small", detector_confidence=0.0) == 1
+    assert stage_counts.count_extract_stale(db, "sam2-small", detector_confidence=0.0) == 1
 
 
 # -------- compute_plan: classify --------
@@ -1755,12 +1756,12 @@ def test_count_photos_missing_thumb_basic(tmp_path):
         "UPDATE photos SET thumb_path='done.jpg' WHERE id=?", (pid_done,),
     )
     db.conn.commit()
-    assert db.count_photos_missing_thumb() == {"eligible": 2, "pending": 1}
+    assert stage_counts.count_photos_missing_thumb(db) == {"eligible": 2, "pending": 1}
 
 
 def test_count_photos_missing_thumb_empty_workspace(tmp_path):
     db, _ = _make_db(tmp_path)
-    assert db.count_photos_missing_thumb() == {"eligible": 0, "pending": 0}
+    assert stage_counts.count_photos_missing_thumb(db) == {"eligible": 0, "pending": 0}
 
 
 def test_count_photos_missing_preview_basic(tmp_path):
@@ -1775,7 +1776,7 @@ def test_count_photos_missing_preview_basic(tmp_path):
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid_a, 1920, 100)
-    assert db.count_photos_missing_preview(1920) == {
+    assert stage_counts.count_photos_missing_preview(db, 1920) == {
         "eligible": 2, "pending": 1,
     }
 
@@ -1790,10 +1791,10 @@ def test_count_photos_missing_preview_size_specific(tmp_path):
         file_size=1, file_mtime=1.0,
     )
     db.caches.preview_insert(pid, 1280, 100)
-    assert db.count_photos_missing_preview(1920) == {
+    assert stage_counts.count_photos_missing_preview(db, 1920) == {
         "eligible": 1, "pending": 1,
     }
-    assert db.count_photos_missing_preview(1280) == {
+    assert stage_counts.count_photos_missing_preview(db, 1280) == {
         "eligible": 1, "pending": 0,
     }
 
@@ -1833,9 +1834,9 @@ def test_count_photos_missing_thumb_or_preview_union(tmp_path):
 
     # max(thumb_pending=2, preview_pending=2) = 2 — but the real union is
     # {a, b, d} = 3 photos the next run will touch.
-    assert db.count_photos_missing_thumb()["pending"] == 2
-    assert db.count_photos_missing_preview(1920)["pending"] == 2
-    assert db.count_photos_missing_thumb_or_preview(1920) == {
+    assert stage_counts.count_photos_missing_thumb(db)["pending"] == 2
+    assert stage_counts.count_photos_missing_preview(db, 1920)["pending"] == 2
+    assert stage_counts.count_photos_missing_thumb_or_preview(db, 1920) == {
         "eligible": 4, "pending": 3,
     }
 
@@ -2060,7 +2061,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
     extract = plan["stages"]["Extract"]
     assert extract["state"] == "done-prior"
@@ -2076,7 +2077,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
         detector_model="megadetector-v6",
         prompt=(0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(pid_done, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid_done, "sam2-small")
     _add_photo_with_detection(db, folder_id, "todo.jpg")
     db.conn.commit()
 
@@ -4102,16 +4103,16 @@ def test_plan_counts_use_runtime_category_defaults(tmp_path, category, expected)
     pid, did = _add_photo_with_detection(db, folder_id, "legacy.jpg")
     db.conn.execute("UPDATE detections SET category=? WHERE id=?", (category, did))
     db.conn.commit()
-    for count in (db.count_real_detections_in_scope, db.count_primary_detections_in_scope):
-        assert count([pid], min_conf=0.2) == {"photos_with_dets": expected, "total_dets": expected}
-    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
-        assert pending("Model", "current", [pid], min_conf=0.2) == expected
+    for count in (stage_counts.count_real_detections_in_scope, stage_counts.count_primary_detections_in_scope):
+        assert count(db, [pid], min_conf=0.2) == {"photos_with_dets": expected, "total_dets": expected}
+    for pending in (stage_counts.count_classify_pending_pairs, stage_counts.count_primary_classify_pending_pairs):
+        assert pending(db, "Model", "current", [pid], min_conf=0.2) == expected
     db.model_runs.record_classifier_run(did, "Model", "old", prediction_count=1)
-    for stale in (db.count_classify_stale, db.count_primary_classify_stale):
-        assert stale("Model", "current", [pid], min_conf=0.2) == expected
+    for stale in (stage_counts.count_classify_stale, stage_counts.count_primary_classify_stale):
+        assert stale(db, "Model", "current", [pid], min_conf=0.2) == expected
     db.model_runs.record_classifier_run(did, "Model", "current", prediction_count=1)
-    for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
-        assert pending("Model", "current", [pid], min_conf=0.2) == 0
+    for pending in (stage_counts.count_classify_pending_pairs, stage_counts.count_primary_classify_pending_pairs):
+        assert pending(db, "Model", "current", [pid], min_conf=0.2) == 0
     db.close()
 
 

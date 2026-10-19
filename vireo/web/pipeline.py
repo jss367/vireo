@@ -33,6 +33,7 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
+from services import subject_masks
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -464,7 +465,7 @@ def create_pipeline_blueprint(
             "sam2_known": sam2_variant in SAM2_VARIANTS,
             "dinov2": dinov2_status(dinov2_variant),
             "dinov2_known": dinov2_variant in DINOV2_VARIANTS,
-            "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
+            "sam_variant_warning": subject_masks.sam_variant_rerun_warning(db, sam2_variant),
         })
 
     @blueprint.route("/api/jobs/pipeline", methods=["POST"])
@@ -768,7 +769,7 @@ def create_pipeline_blueprint(
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.masks_features.variant_coverage(),
-            "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
+            "sam_variant_warning": subject_masks.sam_variant_rerun_warning(db, sam2_variant),
             "results": results,
             "results_cache_info": results_cache_info,
             "review_readiness": review_readiness,
@@ -883,7 +884,7 @@ def create_pipeline_blueprint(
     def attach_live_pipeline_decisions(db, results):
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
-        species = db.keywords.get_species_for_photos(photo_ids)
+        species = db.photo_species.get_species_for_photos(photo_ids)
         live = db.photos.flags_ratings_and_eyes(photo_ids)
         for photo in results.get("photos", []):
             row = live.get(photo["id"])
@@ -1478,7 +1479,7 @@ def create_pipeline_blueprint(
             has_kw = False
             has_kws = {}
             if species_kid is not None or list_kids:
-                attached = {k["id"] for k in db.keywords.get_for_photo(pid)}
+                attached = {k["id"] for k in db.photo_keywords.get_for_photo(pid)}
                 if species_kid is not None:
                     has_kw = species_kid in attached
                 has_kws = {
@@ -1666,7 +1667,7 @@ def create_pipeline_blueprint(
         """Switch the active mask variant for every photo in the workspace
         that has a row for ``variant`` in ``photo_masks``.
 
-        This is the bulk version of ``Database.set_active_mask_variant``:
+        This is the bulk version of ``subject_masks.set_active_mask_variant``:
         it walks the workspace's photos, finds the ones with a mask row
         for the requested variant, and denormalizes that variant's
         path/features into the ``photos`` row so downstream readers
@@ -1695,8 +1696,8 @@ def create_pipeline_blueprint(
         # per request — multiple seconds with no progress indicator.
         for photo_id in photo_ids:
             try:
-                db.set_active_mask_variant(
-                    photo_id, variant, _commit=False,
+                subject_masks.set_active_mask_variant(
+                    db, photo_id, variant, _commit=False,
                 )
                 updated += 1
             except ValueError as e:
@@ -1796,7 +1797,7 @@ def create_pipeline_blueprint(
         )
 
         # Get keywords
-        keywords = db.keywords.get_for_photo(photo_id)
+        keywords = db.photo_keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
         # Compute crop info from primary detection (highest confidence)
