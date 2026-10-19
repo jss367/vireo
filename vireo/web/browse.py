@@ -645,7 +645,7 @@ def create_browse_blueprint(
             return err
 
         # Row order doesn't matter: ``keywords`` is fully sorted below.
-        keywords_by_photo = db.keywords.get_for_photos(photo_ids)
+        keywords_by_photo = db.photo_keywords.get_for_photos(photo_ids)
 
         selected_count = len(photo_ids)
         by_keyword = {}

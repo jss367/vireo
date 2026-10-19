@@ -470,11 +470,11 @@ def test_photo_keyword_reads(db, lib):
     db.tag_photo(p0, a)
     db.tag_photo(p0, b)
     db.tag_photo(p1, b)
-    assert [tuple(r) for r in db.keywords.get_for_photo(p0)] == [
+    assert [tuple(r) for r in db.photo_keywords.get_for_photo(p0)] == [
         (a, "Alpha", None, "general"), (b, "American Robin", None, "taxonomy"),
     ]
-    assert db.keywords.get_for_photos([]) == {}
-    got = db.keywords.get_for_photos([p0, p1, p0, p2])
+    assert db.photo_keywords.get_for_photos([]) == {}
+    got = db.photo_keywords.get_for_photos([p0, p1, p0, p2])
     assert sorted(got) == [p0, p1]
     assert [k["name"] for k in got[p0]] == ["Alpha", "American Robin"]
     assert got[p1][0]["taxon_rank"] == "species"
@@ -484,7 +484,7 @@ def test_keywords_for_photos_chunks(db, lib):
     p0 = lib["p"][0]
     db.tag_photo(p0, db.add_keyword("Alpha"))
     statements = _trace(db)
-    got = db.keywords.get_for_photos(list(range(10_000, 10_800)) + [p0])
+    got = db.photo_keywords.get_for_photos(list(range(10_000, 10_800)) + [p0])
     db.conn.set_trace_callback(None)
     assert list(got) == [p0]
     assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
@@ -536,10 +536,10 @@ def test_get_photo_ids_with_keyword_and_chunks(db, lib):
     db.tag_photo(p0, kid)
     db.tag_photo(p2, kid)
     db.tag_photo(p1, other)
-    assert db.keywords.photo_ids_tagged_with(kid, []) == set()
-    assert db.keywords.photo_ids_tagged_with(kid, (p0, p1)) == {p0}
+    assert db.photo_keywords.photo_ids_tagged_with(kid, []) == set()
+    assert db.photo_keywords.photo_ids_tagged_with(kid, (p0, p1)) == {p0}
     statements = _trace(db)
-    got = db.keywords.photo_ids_tagged_with(kid, list(range(10_000, 10_800)) + [p2, p0])
+    got = db.photo_keywords.photo_ids_tagged_with(kid, list(range(10_000, 10_800)) + [p2, p0])
     db.conn.set_trace_callback(None)
     assert got == {p0, p2}
     assert len([s for s in dict.fromkeys(statements) if "photo_id IN" in s]) == 2
@@ -586,14 +586,14 @@ def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib)
     db.tag_photo(p0, kid)
     db.tag_photo(p1, kid)
     db.tag_photo(p2, db.add_keyword("Beta"))
-    got = sorted(tuple(r) for r in db.keywords.photo_workspaces_tagged_with(kid))
+    got = sorted(tuple(r) for r in db.photo_keywords.photo_workspaces_tagged_with(kid))
     assert got == sorted(
         [(p0, lib["ws"]), (p1, lib["ws"]), (p0, other_ws), (p1, other_ws)]
     )
     # A photo no workspace can see has no row.
     db.remove_workspace_folder(other_ws, lib["fid"])
     db.remove_workspace_folder(lib["ws"], lib["fid"])
-    assert db.keywords.photo_workspaces_tagged_with(kid) == []
+    assert db.photo_keywords.photo_workspaces_tagged_with(kid) == []
 
 
 def test_get_keyword_subtree_photo_workspaces_walks_descendants(db, lib):
@@ -609,13 +609,13 @@ def test_get_keyword_subtree_photo_workspaces_walks_descendants(db, lib):
     db.tag_photo(p2, country)
     db.tag_photo(p3, elsewhere)
     ws = lib["ws"]
-    assert sorted(tuple(r) for r in db.keywords.subtree_photo_workspaces(country)) == [
+    assert sorted(tuple(r) for r in db.photo_keywords.subtree_photo_workspaces(country)) == [
         (p0, ws), (p1, ws), (p2, ws),
     ]
-    assert sorted(tuple(r) for r in db.keywords.subtree_photo_workspaces(park)) == [
+    assert sorted(tuple(r) for r in db.photo_keywords.subtree_photo_workspaces(park)) == [
         (p0, ws), (p1, ws),
     ]
-    assert db.keywords.subtree_photo_workspaces(987_654) == []
+    assert db.photo_keywords.subtree_photo_workspaces(987_654) == []
 
 
 def test_get_keyword_duplicate_groups_and_workspace_photo_counts(db, lib):
@@ -637,10 +637,10 @@ def test_get_keyword_duplicate_groups_and_workspace_photo_counts(db, lib):
     assert groups[0]["cnt"] == 2
     assert {int(x) for x in groups[0]["ids"].split(",")} == {upper, lower}
     assert db.keywords.workspace_duplicate_groups(None) == []
-    assert tuple(db.keywords.workspace_photo_count(upper, ws)) == ("Heron", 2)
-    assert tuple(db.keywords.workspace_photo_count(lower, ws)) == ("heron", 1)
+    assert tuple(db.photo_keywords.workspace_photo_count(upper, ws)) == ("Heron", 2)
+    assert tuple(db.photo_keywords.workspace_photo_count(lower, ws)) == ("heron", 1)
     # An aggregate with no GROUP BY: always one row, NULL name when nothing matches.
-    assert tuple(db.keywords.workspace_photo_count(upper, ws + 999)) == (None, 0)
+    assert tuple(db.photo_keywords.workspace_photo_count(upper, ws + 999)) == (None, 0)
 
 
 def test_search_species_keyword_names_matches_species_rows_only(db, lib):
@@ -746,22 +746,22 @@ def test_get_previous_species_candidates(db, confirmed):
     root, alias, homonym = confirmed["root"], confirmed["alias"], confirmed["homonym"]
     # Linked root taxon: the taxon arm adds the alias. Root rows first, then
     # by keyword id (not by photo).
-    rows = db.keywords.previous_species_candidates([p0, p1, p2], "ROBIN", 3)
+    rows = db.photo_species.previous_species_candidates([p0, p1, p2], "ROBIN", 3)
     assert [r["id"] for r in rows] == [root, alias, alias, homonym]
     assert set(_rows(rows, "photo_id", "id")) == {
         (p0, root), (p0, alias), (p2, alias), (p1, homonym),
     }
     assert tuple(rows[0]) == (root, "Robin", 3, p0)
     # Name only: the alias has another name.
-    rows = db.keywords.previous_species_candidates([p0, p1, p2], "robin", None)
+    rows = db.photo_species.previous_species_candidates([p0, p1, p2], "robin", None)
     assert _rows(rows, "photo_id", "id") == [(p0, root), (p1, homonym)]
-    assert db.keywords.previous_species_candidates([], "Robin", 3) == []
+    assert db.photo_species.previous_species_candidates([], "Robin", 3) == []
 
 
 def test_get_previous_species_candidates_chunks(db, confirmed):
     p0, p1, _, _ = confirmed["p"]
     statements = _trace(db)
-    rows = db.keywords.previous_species_candidates(
+    rows = db.photo_species.previous_species_candidates(
         list(range(10_000, 10_800)) + [p1, p0], "Robin", None,
     )
     db.conn.set_trace_callback(None)
@@ -774,7 +774,7 @@ def test_get_previous_species_candidates_chunks(db, confirmed):
 def test_get_attached_species_rows(db, confirmed):
     p0, p1, p2, p3 = confirmed["p"]
     root, alias, homonym = confirmed["root"], confirmed["alias"], confirmed["homonym"]
-    rows = db.keywords.attached_species_rows([p2, p1, p0, p3])
+    rows = db.photo_species.attached_species_rows([p2, p1, p0, p3])
     # By photo, root rows first, then id; genus-rank and non-species rows
     # are left out.
     assert _rows(rows, "photo_id", "id") == [
@@ -782,7 +782,7 @@ def test_get_attached_species_rows(db, confirmed):
     ]
     assert tuple(rows[1]) == (p0, alias, "Desert Robin", 3)
     statements = _trace(db)
-    rows = db.keywords.attached_species_rows(list(range(10_000, 10_800)) + [p1])
+    rows = db.photo_species.attached_species_rows(list(range(10_000, 10_800)) + [p1])
     db.conn.set_trace_callback(None)
     assert _rows(rows, "photo_id", "id") == [(p1, homonym)]
     assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
@@ -797,14 +797,14 @@ def test_species_rank_keywords_for_photo(db, lib):
     plain = _raw_kw(db, "Sunset")
     for kid in (unlinked, species, genus, flagged, plain):
         db.tag_photo(p0, kid)
-    rows = db.keywords.species_rank_keywords_for_photo(p0)
+    rows = db.photo_species.species_rank_keywords_for_photo(p0)
     # is_species rows first, then most recently tagged first.
     assert [tuple(r) for r in rows] == [
         (flagged, "Old Species", 1, "general"),
         (species, "American Robin", 1, "taxonomy"),
         (unlinked, "Mystery", 0, "taxonomy"),
     ]
-    assert db.keywords.species_rank_keywords_for_photo(p1) == []
+    assert db.photo_species.species_rank_keywords_for_photo(p1) == []
 
 
 def test_photo_ids_with_species_rank_keyword(db, lib):
@@ -814,12 +814,12 @@ def test_photo_ids_with_species_rank_keyword(db, lib):
     db.tag_photo(p1, _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2))
     db.tag_photo(p2, _raw_kw(db, "Sunset"))
     db.tag_photo(p3, _raw_kw(db, "Unlinked", kw_type="taxonomy"))
-    assert db.keywords.photo_ids_with_species_rank_keyword([p0, p1, p2, p3]) == {p0, p3}
-    assert db.keywords.photo_ids_with_species_rank_keyword([]) == set()
+    assert db.photo_species.photo_ids_with_species_rank_keyword([p0, p1, p2, p3]) == {p0, p3}
+    assert db.photo_species.photo_ids_with_species_rank_keyword([]) == set()
 
     statements = _trace(db)
     padded = list(range(10_000, 10_800)) + [p3]
-    assert db.keywords.photo_ids_with_species_rank_keyword(padded) == {p3}
+    assert db.photo_species.photo_ids_with_species_rank_keyword(padded) == {p3}
     db.conn.set_trace_callback(None)
     assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
 
@@ -842,7 +842,7 @@ def test_species_keywords_and_equivalents(db, lib):
     db.tag_photo(p0, root)
     db.tag_photo(p1, leaf)
     db.tag_photo(p2, genus)
-    got = db.keywords.get_species_for_photos([p0, p1, p2, p3])
+    got = db.photo_species.get_species_for_photos([p0, p1, p2, p3])
     assert got[p0] == ["American Robin"]
     assert got[p1] == ["American Robin"]
     assert p2 not in got
@@ -871,14 +871,14 @@ def test_filter_out_subject_tagged(db, lib, monkeypatch):
     db.tag_photo(p1, legacy)
     db.tag_photo(p2, db.add_keyword("Party", kw_type="genre"))
     ids = [p3, p2, p1, p0]
-    assert db.keywords.filter_out_subject_tagged(ids, []) == ids
-    assert db.keywords.filter_out_subject_tagged([], ["taxonomy"]) == []
-    assert db.keywords.filter_out_subject_tagged(ids, ["bogus"]) == ids
-    assert db.keywords.filter_out_subject_tagged(ids, ["taxonomy"]) == [p3, p2]
-    assert db.keywords.filter_out_subject_tagged(ids, ["genre"]) == [p3, p1, p0]
+    assert db.photo_keywords.filter_out_subject_tagged(ids, []) == ids
+    assert db.photo_keywords.filter_out_subject_tagged([], ["taxonomy"]) == []
+    assert db.photo_keywords.filter_out_subject_tagged(ids, ["bogus"]) == ids
+    assert db.photo_keywords.filter_out_subject_tagged(ids, ["taxonomy"]) == [p3, p2]
+    assert db.photo_keywords.filter_out_subject_tagged(ids, ["genre"]) == [p3, p1, p0]
     monkeypatch.setattr(Database, "_FILTER_SUBJECT_CHUNK", 2)
     statements = _trace(db)
-    assert db.keywords.filter_out_subject_tagged(tuple(ids), ["taxonomy", "genre"]) == [p3]
+    assert db.photo_keywords.filter_out_subject_tagged(tuple(ids), ["taxonomy", "genre"]) == [p3]
     db.conn.set_trace_callback(None)
     assert len([s for s in statements if "pk.photo_id IN" in s]) == 2
 
@@ -901,7 +901,7 @@ def test_keyword_tree_and_counts(db, lib):
     assert set(rows) == {"Birds", "Heron"}
     db.set_active_workspace(None)
     for method in (db.keywords.get_tree, db.keywords.count, db.keywords.count_in_workspace,
-                   db.keywords.list_all, db.keywords.get_accepted_species):
+                   db.keywords.list_all, db.photo_species.get_accepted_species):
         with pytest.raises(RuntimeError):
             method()
 
@@ -950,7 +950,7 @@ def test_get_accepted_species(db, lib):
     place = db.add_keyword("Park", kw_type="location")
     db.conn.execute("UPDATE keywords SET latitude = 1, longitude = 2 WHERE id = ?", (place,))
     db.tag_photo(p1, place)
-    assert db.keywords.get_accepted_species() == ["American Robin", "Cougar"]
+    assert db.photo_species.get_accepted_species() == ["American Robin", "Cougar"]
 
 
 # -- seeds and legacy migrations ----------------------------------------------------------
@@ -1361,22 +1361,35 @@ def test_resolve_species_by_lineage(db, lib):
 # Still on ``Database``: the forwarders bound into the keyword repositories by
 # name (``FACADE_METHODS``), ``untag_photo`` (kept beside ``tag_photo`` for the
 # structural guards that find keyword writers by name), and the coordinated
-# methods that delegate their statements.
-_DELEGATING_KEYWORD_METHODS = (
-    "detect_keyword_case_convention",
-    "resolve_species_display_name",
-    "_species_root_name_for_taxon",
-    "_lookup_taxon_id_for_keyword",
-    "_add_source_species_keyword",
-    "add_keyword",
-    "_merge_duplicate_keywords_pass",
-    "_rename_keyword_dependents",
-    "_reparent_disambiguated",
-    "untag_photo",
-    "get_photos_with_equivalent_species",
-    "update_keyword",
-    "_resolve_species_by_lineage",
-)
+# methods that delegate their statements; each mapped to the factory of the
+# repository that holds its SQL.
+_DELEGATING_KEYWORD_METHODS = {
+    "detect_keyword_case_convention": "_keyword_repository",
+    "resolve_species_display_name": "_keyword_repository",
+    "_species_root_name_for_taxon": "_keyword_repository",
+    "_lookup_taxon_id_for_keyword": "_keyword_repository",
+    "_add_source_species_keyword": "_keyword_repository",
+    "add_keyword": "_keyword_repository",
+    "_merge_duplicate_keywords_pass": "_keyword_repository",
+    "_rename_keyword_dependents": "_keyword_repository",
+    "_reparent_disambiguated": "_keyword_repository",
+    "untag_photo": "_photo_keyword_repository",
+    "get_photos_with_equivalent_species": "_photo_species_repository",
+    "update_keyword": "_keyword_repository",
+    "_resolve_species_by_lineage": "_keyword_repository",
+}
+
+# Every keyword-domain repository: its module, class, ``Database`` accessor
+# and the factory the accessor builds it through.
+_KEYWORD_REPOSITORIES = {
+    "repositories.keywords": ("KeywordRepository", "keywords", "_keyword_repository"),
+    "repositories.photo_keywords": (
+        "PhotoKeywordRepository", "photo_keywords", "_photo_keyword_repository",
+    ),
+    "repositories.photo_species": (
+        "PhotoSpeciesRepository", "photo_species", "_photo_species_repository",
+    ),
+}
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
 # reach the same methods through ``db.keywords`` now.
@@ -1449,14 +1462,14 @@ def _self_attrs(fn):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_KEYWORD_METHODS)
-def test_keyword_method_delegates_to_repository(name):
+@pytest.mark.parametrize("name, factory", sorted(_DELEGATING_KEYWORD_METHODS.items()))
+def test_keyword_method_delegates_to_repository(name, factory):
     attrs = _self_attrs(getattr(Database, name))
     assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to KeywordRepository"
+        f"Database.{name} touches self.conn; move the SQL to a keyword repository"
     )
-    assert "_keyword_repository" in attrs, (
-        f"Database.{name} no longer delegates to KeywordRepository"
+    assert factory in attrs, (
+        f"Database.{name} no longer delegates through {factory}"
     )
 
 
@@ -1464,11 +1477,24 @@ def test_keywords_has_no_forwarding_wrappers_on_database():
     """The domain is reached through ``db.keywords``; Database keeps no aliases."""
     for name in _REMOVED_KEYWORD_WRAPPERS:
         assert not hasattr(Database, name), f"Database.{name} came back; call db.keywords"
-    accessor = Database.__dict__["keywords"]
-    assert isinstance(accessor, property)
-    attrs = _self_attrs(accessor.fget)
-    assert "_keyword_repository" in attrs
-    assert "conn" not in attrs
+    for _cls, name, factory in _KEYWORD_REPOSITORIES.values():
+        accessor = Database.__dict__[name]
+        assert isinstance(accessor, property)
+        attrs = _self_attrs(accessor.fget)
+        assert factory in attrs, name
+        assert "conn" not in attrs, name
+
+
+@pytest.mark.parametrize("module_name", sorted(_KEYWORD_REPOSITORIES))
+def test_keyword_accessors_build_a_fresh_repository_per_access(db, module_name):
+    import importlib
+
+    class_name, name, _factory = _KEYWORD_REPOSITORIES[module_name]
+    cls = getattr(importlib.import_module(module_name), class_name)
+    first = getattr(db, name)
+    assert isinstance(first, cls)
+    assert getattr(db, name) is not first
+    assert first.conn is db.conn
 
 
 @pytest.mark.parametrize("name", _KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY)
@@ -1494,9 +1520,11 @@ def test_split_methods_still_call_merge_on_the_facade(name):
     assert "_merge_keyword_into" in _self_attrs(getattr(Database, name))
 
 
-def test_keyword_repository_never_references_provenance_writers():
-    import repositories.keywords as module
+@pytest.mark.parametrize("module_name", sorted(_KEYWORD_REPOSITORIES))
+def test_keyword_repository_never_references_provenance_writers(module_name):
+    import importlib
 
+    module = importlib.import_module(module_name)
     tree = ast.parse(inspect.getsource(module))
     names = set()
     for node in ast.walk(tree):
@@ -1509,7 +1537,7 @@ def test_keyword_repository_never_references_provenance_writers():
         elif isinstance(node, ast.FunctionDef):
             names.add(node.name)
     assert not names & set(_PROVENANCE_WRITERS)
-    assert not set(module.FACADE_METHODS) & set(_PROVENANCE_WRITERS)
+    assert not set(getattr(module, "FACADE_METHODS", ())) & set(_PROVENANCE_WRITERS)
 
 
 def test_keyword_repository_routes_facade_calls_through_database(db):
@@ -1542,18 +1570,24 @@ def test_keyword_facade_signatures_unchanged():
         "(self, photo_ids, keyword_id, exclude_keyword_ids=None)"
     )
     from repositories.keywords import KeywordRepository
+    from repositories.photo_species import PhotoSpeciesRepository
 
-    assert str(inspect.signature(KeywordRepository.get_species_for_photos)) == (
-        "(self, photo_ids, include_identities=False)"
-    )
+    params = inspect.signature(PhotoSpeciesRepository.get_species_for_photos).parameters
+    assert [(p.name, p.default) for p in params.values()] == [
+        ("self", inspect.Parameter.empty),
+        ("photo_ids", inspect.Parameter.empty),
+        ("include_identities", False),
+    ]
     assert str(inspect.signature(KeywordRepository.normalize_row_name)) == "(self, keyword_id)"
 
 
-def test_keyword_repository_never_hands_itself_out_as_the_database():
+@pytest.mark.parametrize("module_name", sorted(_KEYWORD_REPOSITORIES))
+def test_keyword_repository_never_hands_itself_out_as_the_database(module_name):
     """Moved bodies that passed ``self`` (the Database) to a helper must pass
     ``self.db`` now; a bare ``self`` argument would hand over the repository."""
-    import repositories.keywords as module
+    import importlib
 
+    module = importlib.import_module(module_name)
     tree = ast.parse(inspect.getsource(module))
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     bare = [
@@ -1563,8 +1597,10 @@ def test_keyword_repository_never_hands_itself_out_as_the_database():
                  and parents[node].value is node)
         and not isinstance(parents.get(node), ast.arguments)
     ]
-    # The only one is ``__init__`` storing the façade (``setattr(self, ...)``).
-    assert len(bare) == 1
+    # The only one is ``KeywordRepository.__init__`` storing the façade
+    # (``setattr(self, ...)``); the repositories without façade methods
+    # have none.
+    assert len(bare) == (1 if hasattr(module, "FACADE_METHODS") else 0)
 
 
 # -- species filed in the user's tree vs. top-level twins ----------------------------------
