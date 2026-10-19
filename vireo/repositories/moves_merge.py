@@ -798,15 +798,21 @@ class MovesMergeRepository:
         )
 
     def folder_paths_below(self, base):
-        """Rows (``path``) of folders whose path is ``LIKE base + '/%'``.
+        """``(path, relative)`` for every folder strictly below ``base``.
 
-        ``LIKE`` wildcards in ``base`` match too; callers filter on a literal
-        prefix.
+        Matches like ``move_folder_path``'s cascade: either separator, so a
+        Windows catalog (``C:\\Photos\\Birds\\Day 1``) matches too, and a
+        literal prefix, so ``_`` and ``%`` in ``base`` are not wildcards.
+        ``relative`` is the path below ``base``, ``/``-separated.
         """
-        return self.conn.execute(
-            "SELECT path FROM folders WHERE path LIKE ?",
-            (base + "/%",),
+        prefix = self._subtree_prefix(base)
+        rows = self.conn.execute(
+            "SELECT path FROM folders "
+            "WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?",
+            (len(prefix), prefix),
         ).fetchall()
+        return [(row["path"], self._subtree_relative(row["path"], base))
+                for row in rows]
 
     def date_move_subtree_photos(self, folder_id, descendant_predicate,
                                  descendant_params, sql_functions=()):

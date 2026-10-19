@@ -383,18 +383,11 @@ class _FolderCatalogRewrite:
         if developed_dir:
             from export import relocate_developed_dir
             relocate_developed_dir(developed_dir, src_path, developed_base)
-            # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
-            # all of which are valid POSIX path characters. Without a strict
-            # prefix guard, an unrelated folder like `/dXst/birds/fake` would
-            # match a pattern like `/d_st/birds/%` and feed a bogus computed
-            # old_path into relocate_developed_dir, mis-rebasing the wrong
-            # developed subdir. Filter results by a literal prefix check.
-            descendant_rows = self.db.moves_merge.folder_paths_below(
-                developed_base)
-            prefix = developed_base + "/"
-            for row in descendant_rows:
-                new_child = row["path"]
-                if not new_child.startswith(prefix):
-                    continue
-                old_child = src_path + new_child[len(developed_base):]
+            # Each descendant's old path is its path relative to the new base,
+            # rejoined under the source in the source's own separator, so a
+            # Windows catalog (``\\``) rebuilds the exact string its developed
+            # key was hashed from.
+            for new_child, relative in self.db.moves_merge.folder_paths_below(
+                    developed_base):
+                old_child = _join_subtree_path(src_path, relative)
                 relocate_developed_dir(developed_dir, old_child, new_child)

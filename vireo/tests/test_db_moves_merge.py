@@ -1468,10 +1468,21 @@ def test_folder_lookups_for_file_moves(db):
     assert moves.folder_source_row(b + 999) is None
     assert moves.folder_id_row("/lib/a/b")["id"] == b
     assert moves.folder_id_row("/lib/a/missing") is None
-    # LIKE: the caller filters ``_`` matches on a literal prefix.
-    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a")) == [
-        "/lib/a/b"]
-    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a_")) == []
+    # A literal prefix: ``_`` in the base is not a wildcard.
+    assert moves.folder_paths_below("/lib/a") == [("/lib/a/b", "b")]
+    assert moves.folder_paths_below("/lib/a_") == []
+
+
+def test_folder_paths_below_matches_windows_separators(db):
+    """Windows stores ``\\``-separated paths; the subtree must still match."""
+    a = _folder(db, "C:\\lib\\a", root=True)
+    b = _folder(db, "C:\\lib\\a\\b", a)
+    _folder(db, "C:\\lib\\a\\b\\c", b)
+    _folder(db, "C:\\lib\\ab", root=True)
+    assert sorted(db.moves_merge.folder_paths_below("C:\\lib\\a")) == [
+        ("C:\\lib\\a\\b", "b"),
+        ("C:\\lib\\a\\b\\c", "b/c"),
+    ]
 
 
 def test_folders_except_is_an_unfetched_cursor(db):

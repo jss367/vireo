@@ -783,6 +783,44 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             event(f"move_folder error: {_error_kind(error)}")
 
     @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data(), merge=st.booleans(),
+          launch_error=st.sampled_from(["permission", "e2big"]))
+    def move_a_folder_when_rsync_cannot_start(self, data, merge, launch_error):
+        """Move Folder where rsync exists but cannot be started (not
+        executable, or an argv over the platform limit). The move fails as a
+        reported error; the folder, its photos and its catalog rows stay."""
+        import move
+
+        folders = self._photo_folders()
+        if not folders:
+            return
+        folder = data.draw(st.sampled_from(folders))
+        dest = data.draw(st.sampled_from([self.moved, os.path.join(self.moved, "nested")]))
+        os.makedirs(dest, exist_ok=True)
+        error = {
+            "permission": PermissionError(13, "Permission denied"),
+            "e2big": OSError(7, "Argument list too long"),
+        }[launch_error]
+        real_rsync = move.folder_transfer._run_rsync_streamed
+
+        def cannot_start(*_args, **_kwargs):
+            raise error
+
+        before_rows = sorted((r["id"], r["folder_path"]) for r in self._catalog_rows())
+        move.folder_transfer._run_rsync_streamed = cannot_start
+        try:
+            result = move.move_folder(self.db, folder["id"], dest, merge=merge)
+        finally:
+            move.folder_transfer._run_rsync_streamed = real_rsync
+        assert result["moved"] == 0, result
+        assert result["errors"], result
+        # Refused before the copy (overlap, existing destination) or after it
+        # failed to start: either way nothing in the catalog moved.
+        assert sorted((r["id"], r["folder_path"]) for r in self._catalog_rows()) == before_rows
+        for err in result["errors"]:
+            event(f"move_folder with rsync that cannot start: {_error_kind(err)}")
+
+    @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
     def move_a_folder_by_date(self, data):
         """Move Folder with a date template: photos re-sorted by capture date."""
