@@ -1338,6 +1338,41 @@ def test_merge_scoped_workspace_prunes_instead_of_linking_broad_base(db):
     assert links["/arch/USA/2026"] == 1
 
 
+def _visible_to(db, ws):
+    return {
+        r["filename"] for r in db.conn.execute(
+            "SELECT p.filename FROM photos p JOIN photo_workspace_visibility v "
+            "ON v.photo_id = p.id WHERE v.workspace_id = ?", (ws,))
+    }
+
+
+def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
+    """A staged photo folded into an existing archive folder stays visible to
+    a workspace that shared the staged folder, without exposing that
+    workspace to the archive folder's other photos."""
+    ws = db._active_workspace_id
+    sharing = db.create_workspace("Sharing")
+    linked = db.create_workspace("Linked")
+    db.set_active_workspace(ws)
+    arch = _folder(db, "/arch", root=True)
+    _photo(db, arch, "old.jpg")
+    db.add_workspace_folder(linked, arch)
+    stage = _folder(db, "/stage", root=True)
+    _photo(db, stage, "new.jpg")
+    db.add_workspace_folder(sharing, stage)
+    db.add_workspace_folder(linked, stage)
+
+    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+
+    assert counts["new_photos"] == 1 and counts["merged_folders"] == 1
+    assert _visible_to(db, ws) == {"old.jpg", "new.jpg"}
+    assert _visible_to(db, sharing) == {"new.jpg"}
+    assert _visible_to(db, linked) == {"old.jpg", "new.jpg"}
+    # Only the workspace without a link to the archive folder needs a grant.
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT workspace_id FROM workspace_photos")] == [(sharing,)]
+
+
 def test_merge_new_path_roots_deepest_tracked_ancestor(db):
     ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")

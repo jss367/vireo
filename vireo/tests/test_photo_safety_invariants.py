@@ -1410,6 +1410,55 @@ def test_reimport_moved_duplicate_is_visible_in_receiving_workspace():
 
 
 
+def test_archive_merge_keeps_photo_in_workspace_that_shared_its_folder():
+    """A nightly failure ("photos lost workspace visibility: {1: [2]}"): a
+    folder shared with the other workspace merges into a tracked folder only
+    the active workspace links, and its photo dropped out of the other one."""
+    import move
+
+    machine = PhotoSafetyMachine()
+
+    def check():
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        machine.catalog_matches_disk()
+
+    try:
+        machine.first_shoot(["DSC_0001.jpg"], 0)
+        assert machine._run_import(CARDS[0], _Runner())["ok"]
+        check()
+        shared = machine._photo_folders()[0]
+        assert not move.move_folder(machine.db, shared["id"], machine.moved)["errors"]
+        check()
+        # A second photo from the same day lands in a new library folder,
+        # which then moves to where the first folder will be merged.
+        machine.shoot_onto_card(CARDS[1], ["DSC_0002.jpg"], 0)
+        assert machine._run_import(CARDS[1], _Runner())["ok"]
+        check()
+        nested = os.path.join(machine.moved, "nested")
+        os.makedirs(nested)
+        receiver = next(f for f in machine._photo_folders() if f["id"] != shared["id"])
+        assert not move.move_folder(machine.db, receiver["id"], nested)["errors"]
+        check()
+        machine.db.add_workspace_folder(machine.other_ws, shared["id"])
+        check()
+        before_disk, before_rows = machine._disk_snapshot(), machine._catalog_rows()
+        result = move.move_folder(
+            machine.db, shared["id"], nested,
+            merge=True, allow_tracked_merge=True, verify_contents=True,
+        )
+        assert not result["errors"] and result["merge"]["merged_folders"] == 1
+        machine._record_verified_consolidations(
+            shared["path"], result["merged_into_existing"], before_disk, before_rows, result,
+        )
+        check()
+        # The other workspace sees the photo it shared, not the folder's others.
+        machine.switch_workspace()
+        assert len(machine._visible_photo_ids()) == 1
+    finally:
+        machine.teardown()
+
+
 def test_crashed_import_archive_merge_consolidates_verified_copy():
     import gc
 
