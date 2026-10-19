@@ -862,7 +862,7 @@ class _IngestRun:
                 self.pause_callback()
             try:
                 token = checker.match(source_file) if checker is not None else None
-            except Exception as e:
+            except Exception as e:  # broad: per-file boundary; the duplicate check reads metadata and hashes, and one file must not stop the batch
                 log.warning("Failed to ingest %s: %s", source_file, e, exc_info=True)
                 self.failed += 1
             else:
@@ -928,7 +928,7 @@ class _IngestRun:
             try:
                 self._copy_survivor(source_file)
 
-            except Exception as e:
+            except Exception as e:  # broad: per-file boundary; the copy failure is counted and the batch continues
                 log.warning("Failed to ingest %s: %s", source_file, e, exc_info=True)
                 self.failed += 1
 

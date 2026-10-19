@@ -578,7 +578,7 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
                 ),
             )
         return img
-    except BaseException:
+    except BaseException:  # broad: close the decoded image on any exit, then re-raise
         if img is not None:
             img.close()
         raise
@@ -858,7 +858,7 @@ class _PhotoExportBatch:
                         self.camera_data_map.get(pid, {}),
                         self.location_map.get(pid),
                     )
-                except Exception:
+                except Exception:  # broad: remove the untagged output on any failure, then re-raise
                     # A checked metadata option is part of the requested
                     # output contract. Do not leave behind an apparently
                     # successful but silently untagged derivative.
@@ -878,7 +878,7 @@ class _PhotoExportBatch:
                     "requested_name": os.path.basename(requested_out_path),
                     "export_name": os.path.basename(out_path),
                 })
-        except Exception as exc:
+        except Exception as exc:  # broad: per-photo boundary; the failure is listed in the export's errors
             if claimed_out_path:
                 with contextlib.suppress(OSError):
                     os.unlink(claimed_out_path)
@@ -1308,7 +1308,7 @@ def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_dat
         with Image.open(dev_path) as img:
             dev_w, dev_h = _image_size_after_exif_orientation(img)
     except Exception:
-        # PIL raises a wide set (OSError, SyntaxError, DecompressionBombError);
+        # broad: PIL raises a wide set (OSError, SyntaxError, DecompressionBombError);
         # an unreadable developed file keeps the documented default.
         log.debug("Could not read the developed output size of %s", dev_path, exc_info=True)
         return True
@@ -1804,7 +1804,7 @@ def _working_copy_can_satisfy_export(
         from PIL import Image
         with Image.open(wc_path) as wc_img:
             wc_w, wc_h = wc_img.size
-    except Exception:
+    except Exception:  # broad: PIL raises a wide set on bad files; the working copy is treated as too small
         log.debug("Could not read the working copy size of %s", wc_path, exc_info=True)
         return False
 
@@ -1860,7 +1860,7 @@ def _companion_can_satisfy_export(
         from PIL import Image
         with Image.open(companion) as img:
             comp_w, comp_h = _image_size_after_exif_orientation(img)
-    except Exception:
+    except Exception:  # broad: PIL raises a wide set on bad files; the companion is not used
         log.debug("Could not read the companion JPEG size of %s", companion, exc_info=True)
         return None
 

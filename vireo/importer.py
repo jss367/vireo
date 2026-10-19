@@ -144,6 +144,7 @@ def preview_import(catalog_paths, db):
                     "flat_keywords"
                 ]
         except Exception as exc:
+            # broad: catalog parsers raise undocumented errors.
             # The catalog is left out of the preview; say so rather than
             # silently showing fewer catalogs than the user picked.
             log.exception("Failed to read catalog: %s", cat_path)
@@ -349,7 +350,7 @@ def execute_import(
         try:
             _import_photo_keywords(db, photo, kw_data, file_path, write_xmp)
             imported += 1
-        except Exception as exc:
+        except Exception as exc:  # broad: per-photo boundary; the failure is counted and listed
             failed += 1
             log.warning("Failed to import keywords for %s", file_path, exc_info=True)
             errors.append(f"{file_path}: {exc}")

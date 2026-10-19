@@ -145,7 +145,7 @@ class _AnalyzeRun:
 
         try:
             predictions = self.clf.classify(tmp_path, threshold=self.threshold)
-        except Exception:
+        except Exception:  # broad: per-image boundary; classifier inference raises undocumented errors
             log.warning("Classification failed for %s", image_path, exc_info=True)
             self.stats["failed"] += 1
             return None

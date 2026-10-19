@@ -91,7 +91,7 @@ def write_manifest(manifest_dir, manifest):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(manifest, f)
         replace_file(tmp, path)
-    except Exception:
+    except Exception:  # broad: remove the unpublished temp file on any failure, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise

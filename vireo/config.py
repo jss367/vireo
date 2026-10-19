@@ -324,7 +324,7 @@ def load():
             with open(CONFIG_PATH) as f:
                 config = _deep_merge(config, json.load(f))
         except Exception:
-            # Broad on purpose: config.load() runs on nearly every request and
+            # broad: config.load() runs on nearly every request and
             # at startup, and a corrupt file must fall back to defaults rather
             # than take the app down (the original is preserved first).
             log.warning("Failed to read config, using defaults", exc_info=True)
@@ -377,7 +377,7 @@ def save(config):
         with os.fdopen(fd, "w") as f:
             json.dump(config, f, indent=2)
         replace_file(tmp_path, CONFIG_PATH)
-    except BaseException:
+    except BaseException:  # broad: remove the temp file on any exit, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise

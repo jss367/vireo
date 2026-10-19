@@ -118,7 +118,7 @@ def _hf_download_megadetector_weights(progress_callback=None):
             # fully written weights file — never a partial copy.
             shutil.copy2(cached_path, tmp_path)
             replace_file(tmp_path, MEGADETECTOR_ONNX_PATH)
-        except Exception as e:
+        except Exception as e:  # broad: remove the partial weights on any failure, then re-raise with the reason
             import contextlib
 
             with contextlib.suppress(OSError):
@@ -644,7 +644,7 @@ def detect_animals(image_path):
         return detections
     except ResourceWaitCancelled:
         raise
-    except Exception:
+    except Exception:  # broad: per-image boundary; decoding and ONNX inference raise undocumented errors
         log.warning("Detection failed for %s", image_path, exc_info=True)
         return None
 
