@@ -1755,7 +1755,7 @@ def _scope_to_source_snapshot(params, db_path, workspace_id):
     if params.source_snapshot_id is not None:
         db_ro = Database(db_path)
         db_ro.set_active_workspace(workspace_id)
-        snap = db_ro.get_new_images_snapshot(params.source_snapshot_id)
+        snap = db_ro.workspaces.get_new_images_snapshot(params.source_snapshot_id)
         if snap is None:
             raise ValueError(
                 f"snapshot {params.source_snapshot_id} not found"

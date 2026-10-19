@@ -304,7 +304,9 @@ class Checks(unittest.TestCase):
             repair_stale_folder_parents=lambda: events.append("folders"),
             repair_misclassified_location_ancestors=lambda: events.append("locations") or 0,
             merge_taxonomy_root_twins=fail,
-            create_default_collections_for_all_workspaces=lambda: events.append("defaults"),
+        )
+        ns["workspace_config"] = types.SimpleNamespace(
+            create_default_collections_for_all_workspaces=lambda db: events.append("defaults"),
         )
         load("services/startup_tasks.py", ns, methods={"StartupTasks": {"run_catalog_repairs"}}, functions=set())
         task = ns["StartupTasks"]()

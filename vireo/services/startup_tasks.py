@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from db import Database
+from services import workspace_config
 
 if TYPE_CHECKING:
     from jobs import JobRunner, LogBroadcaster
@@ -160,7 +161,7 @@ class StartupTasks:
             init_db.merge_taxonomy_root_twins()
         except Exception:
             log.exception("Could not merge top-level species keyword twins")
-        init_db.create_default_collections_for_all_workspaces()
+        workspace_config.create_default_collections_for_all_workspaces(init_db)
         self.prune_collection_ids_of_missing_photos()
 
     def prune_collection_ids_of_missing_photos(self) -> list[JsonDict]:

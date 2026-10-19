@@ -3014,32 +3014,6 @@ class Database:
         """
         return self._location_repository()
 
-    def get_browse_summary(
-        self,
-        folder_id=None,
-        collection_id=None,
-        rules=None,
-    ):
-        """Return summary stats for the browse panel, scoped to active workspace and filters.
-
-        ``rules`` (a universal-filter rule tree) restricts every aggregate to
-        the matching photo set, exactly like the collection_id subquery path —
-        the summary panel must describe the same photos the filtered grid
-        shows. Raises ValueError on malformed rules.
-        """
-        def detector_confidence():
-            import config as cfg
-            return self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2
-            )
-
-        return self._photos_repository().get_browse_summary(
-            folder_id=folder_id,
-            collection_id=collection_id,
-            rules=rules,
-            detector_confidence=detector_confidence,
-        )
-
     def get_assigned_photo_location(self, photo_id, verify_workspace=True,
                                     allow_sync_only=False):
         """Return linked location-keyword coordinates for one visible photo.
@@ -6054,20 +6028,6 @@ class Database:
         from repositories.collections import prune_collection_ids_of_missing_photos
         return prune_collection_ids_of_missing_photos(self.conn, commit=commit_with_retry)
 
-    def get_new_images_snapshot(self, snapshot_id):
-        """Return snapshot metadata + file paths, or None if not found / cross-workspace.
-
-        Isolation: a snapshot created in workspace A is invisible when workspace B
-        is active. Callers treat None as 'expired / gone'.
-
-        An id outside SQLite's signed 64-bit range can't match any stored row,
-        so we short-circuit to None rather than let parameter binding raise
-        OverflowError (which would surface as a 500 to API callers).
-        """
-        if not -(1 << 63) <= snapshot_id <= (1 << 63) - 1:
-            return None
-        return self._workspace_repository().get_new_images_snapshot(snapshot_id)
-
     def _build_query_from_rules(self, rules, include_offline_folders=False,
                                 row_scoped=False):
         """Build SQL clauses from a smart-collection rule tree.
@@ -6116,22 +6076,6 @@ class Database:
         detections exist after the user moves the slider.
         """
         return self._collection_repository()._top_prediction_confidence_params()
-
-    def rules_resolvable(self, rules):
-        """Return True if a rule tree can be resolved to SQL clauses without
-        executing them.
-
-        Callers (notably ``/api/browse/init``) use this to flag degraded
-        collections at first paint without running the full
-        ``COUNT(DISTINCT p.id)`` per collection — that N+1 is what the
-        Browse client's async ``loadCollectionCounts()`` was built to
-        avoid. Only the query-building step is exercised.
-        """
-        try:
-            self._build_query_from_rules(rules)
-        except ValueError:
-            return False
-        return True
 
     # Species / location keyword sets, folded to one stable string per photo
     # so two frames compare equal exactly when they carry the same keywords
@@ -6313,94 +6257,6 @@ class Database:
         },
     }
 
-    def count_browse_stacks(self, rules, collection_id=None, folder_id=None,
-                            include_offline_folders=False, stack_config=None):
-        """Count logical Browse items after stack projection."""
-        return self.collections.browse_stack_totals(
-            rules, collection_id=collection_id, folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )["total"]
-
-    def query_browse_stack_position(self, rules, photo_id, sort="date",
-                                    collection_id=None, folder_id=None,
-                                    include_offline_folders=False,
-                                    stack_config=None):
-        """Return the zero-based position of the Browse item *containing*
-        ``photo_id`` once stacks are projected, or ``None`` when the photo
-        does not match.
-
-        Stacked Browse pages logical items, not photos, so a hidden burst
-        frame has no page of its own — the page that shows it is the one its
-        cover sits on. Ranking the covers and joining back through
-        ``_stack_key`` answers for members and singles alike, which is what
-        lets a re-sort keep a selected stack member without Browse having to
-        silently turn Stacks off the way focused deep links do.
-
-        ``stack_config`` must be the grouping the caller pages with
-        (``query_browse_stacks``): stacks are a configured projection of the
-        result set, so a position read under different settings describes a
-        different grid.
-
-        Raises ValueError on malformed rules.
-        """
-        found = self.collections.query_browse_stack_position_first(
-            rules, [photo_id], sort=sort, collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-            stack_config=stack_config,
-        )
-        return found[1] if found is not None else None
-
-    @staticmethod
-    def _candidate_preference_case(column, ids):
-        """ORDER BY fragment ranking ``ids`` in the order they were asked for.
-
-        Position alone does not decide between frames of one stack: they all
-        report their cover's position, so a plain ``ORDER BY position, id``
-        would answer with whichever frame happens to hold the lowest ID. The
-        caller asked about a card, and it named the frame that *is* that card
-        first — answering with a hidden member instead would send the client
-        off to expand a tray around a frame the user never opened. Binds one
-        parameter per ID (the ``IN`` list binds them once more).
-        """
-        from repositories.collections import CollectionRepository
-
-        return CollectionRepository._candidate_preference_case(column, ids)
-
-    def get_collection_photo_ids_stacked(self, collection_id, sort="date",
-                                         stack_config=None):
-        """Return every photo ID matching a collection, in stack-projected
-        order. See ``_stacked_photo_ids``.
-
-        Without this, Select-all-matching with Stacks enabled would seed
-        Best Batch, Burst Review, and the export-preview filename from a
-        hidden member whenever a stack's quality-ranked cover isn't its
-        earliest member under the selected sort (Codex P2 on PR #1561).
-        """
-        return self.collections._stacked_photo_ids(
-            [], sort=sort, collection_id=collection_id,
-            stack_config=stack_config,
-        )
-
-    def query_photo_ids_stacked(self, rules, sort="date",
-                                collection_id=None, folder_id=None,
-                                stack_config=None):
-        """Return every photo ID matching a universal-filter rule tree, in
-        stack-projected order — the rules analog of
-        ``get_collection_photo_ids_stacked``.
-
-        Without this, Select-all-matching with Stacks enabled in the
-        workspace, folder, dashboard-collection, or unsaved-filter paths
-        would seed Best Batch, Burst Review, and the export-preview filename
-        from a hidden member whenever a stack's quality-ranked cover isn't
-        its earliest member under the selected sort (Codex P2 on PR #1561).
-        """
-        return self.collections._stacked_photo_ids(
-            rules, sort=sort, collection_id=collection_id, folder_id=folder_id,
-            stack_config=stack_config,
-        )
-
     # (display_expr, group_expr) for suggest-capable columns.
     # ``group_expr`` folds the value the same way the corresponding filter
     # matches it — camera/lens rules use ``LOWER(col) = LOWER(?)`` so their
@@ -6409,27 +6265,6 @@ class Database:
     # match both photos. ``display_expr`` is what the picker shows; using
     # ``MIN(col)`` picks a stable representative spelling within each
     # case-insensitive bucket instead of always lower-casing the label.
-
-    def query_photo_position(
-        self,
-        rules,
-        photo_id,
-        sort="date",
-        collection_id=None,
-        folder_id=None,
-        include_offline_folders=False,
-    ):
-        """Return a photo's zero-based position in a universal-filter result
-        set, or ``None`` when it does not match — the rules analog of
-        ``get_photo_position``. One-ID shorthand for
-        ``query_photo_position_first``.
-        """
-        found = self.collections.query_photo_position_first(
-            rules, [photo_id], sort=sort, collection_id=collection_id,
-            folder_id=folder_id,
-            include_offline_folders=include_offline_folders,
-        )
-        return found[1] if found is not None else None
 
     _SUGGEST_VALUE_EXPRS = {
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
@@ -6450,11 +6285,6 @@ class Database:
         return self._keyword_repository().resolve_species_by_lineage(
             species_name, expected_ancestors,
         )
-
-    def create_default_collections_for_all_workspaces(self):
-        """Create missing default smart collections in every workspace."""
-        for ws in self.workspaces.list_all():
-            self.collections.create_defaults(workspace_id=ws["id"])
 
     # ------ iNaturalist submissions ------
 

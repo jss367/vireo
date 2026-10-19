@@ -13,8 +13,7 @@ Callers reach it as ``db.workspaces`` (a fresh repository per access, see
 ``create_workspace``, ``delete_workspace`` and ``ensure_default_workspace``
 stay on ``Database`` because they also maintain the new-images cache (or
 create the row through ``create_workspace``); call those rather than
-:meth:`create` / :meth:`delete`. ``get_new_images_snapshot`` stays there too,
-for its id range check.
+:meth:`create` / :meth:`delete`.
 """
 
 import json
@@ -282,12 +281,18 @@ class WorkspaceRepository:
         return snap_id
 
     def get_new_images_snapshot(self, snapshot_id: int) -> dict[str, Any] | None:
-        """Return the active workspace's snapshot metadata and paths, or None.
+        """Return snapshot metadata + file paths, or None if not found / cross-workspace.
 
-        ``snapshot_id`` must already be within SQLite's signed 64-bit range;
-        ``Database.get_new_images_snapshot`` checks that before this resolves
-        the active workspace.
+        Isolation: a snapshot created in workspace A is invisible when workspace B
+        is active. Callers treat None as 'expired / gone'.
+
+        An id outside SQLite's signed 64-bit range can't match any stored row,
+        so we short-circuit to None, before resolving the active workspace,
+        rather than let parameter binding raise OverflowError (which would
+        surface as a 500 to API callers).
         """
+        if not -(1 << 63) <= snapshot_id <= (1 << 63) - 1:
+            return None
         ws_id = self.workspace_id_fn()
         row = self.conn.execute(
             "SELECT id, workspace_id, created_at, file_count "

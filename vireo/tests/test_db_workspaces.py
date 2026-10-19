@@ -426,7 +426,7 @@ def test_tabs_require_an_active_workspace(db):
 
 def test_new_images_snapshot_round_trip_dedupes_and_sorts(db):
     snap_id = db.workspaces.create_new_images_snapshot(["/b.jpg", "/a.jpg", "/b.jpg"])
-    snap = db.get_new_images_snapshot(snap_id)
+    snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["id"] == snap_id
     assert snap["workspace_id"] == db._ws_id()
     assert snap["file_count"] == 2
@@ -436,7 +436,7 @@ def test_new_images_snapshot_round_trip_dedupes_and_sorts(db):
 
 def test_new_images_snapshot_allows_empty_paths(db):
     snap_id = db.workspaces.create_new_images_snapshot(None)
-    snap = db.get_new_images_snapshot(snap_id)
+    snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
 
@@ -445,17 +445,17 @@ def test_new_images_snapshot_is_workspace_scoped(db):
     snap_id = db.workspaces.create_new_images_snapshot(["/a.jpg"])
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
-    assert db.get_new_images_snapshot(snap_id) is None
-    assert db.get_new_images_snapshot(snap_id + 1000) is None
+    assert db.workspaces.get_new_images_snapshot(snap_id) is None
+    assert db.workspaces.get_new_images_snapshot(snap_id + 1000) is None
 
 
 def test_new_images_snapshot_out_of_range_id_short_circuits(db):
     # The range check runs before the active workspace is consulted.
     db.set_active_workspace(None)
-    assert db.get_new_images_snapshot(1 << 63) is None
-    assert db.get_new_images_snapshot(-(1 << 63) - 1) is None
+    assert db.workspaces.get_new_images_snapshot(1 << 63) is None
+    assert db.workspaces.get_new_images_snapshot(-(1 << 63) - 1) is None
     with pytest.raises(RuntimeError):
-        db.get_new_images_snapshot(1)
+        db.workspaces.get_new_images_snapshot(1)
 
 
 def test_create_new_images_snapshot_requires_active_workspace(db):
@@ -526,15 +526,15 @@ def test_get_workspace_id_by_name_matches_the_exact_name(db):
 # -- structure: the workspace SQL lives in the repository ---------------------
 
 # Coordinated Database methods over repositories/workspaces.py: each adds the
-# new-images cache upkeep, the restore, or the snapshot id range check, so it
-# stays on the façade; none may reach the connection directly again.
+# new-images cache upkeep or the restore, so it stays on the façade; none may
+# reach the connection directly again. The snapshot id range check moved into
+# ``WorkspaceRepository.get_new_images_snapshot``.
 _DELEGATING_WORKSPACE_METHODS = (
     "_restore_active_workspace",
     "invalidate_new_images_cache_for_folders",
     "create_workspace",
     "delete_workspace",
     "ensure_default_workspace",
-    "get_new_images_snapshot",
 )
 
 # The forwarding wrappers ``db.workspaces`` replaced.
@@ -550,11 +550,12 @@ _REMOVED_WORKSPACE_WRAPPERS = (
     "pin_tab",
     "unpin_tab",
     "create_new_images_snapshot",
+    "get_new_images_snapshot",
 )
 
 # Repository methods behind a coordinated ``Database`` method. Production code
 # calls the ``Database`` method instead, so the new-images cache stays right.
-_FACADE_ONLY_REPOSITORY_METHODS = ("create", "delete", "get_new_images_snapshot")
+_FACADE_ONLY_REPOSITORY_METHODS = ("create", "delete")
 
 
 @pytest.mark.parametrize("name", _DELEGATING_WORKSPACE_METHODS)
@@ -672,7 +673,7 @@ def test_active_workspace_methods_follow_the_workspace_active_at_each_call(db):
     db.workspaces.set_tabs(["review"])
     assert held.pin_tab("logs") == ["review", "logs"]
     snap = held.create_new_images_snapshot(["/o.jpg"])
-    assert db.get_new_images_snapshot(snap)["workspace_id"] == other
+    assert db.workspaces.get_new_images_snapshot(snap)["workspace_id"] == other
     db.set_active_workspace(ws)
     assert held.get_tabs() == ["browse"]
     assert db.workspaces.get_new_images_snapshot(snap) is None
@@ -712,6 +713,6 @@ def test_production_code_creates_and_deletes_workspaces_through_the_facade():
         text = path.read_text(encoding="utf-8")
         offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
     assert offenders == [], (
-        "Call db.create_workspace / db.delete_workspace / "
-        f"db.get_new_images_snapshot instead: {offenders}"
+        "Call db.create_workspace / db.delete_workspace "
+        f"instead: {offenders}"
     )

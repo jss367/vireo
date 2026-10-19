@@ -7,6 +7,7 @@ from repositories.masks_features import MaskQuality, PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services import (
+    browse_queries,
     classify_preflight,
     dashboard_stats,
     detection_store,
@@ -363,7 +364,7 @@ def test_browse_summary_folder_includes_descendants(tmp_path):
     photo_ingest.add_photo(db, folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     photo_ingest.add_photo(db, folder_id=root, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
 
-    summary = db.get_browse_summary(folder_id=root)
+    summary = browse_queries.get_browse_summary(db, folder_id=root)
     assert summary['filtered_total'] == 2
 
 
@@ -397,7 +398,7 @@ def test_browse_summary_top_species_filters_to_latest_fingerprint(tmp_path):
     )
     db.conn.commit()
 
-    summary = db.get_browse_summary()
+    summary = browse_queries.get_browse_summary(db)
     species_list = [(s["species"], s["count"]) for s in summary["top_species"]]
     assert species_list == [("Robin", 1)], (
         f"top_species must be the active-fingerprint Robin (lower "
@@ -479,8 +480,8 @@ def test_get_photos_filter_by_flag(tmp_path):
     assert db.photos.count_filtered(flag='flagged') == 1
     assert db.photos.count_filtered(flag='rejected') == 1
     # get_browse_summary filters via rules only (Phase 5).
-    assert db.get_browse_summary(
-        rules=[{"field": "flag", "op": "is", "value": "flagged"}]
+    assert browse_queries.get_browse_summary(
+        db, rules=[{"field": "flag", "op": "is", "value": "flagged"}]
     )['filtered_total'] == 1
     assert db.photos.get_calendar_data(
         2024, rules=[{"field": "flag", "op": "is", "value": "rejected"}]
@@ -1185,14 +1186,14 @@ def test_collection_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path)
 
     # Stack-projected: the burst cover leads, then its hidden member, then
     # the single — matching the paginated /photos response the user sees.
-    stacked = db.get_collection_photo_ids_stacked(cid, sort='name')
+    stacked = browse_queries.get_collection_photo_ids_stacked(db, cid, sort='name')
     assert stacked == [burst_cover, burst_soft, single_later]
 
     # The stack projection also agrees with the paginated grid's first item
     # for every supported sort — that first id is what drives Best Batch
     # seed, burst-review order, and export preview.
     for sort in ('date', 'name', 'name_desc', 'rating', 'quality'):
-        stacked = db.get_collection_photo_ids_stacked(cid, sort=sort)
+        stacked = browse_queries.get_collection_photo_ids_stacked(db, cid, sort=sort)
         grid = db.collections.query_browse_stacks(
             [], collection_id=cid, sort=sort, per_page=99,
         )
@@ -1254,13 +1255,13 @@ def test_query_photo_ids_stacked_puts_cover_before_hidden_members(tmp_path):
 
     # Stack-projected: the burst cover leads, then its hidden member, then
     # the single — matching what the Stacks-enabled grid shows.
-    stacked = db.query_photo_ids_stacked(rules, sort='name')
+    stacked = browse_queries.query_photo_ids_stacked(db, rules, sort='name')
     assert stacked == [burst_cover, burst_soft, single_later]
 
     # And every supported sort's first id agrees with the first visible
     # card the paginated grid would show.
     for sort in ('date', 'name', 'name_desc', 'rating', 'quality'):
-        stacked = db.query_photo_ids_stacked(rules, sort=sort)
+        stacked = browse_queries.query_photo_ids_stacked(db, rules, sort=sort)
         grid = db.collections.query_browse_stacks(rules, sort=sort, per_page=99)
         first_visible = grid[0]['id']
         assert stacked[0] == first_visible, (
@@ -1337,7 +1338,7 @@ def test_query_photo_position_agrees_with_the_paged_order(tmp_path):
         ]
         assert sorted(ordered) == sorted(ids)
         for expected, photo_id in enumerate(ordered):
-            assert db.query_photo_position([], photo_id, sort=sort) == expected, (
+            assert browse_queries.query_photo_position(db, [], photo_id, sort=sort) == expected, (
                 f"sort={sort}: position disagrees with the paged order"
             )
 
@@ -1356,15 +1357,15 @@ def test_query_photo_position_is_scoped_like_the_grid(tmp_path):
         file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
     )
 
-    assert db.query_photo_position([], outsider, folder_id=fid) is None
-    assert db.query_photo_position([], ids[0], folder_id=fid) is not None
+    assert browse_queries.query_photo_position(db, [], outsider, folder_id=fid) is None
+    assert browse_queries.query_photo_position(db, [], ids[0], folder_id=fid) is not None
 
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     matching = [row['id'] for row in db.collections.query_photos(rules, sort='name')]
     assert matching, "fixture must leave some 4+ star photos"
     excluded = next(pid for pid in ids if pid not in matching)
-    assert db.query_photo_position(rules, excluded, sort='name') is None
-    assert db.query_photo_position(rules, matching[-1], sort='name') == (
+    assert browse_queries.query_photo_position(db, rules, excluded, sort='name') is None
+    assert browse_queries.query_photo_position(db, rules, matching[-1], sort='name') == (
         len(matching) - 1
     )
 
@@ -1400,11 +1401,11 @@ def test_query_browse_stack_position_agrees_with_the_stacked_grid(tmp_path):
         ]
         assert len(grid) == len(ids) - 1, f"sort={sort}: burst did not collapse"
         for expected, photo_id in enumerate(grid):
-            assert db.query_browse_stack_position(
-                [], photo_id, sort=sort,
+            assert browse_queries.query_browse_stack_position(
+                db, [], photo_id, sort=sort,
             ) == expected, f"sort={sort}: cover position disagrees with the grid"
         # The hidden member resolves to the same item as its cover.
-        assert db.query_browse_stack_position([], hidden, sort=sort) == (
+        assert browse_queries.query_browse_stack_position(db, [], hidden, sort=sort) == (
             grid.index(cover)
         ), f"sort={sort}: hidden member did not resolve to its cover's item"
 
@@ -1419,9 +1420,9 @@ def test_query_browse_stack_position_is_none_for_non_matching_photo(tmp_path):
     matching = [row['id'] for row in db.collections.query_browse_stacks(rules, sort='name')]
     excluded = next(pid for pid in ids if pid not in matching)
 
-    assert db.query_browse_stack_position(rules, excluded, sort='name') is None
-    assert db.query_browse_stack_position(
-        rules, matching[0], sort='name',
+    assert browse_queries.query_browse_stack_position(db, rules, excluded, sort='name') is None
+    assert browse_queries.query_browse_stack_position(
+        db, rules, matching[0], sort='name',
     ) == 0
 
 
@@ -1445,8 +1446,8 @@ def test_query_photo_ids_stacked_folder_scoped(tmp_path):
         file_size=100, file_mtime=1.0, timestamp='2024-01-02T00:00:00',
     )
 
-    only_a = db.query_photo_ids_stacked([], folder_id=fid_a)
-    only_b = db.query_photo_ids_stacked([], folder_id=fid_b)
+    only_a = browse_queries.query_photo_ids_stacked(db, [], folder_id=fid_a)
+    only_b = browse_queries.query_photo_ids_stacked(db, [], folder_id=fid_b)
     assert only_a == [in_a]
     assert only_b == [in_b]
 
@@ -3762,7 +3763,7 @@ def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
     db.conn.commit()
 
     db.set_active_workspace(ws1)
-    db.create_default_collections_for_all_workspaces()
+    workspace_config.create_default_collections_for_all_workspaces(db)
 
     for ws in (ws1, ws2):
         rows = db.conn.execute(
@@ -16538,7 +16539,7 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     snap_id = db.workspaces.create_new_images_snapshot(paths)
     assert isinstance(snap_id, int)
 
-    snap = db.get_new_images_snapshot(snap_id)
+    snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap is not None
     assert snap["file_count"] == 2
     assert snap["workspace_id"] == ws_id
@@ -16551,7 +16552,7 @@ def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
     paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
 
     snap_id = db.workspaces.create_new_images_snapshot(paths)
-    snap = db.get_new_images_snapshot(snap_id)
+    snap = db.workspaces.get_new_images_snapshot(snap_id)
 
     assert snap["file_count"] == 2
     assert snap["file_paths"] == ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
@@ -16564,7 +16565,7 @@ def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
     paths = ["/tmp/a/IMG_001.JPG"]
     snap_id = db.workspaces.create_new_images_snapshot(paths)
     db.set_active_workspace(other_ws)
-    assert db.get_new_images_snapshot(snap_id) is None
+    assert db.workspaces.get_new_images_snapshot(snap_id) is None
 
 
 def test_snapshot_deleted_with_workspace(tmp_path):
@@ -16584,7 +16585,7 @@ def test_create_snapshot_empty_paths(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     snap_id = db.workspaces.create_new_images_snapshot([])
-    snap = db.get_new_images_snapshot(snap_id)
+    snap = db.workspaces.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
 
@@ -25605,7 +25606,7 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
     db.conn.commit()
 
     rows = [dict(row) for row in db.collections.query_browse_stacks([], sort="name")]
-    assert db.count_browse_stacks([]) == 4
+    assert browse_queries.count_browse_stacks(db, []) == 4
     assert db.collections.browse_stack_totals([]) == {"total": 4, "stack_count": 2}
     grouped = {
         row["_browse_stack_kind"]: row
@@ -25680,7 +25681,7 @@ def test_browse_stacks_group_consecutive_frames_within_the_time_gap(tmp_path):
     db.conn.commit()
 
     assert _stack_shape(db) == [("burst", [a, b, c]), (None, [lone])]
-    assert db.count_browse_stacks([]) == 2
+    assert browse_queries.count_browse_stacks(db, []) == 2
 
 
 def test_browse_stacks_respect_the_configured_time_gap(tmp_path):
@@ -25692,11 +25693,11 @@ def test_browse_stacks_respect_the_configured_time_gap(tmp_path):
 
     tight = {"browse_stack_time_gap": 1.0}
     assert _stack_shape(db, tight) == [(None, [a]), (None, [b])]
-    assert db.count_browse_stacks([], stack_config=tight) == 2
+    assert browse_queries.count_browse_stacks(db, [], stack_config=tight) == 2
 
     loose = {"browse_stack_time_gap": 5.0}
     assert _stack_shape(db, loose) == [("burst", [a, b])]
-    assert db.count_browse_stacks([], stack_config=loose) == 1
+    assert browse_queries.count_browse_stacks(db, [], stack_config=loose) == 1
 
 
 def test_browse_stacks_treat_a_gap_equal_to_the_setting_as_inside(tmp_path):
@@ -25798,7 +25799,7 @@ def test_browse_stacks_partition_mode_regroups_an_interleaved_run(tmp_path):
     assert _stack_shape(db, partition) == [
         ("burst", [first, back_a, back_b]), (None, [middle]),
     ]
-    assert db.count_browse_stacks([], stack_config=partition) == 2
+    assert browse_queries.count_browse_stacks(db, [], stack_config=partition) == 2
 
 
 def test_browse_stacks_break_at_a_location_change(tmp_path):

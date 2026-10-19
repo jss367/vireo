@@ -2413,7 +2413,7 @@ class _PipelineLaunch:
         # time instead of a 200 followed by an asynchronous job failure.
         if (
             source_snapshot_id is not None
-            and self.db.get_new_images_snapshot(source_snapshot_id) is None
+            and self.db.workspaces.get_new_images_snapshot(source_snapshot_id) is None
         ):
             return self.json_error(
                 f"source_snapshot_id {source_snapshot_id} not found",
@@ -2797,7 +2797,7 @@ class _PipelineLaunch:
         elif source_snapshot_id is not None:
             work_units = runtime_warning_work_units(
                 "pipeline new-images snapshot",
-                lambda: (db.get_new_images_snapshot(source_snapshot_id) or {}).get(
+                lambda: (db.workspaces.get_new_images_snapshot(source_snapshot_id) or {}).get(
                     "file_count"
                 ),
             )

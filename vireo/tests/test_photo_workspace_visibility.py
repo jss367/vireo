@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import dashboard_stats, photo_ingest
+from services import browse_queries, dashboard_stats, photo_ingest
 
 
 def _photo(db, folder, name, content=b"photo"):
@@ -752,7 +752,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         assert set(db.get_folder_subtree_ids(parent)) == {parent, day}
         assert set(db.photos.get_ids(folder_id=parent)) == {root_photo, shared}
         assert {row["id"] for row in db.photos.list_page(folder_id=parent)} == {root_photo, shared}
-        assert db.get_browse_summary(folder_id=parent)["filtered_total"] == 2
+        assert browse_queries.get_browse_summary(db, folder_id=parent)["filtered_total"] == 2
         assert db.photos.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
         assert [row["id"] for row in db.species_curation.get_highlights_candidates(parent, min_quality=.1)] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.folders.with_quality_data()}
