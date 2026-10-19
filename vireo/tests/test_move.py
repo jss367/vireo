@@ -223,6 +223,38 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     }
 
 
+def test_move_folder_by_date_progress_counts_each_photo_once(tmp_path):
+    """Date-organized progress counts every photo exactly once, skipped
+    ones included, and ends at the total."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    (archive / "2026-07-12").mkdir(parents=True)
+    fid = db.add_folder(str(src), name="card")
+    for name, stamp in (("a.jpg", "2026-07-12T09:00:00"),
+                        ("b.jpg", "2026-07-12T09:01:00"),
+                        ("c.jpg", "2026-07-13T09:00:00")):
+        (src / name).write_bytes(name.encode())
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=5, file_mtime=1.0, timestamp=stamp)
+    # b.jpg collides at its date folder and is skipped.
+    (archive / "2026-07-12" / "b.jpg").write_bytes(b"other")
+
+    calls = []
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        progress_cb=lambda cur, tot, fn, phase: calls.append((cur, tot)),
+    )
+
+    assert result["moved"] == 2
+    assert len(result["errors"]) == 1
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
     """Same-stem photos split by date each retain their shared XMP."""
     from move import move_folder_by_date
@@ -5804,6 +5836,64 @@ def test_move_photos_progress_callback(move_env):
     assert calls[0][0] == 1  # current=1
     assert calls[1][0] == 2  # current=2
     assert calls[0][1] == 2  # total=2
+
+
+def test_move_photos_progress_counts_skipped_and_failed_photos(move_env, monkeypatch):
+    """Every photo the batch settles advances the bar, not only the moved
+    ones: a missing source, a destination collision and a failed copy each
+    report their position, so the bar reaches the total."""
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    missing = db.add_photo(folder_id=env["fid_src"], filename="gone.jpg",
+                           extension=".jpg", file_size=10, file_mtime=0.5)
+    (env["src"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x01" * 30)
+    (env["dst"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x02" * 30)
+    clash = db.add_photo(folder_id=env["fid_src"], filename="clash.jpg",
+                         extension=".jpg", file_size=32, file_mtime=0.6)
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_copy(src, dst):
+        if os.path.basename(src) == "bird2.jpg":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_copy)
+    calls = []
+    result = move_mod.move_photos(
+        db=db,
+        photo_ids=[missing, env["p1"], clash, env["p2"], 999999],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 4
+    assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
+    assert {c[1] for c in calls} == {5}
+    assert [c[2] for c in calls] == [
+        "gone.jpg", "bird1.jpg", "clash.jpg", "bird2.jpg", "",
+    ]
+
+
+def test_move_photos_refused_batch_reports_full_progress(move_env):
+    """A batch refused up front (destination is a file) still finishes the
+    bar, so the job does not sit at 0 of N while reporting N errors."""
+    from move import move_photos
+
+    env = move_env
+    blocker = env["tmp_path"] / "not-a-dir"
+    blocker.write_text("x")
+    calls = []
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"], env["p2"]],
+        destination=str(blocker),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 2
+    assert calls[-1][:2] == (2, 2)
 
 
 def test_move_folder_reports_phases_and_per_file_progress(move_env):
