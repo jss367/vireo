@@ -185,7 +185,7 @@ def resolve_release(timeout=15):
             # build in the latest release" here would be a lie.
             raise ValueError("GitHub returned something that is not a release object")
         asset = select_asset(release, sys.platform, machine)
-    except Exception:
+    except Exception:  # broad: urllib, JSON and the release payload raise a wide set; reported as unreachable
         log.warning("Could not reach the GitHub releases API", exc_info=True)
         return None, REASON_UNREACHABLE
 
@@ -388,7 +388,7 @@ def is_quarantined(path):
             capture_output=True, text=True, timeout=10,
         )
         return result.returncode == 0
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         log.debug("Could not check the quarantine attribute of %s", path, exc_info=True)
         return False
 
@@ -508,7 +508,7 @@ def download(asset, dest_dir=None, byte_callback=None, should_cancel=None):
         if byte_callback is not None:
             try:
                 byte_callback(expected_size, expected_size)
-            except Exception:
+            except Exception:  # broad: a progress callback must not fail a completed download
                 log.debug("Progress callback raised on a completed download", exc_info=True)
     else:
         _download_with_resume(

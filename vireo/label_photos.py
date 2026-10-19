@@ -56,7 +56,7 @@ def _label_image(clf, image_path, threshold, write, stats):
 
     try:
         predictions = clf.classify(tmp_path, threshold=threshold)
-    except Exception:
+    except Exception:  # broad: per-image boundary; classifier inference raises undocumented errors
         log.warning("Classification failed for %s", image_path, exc_info=True)
         stats["images_failed"] += 1
         return False
@@ -86,7 +86,7 @@ def _label_image(clf, image_path, threshold, write, stats):
                 hierarchical_keywords=set(),
             )
             stats["sidecars_written"] += 1
-        except Exception:
+        except Exception:  # broad: per-file boundary; XMP writing raises undocumented errors
             log.warning("Failed to write sidecar for %s", image_path, exc_info=True)
     else:
         log.info(

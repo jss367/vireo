@@ -238,7 +238,7 @@ def local_label_descriptions_identity(active_model):
         descs, _signature = read_label_descriptions(
             os.path.join(weights_path, LABEL_DESCRIPTIONS_FILE),
         )
-    except Exception:
+    except Exception:  # broad: a missing or malformed descriptions file reads as no descriptions
         log.debug("Could not read label descriptions under %s", weights_path, exc_info=True)
         return NO_LABEL_DESCRIPTIONS
     return label_descriptions_identity(descs)
@@ -394,7 +394,7 @@ def local_taxonomy_identity():
         return "no-tax"
     try:
         tax = load_local_taxonomy()
-    except Exception:
+    except Exception:  # broad: taxonomy parsing raises undocumented errors; the identity reads as no taxonomy
         log.debug("Could not load the local taxonomy for its identity", exc_info=True)
         return "no-tax"
     return taxonomy_identity(tax)
@@ -417,7 +417,7 @@ def local_synonyms_identity():
         return "no-synonyms"
     try:
         return scientific_synonyms_identity()
-    except Exception:
+    except Exception:  # broad: a missing or malformed synonym map reads as no synonyms
         log.debug("Could not read the scientific-name synonym map identity", exc_info=True)
         return "no-synonyms"
 
@@ -1784,7 +1784,7 @@ def _local_classifier_runtimes(classifier_model, cache):
         return identities
     try:
         installed = get_models()
-    except Exception:
+    except Exception:  # broad: model discovery reads config and model dirs; without it identities stay unmatched
         log.warning("Could not list installed models to match classifier identities", exc_info=True)
         cache[classifier_model] = identities
         return identities

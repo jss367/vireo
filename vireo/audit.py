@@ -707,7 +707,7 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
             # and the api_job_scan / api_job_import_full handlers.
             try:
                 invalidate_new_images_after_scan(db, d)
-            except Exception:
+            except Exception:  # broad: cache invalidation is best-effort; the import already committed
                 log.exception(
                     "Failed to invalidate new-images cache for %s", d
                 )

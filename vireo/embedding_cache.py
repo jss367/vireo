@@ -613,7 +613,7 @@ class EmbeddingCache:
             try:
                 self._update_manifest(actual_digest, actual_identity, value)
             except Exception:
-                # The manifest is explanatory metadata, never cache validity.
+                # broad: the manifest is explanatory metadata, never cache validity.
                 # Publication has already committed a complete payload.
                 log.exception(
                     "EmbeddingCache: manifest update failed key=%s",
@@ -631,7 +631,7 @@ class EmbeddingCache:
                 _diagnostics["producer_publications"] += 1
             log.info("EmbeddingCache: published key=%s", actual_digest[:12])
             return value, actual_identity
-        except BaseException as exc:
+        except BaseException as exc:  # broad: record any failure, cancel included, for the waiters, then re-raise
             flight.error = exc
             with _flights_lock:
                 _diagnostics["producer_failures"] += 1

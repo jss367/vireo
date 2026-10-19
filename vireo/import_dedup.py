@@ -135,7 +135,7 @@ def source_capture_timestamps(files):
                     "-TrackCreateDate",
                 ],
             )
-        except Exception:
+        except Exception:  # broad: ExifTool failures leave capture times unknown, which falls back to hashing
             log.debug(
                 "Could not read ExifTool metadata for capture timestamps",
                 exc_info=True,
