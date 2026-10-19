@@ -74,7 +74,7 @@ def location_keyword_cleanup_warning(workspace_names):
         noun = "workspace" if len(workspace_names) == 1 else "workspaces"
         where = f"in {noun} {quoted}"
         retry = (
-            "To retry, click" if len(workspace_names) == 1
+            f"To retry, in workspace {quoted} click" if len(workspace_names) == 1
             else "To retry, in each of those workspaces click"
         )
     return (
@@ -997,6 +997,7 @@ def create_settings_blueprint(
             "default": default_layer,
             "global": global_layer,
             "workspace": workspace_layer,
+            "workspace_id": db.active_workspace_id,
             "effective": effective_layer,
         })
 

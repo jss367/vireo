@@ -5,6 +5,8 @@
 // scope tab can't clear the pending write of the first scope's edit.
 /** @type {Record<string,ReturnType<typeof setTimeout>|null>} */ var ALL_SETTINGS_DEBOUNCE = {};
 var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
+// Successful writes retire only their own scope/workspace/key's warning.
+/** @type {Record<string,string>} */ var ALL_SETTINGS_WARNINGS = Object.create(null);
 
 /** @param {string} scope */ function setSettingsScope(scope) {
   if (scope !== 'global' && scope !== 'workspace') return;
@@ -185,6 +187,7 @@ async function refreshAllSettingsValues() {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
   var search = key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category;
+  var warning = ALL_SETTINGS_WARNINGS[settingWarningToken(key)];
   return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
        +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
@@ -199,9 +202,9 @@ async function refreshAllSettingsValues() {
        +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
        +     '<div style="display:flex;justify-content:space-between;gap:8px;margin-top:2px;">'
        +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
-       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;"></div>'
+       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;">' + (warning ? 'Saved with a warning' : '') + '</div>'
        +     '</div>'
-       +     '<div class="setting-row-warning" role="status" hidden style="font-size:12px;color:var(--warning);line-height:1.5;margin-top:4px;"></div>'
+       +     '<div class="setting-row-warning" role="status"' + (warning ? '' : ' hidden') + ' style="font-size:12px;color:var(--warning);line-height:1.5;margin-top:4px;">' + escapeHtml(warning || '') + '</div>'
        +   '</div>'
        + '</div>';
 }
@@ -351,6 +354,8 @@ async function refreshAllSettingsValues() {
 
 /** @param {string} key @param {SettingsValue} value @param {string=} scope @param {boolean=} confirmedEviction */ async function saveSchemaSetting(key, value, scope, confirmedEviction) {
   if (!scope) scope = ALL_SETTINGS_SCOPE;
+  var warningToken = settingWarningToken(key, scope);
+  var committed = false;
   setRowStatus(key, 'Saving…', false);
   try {
     /** @type {{key:string;value:SettingsValue;_confirm_working_copy_eviction?:boolean}} */ var payload = { key: key, value: value };
@@ -377,7 +382,9 @@ async function refreshAllSettingsValues() {
       setRowStatus(key, err.error || 'Save failed', true);
       return;
     }
-    var saved = await resp.json().catch(function() { return {}; });
+    committed = true;
+    var saved = await resp.json();
+    showSettingSaveWarning(key, saved, warningToken);
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
     // The curated forms above this panel post full snapshots from their own
@@ -388,15 +395,20 @@ async function refreshAllSettingsValues() {
     // a freshly-saved override).
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    if (showSettingSaveWarning(key, saved)) return;
+    if (warningToken !== settingWarningToken(key)) return;
+    if (restoreSettingSaveWarning(key)) return;
     setRowStatus(key, '✓ Saved', false);
-    setTimeout(function() { setRowStatus(key, '', false); }, 1500);
+    setTimeout(function() {
+      if (warningToken === settingWarningToken(key) && !ALL_SETTINGS_WARNINGS[warningToken]) setRowStatus(key, '', false);
+    }, 1500);
   } catch (err) {
-    setRowStatus(key, 'Network error', true);
+    settingSaveRefreshFailed(key, warningToken, committed);
   }
 }
 
 /** @param {string} key @param {boolean=} confirmedEviction */ async function resetSchemaSetting(key, confirmedEviction) {
+  var warningToken = settingWarningToken(key);
+  var committed = false;
   setRowStatus(key, 'Resetting…', false);
   try {
     var scope = ALL_SETTINGS_SCOPE;
@@ -433,14 +445,16 @@ async function refreshAllSettingsValues() {
       setRowStatus(key, err.error || 'Reset failed', true);
       return;
     }
-    var reset = await resp.json().catch(function() { return {}; });
+    committed = true;
+    var reset = await resp.json();
+    showSettingSaveWarning(key, reset, warningToken);
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    showSettingSaveWarning(key, reset);
+    if (warningToken === settingWarningToken(key)) restoreSettingSaveWarning(key);
   } catch (err) {
-    setRowStatus(key, 'Network error', true);
+    settingSaveRefreshFailed(key, warningToken, committed);
   }
 }
 
@@ -449,19 +463,43 @@ async function refreshAllSettingsValues() {
  * a side effect it promises did not run (turning off location keywords
  * could not queue their removal from the sidecars). The row keeps the full
  * message until its next save, and a toast points at it.
- * @param {string} key @param {{warning?: string}} data @returns {boolean} whether there was one
- */ function showSettingSaveWarning(key, data) {
+ * @param {string} key @param {{warning?: string}} data @param {string=} token @returns {boolean} whether there was one
+ */ function showSettingSaveWarning(key, data, token = settingWarningToken(key)) {
+  rememberSettingSaveWarning(key, data, token);
   var warning = data && data.warning;
   if (!warning) return false;
-  setRowStatus(key, 'Saved with a warning', false);
+  if (typeof showToast === 'function') showToast(warning, 'warning');
+  return true;
+}
+
+/** @param {string} key @param {string=} scope */ function settingWarningToken(key, scope = ALL_SETTINGS_SCOPE) {
+  return JSON.stringify([scope, scope === 'workspace' ? ALL_SETTINGS_CACHE.values?.workspace_id : null, key]);
+}
+
+/** @param {string} key @param {{warning?: string}} data @param {string=} token */ function rememberSettingSaveWarning(key, data, token = settingWarningToken(key)) {
+  if (data.warning) ALL_SETTINGS_WARNINGS[token] = String(data.warning);
+  else delete ALL_SETTINGS_WARNINGS[token];
+  if (token === settingWarningToken(key)) restoreSettingSaveWarning(key);
+}
+
+/** @param {string} key */ function restoreSettingSaveWarning(key) {
+  var warning = ALL_SETTINGS_WARNINGS[settingWarningToken(key)];
+  if (warning) setRowStatus(key, 'Saved with a warning', false);
   var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   var notice = row && row.querySelector(/** @type {'div'} */ ('.setting-row-warning'));
   if (notice) {
-    notice.textContent = String(warning);
-    notice.hidden = false;
+    notice.textContent = warning || '';
+    notice.hidden = !warning;
   }
-  if (typeof showToast === 'function') showToast(warning, 'warning');
-  return true;
+  return Boolean(warning);
+}
+
+/** @param {string} key @param {string} token @param {boolean} committed */ function settingSaveRefreshFailed(key, token, committed) {
+  if (token === settingWarningToken(key)) {
+    restoreSettingSaveWarning(key);
+    if (!committed || !ALL_SETTINGS_WARNINGS[token]) setRowStatus(key, committed ? 'Saved, but the page could not refresh' : 'Network error', !committed);
+  }
+  if (committed && typeof showToast === 'function') showToast('Setting saved, but the page could not refresh. Reload settings.', 'warning');
 }
 
 /** @param {string} key @param {string} msg @param {boolean} isError */ function setRowStatus(key, msg, isError) {
@@ -560,7 +598,8 @@ async function refreshAllSettingsValues() {
           _confirm_working_copy_eviction: confirmedEviction,
         }),
       });
-      var data = await resp.json().catch(function() { return {}; });
+      if (resp.ok) imported = true;
+      var data = await resp.json();
       if (
         resp.status === 409 && !confirmedEviction &&
         data.code === 'working_copy_eviction_confirmation_required'
@@ -581,10 +620,11 @@ async function refreshAllSettingsValues() {
       }
       break;
     }
-    // The server has committed the import at this point; everything below
-    // is UI refresh. Flag it now so a refresh failure can't be mistaken
-    // for an aborted import (which would re-post the stale form over it).
-    imported = true;
+    // Successful HTTP status already marked the import committed.
+    rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
+      settingWarningToken('write_location_keywords_to_xmp', 'global'));
+    // Report the committed import before any fallible UI refresh.
+    alert(settingsImportedMessage(data));
     // The import is a successful write of the whole global config, so a
     // failure left over from an earlier autosave no longer describes what
     // is on disk.
@@ -597,10 +637,8 @@ async function refreshAllSettingsValues() {
     // loadConfig() swallows fetch failures (it has to on first paint), so
     // check its result rather than assume the form now matches disk.
     formReloaded = await loadConfig();
-    if (!formReloaded) return;
-    alert(settingsImportedMessage(data));
   } catch (err) {
-    alert('Network error: ' + (err && settingsErrorMessage(err) || err));
+    alert((imported ? 'Settings imported, but the page could not refresh: ' : 'Network error: ') + (err && settingsErrorMessage(err) || err));
   } finally {
     if (imported && !formReloaded) {
       // The config on disk is the imported one but the form could not be

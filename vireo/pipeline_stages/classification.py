@@ -127,6 +127,7 @@ def classify_stage(
     try:
         classify.run_all()
     except Exception as e:
+        # broad: stage boundary; any failure fails this stage, not the run.
         # fail() logs via log.exception, records the fatal-stage status
         # and sets run.abort; we deliberately swallow rather than
         # re-raise so the finally block still releases the classifier
@@ -678,7 +679,7 @@ class _ClassifyPass:
             bundle = self.load_model_bundle(
                 active_spec, self.tax, self.thread_db, progress_step=step_id,
             )
-        except Exception as model_err:
+        except Exception as model_err:  # broad: model loaders raise undocumented errors; one bad model skips only its step
             is_classification_cancelled = (
                 model_err.__class__.__name__ == "ClassificationCancelled"
             )
@@ -698,7 +699,7 @@ class _ClassifyPass:
                 return None
             log.warning(
                 "Skipping model %s: %s",
-                active_spec["name"], model_err,
+                active_spec["name"], model_err, exc_info=True,
             )
             self.skipped_model_names.append(active_spec["name"])
             run.runner.update_step(
@@ -1397,7 +1398,7 @@ class _ClassifyPass:
         if pause is not None:
             try:
                 paused = bool(pause(run.job["id"]))
-            except Exception:
+            except Exception:  # broad: pausing is best-effort; the run stops below if it cannot park
                 log.warning("Could not pause classify for an offline source", exc_info=True)
         if not paused:
             # ``pause_job`` returns False in two very different
@@ -1419,7 +1420,7 @@ class _ClassifyPass:
             if pause_probe is not None:
                 try:
                     already_pausing = bool(pause_probe(run.job["id"]))
-                except Exception:
+                except Exception:  # broad: an unreadable pause probe reads as not pausing; the run stops below
                     log.warning("Could not read the job's pause request", exc_info=True)
             if not already_pausing:
                 # Nothing to park on. Stop rather than spin
@@ -1466,7 +1467,7 @@ class _ClassifyPass:
                 run.runner.update_step(
                     run.job["id"], step_id, current_file=message,
                 )
-            except Exception:
+            except Exception:  # broad: the pause reason is a status line; failing to show it must not stop the pause
                 log.warning("Could not publish the classify pause reason", exc_info=True)
         run.emit_progress(
             run.runner, run.job["id"], run.stages, "classify",
@@ -1488,7 +1489,7 @@ class _ClassifyPass:
                 run.runner.update_step(
                     run.job["id"], step_id, current_file="",
                 )
-            except Exception:
+            except Exception:  # broad: clearing a status line must not stop the resumed run
                 log.warning("Could not clear the classify pause reason", exc_info=True)
         run.emit_progress(
             run.runner, run.job["id"], run.stages, "classify",
@@ -1508,9 +1509,10 @@ class _ClassifyPass:
 
     def _close_pending_inference(self, spec: _SpecPass) -> None:
         for entry in spec.inference_batch:
-            # Releasing decoded images; a close failure frees nothing more.
-            with contextlib.suppress(Exception):
+            try:
                 entry["img"].close()
+            except Exception:  # broad: releasing a decoded image is best-effort; a close failure frees nothing more
+                log.debug("Could not close a pending inference image", exc_info=True)
         spec.inference_batch.clear()
 
     def _flush_pending_inference(self, spec: _SpecPass) -> None:

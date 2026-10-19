@@ -26,8 +26,9 @@ def _namespace(db, body=None):
         ValidationError=ValueError,
         set_dotted=lambda data, key, value: data.update({key: value}),
         delete_dotted=lambda data, key: data.pop(key, None),
+        flatten=dict,
     )
-    modules = {"config_schema": schema, "config": SimpleNamespace(load=lambda: {KEY: False})}
+    modules = {"config_schema": schema, "config": SimpleNamespace(load=lambda: {KEY: False}, DEFAULTS={KEY: False})}
 
     def fake_import(name, *args, **kwargs):
         assert name in modules, f"Unexpected product import: {name}"
@@ -41,12 +42,13 @@ def _namespace(db, body=None):
         "settings_write_lock": contextlib.nullcontext(),
         "get_db": lambda: db, "jsonify": lambda payload: payload,
         "request": SimpleNamespace(get_json=lambda **kwargs: body or {}),
+        "read_raw_config_file": lambda: {},
     }
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in HELPERS]
     blueprint = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "create_settings_blueprint")
     for node in blueprint.body:
-        if isinstance(node, ast.FunctionDef) and node.name in {"api_settings_workspace_patch", "api_settings_workspace_delete"}:
+        if isinstance(node, ast.FunctionDef) and node.name in {"api_settings_workspace_patch", "api_settings_workspace_delete", "api_settings_values"}:
             node.decorator_list = []
             selected.append(node)
     exec(compile(ast.Module(body=selected, type_ignores=[]), "<fake settings catalog>", "exec"), namespace)
@@ -141,3 +143,39 @@ def test_preexisting_workspace_restore_failure_still_propagates():
         assert caught is error
     else:
         raise AssertionError("Restoration failures must not be hidden")
+
+
+def test_singular_cleanup_retry_names_the_workspace_to_activate():
+    namespace, _ = _namespace(_Catalog())
+    warning = namespace["location_keyword_cleanup_warning"](["Invented non-active workspace"])
+    retry = warning.split("To retry,", 1)[1]
+    assert 'workspace "Invented non-active workspace"' in retry
+
+
+def test_bulk_workspace_update_propagates_failed_cleanup_warning():
+    db = _Catalog(queue_error=sqlite3.OperationalError("invented queue failure"))
+    db.active_workspace_id = 99
+    namespace, _ = _namespace(db, {"config_overrides": {KEY: False}})
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    effective = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "workspace_effective_setting")
+    workspace_source = SOURCE.with_name("workspaces.py")
+    tree = ast.parse(workspace_source.read_text(encoding="utf-8"))
+    blueprint = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "create_workspace_blueprint")
+    update = next(node for node in blueprint.body if isinstance(node, ast.FunctionDef) and node.name == "api_update_workspace")
+    update.decorator_list = []
+    namespace["_validate_workspace_config_overrides"] = lambda *args: None
+    exec(compile(ast.Module(body=[effective, update], type_ignores=[]), "<fake bulk workspace update>", "exec"), namespace)
+    response = namespace["api_update_workspace"](17)
+    assert db.saved and db.overrides[KEY] is False
+    assert db.active_workspace_id == 99 and db.switches == [17, 99]
+    assert '"Invented workspace"' in response["warning"]
+
+
+def test_values_identify_the_workspace_whose_warnings_the_ui_renders():
+    db = _Catalog()
+    namespace, _ = _namespace(db)
+    for workspace_id in (17, 18):
+        db.active_workspace_id = workspace_id
+        response = namespace["api_settings_values"]()
+        assert response["workspace_id"] == workspace_id
+        assert response["workspace"][KEY] is True
