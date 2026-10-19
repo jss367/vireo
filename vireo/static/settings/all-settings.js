@@ -201,6 +201,7 @@ async function refreshAllSettingsValues() {
        +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
        +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;"></div>'
        +     '</div>'
+       +     '<div class="setting-row-warning" role="status" hidden style="font-size:12px;color:var(--warning);line-height:1.5;margin-top:4px;"></div>'
        +   '</div>'
        + '</div>';
 }
@@ -376,6 +377,7 @@ async function refreshAllSettingsValues() {
       setRowStatus(key, err.error || 'Save failed', true);
       return;
     }
+    var saved = await resp.json().catch(function() { return {}; });
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
     // The curated forms above this panel post full snapshots from their own
@@ -386,6 +388,7 @@ async function refreshAllSettingsValues() {
     // a freshly-saved override).
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
+    if (showSettingSaveWarning(key, saved)) return;
     setRowStatus(key, '✓ Saved', false);
     setTimeout(function() { setRowStatus(key, '', false); }, 1500);
   } catch (err) {
@@ -430,13 +433,35 @@ async function refreshAllSettingsValues() {
       setRowStatus(key, err.error || 'Reset failed', true);
       return;
     }
+    var reset = await resp.json().catch(function() { return {}; });
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
+    showSettingSaveWarning(key, reset);
   } catch (err) {
     setRowStatus(key, 'Network error', true);
   }
+}
+
+/**
+ * Show the warning a successful save came back with: a save can stand while
+ * a side effect it promises did not run (turning off location keywords
+ * could not queue their removal from the sidecars). The row keeps the full
+ * message until its next save, and a toast points at it.
+ * @param {string} key @param {{warning?: string}} data @returns {boolean} whether there was one
+ */ function showSettingSaveWarning(key, data) {
+  var warning = data && data.warning;
+  if (!warning) return false;
+  setRowStatus(key, 'Saved with a warning', false);
+  var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
+  var notice = row && row.querySelector(/** @type {'div'} */ ('.setting-row-warning'));
+  if (notice) {
+    notice.textContent = String(warning);
+    notice.hidden = false;
+  }
+  if (typeof showToast === 'function') showToast(warning, 'warning');
+  return true;
 }
 
 /** @param {string} key @param {string} msg @param {boolean} isError */ function setRowStatus(key, msg, isError) {
@@ -468,6 +493,18 @@ async function refreshAllSettingsValues() {
     return String(v);
   }
   return String(v);
+}
+
+/**
+ * The confirmation an import ends with. A warning the import came back with
+ * (a location-keyword cleanup it could not queue) is part of it, and also
+ * gets a toast, since the desktop app's webview shows no native alerts.
+ * @param {{warning?: string}} data @returns {string}
+ */ function settingsImportedMessage(data) {
+  var message = 'Settings imported. Workspace overrides preserved.';
+  if (!data || !data.warning) return message;
+  if (typeof showToast === 'function') showToast(data.warning, 'warning');
+  return message + '\n\n' + data.warning;
 }
 
 /** @param {File} file */ async function importSettingsFile(file) {
@@ -561,7 +598,7 @@ async function refreshAllSettingsValues() {
     // check its result rather than assume the form now matches disk.
     formReloaded = await loadConfig();
     if (!formReloaded) return;
-    alert('Settings imported. Workspace overrides preserved.');
+    alert(settingsImportedMessage(data));
   } catch (err) {
     alert('Network error: ' + (err && settingsErrorMessage(err) || err));
   } finally {

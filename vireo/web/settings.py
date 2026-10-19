@@ -37,19 +37,61 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
     """Queue ``location`` changes for every located photo in one workspace.
 
     Runs the workspace-scoped backfill under an explicit active-workspace
-    switch so the caller's active workspace is left untouched.
+    switch so the caller's active workspace is left untouched. Returns
+    ``False`` when the changes could not be queued: the setting is saved
+    either way, so the caller reports the failure instead of undoing it.
     """
     saved_active = db.active_workspace_id
     try:
         db.set_active_workspace(int(workspace_id))
         db.queue_location_changes_for_tagged_photos()
+        return True
     except Exception:  # broad: a saved setting must not be undone by its cleanup side effect
         log.warning(
             "Failed to queue location cleanup for workspace %s",
             workspace_id, exc_info=True,
         )
+        return False
     finally:
         db.set_active_workspace(saved_active)
+
+
+def location_keyword_cleanup_warning(workspace_names):
+    """The save-response warning for a location-keyword cleanup that failed.
+
+    ``workspace_names`` lists the workspaces whose cleanup could not be
+    queued, or is ``None`` when the workspaces could not even be listed.
+    The setting is saved; what the user needs to know is that the keywords
+    Vireo already wrote stay in the sidecars, and how to queue their
+    removal by hand (the Location metadata backfill button, which queues
+    for the active workspace only).
+    """
+    if workspace_names is None:
+        where = "in any workspace"
+        retry = "In each workspace with located photos, click"
+    else:
+        quoted = ", ".join(f'"{name}"' for name in workspace_names)
+        noun = "workspace" if len(workspace_names) == 1 else "workspaces"
+        where = f"in {noun} {quoted}"
+        retry = (
+            "To retry, click" if len(workspace_names) == 1
+            else "To retry, in each of those workspaces click"
+        )
+    return (
+        "Setting saved, but Vireo could not queue removal of the location "
+        f"keywords it wrote to XMP sidecars {where}. Those keywords stay in "
+        f"the sidecars. {retry} \"Queue location writes\" under Location "
+        "metadata in XMP, then run Sync to XMP."
+    )
+
+
+def queue_location_keyword_cleanup_reporting(db, workspace_id):
+    """Queue one workspace's cleanup; return a warning if it failed, else None."""
+    if queue_location_keyword_cleanup_for_workspace(db, workspace_id):
+        return None
+    ws = db.workspaces.get(int(workspace_id))
+    name = ws["name"] if ws else f"#{workspace_id}"
+    return location_keyword_cleanup_warning([name])
 
 
 def workspace_effective_setting(raw_override, global_cfg, key):
@@ -91,6 +133,9 @@ def queue_location_keyword_cleanup_on_global_off(
     user reassigned each place by hand or ran the Settings backfill.
     Detect the True → False transition per workspace here (workspace
     overrides win over the global) and queue the affected photos.
+
+    Returns the ``location_keyword_cleanup_warning`` for any workspace
+    whose cleanup could not be queued, or ``None``.
     """
     key = LOCATION_KEYWORDS_SETTING
     prev_global_val = bool((previous_global or {}).get(key, False))
@@ -98,7 +143,7 @@ def queue_location_keyword_cleanup_on_global_off(
     # A workspace with its own override for this key is not affected
     # by a global toggle -- its effective value doesn't change.
     if prev_global_val == cur_global_val:
-        return
+        return None
     try:
         workspaces = db.workspaces.list_all()
     except sqlite3.Error:
@@ -106,7 +151,11 @@ def queue_location_keyword_cleanup_on_global_off(
             "Failed to enumerate workspaces for %s cleanup check",
             key, exc_info=True,
         )
-        return
+        # Only a True → False flip has anything to clean up.
+        if prev_global_val and not cur_global_val:
+            return location_keyword_cleanup_warning(None)
+        return None
+    failed = []
     for ws in workspaces:
         override = None
         raw_override = ws["config_overrides"]
@@ -126,8 +175,22 @@ def queue_location_keyword_cleanup_on_global_off(
         cur_effective = (
             override if override is not None else cur_global_val
         )
-        if prev_effective and not cur_effective:
-            queue_location_keyword_cleanup_for_workspace(db, ws["id"])
+        if (
+            prev_effective and not cur_effective
+            and not queue_location_keyword_cleanup_for_workspace(db, ws["id"])
+        ):
+            failed.append(ws["name"])
+    return location_keyword_cleanup_warning(failed) if failed else None
+
+
+def _with_warning(payload, warning):
+    """Add ``warning`` to a successful save's payload when there is one.
+
+    Saves without one keep their original response shape.
+    """
+    if warning:
+        payload["warning"] = warning
+    return payload
 
 
 def read_workspace_overrides(db):
@@ -682,6 +745,9 @@ def create_settings_blueprint(
         curated-form save: HF_TOKEN stays in sync, cache budgets take effect
         immediately, and raising the working-copy ceiling makes deliberately
         evicted rows eligible for a future backfill again.
+
+        Returns a warning for the save response when a side effect the user
+        relies on could not run (``None`` otherwise); the save itself stands.
         """
         hf_token = current.get("hf_token", "")
         if hf_token:
@@ -740,7 +806,7 @@ def create_settings_blueprint(
         # description: "Turning this off removes the keywords Vireo wrote
         # on the next sync." Sync only visits queued photos, so queue them
         # here for every workspace whose effective value transitioned off.
-        queue_location_keyword_cleanup_on_global_off(
+        return queue_location_keyword_cleanup_on_global_off(
             quota_db, previous, current,
         )
 
@@ -812,8 +878,8 @@ def create_settings_blueprint(
             # changed value supersedes an in-flight modal validation.
             if current.get("inat_token") != previous.get("inat_token"):
                 advance_inat_token_generation()
-            _settings_post_save_side_effects(current, previous)
-        return jsonify({"ok": True})
+            warning = _settings_post_save_side_effects(current, previous)
+        return jsonify(_with_warning({"ok": True}, warning))
 
     @blueprint.route("/api/settings/schema")
     def api_settings_schema():
@@ -968,8 +1034,8 @@ def create_settings_blueprint(
             cfg.save(raw)
             if key == "inat_token":
                 advance_inat_token_generation()
-            _settings_post_save_side_effects(cfg.load(), previous)
-        return jsonify({"ok": True, "key": key, "value": value})
+            warning = _settings_post_save_side_effects(cfg.load(), previous)
+        return jsonify(_with_warning({"ok": True, "key": key, "value": value}, warning))
 
     @blueprint.route("/api/settings/global/<path:key>", methods=["DELETE"])
     def api_settings_global_delete(key):
@@ -996,8 +1062,8 @@ def create_settings_blueprint(
             cfg.save(raw)
             if key == "inat_token":
                 advance_inat_token_generation()
-            _settings_post_save_side_effects(cfg.load(), previous)
-        return jsonify({"ok": True, "key": key})
+            warning = _settings_post_save_side_effects(cfg.load(), previous)
+        return jsonify(_with_warning({"ok": True, "key": key}, warning))
 
     @blueprint.route("/api/settings/workspace", methods=["PATCH"])
     def api_settings_workspace_patch():
@@ -1028,6 +1094,7 @@ def create_settings_blueprint(
             and db.processes.get(value) is None
         ):
             return json_error(f"unknown process id: {value}", status=400)
+        warning = None
         with settings_write_lock:
             import config as cfg
             key_transition_check = (key == LOCATION_KEYWORDS_SETTING)
@@ -1043,10 +1110,10 @@ def create_settings_blueprint(
                     db.get_effective_config(cfg.load()).get(key, False),
                 )
                 if prev_effective_val and not new_effective_val:
-                    queue_location_keyword_cleanup_for_workspace(
+                    warning = queue_location_keyword_cleanup_reporting(
                         db, db.active_workspace_id,
                     )
-        return jsonify({"ok": True, "key": key, "value": value})
+        return jsonify(_with_warning({"ok": True, "key": key, "value": value}, warning))
 
     @blueprint.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
     def api_settings_workspace_delete(key):
@@ -1056,6 +1123,7 @@ def create_settings_blueprint(
         if key not in schema.SCHEMA:
             return json_error(f"unknown setting {key!r}", status=400)
         db = get_db()
+        warning = None
         with settings_write_lock:
             import config as cfg
             key_transition_check = (key == LOCATION_KEYWORDS_SETTING)
@@ -1071,10 +1139,10 @@ def create_settings_blueprint(
                     db.get_effective_config(cfg.load()).get(key, False),
                 )
                 if prev_effective_val and not new_effective_val:
-                    queue_location_keyword_cleanup_for_workspace(
+                    warning = queue_location_keyword_cleanup_reporting(
                         db, db.active_workspace_id,
                     )
-        return jsonify({"ok": True, "key": key})
+        return jsonify(_with_warning({"ok": True, "key": key}, warning))
 
     @blueprint.route("/api/settings/export")
     def api_settings_export():
@@ -1206,7 +1274,7 @@ def create_settings_blueprint(
             saved = cfg.load()
             if saved.get("inat_token") != previous.get("inat_token"):
                 advance_inat_token_generation()
-            _settings_post_save_side_effects(saved, previous)
-        return jsonify({"ok": True})
+            warning = _settings_post_save_side_effects(saved, previous)
+        return jsonify(_with_warning({"ok": True}, warning))
 
     return blueprint
