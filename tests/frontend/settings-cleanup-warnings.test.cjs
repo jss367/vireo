@@ -14,7 +14,8 @@ function harness() {
   const decode = value => value.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
   function rowFrom(html) {
     const rowKey = html.match(/data-key="([^"]+)"/)[1];
-    const status = {textContent: decode(html.match(/class="setting-row-status"[^>]*>([^<]*)</)[1]), style: {}};
+    const statusMatch = html.match(/class="setting-row-status"([^>]*)>([^<]*)</);
+    const status = {textContent: decode(statusMatch[2]), style: {color: statusMatch[1].match(/color:([^;]+);/)[1]}};
     const match = html.match(/class="setting-row-warning"([^>]*)>([\s\S]*?)<\/div>/);
     const notice = {hidden: /\bhidden\b/.test(match[1]), textContent: decode(match[2])};
     return {key: rowKey, status, notice, contains: () => false,
@@ -65,8 +66,8 @@ function harness() {
   const functions = new Set(['setSettingsScope', 'refreshAllSettingsValues', 'renderAllSettings', 'renderSettingRow', 'renderSettingWidget',
     '_settingControlSelector', 'rerenderSettingRow', 'cssEscape', '_settingsScopeBaseFor', 'saveSchemaSetting', 'resetSchemaSetting',
     'showSettingSaveWarning', 'setRowStatus', 'formatSettingValue', 'settingsImportedMessage', 'importSettingsFile',
-    'settingWarningToken', 'claimSettingSave', 'reportSettingsImported', 'rememberSettingSaveWarning', 'restoreSettingSaveWarning', 'settingSaveRefreshFailed']);
-  const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS', 'ALL_SETTINGS_SAVE_COMMITS']);
+    'settingWarningToken', 'settingWarningOwnsStatus', 'settingRowStatus', 'claimSettingSave', 'reportSettingsImported', 'rememberSettingSaveWarning', 'restoreSettingSaveWarning', 'settingSaveRefreshFailed']);
+  const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS', 'ALL_SETTINGS_SAVE_COMMITS', 'ALL_SETTINGS_ROW_STATUSES']);
   const nodes = parse(source, {ecmaVersion: 'latest'}).body.filter(node =>
     node.type === 'FunctionDeclaration' && functions.has(node.id.name) ||
     node.type === 'VariableDeclaration' && node.declarations.some(d => variables.has(d.id.name)));
@@ -426,4 +427,82 @@ test('a failed newest attempt does not let an oldest response replace the newer 
   finishWrite(pending, 0, {ok: true}); await oldest;
   assert.equal(h.rows.get(key).notice.textContent, 'new committed warning');
   assert.equal(h.toasts.length, count);
+});
+
+
+for (const olderMethod of ['save', 'reset', 'import']) {
+  for (const newerMethod of ['save', 'reset']) {
+    for (const failure of ['transport', 'validation', 'response-json']) {
+      test('late ' + olderMethod + ' warning preserves newer ' + newerMethod + ' ' + failure + ' status', async () => {
+        const h = harness(), pending = delayedWrites(h);
+        const older = await startWrite(h, olderMethod, pending, 1);
+        const newer = await startWrite(h, newerMethod, pending, 2);
+        failWrite(pending, 1, failure); await newer.result;
+        const status = h.rows.get(key).status.textContent;
+        const color = h.rows.get(key).status.style.color;
+        assert(status && status !== 'Saved with a warning');
+        finishWrite(pending, 0, {ok: true, warning: 'earlier committed warning'}); await older.result;
+        assert.equal(h.rows.get(key).notice.textContent, 'earlier committed warning');
+        assert.equal(h.rows.get(key).status.textContent, status);
+        assert.equal(h.rows.get(key).status.style.color, color);
+        h.ctx.setSettingsScope('workspace');
+        assert.equal(h.rows.get(key).notice.hidden, true);
+        h.ctx.setSettingsScope('global');
+        assert.equal(h.rows.get(key).notice.textContent, 'earlier committed warning');
+        assert.equal(h.rows.get(key).status.textContent, status);
+      });
+    }
+    test('late ' + olderMethod + ' warning preserves pending ' + newerMethod + ' status', async () => {
+      const h = harness(), pending = delayedWrites(h);
+      const older = await startWrite(h, olderMethod, pending, 1);
+      const newer = await startWrite(h, newerMethod, pending, 2);
+      const status = h.rows.get(key).status.textContent;
+      finishWrite(pending, 0, {ok: true, warning: 'earlier committed warning'}); await older.result;
+      assert.equal(h.rows.get(key).status.textContent, status);
+      assert.equal(h.rows.get(key).notice.textContent, 'earlier committed warning');
+      finishWrite(pending, 1, {ok: true}); await newer.result;
+      assert.equal(h.rows.get(key).notice.hidden, true);
+      assert.notEqual(h.rows.get(key).status.textContent, status);
+    });
+  }
+}
+for (const method of ['save', 'reset', 'import']) {
+  test('newer successful ' + method + ' replaces a retained failure status and warning', async () => {
+    const h = harness();
+    await write(h, 'save');
+    let pending = delayedWrites(h);
+    const failed = write(h, 'save'); failWrite(pending, 0, 'transport'); await failed;
+    assert.equal(h.rows.get(key).status.textContent, 'Network error');
+    pending = delayedWrites(h);
+    const successful = await startWrite(h, method, pending, 1);
+    finishWrite(pending, 0, {ok: true}); await successful.result;
+    assert.equal(h.rows.get(key).notice.hidden, true);
+    assert.notEqual(h.rows.get(key).status.textContent, 'Network error');
+  });
+}
+
+test('an earlier import refresh cannot erase the newer failed save status', async () => {
+  const h = harness();
+  let releaseRefresh;
+  const refresh = new Promise(resolve => { releaseRefresh = resolve; });
+  let waitingForRefresh = false;
+  const pending = delayedWrites(h), writeFetch = h.ctx.fetch;
+  h.ctx.fetch = async (url, options) => {
+    if (url === '/api/settings/values' && !waitingForRefresh) {
+      waitingForRefresh = true;
+      return refresh;
+    }
+    return writeFetch(url, options);
+  };
+  const imported = await startWrite(h, 'import', pending, 1);
+  finishWrite(pending, 0, {ok: true, warning: 'committed import warning'});
+  while (!waitingForRefresh) await Promise.resolve();
+  const newer = write(h, 'save');
+  failWrite(pending, 1, 'transport'); await newer;
+  const status = h.rows.get(key).status.textContent;
+  assert.equal(status, 'Network error');
+  releaseRefresh({ok: true, json: async () => h.values}); await imported.result;
+  assert.equal(h.rows.get(key).notice.textContent, 'committed import warning');
+  assert.equal(h.rows.get(key).status.textContent, status);
+  assert.equal(h.rows.get(key).status.style.color, 'var(--danger)');
 });

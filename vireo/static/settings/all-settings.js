@@ -9,6 +9,7 @@ var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 /** @type {Record<string,string>} */ var ALL_SETTINGS_WARNINGS = Object.create(null);
 /** @type {Record<string,number>} */ var ALL_SETTINGS_SAVE_GENERATIONS = Object.create(null);
 /** @type {Record<string,number>} */ var ALL_SETTINGS_SAVE_COMMITS = Object.create(null);
+/** @type {Record<string,{message:string;isError:boolean}>} */ var ALL_SETTINGS_ROW_STATUSES = Object.create(null);
 
 /** @param {string} scope */ function setSettingsScope(scope) {
   if (scope !== 'global' && scope !== 'workspace') return;
@@ -190,6 +191,7 @@ async function refreshAllSettingsValues() {
   }
   var search = key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category;
   var warning = ALL_SETTINGS_WARNINGS[settingWarningToken(key)];
+  var rowStatus = settingRowStatus(key);
   return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
        +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
@@ -204,7 +206,7 @@ async function refreshAllSettingsValues() {
        +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
        +     '<div style="display:flex;justify-content:space-between;gap:8px;margin-top:2px;">'
        +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
-       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;">' + (warning ? 'Saved with a warning' : '') + '</div>'
+       +       '<div class="setting-row-status" style="font-size:11px;color:' + (rowStatus.isError ? 'var(--danger)' : 'var(--text-dim)') + ';min-height:14px;">' + escapeHtml(rowStatus.message) + '</div>'
        +     '</div>'
        +     '<div class="setting-row-warning" role="status"' + (warning ? '' : ' hidden') + ' style="font-size:12px;color:var(--warning);line-height:1.5;margin-top:4px;">' + escapeHtml(warning || '') + '</div>'
        +   '</div>'
@@ -510,12 +512,13 @@ async function refreshAllSettingsValues() {
 /** @param {string} key @param {{warning?: string}} data @param {string=} token */ function rememberSettingSaveWarning(key, data, token = settingWarningToken(key)) {
   if (data.warning) ALL_SETTINGS_WARNINGS[token] = String(data.warning);
   else delete ALL_SETTINGS_WARNINGS[token];
+  if (settingWarningOwnsStatus(token)) delete ALL_SETTINGS_ROW_STATUSES[token];
   if (token === settingWarningToken(key)) restoreSettingSaveWarning(key);
 }
 
 /** @param {string} key */ function restoreSettingSaveWarning(key) {
   var warning = ALL_SETTINGS_WARNINGS[settingWarningToken(key)];
-  if (warning) setRowStatus(key, 'Saved with a warning', false);
+  if (warning && settingWarningOwnsStatus(settingWarningToken(key))) setRowStatus(key, 'Saved with a warning', false);
   var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   var notice = row && row.querySelector(/** @type {'div'} */ ('.setting-row-warning'));
   if (notice) {
@@ -528,12 +531,27 @@ async function refreshAllSettingsValues() {
 /** @param {string} key @param {string} token @param {boolean} committed */ function settingSaveRefreshFailed(key, token, committed) {
   if (token === settingWarningToken(key)) {
     restoreSettingSaveWarning(key);
-    if (!committed || !ALL_SETTINGS_WARNINGS[token]) setRowStatus(key, committed ? 'Saved, but the page could not refresh' : 'Network error', !committed);
+    if (!committed || !ALL_SETTINGS_WARNINGS[token] || !settingWarningOwnsStatus(token)) setRowStatus(key, committed ? 'Saved, but the page could not refresh' : 'Network error', !committed);
   }
   if (committed && typeof showToast === 'function') showToast('Setting saved, but the page could not refresh. Reload settings.', 'warning');
 }
 
+/** @param {string} token */ function settingWarningOwnsStatus(token) {
+  return ALL_SETTINGS_SAVE_COMMITS[token] === ALL_SETTINGS_SAVE_GENERATIONS[token];
+}
+
+/** @param {string} key */ function settingRowStatus(key) {
+  var token = settingWarningToken(key);
+  // A stale committed warning may update its notice, but the latest
+  // attempt's pending/error status must survive an import or scope rerender.
+  return ALL_SETTINGS_ROW_STATUSES[token] || {
+    message: ALL_SETTINGS_WARNINGS[token] && settingWarningOwnsStatus(token) ? 'Saved with a warning' : '',
+    isError: false,
+  };
+}
+
 /** @param {string} key @param {string} msg @param {boolean} isError */ function setRowStatus(key, msg, isError) {
+  ALL_SETTINGS_ROW_STATUSES[settingWarningToken(key)] = {message: String(msg), isError: isError};
   var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   if (!row) return;
   var status = row.querySelector(/** @type {'div'} */ ('.setting-row-status'));
