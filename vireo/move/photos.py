@@ -723,18 +723,48 @@ class _PhotoFileTransfer:
                 comp_copied = False
                 comp_error = f"companion copy failed: {e}"
             if not comp_copied:
+                log.warning("Move skipped for %s: %s: %s", photo["filename"],
+                            comp, comp_error)
                 self.errors.append(f"{comp}: {comp_error}")
-                # Clean up what we copied
-                os.remove(item.dst_file)
-                for cc in copied_companions:
-                    os.remove(os.path.join(destination, cc))
-                    if cc == item.xmp_companion:
-                        copied_xmp_companions.discard((src_dir, cc))
+                self.discard_partial_copies(item, copied_companions)
                 return False
             copied_companions.append(comp)
             if comp == item.xmp_companion:
                 copied_xmp_companions.add((src_dir, comp))
         return True
+
+    def discard_partial_copies(self, item, copied_companions):
+        """Remove the destination copies of a photo whose move failed.
+
+        Only destination copies are removed; the originals were never
+        touched. A copy that cannot be removed (locked by antivirus or an
+        indexer on Windows, the share dropped) is reported against the photo
+        and left in place, and the batch carries on: raising here would
+        abort every remaining photo and drop the errors already collected.
+        """
+        photo = item.photo
+        leftovers = []
+        for name in [photo["filename"], *copied_companions]:
+            path = os.path.join(self.destination, name)
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                leftovers.append(f"{path} ({exc})")
+                # The leftover sidecar is still a verified copy of this
+                # source XMP, so a same-stem sibling may keep sharing it.
+                continue
+            if name == item.xmp_companion:
+                self.copied_xmp_companions.discard((item.src_dir, name))
+        if leftovers:
+            log.warning("Could not remove partial copies of %s: %s",
+                        photo["filename"], "; ".join(leftovers))
+            self.errors.append(
+                f"{photo['filename']}: not moved, and its partial copy could "
+                f"not be removed from the destination: {'; '.join(leftovers)}. "
+                "The original is unchanged at the source."
+            )
 
     def remove_originals(self, item):
         """Delete the source original and companions, now that it is safe.
