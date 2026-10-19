@@ -34,6 +34,7 @@ import contextlib
 import io
 import logging
 import os
+import sys
 import tempfile
 import threading
 from collections import OrderedDict
@@ -1076,10 +1077,15 @@ def extract_working_copy(
                     tmp_path, exc_info=True,
                 )
         if img is not None:
-            try:
-                img.close()
-            except Exception:  # broad: cleanup in ``finally`` must not replace the extraction result
-                log.debug("Could not close the decoded image for %s", source_path, exc_info=True)
+            closed = False
+            # broad: close and diagnostic failures must not replace the extraction result
+            with contextlib.suppress(Exception):
+                try:
+                    img.close()
+                    closed = True
+                finally:
+                    if not closed and isinstance(sys.exception(), Exception):
+                        log.debug("Could not close the decoded image for %s", source_path, exc_info=True)
 
 
 def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):

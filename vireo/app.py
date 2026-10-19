@@ -913,7 +913,6 @@ class _TrashRun:
                     self.moved += 1
                     self.report_processed(filepath)
                     continue
-                log.warning("Trash failed for %s", filepath, exc_info=True)
                 self.send_errors[filepath] = str(exc)
                 if sys.platform == "darwin":
                     self.finder_candidates.append(filepath)
