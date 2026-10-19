@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, pending_changes, photo_ingest, subject_masks, workspace_config
+from services import browse_queries, detection_store, pending_changes, photo_ingest, subject_masks, workspace_config
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -17034,7 +17034,6 @@ def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch
     """
     import json
 
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -17060,7 +17059,7 @@ def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch
 
     # /api/browse/init derives count_error from cheap rule validation, so
     # patch that instead of count_collection_photos to trigger the branch.
-    monkeypatch.setattr(Database, "rules_resolvable", lambda self, rules: False)
+    monkeypatch.setattr(browse_queries, "rules_resolvable", lambda db, rules: False)
 
     resp = client.get("/api/browse/init")
     assert resp.status_code == 200

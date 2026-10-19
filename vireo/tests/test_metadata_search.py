@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import photo_ingest
+from services import browse_queries, photo_ingest
 
 
 def parse_queries(queries, options=None):
@@ -386,8 +386,8 @@ def test_browse_summary_runs_the_metadata_filter_once(catalog):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        summary = db.get_browse_summary(
-            rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])
+        summary = browse_queries.get_browse_summary(
+            db, rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])
     finally:
         db.conn.set_trace_callback(None)
     assert summary["filtered_total"] == 2
@@ -414,13 +414,13 @@ def test_browse_summary_interrupted_mid_materialization_cleans_up(catalog):
     db.conn.set_progress_handler(lambda: 1 if materializing and materializing[-1] else 0, 1)
     try:
         with pytest.raises(sqlite3.OperationalError, match="interrupted"):
-            db.get_browse_summary(
-                rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])
+            browse_queries.get_browse_summary(
+                db, rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])
     finally:
         db.conn.set_progress_handler(None, 0)
         db.conn.set_trace_callback(None)
     assert not db.conn.in_transaction
     assert db.conn.execute(
         "SELECT 1 FROM temp.sqlite_master WHERE name='_browse_summary_ids'").fetchone() is None
-    assert db.get_browse_summary(
-        rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])["filtered_total"] == 2
+    assert browse_queries.get_browse_summary(
+        db, rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])["filtered_total"] == 2
