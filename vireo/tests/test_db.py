@@ -13,6 +13,7 @@ from services import (
     detection_store,
     duplicate_resolution,
     miss_flags,
+    missing_originals,
     pending_changes,
     photo_ingest,
     stage_counts,
@@ -9463,7 +9464,7 @@ def test_get_missing_photos_returns_photos_with_missing_source(tmp_path):
                             extension=".nef", file_size=1, file_mtime=1.0,
                             timestamp="2024-03-08T10:00:00")
 
-    missing = db.get_missing_photos()
+    missing = missing_originals.get_missing_photos(db)
     ids = [row["id"] for row in missing]
     assert ids == [pid_gone]
     row = missing[0]
@@ -9486,7 +9487,7 @@ def test_get_missing_photos_excludes_photos_in_missing_folders(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
     db.conn.commit()
 
-    assert db.get_missing_photos() == []
+    assert missing_originals.get_missing_photos(db) == []
 
 
 def test_get_missing_photos_skips_folder_whose_root_is_offline(tmp_path):
@@ -9512,7 +9513,7 @@ def test_get_missing_photos_skips_folder_whose_root_is_offline(tmp_path):
     photo_ingest.add_photo(db, folder_id=fid, filename="bird.NEF", extension=".nef",
                  file_size=1, file_mtime=1.0)
 
-    assert db.get_missing_photos() == []
+    assert missing_originals.get_missing_photos(db) == []
 
 
 def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
@@ -9538,9 +9539,9 @@ def test_get_missing_photos_scoped_to_active_workspace(tmp_path):
                  file_size=1, file_mtime=1.0)
 
     db.set_active_workspace(ws_a)
-    assert [row["filename"] for row in db.get_missing_photos()] == ["ghost_a.jpg"]
+    assert [row["filename"] for row in missing_originals.get_missing_photos(db)] == ["ghost_a.jpg"]
     db.set_active_workspace(ws_b)
-    assert [row["filename"] for row in db.get_missing_photos()] == ["ghost_b.jpg"]
+    assert [row["filename"] for row in missing_originals.get_missing_photos(db)] == ["ghost_b.jpg"]
 
 
 def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
@@ -9584,7 +9585,7 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os.path, "exists", counted_exists)
 
-    missing = db.get_missing_photos()
+    missing = missing_originals.get_missing_photos(db)
 
     assert [row["filename"] for row in missing] == ["gone.jpg"]
     # 1 fallback stat for the single missing photo. Crucially, the 50
@@ -9613,7 +9614,7 @@ def test_get_missing_photos_ignores_progress_callback_errors(tmp_path):
     def broken_progress(_payload):
         raise RuntimeError("progress sink unavailable")
 
-    missing = db.get_missing_photos(progress_callback=broken_progress)
+    missing = missing_originals.get_missing_photos(db, progress_callback=broken_progress)
 
     assert [row["filename"] for row in missing] == ["gone.jpg"]
 
@@ -9634,7 +9635,7 @@ def test_get_missing_photos_reports_periodic_photo_progress(tmp_path):
                      extension=".jpg", file_size=1, file_mtime=1.0)
 
     events = []
-    missing = db.get_missing_photos(progress_callback=events.append)
+    missing = missing_originals.get_missing_photos(db, progress_callback=events.append)
 
     assert len(missing) == 401
     considered = [event["photos_considered"] for event in events]
@@ -9675,7 +9676,7 @@ def test_get_missing_photos_handles_unicode_normalization(tmp_path):
     photo_ingest.add_photo(db, folder_id=fid, filename=nfc_name, extension=".jpg",
                  file_size=1, file_mtime=1.0)
 
-    assert db.get_missing_photos() == []
+    assert missing_originals.get_missing_photos(db) == []
 
 
 def test_get_missing_photos_defers_case_to_filesystem(tmp_path):
@@ -9707,11 +9708,11 @@ def test_get_missing_photos_defers_case_to_filesystem(tmp_path):
     fs_case_insensitive = os.path.exists(str(folder / "IMG_1234.NEF"))
     if fs_case_insensitive:
         # APFS/NTFS: kernel resolves the case-mismatched name; not missing.
-        assert db.get_missing_photos() == []
+        assert missing_originals.get_missing_photos(db) == []
     else:
         # ext4/XFS/most network mounts: distinct names ARE distinct files.
         # The row IS missing — the prior os.path.exists would have agreed.
-        assert [row["filename"] for row in db.get_missing_photos()] == ["IMG_1234.NEF"]
+        assert [row["filename"] for row in missing_originals.get_missing_photos(db)] == ["IMG_1234.NEF"]
 
 
 def test_get_missing_photos_distinguishes_case_on_case_sensitive_fs(tmp_path):
@@ -9751,7 +9752,7 @@ def test_get_missing_photos_distinguishes_case_on_case_sensitive_fs(tmp_path):
 
     # Only the genuinely-absent SHOT.jpg should surface; the lower-case row
     # must not be incorrectly aliased away.
-    assert [row["filename"] for row in db.get_missing_photos()] == ["SHOT.jpg"]
+    assert [row["filename"] for row in missing_originals.get_missing_photos(db)] == ["SHOT.jpg"]
 
 
 def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
@@ -9782,12 +9783,12 @@ def test_get_missing_photos_treats_broken_symlink_as_missing(tmp_path):
                  file_size=1, file_mtime=1.0)
 
     # Symlink target intact: photo present.
-    assert db.get_missing_photos() == []
+    assert missing_originals.get_missing_photos(db) == []
 
     # Target deleted: symlink basename still appears in scandir, but the
     # photo should now surface as missing.
     target.unlink()
-    assert [row["filename"] for row in db.get_missing_photos()] == ["raw_001.NEF"]
+    assert [row["filename"] for row in missing_originals.get_missing_photos(db)] == ["raw_001.NEF"]
 
 
 def test_relocate_folder(tmp_path):

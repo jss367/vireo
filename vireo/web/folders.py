@@ -20,6 +20,7 @@ from burst_evidence import (
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
+from services import missing_originals
 from services.local_folder import (
     local_copy_scan_conflict,
     local_root_for_folder,
@@ -90,7 +91,7 @@ def create_folders_blueprint(
         # independent of network delivery order.
         db.begin()
         missing = db.folders.missing()
-        health_version = db.get_folder_health_version()
+        health_version = missing_originals.get_folder_health_version(db)
         response = jsonify([dict(f) for f in missing])
         response.headers["X-Vireo-Folder-Health-Version"] = str(health_version)
         db.rollback()
@@ -119,7 +120,7 @@ def create_folders_blueprint(
         db.begin()
         missing = db.folders.missing()
         ws_missing_after = {f["id"] for f in missing}
-        health_version = db.get_folder_health_version()
+        health_version = missing_originals.get_folder_health_version(db)
         response = jsonify({
             "changed": changed,
             "workspace_changed": ws_missing_before != ws_missing_after,

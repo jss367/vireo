@@ -28,7 +28,7 @@ from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
-from services import photo_ingest
+from services import missing_originals, photo_ingest
 
 
 class _RecordingCache:
@@ -489,10 +489,19 @@ def test_get_missing_folders_scoped_with_counts(db):
         db.folders.missing()
 
 
+def test_missing_photos_scan_lives_in_the_service():
+    """The scan and the health-version read moved to ``services/missing_originals.py``."""
+    for name in ("get_missing_photos", "get_folder_health_version", "_missing_photos_subtree_clause"):
+        assert not hasattr(Database, name), f"Database.{name} came back"
+    source = inspect.getsource(missing_originals.get_missing_photos)
+    assert "db.folders.photos_in_present_folders" in source
+    assert ".conn" not in source
+
+
 def test_get_folder_health_version(db):
-    assert db.get_folder_health_version() == 0
+    assert missing_originals.get_folder_health_version(db) == 0
     db.meta.set("folder_health_version", "7")
-    assert db.get_folder_health_version() == 7
+    assert missing_originals.get_folder_health_version(db) == 7
 
 
 def _ghost_setup(db, tmp_path):
@@ -512,16 +521,16 @@ def _ghost_setup(db, tmp_path):
 
 def test_get_missing_photos_whole_workspace_and_subtree(db, tmp_path):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
-    rows = db.get_missing_photos()
+    rows = missing_originals.get_missing_photos(db)
     assert [r["id"] for r in rows] == [ids["gone"], ids["sub_gone"]]
     assert set(rows[0].keys()) == {
         "id", "filename", "extension", "file_size", "timestamp",
         "working_copy_path", "folder_id", "folder_path",
     }
-    assert [r["id"] for r in db.get_missing_photos(folder_id=fsub)] == [ids["sub_gone"]]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db, folder_id=fsub)] == [ids["sub_gone"]]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_missing_photos()
+        missing_originals.get_missing_photos(db)
 
 
 def test_get_missing_photos_skips_missing_and_offline_folders(db, tmp_path):
@@ -530,7 +539,7 @@ def test_get_missing_photos_skips_missing_and_offline_folders(db, tmp_path):
     offline = db.add_folder(str(tmp_path / "offline"))
     _photo(db, offline, "o.jpg")
     db.conn.commit()
-    assert [r["id"] for r in db.get_missing_photos()] == [ids["gone"]]
+    assert [r["id"] for r in missing_originals.get_missing_photos(db)] == [ids["gone"]]
 
 
 def test_get_missing_photos_unreadable_folder_is_treated_as_offline(db, tmp_path, monkeypatch):
@@ -545,7 +554,7 @@ def test_get_missing_photos_unreadable_folder_is_treated_as_offline(db, tmp_path
 
     monkeypatch.setattr(os, "scandir", scandir)
     progress = []
-    rows = db.get_missing_photos(progress_callback=progress.append)
+    rows = missing_originals.get_missing_photos(db, progress_callback=progress.append)
     assert [r["id"] for r in rows] == [ids["gone"]]
     assert progress[-1] == {
         "folders_checked": 2, "photos_considered": 4, "missing_found": 1,
@@ -565,28 +574,28 @@ def test_get_missing_photos_nfc_symlink_and_case_fallback(db, tmp_path):
     os.symlink(folder / "nowhere.jpg", folder / "broken.jpg")
     link = _photo(db, fid, "link.jpg")
     broken = _photo(db, fid, "broken.jpg")
-    missing = {r["id"] for r in db.get_missing_photos()}
+    missing = {r["id"] for r in missing_originals.get_missing_photos(db)}
     assert broken in missing
     assert nfc_photo not in missing and link not in missing
 
 
 def test_get_missing_photos_progress_and_callback_failure(db, tmp_path, monkeypatch, caplog):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
-    monkeypatch.setattr(db_module, "_MISSING_PHOTOS_PROGRESS_INTERVAL", 1)
+    monkeypatch.setattr(missing_originals, "_MISSING_PHOTOS_PROGRESS_INTERVAL", 1)
     seen = []
 
     def boom(payload):
         seen.append(payload)
         raise RuntimeError("callback broke")
 
-    with caplog.at_level(logging.ERROR, logger=db_module.log.name):
-        rows = db.get_missing_photos(progress_callback=boom)
+    with caplog.at_level(logging.ERROR, logger=missing_originals.log.name):
+        rows = missing_originals.get_missing_photos(db, progress_callback=boom)
     assert [r["id"] for r in rows] == [ids["gone"], ids["sub_gone"]]
     assert len(seen) == 1  # disabled after the first failure
     assert "Missing photos progress callback failed" in caplog.text
 
     progress = []
-    db.get_missing_photos(progress_callback=progress.append)
+    missing_originals.get_missing_photos(db, progress_callback=progress.append)
     assert progress[0]["folders_checked"] == 1
     assert progress[-1]["current_folder"] == ""
     assert progress[-1]["missing_found"] == 2
@@ -595,7 +604,7 @@ def test_get_missing_photos_progress_and_callback_failure(db, tmp_path, monkeypa
 def test_get_missing_photos_cancel(db, tmp_path):
     _ghost_setup(db, tmp_path)
     with pytest.raises(MissingPhotosCancelled):
-        db.get_missing_photos(cancel_callback=lambda: True)
+        missing_originals.get_missing_photos(db, cancel_callback=lambda: True)
     polls = []
 
     def cancel_later():
@@ -603,25 +612,25 @@ def test_get_missing_photos_cancel(db, tmp_path):
         return len(polls) > 3
 
     with pytest.raises(MissingPhotosCancelled):
-        db.get_missing_photos(cancel_callback=cancel_later)
+        missing_originals.get_missing_photos(db, cancel_callback=cancel_later)
 
 
 def test_get_missing_photos_subtree_goes_through_facade(db, tmp_path, monkeypatch):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
     monkeypatch.setattr(FolderRepository, "subtree_ids_by_path", lambda self, fid: [])
-    assert db.get_missing_photos(folder_id=froot) == []
+    assert missing_originals.get_missing_photos(db, folder_id=froot) == []
 
 
 def test_get_missing_photos_large_subtree_uses_temp_table(db, tmp_path, monkeypatch):
     froot, fsub, ids = _ghost_setup(db, tmp_path)
-    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
+    monkeypatch.setattr(missing_originals, "SQLITE_PARAM_CHUNK_SIZE", 1)
     staged = []
     real = StatsRepository.stage_scope_ids
     monkeypatch.setattr(
         StatsRepository, "stage_scope_ids",
         lambda self, name, values: (staged.append((name, sorted(values))), real(self, name, values))[1],
     )
-    got = [r["id"] for r in db.get_missing_photos(folder_id=froot)]
+    got = [r["id"] for r in missing_originals.get_missing_photos(db, folder_id=froot)]
     assert got == [ids["gone"], ids["sub_gone"]]
     assert staged == [("missing_subtree_ids", sorted([froot, fsub]))]
 
@@ -1369,7 +1378,6 @@ _DELEGATING_FOLDER_METHODS = (
     "repair_stale_folder_parents",
     "add_folder",
     "get_folder_subtree_ids",
-    "get_missing_photos",
     "delete_folder",
 )
 

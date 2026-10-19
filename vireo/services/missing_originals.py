@@ -1,5 +1,10 @@
 """Missing Originals scans, their per-app result cache, and folder health.
 
+``get_missing_photos`` is the scan itself: the active workspace's photos in
+present folders (optionally one folder's subtree), checked against one
+directory listing per folder. ``get_folder_health_version`` reads the version
+the folder-health loop bumps.
+
 ``/api/photos/missing`` reports photos whose original file is gone from disk.
 Finding them walks every linked folder, which is slow on NAS/SMB libraries, so
 the walk runs as a ``missing_originals_scan`` job and its result is cached per
@@ -20,12 +25,14 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 import dir_listing_cache
+from db import _SQLITE_PARAM_CHUNK_SIZE as SQLITE_PARAM_CHUNK_SIZE
 from db import Database, MissingPhotosCancelled
 from photo_payload import attach_nested_edit_recipes
 
@@ -34,6 +41,275 @@ if TYPE_CHECKING:
     from services.service_types import JobDict, JobResult, JsonDict
 
 log = logging.getLogger(__name__)
+
+# Photos between progress reports while a scan walks its folders.
+_MISSING_PHOTOS_PROGRESS_INTERVAL = 200
+
+
+def _present_names_via_listing(
+    folder_path: str, listing_pass: dir_listing_cache.ListingPass,
+    check_cancelled: Callable[[], None],
+) -> set[str]:
+    """NFC names present in ``folder_path``, read through ``listing_pass``.
+
+    Mirrors the direct ``os.scandir`` read (``_present_names_via_scandir``): a
+    symlink whose target is gone does not count as present. A remembered
+    listing cannot vouch for a target, so symlinks are checked live whether
+    the listing was reused or just read. Raises ``OSError`` like the direct
+    read.
+    """
+    listing = dir_listing_cache.read_directory(
+        folder_path, listing_pass, on_entry=check_cancelled,
+    )
+    names: set[str] = set()
+    for name in listing.names:
+        if name in listing.symlinks and not os.path.exists(
+            os.path.join(folder_path, name)
+        ):
+            continue
+        names.add(_nfc(name))
+    return names
+
+
+def _present_names_via_scandir(
+    folder_path: str, check_cancelled: Callable[[], None],
+) -> set[str]:
+    """NFC names present in ``folder_path``, read with ``os.scandir``.
+
+    A symlink whose target is gone does not count as present. Raises
+    ``OSError`` when the folder cannot be read.
+    """
+    names_set: set[str] = set()
+    with os.scandir(folder_path) as it:
+        for entry in it:
+            check_cancelled()
+            # Broken symlinks: scandir returns the basename
+            # even when the target is gone, but the prior
+            # os.path.exists check returned False. Filter
+            # them so missing originals tracked via
+            # symlinks still surface. is_symlink() uses
+            # cached lstat from scandir, so non-symlinks
+            # don't pay an extra stat.
+            if entry.is_symlink() and not os.path.exists(entry.path):
+                continue
+            names_set.add(_nfc(entry.name))
+    return names_set
+
+
+def _scan_missing_photos(
+    rows: Sequence[Any], progress_callback: Callable[[JsonDict], object] | None,
+    listing_pass: dir_listing_cache.ListingPass | None,
+    check_cancelled: Callable[[], None],
+) -> list[Any]:
+    """The rows of ``get_missing_photos`` whose file is gone from disk."""
+    # One readdir per folder instead of one stat per photo. On a 50k-photo
+    # library across a network volume the per-photo `os.path.exists` was
+    # costing minutes; a single scandir + set-membership check is orders
+    # of magnitude faster and the dominant call site for this endpoint.
+    # Misses fall back to a single os.path.exists to honor FS-specific
+    # case rules without unconditionally case-folding (which would
+    # silently collapse distinct files on case-sensitive volumes).
+    folder_online: dict[int, bool] = {}
+    folder_names: dict[int, set[str] | None] = {}
+    missing: list[Any] = []
+    photos_considered = 0
+    folders_checked = 0
+    reported_folders: set[int] = set()
+    progress_callback_enabled = True
+
+    def report_progress(current_folder: str) -> None:
+        nonlocal progress_callback_enabled
+        if progress_callback is None or not progress_callback_enabled:
+            return
+        try:
+            progress_callback({
+                "folders_checked": folders_checked,
+                "photos_considered": photos_considered,
+                "missing_found": len(missing),
+                "total_photos": len(rows),
+                "current_folder": current_folder,
+            })
+        except Exception:
+            progress_callback_enabled = False
+            log.exception("Missing photos progress callback failed")
+
+    def report_photo_progress(current_folder: str) -> None:
+        if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+            report_progress(current_folder)
+
+    for row in rows:
+        check_cancelled()
+        fid = row["folder_id"]
+        if fid not in folder_online:
+            folder_online[fid] = os.path.isdir(row["folder_path"])
+        if not folder_online[fid]:
+            # Whole folder is offline — surfaced by missing-folders flow.
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+            continue
+        if fid not in folder_names:
+            try:
+                if listing_pass is not None:
+                    folder_names[fid] = _present_names_via_listing(
+                        row["folder_path"], listing_pass, check_cancelled,
+                    )
+                else:
+                    folder_names[fid] = _present_names_via_scandir(
+                        row["folder_path"], check_cancelled,
+                    )
+            except OSError:
+                # Folder vanished between isdir and scandir, or unreadable;
+                # treat the same as "folder offline" so we don't bulk-flag
+                # every photo as a ghost.
+                folder_names[fid] = None
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+        names = folder_names[fid]
+        photos_considered += 1
+        if names is None:
+            report_photo_progress(row["folder_path"])
+            continue
+        if _nfc(row["filename"]) in names:
+            report_photo_progress(row["folder_path"])
+            continue
+        # NFC miss: defer to the kernel for case rules. On case-insensitive
+        # volumes (APFS default, NTFS) os.path.exists resolves a
+        # case-mismatched name; on case-sensitive volumes (most Linux
+        # filesystems) it correctly reports the file as absent.
+        check_cancelled()
+        if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
+            missing.append(row)
+        report_photo_progress(row["folder_path"])
+    check_cancelled()
+    report_progress("")
+    return missing
+
+
+def _nfc(name: str) -> str:
+    """NFC-normalize a filename for byte-exact comparison against scandir output.
+
+    macOS APFS stores names as written but compares with normalization, so the
+    DB row may be NFC while a filename on disk is NFD (or vice versa). NFC on
+    both sides makes set-membership reliable across that mismatch.
+
+    Case is intentionally NOT folded here: case-sensitivity depends on the
+    underlying filesystem (APFS default and NTFS are case-insensitive; ext4
+    and most network mounts are not). Unconditional lowercasing would collapse
+    distinct files on case-sensitive volumes; ``get_missing_photos`` instead
+    falls back to ``os.path.exists`` on miss, deferring case rules to the kernel.
+    """
+    return unicodedata.normalize("NFC", name)
+
+
+def get_folder_health_version(db: Database) -> int:
+    """Return the monotonic version for folder-health-visible changes."""
+    value = db.meta.get("folder_health_version")
+    return int(value or 0)
+
+
+def missing_photos_subtree_clause(
+    db: Database, folder_id: int | None, params: list[Any],
+) -> str | None:
+    """The SQL restricting ``get_missing_photos`` to ``folder_id``'s subtree.
+
+    Appends its parameters to ``params``. Returns ``""`` for the whole
+    workspace and ``None`` when the folder has no subtree to scan.
+    """
+    subtree_clause = ""
+    if folder_id is not None:
+        # Restrict to the folder subtree. Path-prefix expansion (the same
+        # helper used by add_workspace_folder etc.) covers legacy rows
+        # whose parent_id is NULL — a plain recursive walk over parent_id
+        # would silently drop those subfolders.
+        subtree_ids = db.folders.subtree_ids_by_path(folder_id)
+        if not subtree_ids:
+            return None
+        if len(subtree_ids) <= SQLITE_PARAM_CHUNK_SIZE:
+            placeholders = ",".join("?" for _ in subtree_ids)
+            subtree_clause = f" AND f.id IN ({placeholders})"
+            params.extend(subtree_ids)
+        else:
+            # A workspace root with thousands of descendant folders would
+            # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
+            # in a single IN(...) clause. Stage the ids in a
+            # connection-local temp table and join through that instead.
+            db.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
+            subtree_clause = (
+                " AND f.id IN (SELECT id FROM missing_subtree_ids)"
+            )
+    return subtree_clause
+
+
+def get_missing_photos(
+    db: Database,
+    folder_id: int | None = None,
+    progress_callback: Callable[[JsonDict], object] | None = None,
+    cancel_callback: Callable[[], object] | None = None,
+    listing_pass: dir_listing_cache.ListingPass | None = None,
+) -> list[Any]:
+    """Return photos whose source file is missing from disk.
+
+    Scoped to the active workspace. Skips photos in folders flagged
+    ``'missing'`` — those are surfaced by ``folders.missing`` and
+    listing them per-photo would just duplicate that signal at high cost.
+
+    When ``folder_id`` is given, the result is further restricted to
+    that folder and every folder beneath it in the tree. This backs the
+    "rescan a specific folder" flow — the user asked about one folder,
+    so the deleted-original review must not surface ghosts from unrelated
+    parts of the library. Descendant discovery goes through
+    ``folders.subtree_ids_by_path`` so legacy rows whose ``parent_id`` is
+    NULL still count as descendants of their path-prefixed root. ``None``
+    (the default) keeps the whole-workspace behavior.
+
+    Folder DB ``status`` is updated asynchronously by a 10-minute health
+    loop, so a freshly unmounted volume can still show ``status='ok'``
+    when this query runs. To avoid surfacing thousands of "ghosts" for
+    a temporarily offline drive (and offering them up for bulk delete),
+    we also treat any folder whose root no longer resolves on disk as
+    if it were already flagged missing. Resolution is cached per folder
+    within the call so a 1000-photo folder doesn't stat the same root
+    a thousand times.
+
+    Each row carries ``folder_path``, ``timestamp``, and
+    ``working_copy_path`` so the caller can render rich UI without
+    joining again.
+
+    ``progress_callback`` is optional. When supplied, it receives dicts
+    containing ``folders_checked``, ``photos_considered``, ``missing_found``,
+    ``total_photos``, and ``current_folder``. Callback exceptions are
+    logged and ignored so progress reporting cannot abort detection.
+
+    ``cancel_callback`` is optional. When supplied, it is polled between
+    filesystem operations and may abort the scan by returning true.
+
+    ``listing_pass`` is optional (a :class:`dir_listing_cache.ListingPass`).
+    When supplied, each folder is read through it: an unchanged folder's
+    remembered listing is reused instead of read from disk again, and its
+    symlinks are still checked live.
+    """
+    def check_cancelled() -> None:
+        if cancel_callback is not None and cancel_callback():
+            raise MissingPhotosCancelled("missing photos scan cancelled")
+
+    check_cancelled()
+    params: list[Any] = [db.require_workspace_id()]
+    subtree_clause = missing_photos_subtree_clause(db, folder_id, params)
+    if subtree_clause is None:
+        return []
+    check_cancelled()
+    rows = db.folders.photos_in_present_folders(
+        subtree_clause, params,
+    )
+    check_cancelled()
+    return _scan_missing_photos(
+        rows, progress_callback, listing_pass, check_cancelled,
+    )
+
 
 # ``(db_path, workspace_id, folder_id)``: one Missing Originals scan scope.
 CacheKey = tuple[str, int | None, int | None]
@@ -305,7 +581,8 @@ class MissingOriginals:
             pass  # cache dir hasn't been created yet — no previews
 
         out: list[JsonDict] = []
-        for row in db.get_missing_photos(
+        for row in get_missing_photos(
+            db,
             folder_id=folder_id,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
