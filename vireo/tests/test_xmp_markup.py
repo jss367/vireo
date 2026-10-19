@@ -182,6 +182,37 @@ def test_comment_survives_removal_of_the_sibling_it_followed(tmp_path):
     assert "<rdf:li>Heron</rdf:li>" not in bag
 
 
+def test_comment_adjacent_to_character_data_keeps_its_place(tmp_path):
+    """A comment in a text slot stays where the source had it.
+
+    ``TreeBuilder`` coalesces character data around a comment into one
+    ``elem.text`` or child ``tail`` string, so the serializer must remember
+    where in that string the comment sat -- not just which element siblings
+    preceded it.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        f'<rdf:RDF xmlns:rdf="{NS_RDF}">'
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag>"
+        "<rdf:li><!--before-->Heron</rdf:li>"
+        "<rdf:li>Egret<!--after--></rdf:li>"
+        "<rdf:li>Hi<!--middle-->There</rdf:li>"
+        "</rdf:Bag></dc:subject>"
+        "</rdf:Description></rdf:RDF></x:xmpmeta>",
+        encoding="utf-8",
+    )
+
+    write_rating(str(path), 2)
+
+    text = path.read_text(encoding="utf-8")
+    assert "<rdf:li><!--before-->Heron</rdf:li>" in text
+    assert "<rdf:li>Egret<!--after--></rdf:li>" in text
+    assert "<rdf:li>Hi<!--middle-->There</rdf:li>" in text
+    assert read_keywords(str(path)) == {"Heron", "Egret", "HiThere"}
+
+
 def test_rewrite_is_stable(tmp_path):
     """A second edit changes only what it edits: the markup doesn't drift."""
     path = _lightroom_sidecar(tmp_path)

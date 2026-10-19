@@ -90,6 +90,10 @@ class _RecordingBuilder:
         self.markup = SourceMarkup()
         self._open = []
         self._children_seen = []
+        # Per-open-frame: characters accumulated in the current text/tail
+        # slot. The slot is the frame's own ``elem.text`` before any child
+        # has closed, and the just-closed child's tail after one does.
+        self._slot_data = []
         self._pending_namespaces = []
         self._root_closed = False
         self._inner = []
@@ -106,16 +110,24 @@ class _RecordingBuilder:
             self._children_seen[-1] += 1
         self._open.append(elem)
         self._children_seen.append(0)
+        self._slot_data.append("")
         return elem
 
     def end(self, tag):
         self._open.pop()
         self._children_seen.pop()
+        self._slot_data.pop()
+        if self._slot_data:
+            # Re-entering the parent frame: the new slot is this closed
+            # child's tail, which starts empty.
+            self._slot_data[-1] = ""
         self._root_closed = not self._open
         return self._builder.end(tag)
 
     def data(self, data):
         self._builder.data(data)
+        if self._slot_data:
+            self._slot_data[-1] += data
 
     def comment(self, text):
         self._keep(ET.Comment(text))
@@ -125,7 +137,12 @@ class _RecordingBuilder:
 
     def _keep(self, node):
         if self._open:
-            self._inner.append((self._open[-1], self._children_seen[-1], node))
+            self._inner.append((
+                self._open[-1],
+                self._children_seen[-1],
+                len(self._slot_data[-1]),
+                node,
+            ))
         elif self._root_closed:
             self.markup.epilog.append(node)
         else:
@@ -133,12 +150,14 @@ class _RecordingBuilder:
 
     def close(self):
         root = self._builder.close()
-        for parent, preceding, node in self._inner:
+        for parent, preceding, offset, node in self._inner:
             # Anchor to the preceding siblings themselves now that the
             # parent's children are final: an edit may remove the nearest one,
-            # and the node then follows the nearest survivor.
+            # and the node then follows the nearest survivor. The offset
+            # points into the slot after the last preceding sibling (its
+            # tail, or ``elem.text`` when there is none).
             self.markup.inner.setdefault(parent, []).append(
-                (tuple(parent[:preceding]), node),
+                (tuple(parent[:preceding]), offset, node),
             )
         return root
 
@@ -306,43 +325,95 @@ class _Writer:
         # The indentation in front of each child, reused to set off a
         # comment kept between two of them.
         separator = text if text.isspace() else ""
-        self.out.append(_escape_text(text))
-        for node in kept.get(-1, ()):
-            self.out.append(_node_text(node) + separator)
+        self._write_slot(text, kept.get(-1, ()), separator, before_tag=False)
         last = len(children) - 1
         for index, child in enumerate(children):
             self._element(child, scope)
-            tail = _escape_text(child.tail or "")
-            after = kept.get(index, ())
-            if index == last:
-                # The last child's tail indents the closing tag, so what
-                # followed that child goes in front of it.
-                for node in after:
-                    self.out.append(separator + _node_text(node))
-                self.out.append(tail)
-            else:
-                self.out.append(tail)
-                for node in after:
-                    self.out.append(_node_text(node) + separator)
+            tail = child.tail or ""
+            self._write_slot(
+                tail, kept.get(index, ()), separator, before_tag=(index == last),
+            )
+
+    def _write_slot(self, text, inserts, separator, before_tag):
+        """Write a text/tail slot with its kept comments and PIs in place.
+
+        A whitespace-only slot can be rewritten by ``ET.indent`` after the
+        edit, so recorded offsets into it would be stale: the inserts go at
+        the end of the slot (or in front of its closing tag for the last
+        child's tail) flanked by the slot's whitespace, which is what the
+        standard writers' layout wants anyway. In a non-whitespace slot the
+        offset points into text ``ET.indent`` leaves alone, so the inserts
+        split it there -- a comment the source had in front of character
+        data stays in front of it after the rewrite.
+        """
+        if not inserts:
+            self.out.append(_escape_text(text))
+            return
+        if text and not text.isspace():
+            self._write_slot_with_offsets(text, inserts, separator)
+            return
+        nodes = [node for _, node in inserts]
+        if before_tag:
+            for node in nodes:
+                self.out.append(separator + _node_text(node))
+            self.out.append(_escape_text(text))
+        else:
+            self.out.append(_escape_text(text))
+            for node in nodes:
+                self.out.append(_node_text(node) + separator)
+
+    def _write_slot_with_offsets(self, text, inserts, separator):
+        cursor = 0
+        for offset, node in inserts:
+            if offset is None or offset > len(text):
+                # Preceding sibling was removed, or the slot was shortened
+                # after the offset was recorded: append to the end.
+                self.out.append(_escape_text(text[cursor:]))
+                cursor = len(text)
+                self.out.append(separator + _node_text(node) if separator
+                                else _node_text(node))
+                continue
+            offset = max(offset, cursor)
+            self.out.append(_escape_text(text[cursor:offset]))
+            self.out.append(_node_text(node))
+            cursor = offset
+        self.out.append(_escape_text(text[cursor:]))
 
     def _kept_inside(self, elem, children):
         """Group the comments and PIs inside ``elem`` by the child they follow.
 
-        -1 is "before the first child". A node whose preceding siblings were
-        all removed moves to the front.
+        -1 is "before the first child". Each entry is ``(offset_or_None,
+        node)``; the offset is into the slot after that anchor (its tail,
+        or ``elem.text`` for -1). A node whose preceding sibling was
+        removed moves to the nearest earlier survivor (or the front) and
+        loses its offset -- the slot it pointed into no longer exists.
         """
         nodes = self.markup.inner.get(elem)
         if not nodes:
             return {}
         position = {id(child): index for index, child in enumerate(children)}
         by_position = {}
-        for preceding, node in nodes:
-            anchor = next(
-                (position[id(sibling)] for sibling in reversed(preceding)
-                 if id(sibling) in position),
-                -1,
+        for preceding, offset, node in nodes:
+            if not preceding:
+                anchor = -1
+                effective_offset = offset
+            elif id(preceding[-1]) in position:
+                anchor = position[id(preceding[-1])]
+                effective_offset = offset
+            else:
+                anchor = next(
+                    (position[id(sibling)] for sibling in reversed(preceding[:-1])
+                     if id(sibling) in position),
+                    -1,
+                )
+                effective_offset = None
+            by_position.setdefault(anchor, []).append((effective_offset, node))
+        # Stable sort: known offsets ascend; unknown ones keep document order
+        # and go to the end.
+        for entries in by_position.values():
+            entries.sort(
+                key=lambda pair: (0, pair[0]) if pair[0] is not None else (1, 0),
             )
-            by_position.setdefault(anchor, []).append(node)
         return by_position
 
     def _qname(self, name, scope, attribute):
