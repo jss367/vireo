@@ -18,6 +18,7 @@ from urllib.request import urlopen
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import expose_page_modules
 from e2e.viewport_test_support import install_viewport_test_helpers
 
 HIGHLIGHTS_NAVIGATION_TIMEOUT_MS = 10_000
@@ -34,6 +35,9 @@ def _goto_highlights(page, base_url):
         f"{base_url}/highlights",
         timeout=HIGHLIGHTS_NAVIGATION_TIMEOUT_MS,
     )
+    # Highlights is a module page: publish its modules as
+    # ``pageModules.<name>`` and its state as ``highlightsState``.
+    expose_page_modules(page, "highlights", "highlightsState")
 
 
 def _seed_quality_scores_and_species(db, data):
@@ -565,7 +569,7 @@ def test_highlights_lightbox_pick_refreshes_bucket_best_timestamp(live_server, p
 
     initial = page.evaluate(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return { first: b.photos[0].id, ts: b.best_timestamp };"
         "}"
     )
@@ -590,14 +594,14 @@ def test_highlights_lightbox_pick_refreshes_bucket_best_timestamp(live_server, p
 
     page.wait_for_function(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return b && b.photos[0] && b.photos[0].flag === 'flagged';"
         "}",
         timeout=5000,
     )
     after = page.evaluate(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return { first: b.photos[0].id, ts: b.best_timestamp };"
         "}"
     )
@@ -656,7 +660,7 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
 
     # Sanity: 28 hawks total, 20 loaded → has_more should be true.
     has_more = page.evaluate(
-        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more"
+        "() => highlightsState.currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more"
     )
     assert has_more is True
 
@@ -692,11 +696,11 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
     # aligned the client window with the server's post-bonus ordering, the
     # combined set is duplicate-free and covers every hawk.
     page.evaluate(
-        "async () => { while (currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more) "
-        "{ await loadMoreBucket('Red-tailed Hawk', false); } }"
+        "async () => { while (highlightsState.currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more) "
+        "{ await pageModules.render.loadMoreBucket('Red-tailed Hawk', false); } }"
     )
     all_ids = page.evaluate(
-        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').photos.map(p => p.id)"
+        "() => highlightsState.currentData.buckets.find(b => b.species === 'Red-tailed Hawk').photos.map(p => p.id)"
     )
     assert len(all_ids) == len(set(all_ids)), (
         f"Duplicate photo IDs after Load-more: {all_ids}"
@@ -755,7 +759,7 @@ def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
 
     initial = page.evaluate(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return { len: b.photos.length, hasMore: b.has_more };"
         "}"
     )
@@ -798,14 +802,14 @@ def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
     # true so the Load-more path still targets offset=20 next.
     page.wait_for_function(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return b && b.photos.length === 20 && b.photos[0].flag === 'flagged';"
         "}",
         timeout=5000,
     )
     after = page.evaluate(
         "() => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return { len: b.photos.length, hasMore: b.has_more };"
         "}"
     )
@@ -888,7 +892,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     def _bucket_has_photo(pid):
         return page.evaluate(
             "pid => {"
-            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
             "  return !!(b && b.photos.some(p => p.id === pid));"
             "}",
             pid,
@@ -907,7 +911,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     else:
         page.evaluate(
             "pid => {"
-            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
             "  openLightbox(pid, '', b.photos);"
             "}",
             low_hawk,
@@ -929,7 +933,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     assert _wait_for_flag(db, low_hawk, "none") == "none"
     page.wait_for_function(
         "pid => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return !!(b && !b.photos.some(p => p.id === pid));"
         "}",
         arg=low_hawk,
@@ -946,7 +950,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
     assert _wait_for_flag(db, low_hawk, "flagged") == "flagged"
     page.wait_for_function(
         "pid => {"
-        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  const b = highlightsState.currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
         "  return !!(b && b.photos.some(p => p.id === pid && p.flag === 'flagged'));"
         "}",
         arg=low_hawk,
@@ -1331,7 +1335,7 @@ def test_toolbar_history_refreshes_highlight_species_buckets(live_server, page):
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({photo_ids: ids, species: 'Northern Cardinal'})
       });
-      await loadHighlights();
+      await pageModules.loading.loadHighlights();
     }''', ids)
     expect(page.locator('.bucket-title').filter(has_text='Northern Cardinal')).to_have_count(1)
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
