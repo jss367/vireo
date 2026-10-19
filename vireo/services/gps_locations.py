@@ -72,7 +72,7 @@ def location_keyword_photo_ids(db: Database, photo_ids: Iterable[int]) -> set[in
         return set()
     found = set()
     for chunk in gps_location_chunks(photo_ids):
-        rows = db.keywords.location_photo_rows(chunk)
+        rows = db.locations.location_photo_rows(chunk)
         found.update(row["photo_id"] for row in rows)
     return found
 

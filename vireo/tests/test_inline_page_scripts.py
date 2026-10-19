@@ -21,7 +21,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "_sync_panel.html": 876,
     "audit.html": 480,
     "card_cleanup.html": 915,
-    "highlights.html": 1151,
     "id_conflicts.html": 968,
     "stats.html": 992,
     "welcome.html": 374,

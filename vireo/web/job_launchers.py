@@ -36,6 +36,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
+from services import subject_masks
 from services.folder_moves import FolderMoveRequest
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -2029,8 +2030,8 @@ class _MaskExtractionRun:
             ),
             _commit=False,
         )
-        thread_db.set_active_mask_variant(
-            photo_id, self.sam2_variant, _commit=False,
+        subject_masks.set_active_mask_variant(
+            thread_db, photo_id, self.sam2_variant, _commit=False,
         )
         # Remaining (non-mask) per-photo features still land
         # on the photos row. mask_path / crop_complete /
