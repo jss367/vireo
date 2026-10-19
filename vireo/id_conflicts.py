@@ -45,8 +45,8 @@ def build_comparison(db, collection_id, photo_ids=None):
 
     preds = db.predictions.get_rows(photo_ids=row_ids)
     detections_by_photo = db.get_detections_for_photos(row_ids)
-    keywords_by_photo = db.keywords.get_for_photos(row_ids)
-    species_identities = db.keywords.get_species_for_photos(row_ids, include_identities=True)
+    keywords_by_photo = db.photo_keywords.get_for_photos(row_ids)
+    species_identities = db.photo_species.get_species_for_photos(row_ids, include_identities=True)
     species_by_photo = {pid: [entry["name"] for entry in entries]
                         for pid, entries in species_identities.items()}
     edit_recipes_by_photo = db.edits.get_photo_recipes(row_ids)

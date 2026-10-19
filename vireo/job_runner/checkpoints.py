@@ -90,7 +90,7 @@ class JobCheckpointer:
                     return
             try:
                 self._checkpoint()
-            except Exception:
+            except Exception:  # broad: the checkpoint loop must survive one failed write and try again next tick
                 log.exception("Job checkpoint failed")
 
     def stop(self, thread, deadline):

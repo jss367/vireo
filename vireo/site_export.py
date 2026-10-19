@@ -115,8 +115,8 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         photos = db.photos.get_by_ids(batch)
         recipes = db.edits.get_photo_recipes(batch)
         exif = _get_photo_exif_data(db, batch)
-        keywords = db.keywords.get_for_photos(batch)
-        species = db.keywords.get_species_for_photos(batch, include_identities=True)
+        keywords = db.photo_keywords.get_for_photos(batch)
+        species = db.photo_species.get_species_for_photos(batch, include_identities=True)
         locations = db.locations.get_effective(
             batch, verify_workspace=False,
         ) if include_locations else {}

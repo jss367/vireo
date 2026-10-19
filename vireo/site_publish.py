@@ -125,7 +125,7 @@ def _strip_private_photo_fields(db, highlights, include_locations):
     # location keywords included. Rebuild it from the typed rows rather than
     # splitting the string, since keyword names can themselves contain commas.
     ids = [p["id"] for p in photos if p.get("id") and "keyword_names" in p]
-    keywords = db.keywords.get_for_photos(ids) if ids else {}
+    keywords = db.photo_keywords.get_for_photos(ids) if ids else {}
     for photo in photos:
         if "keyword_names" not in photo:
             continue

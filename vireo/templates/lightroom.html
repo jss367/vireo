@@ -100,13 +100,12 @@ body { padding-bottom: 36px; }
     <!-- Phase 1: Select -->
     <div class="lr-phase active" id="lrPhase1">
       <div class="input-group">
-        <input type="text" class="path-input" id="catalogInput" placeholder="/path/to/catalog.lrcat"
-               onkeydown="if(event.key==='Enter')addCatalog()">
-        <button onclick="browseForCatalog()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
-        <button class="btn btn-secondary" onclick="addCatalog()">Add</button>
+        <input type="text" class="path-input" id="catalogInput" placeholder="/path/to/catalog.lrcat">
+        <button id="lrBrowseBtn" type="button" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+        <button id="lrAddBtn" type="button" class="btn btn-secondary">Add</button>
       </div>
       <div class="catalog-list" id="catalogList"></div>
-      <button class="btn btn-primary" id="lrPreviewBtn" onclick="previewImport()" disabled>Preview Import</button>
+      <button class="btn btn-primary" id="lrPreviewBtn" type="button" disabled>Preview Import</button>
       <span class="status-msg" id="lrPreviewStatus"></span>
     </div>
 
@@ -142,8 +141,8 @@ body { padding-bottom: 36px; }
         </div>
       </div>
       <div style="display:flex; gap:12px; margin-top:16px;">
-        <button class="btn btn-secondary" onclick="lrShowPhase(1)">Back</button>
-        <button class="btn btn-primary" onclick="executeLrImport()">Import</button>
+        <button id="lrBackBtn" type="button" class="btn btn-secondary">Back</button>
+        <button id="lrImportBtn" type="button" class="btn btn-primary">Import</button>
       </div>
     </div>
 
@@ -152,160 +151,11 @@ body { padding-bottom: 36px; }
       <div class="progress-bar active"><div class="progress-fill" id="lrProgressFill"></div></div>
       <div class="status-msg" id="lrStatus">Importing...</div>
       <div class="result-summary" id="lrResult" style="display:none;"></div>
-      <button class="btn btn-primary" id="lrDoneBtn" onclick="lrReset()" style="display:none; margin-top:16px;">Done</button>
+      <button class="btn btn-primary" id="lrDoneBtn" type="button" style="display:none; margin-top:16px;">Done</button>
     </div>
   </div>
 </div>
 
-<script>
-/* ==================== LR Catalog Import ==================== */
-var catalogs = [];
-
-function addCatalog() {
-  var input = document.getElementById('catalogInput');
-  var path = input.value.trim();
-  if (!path || catalogs.indexOf(path) !== -1) return;
-  catalogs.push(path);
-  input.value = '';
-  renderCatalogs();
-}
-
-function removeCatalog(idx) {
-  catalogs.splice(idx, 1);
-  renderCatalogs();
-}
-
-function renderCatalogs() {
-  var html = '';
-  catalogs.forEach(function(c, i) {
-    html += '<div class="catalog-item">' +
-      '<span class="remove-btn" onclick="removeCatalog(' + i + ')">&times;</span>' +
-      '<span>' + escapeHtml(c) + '</span></div>';
-  });
-  document.getElementById('catalogList').innerHTML = html;
-  document.getElementById('lrPreviewBtn').disabled = catalogs.length === 0;
-}
-
-async function previewImport() {
-  var status = document.getElementById('lrPreviewStatus');
-  status.textContent = 'Loading preview...';
-  document.getElementById('lrPreviewBtn').disabled = true;
-  try {
-    var data = await safeFetch('/api/import/preview', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({catalogs: catalogs}),
-    }, { toast: false });
-    var html = '';
-    (data.catalogs || []).forEach(function(c) {
-      html += '<tr><td>' + escapeHtml(c.catalog) + '</td><td>' + c.total_files + '</td>' +
-        '<td>' + c.matched_files + '</td><td>' + c.unmatched_files + '</td>' +
-        '<td>' + c.keyword_count + '</td></tr>';
-    });
-    document.getElementById('previewBody').innerHTML = html;
-
-    if (data.conflict_count > 0) {
-      document.getElementById('conflictSection').style.display = '';
-      document.getElementById('conflictCount').textContent = data.conflict_count;
-      var chtml = '';
-      (data.conflicts || []).slice(0, 50).forEach(function(c) {
-        chtml += '<div class="conflict-item"><div class="conflict-file">' + escapeHtml(c.file_path) + '</div>';
-        for (var cat in c.keywords_by_catalog) {
-          chtml += '<div><span class="conflict-cat">' + escapeHtml(cat) + ':</span> ' +
-            escapeHtml(c.keywords_by_catalog[cat].join(', ')) + '</div>';
-        }
-        chtml += '</div>';
-      });
-      document.getElementById('conflictList').innerHTML = chtml;
-    } else {
-      document.getElementById('conflictSection').style.display = 'none';
-    }
-    lrShowPhase(2);
-    status.textContent = '';
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-  document.getElementById('lrPreviewBtn').disabled = catalogs.length === 0;
-}
-
-async function executeLrImport() {
-  lrShowPhase(3);
-  var fill = document.getElementById('lrProgressFill');
-  var status = document.getElementById('lrStatus');
-  fill.style.width = '0%';
-  status.textContent = 'Starting import...';
-
-  var strategy = document.querySelector('input[name=strategy]:checked').value;
-  var writeXmp = document.getElementById('writeXmp').checked;
-
-  try {
-    var data = await safeFetch('/api/jobs/import', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ catalogs: catalogs, strategy: strategy, write_xmp: writeXmp }),
-    }, { toast: false });
-    status.textContent = 'Importing...';
-
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(p) {
-        if (p.total > 0) {
-          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
-          status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + ' files';
-        }
-      },
-      onComplete: function(result) {
-        fill.style.width = '100%';
-        if (result.status === 'completed' && result.result) {
-          status.textContent = 'Complete' + (result.duration ? ' (' + result.duration + 's)' : '');
-          document.getElementById('lrResult').style.display = '';
-          document.getElementById('lrResult').innerHTML =
-            '<span class="ok">Imported: ' + (result.result.imported || 0) + '</span><br>' +
-            '<span class="skip">Skipped: ' + (result.result.skipped || 0) + '</span><br>' +
-            '<span class="fail">Failed: ' + (result.result.failed || 0) + '</span>';
-        } else {
-          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        }
-        document.getElementById('lrDoneBtn').style.display = '';
-      },
-      onError: function() {
-        status.textContent = 'Connection lost.';
-      }
-    });
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-}
-
-function lrShowPhase(n) {
-  document.querySelectorAll('.lr-phase').forEach(function(el) { el.classList.remove('active'); });
-  document.getElementById('lrPhase' + n).classList.add('active');
-}
-
-function lrReset() {
-  catalogs = [];
-  renderCatalogs();
-  document.getElementById('lrProgressFill').style.width = '0';
-  document.getElementById('lrResult').style.display = 'none';
-  document.getElementById('lrDoneBtn').style.display = 'none';
-  lrShowPhase(1);
-}
-
-/* ---------- Native file picker ---------- */
-(function() {
-  if (typeof isTauri === 'function' && isTauri()) {
-    document.querySelectorAll('.tauri-only').forEach(function(el) {
-      el.style.display = '';
-    });
-  }
-})();
-
-async function browseForCatalog() {
-  var path = await pickFile({
-    title: 'Select Lightroom Catalog',
-    filters: [{ name: 'Lightroom Catalog', extensions: ['lrcat'] }],
-  });
-  if (path) {
-    document.getElementById('catalogInput').value = path;
-  }
-}
-</script>
+<script type="module" src="/static/lightroom/boot.js"></script>
 </body>
 </html>

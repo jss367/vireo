@@ -540,7 +540,7 @@ class _SpeciesConfirmation:
         # preserves the existing behavior for attached same-name rows under
         # a different taxon (a legitimate homonym duplicate repair leaves
         # alone).
-        candidate_rows = self.db.keywords.previous_species_candidates(
+        candidate_rows = self.db.photo_species.previous_species_candidates(
             self.photo_ids, self.previous_species, linked_root_taxon,
         )
         for row in candidate_rows:
@@ -622,7 +622,7 @@ class _SpeciesConfirmation:
 
     def _collect_old_rows(self, old_target_key, homonym_conflicts):
         """Group every attached row equivalent to the previous species by photo."""
-        for row in self.db.keywords.attached_species_rows(self.photo_ids):
+        for row in self.db.photo_species.attached_species_rows(self.photo_ids):
             photo_old = self.per_photo_old_row.get(row["photo_id"])
             if photo_old is None:
                 # ``previous_species`` did not resolve to any
@@ -809,7 +809,7 @@ class _SpeciesConfirmation:
         """Whether every frame carries the edited list, and the shared keys."""
         from pipeline_results import species_key_set
 
-        self.actual_by_photo = self.db.keywords.get_species_for_photos(
+        self.actual_by_photo = self.db.photo_species.get_species_for_photos(
             self.photo_ids,
         )
         actual_sets = [

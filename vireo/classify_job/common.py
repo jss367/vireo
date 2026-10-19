@@ -101,9 +101,10 @@ def _load_taxonomy(taxonomy_path: str) -> Taxonomy | None:
         from taxonomy import Taxonomy
 
         return Taxonomy(taxonomy_path)
-    except Exception as e:
+    except Exception as e:  # broad: taxonomy parsing raises undocumented errors; classification runs without enrichment
         log.warning(
-            "Could not load taxonomy: %s — continuing without taxonomy enrichment", e
+            "Could not load taxonomy: %s — continuing without taxonomy enrichment", e,
+            exc_info=True,
         )
         return None
 

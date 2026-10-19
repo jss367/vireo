@@ -1451,7 +1451,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
 
     # The hierarchical photo only carries the lower-cased leaf.
     hier_names = {
-        row["name"] for row in db.keywords.get_for_photo(pid_hier)
+        row["name"] for row in db.photo_keywords.get_for_photo(pid_hier)
     }
     assert "verdin" in hier_names and "Verdin" not in hier_names
 
