@@ -24,9 +24,11 @@ import time
 import tomllib
 from pathlib import Path
 
-from services import photo_ingest
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'vireo'))
+
+from services import photo_ingest  # noqa: E402
+
 SCHEMA = 2
 VIEWS = {'quick': 1024, 'fit': 2048, 'native': None}
 

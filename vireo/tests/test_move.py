@@ -240,8 +240,8 @@ def test_move_folder_by_date_progress_counts_each_photo_once(tmp_path):
                         ("b.jpg", "2026-07-12T09:01:00"),
                         ("c.jpg", "2026-07-13T09:00:00")):
         (src / name).write_bytes(name.encode())
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
-                     file_size=5, file_mtime=1.0, timestamp=stamp)
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
+                               file_size=5, file_mtime=1.0, timestamp=stamp)
     # b.jpg collides at its date folder and is skipped.
     (archive / "2026-07-12" / "b.jpg").write_bytes(b"other")
 
@@ -3251,8 +3251,8 @@ def test_move_photos_reports_partial_copy_cleanup_failure(move_env, monkeypatch)
     env = move_env
     db = env["db"]
     # bird0 is missing on disk, so the batch collects an error before bird1.
-    p0 = db.add_photo(folder_id=env["fid_src"], filename="bird0.jpg",
-                      extension=".jpg", file_size=10, file_mtime=0.5)
+    p0 = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="bird0.jpg",
+                                extension=".jpg", file_size=10, file_mtime=0.5)
     db.conn.execute("UPDATE photos SET companion_path = 'bird1.nef' WHERE id = ?",
                     (env["p1"],))
     db.conn.commit()
@@ -6084,12 +6084,12 @@ def test_move_photos_progress_counts_skipped_and_failed_photos(move_env, monkeyp
 
     env = move_env
     db = env["db"]
-    missing = db.add_photo(folder_id=env["fid_src"], filename="gone.jpg",
-                           extension=".jpg", file_size=10, file_mtime=0.5)
+    missing = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="gone.jpg",
+                                     extension=".jpg", file_size=10, file_mtime=0.5)
     (env["src"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x01" * 30)
     (env["dst"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x02" * 30)
-    clash = db.add_photo(folder_id=env["fid_src"], filename="clash.jpg",
-                         extension=".jpg", file_size=32, file_mtime=0.6)
+    clash = photo_ingest.add_photo(db, folder_id=env["fid_src"], filename="clash.jpg",
+                                   extension=".jpg", file_size=32, file_mtime=0.6)
     real_copy = move_mod.photos._copy_and_verify
 
     def failing_copy(src, dst):
