@@ -16,6 +16,7 @@ from image_loader import RAW_EXTENSIONS
 from scanner.companions import _companion_stat_unchanged
 from scanner.hashing import EMPTY_FILE_SHA256
 from scanner.keywords import _import_keywords_for_photo
+from services import duplicate_resolution
 
 if TYPE_CHECKING:
     import sqlite3
@@ -257,7 +258,7 @@ class _IncrementalTriage:
         ):
             # Reprocessing must decide against the new hash, not this old one.
             if retry_duplicate_resolution and existing_file_hash:
-                db.check_and_resolve_duplicates_for_hash(existing_file_hash)
+                duplicate_resolution.check_and_resolve_duplicates_for_hash(db, existing_file_hash)
             self.tally.credit_reused_row(
                 existing["id"], full_path_str,
                 existing["folder_id"], existing["filename"],

@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/workspace.d.ts",
+    "../types/pages/work-locally.d.ts",
+    "../types/page-hooks.d.ts",
+    "../vireo/static/workspace/boot.js",
+    "../vireo/static/workspace/deletion.js",
+    "../vireo/static/workspace/folders.js",
+    "../vireo/static/workspace/history.js",
+    "../vireo/static/workspace/move-folders.js",
+    "../vireo/static/workspace/shared.js",
+    "../vireo/static/workspace/state.js",
+    "../vireo/static/workspace/subject-types.js",
+    "../vireo/static/workspace/workspaces.js"
+  ]
+}

@@ -19,6 +19,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.workspace_folders import WorkspaceFolderRepository
+from services import photo_ingest
 
 
 class _RecordingCache:
@@ -83,8 +84,8 @@ def _link_raw(db, workspace_id, folder_id, is_root):
 
 
 def _photo(db, folder_id, name, extension=".jpg"):
-    return db.add_photo(
-        folder_id=folder_id, filename=name, extension=extension,
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=name, extension=extension,
         file_size=1, file_mtime=1.0,
     )
 

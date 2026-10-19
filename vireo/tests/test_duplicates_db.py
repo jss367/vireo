@@ -6,12 +6,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
 from repositories.duplicates import DuplicatesRepository
+from services import duplicate_resolution, photo_ingest
 
 
 def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
     """Helper: add_photo + optionally set file_hash + rating in-place."""
-    pid = db.add_photo(
-        folder_id=folder_id,
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=filename,
         extension=os.path.splitext(filename)[1] or ".jpg",
         file_size=1000,
@@ -48,7 +49,7 @@ def test_apply_resolution_rejects_loser_and_merges_rating(tmp_path):
     db.conn.execute("UPDATE photos SET rating = ? WHERE id = ?", (5, p2))
     db.conn.commit()
 
-    result = db.apply_duplicate_resolution([p1, p2])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [p1, p2])
     assert result["winner_id"] == p1
     assert result["loser_ids"] == [p2]
     assert result["rejected"] == 1
@@ -86,7 +87,7 @@ def test_apply_resolution_skips_already_rejected(tmp_path):
     rejected = [pid for pid, f in flags.items() if f == "rejected"]
     assert len(rejected) == 1
 
-    result = db.apply_duplicate_resolution([p1, p2])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [p1, p2])
     assert result["winner_id"] is None
     assert result["loser_ids"] == []
     assert result["rejected"] == 0
@@ -115,7 +116,7 @@ def test_apply_resolution_merges_keywords(tmp_path):
     )
     db.conn.commit()
 
-    db.apply_duplicate_resolution([p1, p2])
+    duplicate_resolution.apply_duplicate_resolution(db, [p1, p2])
     rows = db.conn.execute(
         "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
     ).fetchall()
@@ -127,7 +128,7 @@ def test_apply_resolution_single_candidate_noop(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "a.jpg", file_hash="H")
-    result = db.apply_duplicate_resolution([p1])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [p1])
     assert result["winner_id"] is None
     assert result["rejected"] == 0
 
@@ -214,14 +215,14 @@ def test_add_photo_hook_swallows_sqlite_error(tmp_path, monkeypatch):
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HBOOM")
 
-    # Patch apply_duplicate_resolution on the instance so the hook's
+    # Patch apply_duplicate_resolution on its module so the hook's
     # execute() succeeds but the resolver call raises sqlite3.Error.
-    def _boom(ids):
+    def _boom(_db, ids):
         raise sqlite3.OperationalError("synthetic")
-    monkeypatch.setattr(db, "apply_duplicate_resolution", _boom)
+    monkeypatch.setattr(duplicate_resolution, "apply_duplicate_resolution", _boom)
 
-    p2 = db.add_photo(
-        folder_id=fid,
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="owl (2).jpg",
         extension=".jpg",
         file_size=1000,
@@ -244,24 +245,24 @@ def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
     fid = db.add_folder(str(tmp_path))
 
     # Scanner path: add_photo with no hash, then UPDATE photos SET file_hash=?
-    p1 = db.add_photo(
-        folder_id=fid, filename="owl.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="owl.jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
     )
-    p2 = db.add_photo(
-        folder_id=fid, filename="owl (2).jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="owl (2).jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
     )
     db.conn.execute("UPDATE photos SET file_hash = ? WHERE id = ?", ("SCANHASH", p1))
     db.conn.commit()
     # First call: only one row has the hash — no-op.
-    result = db.check_and_resolve_duplicates_for_hash("SCANHASH")
+    result = duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "SCANHASH")
     assert result is None
 
     db.conn.execute("UPDATE photos SET file_hash = ? WHERE id = ?", ("SCANHASH", p2))
     db.conn.commit()
     # Second call: two rows share the hash — resolve.
-    result = db.check_and_resolve_duplicates_for_hash("SCANHASH")
+    result = duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "SCANHASH")
     assert result is not None
     assert result["winner_id"] == p1
     assert result["loser_ids"] == [p2]
@@ -587,7 +588,7 @@ def test_auto_resolve_after_xmp_import_merges_loser_keywords(tmp_path):
     db.conn.commit()
 
     # Now fire the auto-resolve hook (as scanner does after XMP import).
-    result = db.check_and_resolve_duplicates_for_hash("HASH")
+    result = duplicate_resolution.check_and_resolve_duplicates_for_hash(db, "HASH")
     assert result is not None
     assert result["winner_id"] == winner_id
     assert result["loser_ids"] == [loser_id]
@@ -733,7 +734,7 @@ def test_apply_resolution_promotes_present_over_missing(tmp_path):
     p_real = _add(db, long_fid, "owl.jpg", file_hash="HG")
     _reset_flags(db, "HG")
 
-    result = db.apply_duplicate_resolution([p_ghost, p_real])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [p_ghost, p_real])
     assert result["winner_id"] == p_real, (
         "Resolver picked a missing-on-disk row over a surviving one — Rule 0 broken."
     )
@@ -918,7 +919,7 @@ def test_null_flag_photos_participate_in_duplicate_resolution(tmp_path):
     unresolved_hashes = {g["file_hash"] for g in groups}
     assert "HASHN" in unresolved_hashes
 
-    result = db.apply_duplicate_resolution([p1, p2])
+    result = duplicate_resolution.apply_duplicate_resolution(db, [p1, p2])
     assert result["winner_id"] == p1
     assert result["loser_ids"] == [p2]
     flag = db.conn.execute(

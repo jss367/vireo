@@ -3,6 +3,7 @@
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -18,8 +19,8 @@ def dark_photo(live_server, tmp_path):
     image.save(path)
     db = live_server['db']
     folder_id = db.add_folder(str(folder))
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=path.name, extension='.png',
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=path.name, extension='.png',
         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
         width=image.width, height=image.height,
     )
@@ -90,8 +91,8 @@ def test_stale_auto_tone_response_does_not_edit_loaded_photo(live_server, page, 
     """A response belongs to its photo and load, even when recipes are identical."""
     db = live_server['db']
     photo = db.photos.get(dark_photo)
-    other = db.add_photo(
-        folder_id=photo['folder_id'], filename='other.png', extension='.png',
+    other = photo_ingest.add_photo(
+        db, folder_id=photo['folder_id'], filename='other.png', extension='.png',
         file_size=photo['file_size'], file_mtime=photo['file_mtime'], width=300, height=200,
     )
     folder = db.conn.execute('SELECT path FROM folders WHERE id=?', (photo['folder_id'],)).fetchone()[0]

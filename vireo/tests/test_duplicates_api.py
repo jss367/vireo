@@ -1,17 +1,18 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
 import os
 
+from services import photo_ingest
 from wait import wait_for_job_via_client
 
 
 def _seed_pair(db, file_hash, fid, name_a="x.jpg", name_b="x (2).jpg"):
     """Seed two dup photos sharing a hash, then undo the hook's auto-reject."""
-    p1 = db.add_photo(
-        folder_id=fid, filename=name_a, extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename=name_a, extension=".jpg",
         file_size=1000, file_mtime=100.0, file_hash=file_hash,
     )
-    p2 = db.add_photo(
-        folder_id=fid, filename=name_b, extension=".jpg",
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename=name_b, extension=".jpg",
         file_size=1000, file_mtime=200.0, file_hash=file_hash,
     )
     db.conn.execute(
@@ -119,16 +120,16 @@ def test_apply_endpoint_rejects_only_losers_not_all_but_one(app_and_db):
     """With a 3-way dup, exactly the resolver-picked losers are rejected."""
     app, db = app_and_db
     fid = db.add_folder("/tmp/dupapply2")
-    p1 = db.add_photo(
-        folder_id=fid, filename="z.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="z.jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
     )
-    p2 = db.add_photo(
-        folder_id=fid, filename="z (2).jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="z (2).jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
     )
-    p3 = db.add_photo(
-        folder_id=fid, filename="z copy.jpg", extension=".jpg",
+    p3 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="z copy.jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
     )
     db.conn.execute(
@@ -156,12 +157,12 @@ def test_apply_endpoint_skips_already_resolved_hash(app_and_db):
     app, db = app_and_db
     fid = db.add_folder("/tmp/dupapply3")
     # Hook auto-rejects one; leave as-is so only 1 non-rejected row remains.
-    db.add_photo(
-        folder_id=fid, filename="w.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="w.jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0, file_hash="H4",
     )
-    db.add_photo(
-        folder_id=fid, filename="w (2).jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="w (2).jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0, file_hash="H4",
     )
 
@@ -234,9 +235,9 @@ def _seed_pair_with_real_files(db, tmp_path, file_hash):
     loser_path.write_bytes(b"x" * 100)
 
     fid = db.add_folder(str(folder))
-    p1 = db.add_photo(folder_id=fid, filename="owl.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="owl.jpg", extension=".jpg",
                       file_size=100, file_mtime=100.0, file_hash=file_hash)
-    p2 = db.add_photo(folder_id=fid, filename="owl-2.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="owl-2.jpg", extension=".jpg",
                       file_size=100, file_mtime=200.0, file_hash=file_hash)
     # Hook auto-rejects owl-2 (clean filename wins).
     flag1 = db.conn.execute("SELECT flag FROM photos WHERE id=?", (p1,)).fetchone()["flag"]
@@ -377,7 +378,7 @@ def test_delete_loser_files_refuses_when_no_kept_anchor(app_and_db, tmp_path):
     src.write_bytes(b"y" * 100)
 
     fid = db.add_folder(str(folder))
-    pid = db.add_photo(folder_id=fid, filename="lonely.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="lonely.jpg", extension=".jpg",
                        file_size=100, file_mtime=100.0, file_hash="HALONE")
     # Reject the only copy (e.g. user manually rejected it for non-duplicate reasons).
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid,))
@@ -657,14 +658,14 @@ def test_disk_cleanup_summary_counts_only_anchored_rejections(app_and_db):
     app, db = app_and_db
     fid = db.add_folder("/tmp/clsum")
     # Anchored loser: 1 kept + 1 rejected sharing a hash.
-    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0, file_hash="HCLEAN")
-    db.add_photo(folder_id=fid, filename="a-2.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a-2.jpg", extension=".jpg",
                  file_size=2000, file_mtime=2.0, file_hash="HCLEAN")
     # Hook auto-rejected a-2; counted size = 2000.
 
     # Unrelated rejected row (no hash twin) — must NOT be counted.
-    pid_lone = db.add_photo(folder_id=fid, filename="lonely.jpg", extension=".jpg",
+    pid_lone = photo_ingest.add_photo(db, folder_id=fid, filename="lonely.jpg", extension=".jpg",
                             file_size=9999, file_mtime=3.0, file_hash="HLONE")
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid_lone,))
     db.conn.commit()
@@ -696,7 +697,7 @@ def test_cleanup_matches_banner_without_saved_scan_or_disk_checks(app_and_db, mo
     fid = db.add_folder("/tmp/cleanup-catalog")
     kept, rejected = _seed_pair(db, "HCATALOG", fid)
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
-    unrelated = db.add_photo(folder_id=fid, filename="unrelated.jpg", file_hash="HUNRELATED",
+    unrelated = photo_ingest.add_photo(db, folder_id=fid, filename="unrelated.jpg", file_hash="HUNRELATED",
                              extension=".jpg", file_size=1000, file_mtime=100.0)
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (unrelated,))
     db.conn.commit()
@@ -725,7 +726,7 @@ def test_cleanup_includes_all_kept_anchors_and_refreshes_catalog(app_and_db):
     app, db = app_and_db
     fid = db.add_folder("/tmp/cleanup-multiple-kept")
     a, b = _seed_pair(db, "HMULTIPLE", fid)
-    c = db.add_photo(folder_id=fid, filename="third.jpg", file_hash="HMULTIPLE",
+    c = photo_ingest.add_photo(db, folder_id=fid, filename="third.jpg", file_hash="HMULTIPLE",
                      extension=".jpg", file_size=1000, file_mtime=100.0)
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HMULTIPLE'")
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (c,))
@@ -886,8 +887,8 @@ def test_last_scan_drops_group_whose_extra_copy_id_was_reused(app_and_db, tmp_pa
     assert first["stale_group_count"] == 0
 
     db.delete_photos([extra])
-    newcomer = db.add_photo(
-        folder_id=fid, filename="unrelated.jpg", extension=".jpg",
+    newcomer = photo_ingest.add_photo(
+        db, folder_id=fid, filename="unrelated.jpg", extension=".jpg",
         file_size=5000, file_mtime=300.0, file_hash="HOTHER",
     )
     assert newcomer == extra  # SQLite reused the freed id
@@ -943,8 +944,8 @@ def test_last_scan_counts_groups_resolved_or_grown_since_the_scan(app_and_db):
     _scan_and_restore(client)
 
     client.post("/api/duplicates/apply", json={"hashes": ["HAPPLIED"]})
-    db.add_photo(
-        folder_id=fid, filename="g (3).jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="g (3).jpg", extension=".jpg",
         file_size=1000, file_mtime=300.0, file_hash="HGROWN",
     )
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HGROWN'")
@@ -1041,8 +1042,8 @@ def test_last_scan_keeps_group_with_a_current_extra_copy_left(app_and_db):
     app, db = app_and_db
     fid = db.add_folder("/tmp/duplastscanpartial")
     keep, extra1 = _seed_pair(db, "HTRIO", fid, name_a="t.jpg", name_b="t (2).jpg")
-    extra2 = db.add_photo(
-        folder_id=fid, filename="t (3).jpg", extension=".jpg",
+    extra2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="t (3).jpg", extension=".jpg",
         file_size=1000, file_mtime=300.0, file_hash="HTRIO",
     )
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HTRIO'")
@@ -1080,9 +1081,9 @@ def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db, tmp_path):
     for h, name in [("HBA1", "owl.jpg"), ("HBA2", "hawk.jpg"), ("HBA3", "finch.jpg")]:
         (a_dir / name).write_bytes(b"x")
         (b_dir / name).write_bytes(b"x")
-        p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
+        p_a = photo_ingest.add_photo(db, folder_id=a_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
-        p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
+        p_b = photo_ingest.add_photo(db, folder_id=b_fid, filename=name, extension=".jpg",
                            file_size=1000, file_mtime=100.0, file_hash=h)
         db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
         pairs.append((h, p_a, p_b))
@@ -1132,7 +1133,7 @@ def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db
                           ("SKIP", (b_fid, c_fid), "skip.jpg")]:
         for fid in fids:
             (folder_by_id[fid] / name).write_bytes(b"x")
-            db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+            photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                          file_size=1000, file_mtime=100.0, file_hash=h)
         db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
     db.conn.commit()

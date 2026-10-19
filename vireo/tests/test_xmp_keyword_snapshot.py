@@ -153,6 +153,10 @@ def test_readable_empty_keywords_are_distinct_from_an_unreadable_sidecar():
 
 
 def _scanner_method(namespace, file, class_name, name):
+    namespace["photo_ingest"] = SimpleNamespace(add_photo=lambda db, *a, **k: db._fake_add_photo(*a, **k))
+    namespace["duplicate_resolution"] = SimpleNamespace(
+        check_and_resolve_duplicates_for_hash=lambda db, h: db._fake_check_and_resolve_duplicates_for_hash(h),
+    )
     tree = ast.parse((VIREO / "scanner" / file).read_text(encoding="utf-8"))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
@@ -171,7 +175,7 @@ def _incremental_boundary(namespace, db):
     db.scanning = SimpleNamespace(set_xmp_mtime=lambda pid, value: existing.update(xmp_mtime=value, xmp_import_pending=0),
                                  defer_xmp_import=lambda pid: existing.update(xmp_import_pending=1))
     db.commit_with_retry = lambda: commits.append("commit")
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: None
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(db=db, repair_missing_metadata=False,
                             tally=SimpleNamespace(credit_reused_row=lambda *args: None))
     namespace.update(RAW_EXTENSIONS=set(), EMPTY_FILE_SHA256="invented empty hash")
@@ -269,7 +273,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
                     row[assignment.removesuffix("=?")] = value
         assert list(bindings) == []
 
-    db.add_photo = add_photo
+    db._fake_add_photo = add_photo
     db._commits_held = contextlib.nullcontext
     db.commit_with_retry = lambda: events.append("commit")
     def defer(photo_id, *, clear_mtime=False):
@@ -279,7 +283,7 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
             row["xmp_mtime"] = None
 
     db.scanning = SimpleNamespace(set_xmp_mtime=set_mtime, update_photo=update_photo, defer_xmp_import=defer)
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: None
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(
         db=db, vireo_dir=None, extract_full_metadata=False,
         collections=SimpleNamespace(drop_inherited_collection_membership=lambda photo_id: None),
@@ -447,13 +451,13 @@ def test_failed_catalog_read_defers_duplicate_resolution_until_the_retry():
 
     ns["ET"].parse = transient_parse
     full_row, _, catalog = _catalog_boundary(ns, db, existing=False)
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     catalog()
     assert resolved == [] and imported == []
     row, _, reuse = _incremental_boundary(ns, db)
     row["xmp_mtime"] = None
     row["file_hash"] = "invented hash"
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     unreadable[0] = False
     assert reuse(9) is True
     assert resolved == ["invented hash"] and imported == [({"Paris"}, [])]
@@ -463,7 +467,7 @@ def test_sidecarless_catalog_still_runs_duplicate_resolution():
     ns, db, _, _ = _namespace()
     resolved = []
     row, _, catalog = _catalog_boundary(ns, db, existing=False, xmp_mtime=None)
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     catalog()
     assert resolved == ["invented hash"]
 
@@ -473,7 +477,7 @@ def test_incremental_retry_without_a_prior_null_mtime_does_not_rerun_duplicate_r
     resolved = []
     row, _, reuse = _incremental_boundary(ns, db)
     # Simulate a legitimate Lightroom edit: stored mtime is 5, incoming is 9.
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     assert reuse(9) is True
     assert resolved == [] and imported == [({"Paris"}, [])]
 
@@ -523,7 +527,7 @@ def test_sibling_in_same_scan_does_not_resolve_a_deferred_hash_group():
     # successive catalog_file invocations on different items in one scan.
     shared = set()
     _, _, first_catalog = _catalog_boundary(ns, db, existing=False, deferred_hashes=shared)
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     first_catalog()
     assert resolved == [] and imported == []
     assert "invented hash" in shared
@@ -532,7 +536,7 @@ def test_sibling_in_same_scan_does_not_resolve_a_deferred_hash_group():
     # must suppress this row's resolver call too.
     unreadable[0] = False
     _, _, second_catalog = _catalog_boundary(ns, db, existing=False, deferred_hashes=shared)
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     second_catalog()
     assert resolved == [] and imported == [({"Paris"}, [])]
 
@@ -546,7 +550,7 @@ def test_sibling_without_a_prior_deferral_still_resolves_duplicates():
     _, _, catalog = _catalog_boundary(
         ns, db, existing=False, xmp_mtime=None, deferred_hashes=shared,
     )
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     catalog()
     assert resolved == ["invented hash"] and shared == set()
 
@@ -576,7 +580,7 @@ def test_deferred_catalog_normalizes_prior_acknowledgement_so_the_retry_resolves
     row["xmp_mtime"] = full_row["xmp_mtime"]
     row["file_hash"] = "invented hash"
     resolved = []
-    db.check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
+    db._fake_check_and_resolve_duplicates_for_hash = lambda file_hash: resolved.append(file_hash)
     unreadable[0] = False
     assert reuse(9) is True
     assert resolved == ["invented hash"] and imported == [({"Paris"}, [])]

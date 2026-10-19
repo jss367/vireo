@@ -54,6 +54,7 @@ def _shared_scripts():
     shared export-modal controllers that call back into their pages."""
     return (sorted(STATIC.glob("navbar-*.js")) + sorted((STATIC / "lightbox").glob("*.js"))
             + [STATIC / "vireo-export-presets.js", STATIC / "vireo-export-collisions.js",
+               STATIC / "vireo-work-locally.js",
                STATIC / "vireo-release-originals.js"])
 
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
-from services import detection_store, stage_counts, subject_masks
+from services import detection_store, photo_ingest, stage_counts, subject_masks
 from subjects import analyze_photo, payload, select_primary
 
 
@@ -13,7 +13,7 @@ def subject_photo(db, tmp_path):
     # A sharp, lower-confidence animal on the right; blurry animal on left.
     pixels[:, 160:] = np.where((np.indices((160, 160)).sum(axis=0) // 4 % 2)[..., None], 160, 60)
     Image.fromarray(pixels).save(path)
-    photo_id = db.add_photo(folder_id=folder, filename=path.name, extension=".jpg", file_size=path.stat().st_size, file_mtime=1)
+    photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".jpg", file_size=path.stat().st_size, file_mtime=1)
     ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
         {"box": {"x": .05, "y": .1, "w": .35, "h": .8}, "confidence": .95, "category": "animal"},
         {"box": {"x": .6, "y": .1, "w": .35, "h": .8}, "confidence": .7, "category": "animal"},

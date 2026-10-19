@@ -15,8 +15,8 @@ a ``CollectionRepository`` built when they are needed; the calls happen at
 the same point as before.
 ``delete_photos`` keeps the
 companion resolution, the new-images cache invalidation and the pipeline
-cache prune on the façade; ``add_photo`` keeps the duplicate auto-resolve
-hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
+cache prune on the façade; ``services.photo_ingest.add_photo`` runs the
+duplicate auto-resolve hook after ``add``. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 (``photo_labels``) have their own repositories. The working-copy and
 thumbnail column writes here are the ones the on-demand image routes make,
 plus the catalog-wide eviction reset a raised working-copy quota triggers.

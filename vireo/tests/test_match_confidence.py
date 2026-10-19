@@ -6,6 +6,7 @@ pre-softmax score has to survive to storage intact, and an uncalibrated model
 must decline to judge rather than guess.
 """
 import match_confidence as mc
+from services import photo_ingest
 
 _COSINE_CFG = {
     "match_thresholds": {
@@ -19,8 +20,8 @@ _DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9,
 def _photo(db, filename="DSC_0320.NEF"):
     """A folder + photo + detection, the minimum a prediction needs."""
     fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename=filename, extension=".nef",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename=filename, extension=".nef",
         file_size=25_000_000, file_mtime=1_700_000_000.0,
         timestamp="2026-04-25T10:30:00", width=6000, height=4000,
     )

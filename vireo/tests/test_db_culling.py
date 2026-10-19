@@ -14,13 +14,14 @@ from pathlib import Path
 
 from db import Database
 from repositories.culling import CullingRepository
+from services import photo_ingest
 
 VIREO = Path(__file__).resolve().parents[1]
 
 
 def _photo(db, folder_id, filename, **columns):
-    pid = db.add_photo(
-        folder_id=folder_id, filename=filename,
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=filename,
         extension="." + filename.rsplit(".", 1)[1].lower(),
         file_size=100, file_mtime=1.0,
     )

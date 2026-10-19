@@ -15,6 +15,7 @@ import json
 import config as cfg
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
+from services import workspace_config
 from services.visual_scope import (
     collection_row,
     collection_rules_state,
@@ -475,7 +476,7 @@ def create_collections_blueprint(get_db, json_error):
         focus_resolved_id = None
         try:
             underlying_total = db.collections.count_photos(collection_id)
-            stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
+            stack_cfg = workspace_config.browse_stack_settings(db, cfg.load()) if stacks else None
             if focus_candidates:
                 found = (
                     db.collections.query_browse_stack_position_first(
@@ -547,7 +548,7 @@ def create_collections_blueprint(get_db, json_error):
             if stacks:
                 photo_ids = db.get_collection_photo_ids_stacked(
                     collection_id, sort=sort,
-                    stack_config=db.browse_stack_settings(cfg.load()),
+                    stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
                 )
             else:
                 photo_ids = db.collections.get_photo_ids(collection_id, sort=sort)

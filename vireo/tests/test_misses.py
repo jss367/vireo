@@ -3,6 +3,7 @@
 classify_miss() is a pure function that derives three miss booleans from
 per-photo features already written by the pipeline. No I/O, no DB access.
 """
+from services import photo_ingest
 
 
 def _row(**overrides):
@@ -191,16 +192,16 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     folder_id = db.add_folder("/tmp/fake")
 
     # Two photos in the same burst — one keeper, one lost-framing miss.
-    p_keeper = db.add_photo(
-        folder_id,
+    p_keeper = photo_ingest.add_photo(
+        db, folder_id,
         "k.jpg",
         extension=".jpg",
         file_size=100,
         file_mtime=1.0,
         timestamp="2026-04-22T10:00:00",
     )
-    p_miss = db.add_photo(
-        folder_id,
+    p_miss = photo_ingest.add_photo(
+        db, folder_id,
         "m.jpg",
         extension=".jpg",
         file_size=100,
@@ -258,8 +259,8 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
     # Folder linked to A only — add it while A is active.
     db.set_active_workspace(ws_a)
     fa = db.add_folder("/tmp/a", name="a")
-    p_a = db.add_photo(
-        fa, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+    p_a = photo_ingest.add_photo(
+        db, fa, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
         timestamp="2026-04-22T10:00:00",
     )
     db.conn.execute(
@@ -277,8 +278,8 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
     # Folder linked to B — add while B is active.
     db.set_active_workspace(ws_b)
     fb = db.add_folder("/tmp/b", name="b")
-    p_b = db.add_photo(
-        fb, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
+    p_b = photo_ingest.add_photo(
+        db, fb, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
         timestamp="2026-04-22T10:00:01",
     )
     db.conn.execute(
@@ -324,12 +325,12 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake", name="fake")
 
-    p_in = db.add_photo(
-        folder_id, "in.jpg", extension=".jpg", file_size=100,
+    p_in = photo_ingest.add_photo(
+        db, folder_id, "in.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
-    p_out = db.add_photo(
-        folder_id, "out.jpg", extension=".jpg", file_size=100,
+    p_out = photo_ingest.add_photo(
+        db, folder_id, "out.jpg", extension=".jpg", file_size=100,
         file_mtime=2.0, timestamp="2026-04-22T10:00:01",
     )
     # Both singletons with subject sizes below the singleton clipped
@@ -394,12 +395,12 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake", name="fake")
 
-    p_kept = db.add_photo(
-        folder_id, "kept.jpg", extension=".jpg", file_size=100,
+    p_kept = photo_ingest.add_photo(
+        db, folder_id, "kept.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
-    p_excluded = db.add_photo(
-        folder_id, "ex.jpg", extension=".jpg", file_size=100,
+    p_excluded = photo_ingest.add_photo(
+        db, folder_id, "ex.jpg", extension=".jpg", file_size=100,
         file_mtime=2.0, timestamp="2026-04-22T10:00:01",
     )
     # Both singletons below the singleton clipped threshold — so we can
@@ -453,8 +454,8 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
 
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake", name="fake")
-    pid = db.add_photo(
-        folder_id, "p.jpg", extension=".jpg", file_size=100,
+    pid = photo_ingest.add_photo(
+        db, folder_id, "p.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, timestamp="2026-04-22T10:00:00",
     )
     db.conn.execute(
@@ -491,8 +492,8 @@ def _photo_with_weak_detection(db, name, file_mtime, det_conf=0.143):
     Returns ``(photo_id, detection_id)``.
     """
     folder_id = db.add_folder(f"/tmp/{name}", name=name)
-    pid = db.add_photo(
-        folder_id, f"{name}.jpg", extension=".jpg", file_size=100,
+    pid = photo_ingest.add_photo(
+        db, folder_id, f"{name}.jpg", extension=".jpg", file_size=100,
         file_mtime=file_mtime, timestamp=f"2026-04-22T10:00:0{file_mtime}",
     )
     det_ids = db.detections.save(

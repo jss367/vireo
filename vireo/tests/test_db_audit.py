@@ -19,6 +19,7 @@ from datetime import datetime
 import pytest
 from db import Database
 from repositories.audit import AuditRepository
+from services import photo_ingest
 
 
 def _other_conn(db):
@@ -58,13 +59,13 @@ def library(db):
     db.conn.commit()
 
     ids = {}
-    ids["b_ok"] = db.add_photo(ok, "b.jpg", ".jpg", 100, 1.0,
+    ids["b_ok"] = photo_ingest.add_photo(db, ok, "b.jpg", ".jpg", 100, 1.0,
                                file_hash="h-b")
-    ids["a_ok"] = db.add_photo(ok, "a.jpg", ".jpg", 100, 2.0,
+    ids["a_ok"] = photo_ingest.add_photo(db, ok, "a.jpg", ".jpg", 100, 2.0,
                                file_hash="h-a")
-    ids["c_partial"] = db.add_photo(partial, "c.jpg", ".jpg", 100, 3.0)
-    ids["d_missing"] = db.add_photo(missing, "d.jpg", ".jpg", 100, 4.0)
-    ids["e_foreign"] = db.add_photo(foreign, "e.jpg", ".jpg", 100, 5.0)
+    ids["c_partial"] = photo_ingest.add_photo(db, partial, "c.jpg", ".jpg", 100, 3.0)
+    ids["d_missing"] = photo_ingest.add_photo(db, missing, "d.jpg", ".jpg", 100, 4.0)
+    ids["e_foreign"] = photo_ingest.add_photo(db, foreign, "e.jpg", ".jpg", 100, 5.0)
     return {"ws": ws, "other_ws": other_ws, "ids": ids,
             "folders": {"ok": ok, "partial": partial, "missing": missing,
                         "foreign": foreign}}
@@ -182,9 +183,9 @@ def test_get_integrity_flagged_filters_and_orders(db, library):
     db.audit.update_photo_hash_check(ids["c_partial"], "corrupt")
     db.audit.update_photo_hash_check(ids["d_missing"], "unreadable")  # missing folder
     db.audit.update_photo_hash_check(ids["e_foreign"], "corrupt")  # other workspace
-    extra = db.add_photo(library["folders"]["ok"], "z.jpg", ".jpg", 1, 9.0)
+    extra = photo_ingest.add_photo(db, library["folders"]["ok"], "z.jpg", ".jpg", 1, 9.0)
     db.audit.update_photo_hash_check(extra, "unreadable")
-    ok_photo = db.add_photo(library["folders"]["ok"], "y.jpg", ".jpg", 1, 9.0)
+    ok_photo = photo_ingest.add_photo(db, library["folders"]["ok"], "y.jpg", ".jpg", 1, 9.0)
     db.audit.update_photo_hash_check(ok_photo, "ok")
 
     rows = db.audit.get_integrity_flagged()

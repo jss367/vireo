@@ -33,6 +33,7 @@ from scanner.companions import _COMPANION_JPEG_EXTENSIONS
 from scanner.exif_fields import _extract_dimensions, _extract_timestamp
 from scanner.hashing import EMPTY_FILE_SHA256
 from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
+from services import duplicate_resolution, photo_ingest
 
 if TYPE_CHECKING:
     from db import Database
@@ -313,7 +314,7 @@ class _FileIndexer:
             and not sidecar_import_deferred
             and file_hash not in self._deferred_hashes
         ):
-            db.check_and_resolve_duplicates_for_hash(file_hash)
+            duplicate_resolution.check_and_resolve_duplicates_for_hash(db, file_hash)
 
         self.tally.report_cataloged(
             photo_id, str(image_path), item.folder_id, item.image_path.name,
@@ -388,8 +389,8 @@ class _FileIndexer:
         # photo to a collection as soon as the row becomes visible; cleanup
         # after add_photo commits would mistake that membership for stale.
         with self.db._commits_held():
-            photo_id, inserted = self.db.add_photo(
-                folder_id=item.folder_id,
+            photo_id, inserted = photo_ingest.add_photo(
+                self.db, folder_id=item.folder_id,
                 filename=item.image_path.name,
                 extension=item.image_path.suffix.lower(),
                 file_size=item.file_size,

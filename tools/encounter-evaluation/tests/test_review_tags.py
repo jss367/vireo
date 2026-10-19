@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from services import photo_ingest
 
 from encounter_eval.common import write_json
 from encounter_eval.library import prepare
@@ -18,7 +19,7 @@ def writable_queue(tmp_path):
     ws = db._ws_id()
     folder = db.add_folder('/example')
     db.add_workspace_folder(ws, folder)
-    pid = db.add_photo(folder, 'bird.jpg', '.jpg', 100, 1, timestamp='2026-01-01T12:00:00', file_hash='original')
+    pid = photo_ingest.add_photo(db, folder, 'bird.jpg', '.jpg', 100, 1, timestamp='2026-01-01T12:00:00', file_hash='original')
     db.conn.executemany('INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(?,?,?,?,?)', [
         (1, 101, 'Tringa erythropus', 'Spotted Redshank', 'species'),
         (2, 102, 'Plegadis falcinellus', 'Glossy Ibis', 'species'),

@@ -15,12 +15,13 @@ import textwrap
 import pytest
 from db import Database
 from repositories.photo_review import PhotoReviewRepository
+from services import photo_ingest
 
 
 def _photo(db, name="bird.jpg"):
     fid = db.add_folder(f"/photos/{name}", name=name)
-    return db.add_photo(
-        folder_id=fid, filename=name, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
 

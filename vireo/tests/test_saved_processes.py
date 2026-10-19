@@ -7,6 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from services import saved_processes
 
 
 def _db(tmp_path):
@@ -53,7 +54,7 @@ def test_resolve_process_round_trips_all_six_fields(tmp_path):
     identify = next(
         p for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
-    flags = db.resolve_process(identify["id"])
+    flags = saved_processes.resolve_process(db, identify["id"])
     assert flags == {
         "skip_classify": False,
         "skip_extract_masks": True,
@@ -67,7 +68,7 @@ def test_resolve_process_round_trips_all_six_fields(tmp_path):
 def test_resolve_process_unknown_id_raises(tmp_path):
     db = _db(tmp_path)
     with pytest.raises(ValueError):
-        db.resolve_process(99999)
+        saved_processes.resolve_process(db, 99999)
 
 
 def test_create_and_get_saved_process(tmp_path):
@@ -105,8 +106,8 @@ def test_create_bad_review_mode_rejected(tmp_path):
 def test_update_saved_process_rename_and_flags(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Temp")
-    assert db.update_saved_process(
-        pid, name="Renamed", skip_classify=True, review_mode="species",
+    assert saved_processes.update_saved_process(
+        db, pid, name="Renamed", skip_classify=True, review_mode="species",
     )
     proc = db.processes.get(pid)
     assert proc["name"] == "Renamed"
@@ -119,7 +120,7 @@ def test_update_partial_leaves_other_fields(tmp_path):
     pid = db.processes.create(
         "Base", skip_regroup=True, miss_enabled=False, review_mode="species",
     )
-    db.update_saved_process(pid, name="Base2")
+    saved_processes.update_saved_process(db, pid, name="Base2")
     proc = db.processes.get(pid)
     assert proc["name"] == "Base2"
     assert proc["skip_regroup"] is True
@@ -130,28 +131,28 @@ def test_update_partial_leaves_other_fields(tmp_path):
 def test_update_can_clear_review_mode(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("HasReview", review_mode="species")
-    db.update_saved_process(pid, review_mode=None)
+    saved_processes.update_saved_process(db, pid, review_mode=None)
     assert db.processes.get(pid)["review_mode"] is None
 
 
 def test_update_missing_returns_false(tmp_path):
     db = _db(tmp_path)
-    assert db.update_saved_process(99999, name="x") is False
+    assert saved_processes.update_saved_process(db, 99999, name="x") is False
 
 
 def test_update_duplicate_name_rejected(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Unique")
     with pytest.raises(ValueError):
-        db.update_saved_process(pid, name="Full")
+        saved_processes.update_saved_process(db, pid, name="Full")
 
 
 def test_delete_saved_process(tmp_path):
     db = _db(tmp_path)
     pid = db.processes.create("Doomed")
-    assert db.delete_saved_process(pid) is True
+    assert saved_processes.delete_saved_process(db, pid) is True
     assert db.processes.get(pid) is None
-    assert db.delete_saved_process(pid) is False
+    assert saved_processes.delete_saved_process(db, pid) is False
 
 
 def test_delete_nulls_referencing_workspace_default(tmp_path):
@@ -160,7 +161,7 @@ def test_delete_nulls_referencing_workspace_default(tmp_path):
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": pid}},
     )
-    db.delete_saved_process(pid)
+    saved_processes.delete_saved_process(db, pid)
     ws = db.workspaces.get(ws_id)
     overrides = json.loads(ws["config_overrides"])
     # Explicit None (not a popped key) so a global default_process_id set
@@ -178,7 +179,7 @@ def test_delete_workspace_default_beats_global_default(tmp_path):
         "WS", config_overrides={"pipeline": {"default_process_id": doomed}},
     )
     db.set_active_workspace(ws_id)
-    db.delete_saved_process(doomed)
+    saved_processes.delete_saved_process(db, doomed)
     effective = db.get_effective_config(
         {"pipeline": {"default_process_id": keep}}
     )
@@ -192,7 +193,7 @@ def test_delete_leaves_other_workspace_defaults_intact(tmp_path):
     ws_id = db.create_workspace(
         "WS", config_overrides={"pipeline": {"default_process_id": keep}},
     )
-    db.delete_saved_process(doomed)
+    saved_processes.delete_saved_process(db, doomed)
     ws = db.workspaces.get(ws_id)
     overrides = json.loads(ws["config_overrides"])
     assert overrides["pipeline"]["default_process_id"] == keep
@@ -204,7 +205,7 @@ def test_seeds_not_reinserted_after_delete_all(tmp_path):
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
     for p in db.processes.list_all():
-        db.delete_saved_process(p["id"])
+        saved_processes.delete_saved_process(db, p["id"])
     assert db.processes.list_all() == []
     # Re-open: the db_meta marker must prevent re-seeding.
     db2 = Database(db_path)

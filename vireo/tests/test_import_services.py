@@ -9,6 +9,7 @@ from jobs import JobRunner
 from PIL import Image
 from repositories.processes import ProcessesRepository
 from scanner import ScanOptions
+from services import saved_processes
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
@@ -80,13 +81,13 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
     process_id = db.processes.create("After import")
-    frozen_process = db.resolve_process(process_id)
+    frozen_process = saved_processes.resolve_process(db, process_id)
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "source_snapshot_id": snapshot_id,
         "after_import": process_id, "after_import_snapshot": frozen_process,
         "tags": ["Birding"],
     })
-    db.update_saved_process(process_id, skip_classify=True)
+    saved_processes.update_saved_process(db, process_id, skip_classify=True)
     service.enqueue_process_job.return_value = ("processing", None, None)
 
     response = service.restart_in_place(db, parent_id)
@@ -140,12 +141,12 @@ def test_restart_in_place_uses_frozen_snapshot_when_saved_process_deleted(
     source.mkdir()
     Image.new("RGB", (32, 32)).save(source / "bird.jpg")
     process_id = db.processes.create("After import")
-    frozen_process = db.resolve_process(process_id)
+    frozen_process = saved_processes.resolve_process(db, process_id)
     parent_id = _interrupted_in_place(db, {
         "sources": [str(source)], "after_import": process_id,
         "after_import_snapshot": frozen_process,
     })
-    assert db.delete_saved_process(process_id) is True
+    assert saved_processes.delete_saved_process(db, process_id) is True
     service.enqueue_process_job.return_value = ("processing", None, None)
 
     response = service.restart_in_place(db, parent_id)
@@ -478,10 +479,10 @@ def test_in_place_process_snapshot_failure_rolls_back_new_workspace(
     original_workspace = db._active_workspace_id
     monkeypatch.setattr(ProcessesRepository, "get", lambda self, pid: {"id": pid})
 
-    def gone(pid):
+    def gone(_db, pid):
         raise ValueError(f"process {pid} was deleted")
 
-    monkeypatch.setattr(db, "resolve_process", gone)
+    monkeypatch.setattr(saved_processes, "resolve_process", gone)
     body = _source_body(tmp_path, "import_in_place", "Snapshot gone")
     body["after_import"] = 4242
 

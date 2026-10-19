@@ -1,6 +1,7 @@
 """Exact-value picker predicates and model choices use library semantics."""
 import config as cfg
 import pytest
+from services import photo_ingest
 
 
 @pytest.fixture(autouse=True)
@@ -9,7 +10,7 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def _photo(db, folder, name, **cols):
-    pid = db.add_photo(folder_id=folder, filename=name, extension=".jpg", file_size=1, file_mtime=1)
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename=name, extension=".jpg", file_size=1, file_mtime=1)
     if cols:
         db.conn.execute("UPDATE photos SET " + ", ".join(f"{key}=?" for key in cols) + " WHERE id=?",
                         [*cols.values(), pid])

@@ -39,14 +39,14 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
         row, catalog_events, catalog = SUPPORT["_catalog_boundary"](
             ns, db, existing=False, xmp_mtime=None if sidecar == "absent" else 9,
         )
-        add_photo = db.add_photo
+        add_photo = db._fake_add_photo
 
         def add(**values):
             result = add_photo(**values)
             conn.execute("INSERT OR IGNORE INTO photos VALUES(731,NULL,NULL,NULL,1,100,0)")
             return result
 
-        db.add_photo = add
+        db._fake_add_photo = add
         update_photo = db.scanning.update_photo
         set_mtime = db.scanning.set_xmp_mtime
         commit = db.commit_with_retry
@@ -88,7 +88,7 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
 
         db.scanning = SimpleNamespace(update_photo=update, set_xmp_mtime=acknowledge)
         db.commit_with_retry = commit_catalog
-        db.check_and_resolve_duplicates_for_hash = resolve
+        db._fake_check_and_resolve_duplicates_for_hash = resolve
         ns["_import_keyword_lists"] = keywords
         ns["_import_embedded_keywords_for_photo"] = lambda *args: trace.append(("embedded",))
         catalog()
@@ -109,7 +109,7 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
             db.scanning.set_xmp_mtime = ack
             db.scanning.defer_xmp_import = lambda pid: conn.execute("UPDATE photos SET xmp_import_pending=1 WHERE id=?", (pid,))
             db.commit_with_retry = conn.commit
-            db.check_and_resolve_duplicates_for_hash = resolve
+            db._fake_check_and_resolve_duplicates_for_hash = resolve
             owner = SimpleNamespace(db=db, repair_missing_metadata=False,
                                     tally=SimpleNamespace(credit_reused_row=lambda *args: None))
             reuse = SUPPORT["_scanner_method"](ns, "triage.py", "_IncrementalTriage", "_reuse_existing_row")

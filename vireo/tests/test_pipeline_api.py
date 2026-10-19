@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
-from services import detection_store, subject_masks
+from services import detection_store, photo_ingest, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -417,8 +417,8 @@ def test_pipeline_local_processing_merges_into_tracked_destination(
     prior_id = db.add_folder(
         str(prior_dir), parent_id=base_id, workspace_root=False
     )
-    db.add_photo(
-        prior_id, "old.jpg", ".jpg",
+    photo_ingest.add_photo(
+        db, prior_id, "old.jpg", ".jpg",
         prior_file.stat().st_size, prior_file.stat().st_mtime,
     )
     db.close()
@@ -708,8 +708,8 @@ def test_pipeline_merges_new_shoot_into_existing_archive(
         str(prior_dir), parent_id=base_id, workspace_root=False
     )
     for f in (prior_a, prior_b):
-        db.add_photo(
-            prior_id, f.name, ".jpg",
+        photo_ingest.add_photo(
+            db, prior_id, f.name, ".jpg",
             f.stat().st_size, f.stat().st_mtime,
         )
     prior_photo_ids = {
@@ -1696,8 +1696,8 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     folder_id = db.add_folder(str(seed_folder))
     ws_id = db._active_workspace_id
     db.add_workspace_folder(ws_id, folder_id)
-    db.add_photo(
-        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
         file_hash=dup_hash,
     )
@@ -1780,8 +1780,8 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     folder_id = db.add_folder(str(seed_folder))
     ws_id = db._active_workspace_id
     db.add_workspace_folder(ws_id, folder_id)
-    db.add_photo(
-        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
         file_hash=dup_hash,
     )
@@ -2088,8 +2088,8 @@ def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
     folder_id = db.add_folder(str(real_dest))
     ws_id = db._active_workspace_id
     db.add_workspace_folder(ws_id, folder_id)
-    db.add_photo(
-        folder_id=folder_id, filename="fresh.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="fresh.jpg", extension=".jpg",
         file_size=0, file_mtime=1.0, file_hash=None,
     )
     db.close()
@@ -2201,8 +2201,8 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     folder_id = db.add_folder(str(seed_folder))
     ws_id = db._active_workspace_id
     db.add_workspace_folder(ws_id, folder_id)
-    db.add_photo(
-        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=dup_path.stat().st_size, file_mtime=1.0,
         file_hash=dup_hash,
     )
@@ -2577,9 +2577,9 @@ def test_destination_preview_flags_managed_archive(setup, tmp_path):
     base_id = seed.add_folder(str(archive))
     prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
     for f in (p1, p2):
-        seed.add_photo(prior_id, f.name, ".jpg", f.stat().st_size, f.stat().st_mtime)
+        photo_ingest.add_photo(seed, prior_id, f.name, ".jpg", f.stat().st_size, f.stat().st_mtime)
     gone_id = seed.add_folder(str(gone), parent_id=base_id, workspace_root=False)
-    seed.add_photo(gone_id, g1.name, ".jpg", g1.stat().st_size, g1.stat().st_mtime)
+    photo_ingest.add_photo(seed, gone_id, g1.name, ".jpg", g1.stat().st_size, g1.stat().st_mtime)
     seed.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_id,)
     )
@@ -2646,7 +2646,7 @@ def test_destination_preview_inside_managed_archive_flags_ancestor(setup, tmp_pa
     seed = Database(db_path)
     base_id = seed.add_folder(str(archive))
     prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
-    seed.add_photo(prior_id, p1.name, ".jpg", p1.stat().st_size, p1.stat().st_mtime)
+    photo_ingest.add_photo(seed, prior_id, p1.name, ".jpg", p1.stat().st_size, p1.stat().st_mtime)
     seed.close()
 
     src = tmp_path / "card"
@@ -2696,8 +2696,8 @@ def test_destination_preview_above_managed_archive_does_not_claim_merge(
     shoot_id = seed.add_folder(
         str(shoot), parent_id=managed_id, workspace_root=False,
     )
-    seed.add_photo(
-        shoot_id, old.name, ".jpg", old.stat().st_size, old.stat().st_mtime,
+    photo_ingest.add_photo(
+        seed, shoot_id, old.name, ".jpg", old.stat().st_size, old.stat().st_mtime,
     )
     seed.close()
 
@@ -2748,8 +2748,8 @@ def test_destination_preview_generated_folder_inside_managed_archive_flags_merge
     existing_id = seed.add_folder(
         str(existing), parent_id=managed_id, workspace_root=False,
     )
-    seed.add_photo(
-        existing_id, old.name, ".jpg",
+    photo_ingest.add_photo(
+        seed, existing_id, old.name, ".jpg",
         old.stat().st_size, old.stat().st_mtime,
     )
     seed.close()
@@ -2805,8 +2805,8 @@ def test_destination_preview_partial_managed_archive_overlap(setup, tmp_path):
     existing_id = seed.add_folder(
         str(existing), parent_id=managed_id, workspace_root=False,
     )
-    seed.add_photo(
-        existing_id, old.name, ".jpg",
+    photo_ingest.add_photo(
+        seed, existing_id, old.name, ".jpg",
         old.stat().st_size, old.stat().st_mtime,
     )
     seed.close()
@@ -2863,12 +2863,12 @@ def test_destination_preview_multiple_managed_archives(setup, tmp_path):
     m26 = seed.add_folder(str(managed_2026))
     d25 = seed.add_folder(str(prior_25), parent_id=m25, workspace_root=False)
     d26 = seed.add_folder(str(prior_26), parent_id=m26, workspace_root=False)
-    seed.add_photo(
-        d25, old_25.name, ".jpg",
+    photo_ingest.add_photo(
+        seed, d25, old_25.name, ".jpg",
         old_25.stat().st_size, old_25.stat().st_mtime,
     )
-    seed.add_photo(
-        d26, old_26.name, ".jpg",
+    photo_ingest.add_photo(
+        seed, d26, old_26.name, ".jpg",
         old_26.stat().st_size, old_26.stat().st_mtime,
     )
     seed.close()
@@ -3255,9 +3255,9 @@ def _seed_workspace_with_masks(db_path):
     ws_id = db._active_workspace_id  # Default workspace, auto-created
     fid = db.add_folder("/photos/seed", name="seed")
     db.add_workspace_folder(ws_id, fid)
-    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
-    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
     db.masks_features.upsert_mask(p1, "sam2-small", "/m/a.small.png",
         detector_model="md", prompt=(0, 0, 0, 0))
@@ -3279,7 +3279,7 @@ def _seed_workspace_with_large_only_masks(db_path):
     db.add_workspace_folder(ws_id, fid)
     photo_ids = []
     for name in ("a.jpg", "b.jpg"):
-        pid = db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                            file_size=1, file_mtime=1.0)
         db.detections.save(
             pid,
@@ -3510,9 +3510,9 @@ def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup
     ws = db._active_workspace_id
     fid = db.add_folder("/photos/seed_no_masks", name="seed_no_masks")
     db.add_workspace_folder(ws, fid)
-    db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
-    db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     db.close()
 
@@ -3588,9 +3588,9 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
         db.add_workspace_folder(ws_a, f_a)
         db.add_workspace_folder(ws_b, f_b)
 
-        p_a = db.add_photo(folder_id=f_a, filename="a.jpg",
+        p_a = photo_ingest.add_photo(db, folder_id=f_a, filename="a.jpg",
                            extension=".jpg", file_size=1, file_mtime=1.0)
-        p_b = db.add_photo(folder_id=f_b, filename="b.jpg",
+        p_b = photo_ingest.add_photo(db, folder_id=f_b, filename="b.jpg",
                            extension=".jpg", file_size=1, file_mtime=1.0)
 
         # Seed the same variant in both workspaces so the only thing
@@ -3659,7 +3659,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
         folder = db.add_folder(str(tmp_path / "sequence"))
         ids = []
         for i in range(3):
-            pid = db.add_photo(folder, f"{i}.jpg", ".jpg", 100, 1,
+            pid = photo_ingest.add_photo(db, folder, f"{i}.jpg", ".jpg", 100, 1,
                                timestamp=(datetime(2026, 1, 1) + timedelta(seconds=i * 0.5)).isoformat())
             ids.append(pid)
             did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [{

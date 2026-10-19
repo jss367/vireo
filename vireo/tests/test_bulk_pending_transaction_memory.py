@@ -1,5 +1,7 @@
 """Bulk plan/merge locking on shared-memory SQLite; no filesystem or app use."""
 
+import __future__
+
 import ast
 import builtins
 import contextlib
@@ -16,8 +18,10 @@ VIREO = Path(__file__).resolve().parents[1]
 def _selected(module, cls, name, namespace):
     tree = ast.parse((VIREO / module).read_text(encoding="utf-8"))
     body = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls).body
+    if module == "db.py" and not any(isinstance(n, ast.FunctionDef) and n.name == name for n in body):
+        body = ast.parse((VIREO / "services/duplicate_resolution.py").read_text()).body
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "<bulk memory>", "exec"), namespace)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<bulk memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace[name]
 
 
@@ -46,6 +50,8 @@ def _flow():
             namespace = {"os": SimpleNamespace(path=paths),
                          "__builtins__": {**vars(builtins), "__import__": fake_import}}
             repo = SimpleNamespace(conn=conn)
+            for helper in ("_keep_folder_rows", "keep_folder_preflight"):
+                setattr(repo, helper, MethodType(_selected("repositories/duplicates.py", "DuplicatesRepository", helper, namespace), repo))
             repo.keep_folder_plan = MethodType(
                 _selected("repositories/duplicates.py", "DuplicatesRepository", "keep_folder_plan", namespace), repo,
             )
@@ -58,6 +64,7 @@ def _flow():
                                  begin_immediate=lambda: conn.execute("BEGIN IMMEDIATE"),
                                  transaction=lambda: conn, rollback=conn.rollback,
                                  _apply_winner_loser_merge=merge)
+            db.duplicates = repo
             db.bulk = MethodType(_selected("db.py", "Database", "bulk_resolve_by_folder", namespace), db)
             yield conn, scan, db, repo, merges, trace
 
@@ -66,8 +73,8 @@ def test_bulk_writer_lock_precedes_plan_and_blocks_scan_until_merge():
     with _flow() as (conn, scan, db, repo, merges, trace):
         plan = repo.keep_folder_plan
         blocked = []
-        def interleave(*args):
-            result = plan(*args)
+        def interleave(*args, **kwargs):
+            result = plan(*args, **kwargs)
             try:
                 scan.execute("UPDATE photos SET xmp_import_pending=1 WHERE id=2")
                 scan.commit()
@@ -80,8 +87,8 @@ def test_bulk_writer_lock_precedes_plan_and_blocks_scan_until_merge():
         result = db.bulk(["hash"], "invented/keep")
         assert blocked == [True], "Scan changed pending state after a stale bulk plan"
         assert result["resolved"][0]["loser_ids"] == [2] and merges == [(1, [2])]
-        assert trace[0] == "BEGIN IMMEDIATE"
-        assert next(i for i, sql in enumerate(trace) if "xmp_import_pending" in sql) > 0
+        assert "BEGIN IMMEDIATE" in trace
+        assert trace.index("BEGIN IMMEDIATE") < max(i for i, sql in enumerate(trace) if "xmp_import_pending" in sql)
         assert not conn.in_transaction
         scan.execute("UPDATE photos SET xmp_import_pending=1 WHERE id=2")
         scan.commit()
@@ -117,7 +124,7 @@ def test_bulk_plan_and_merge_failures_roll_back_partial_writes_and_control_flow(
     for stage in ("plan", "merge"):
         for original in (RuntimeError("invented failure"), KeyboardInterrupt(), SystemExit()):
             with _flow() as (conn, scan, db, repo, merges, trace):
-                def fail(*args, error=original):
+                def fail(*args, error=original, **kwargs):
                     conn.execute("INSERT INTO notes VALUES('partial')")
                     conn.execute("UPDATE photos SET flag='rejected' WHERE id=2")
                     raise error
@@ -170,3 +177,45 @@ def test_bulk_stale_group_skip_releases_writer_lock():
         result = db.bulk(["missing"], "invented/keep")
         assert result == {"resolved": [], "skipped": [{"file_hash": "missing", "reason": "no candidates"}]}
         assert merges == [] and not conn.in_transaction and "ROLLBACK" in trace
+
+
+def test_bulk_disk_preflight_runs_before_lock_and_locked_plan_never_stats():
+    with _flow() as (conn, scan, db, repo, merges, trace):
+        paths = repo.keep_folder_preflight.__func__.__globals__["os"].path
+        probes = []
+        def exists(path):
+            assert not conn.in_transaction, "Disk preflight ran while holding the writer lock"
+            probes.append(path)
+            return True
+        paths.exists = exists
+        result = db.bulk(["hash"], "invented/keep")
+        assert len(probes) == 1 and len(result["resolved"]) == 1
+        assert merges == [(1, [2])] and not conn.in_transaction
+
+
+def test_bulk_revalidates_catalog_identity_membership_and_pending_after_preflight():
+    changes = [
+        "UPDATE photos SET xmp_import_pending=1 WHERE id=2",
+        "UPDATE photos SET flag='rejected' WHERE id=2",
+        "UPDATE photos SET filename='replaced.jpg' WHERE id=1",
+        "UPDATE photos SET file_mtime=99 WHERE id=1",
+        "UPDATE photos SET rating=5 WHERE id=1",
+        "UPDATE photos SET folder_id=2 WHERE id=1",
+        "UPDATE folders SET path='invented/repointed' WHERE id=1",
+        "UPDATE photos SET file_hash='changed' WHERE id=2",
+        "INSERT INTO photos VALUES(3,2,'new.jpg','hash',3,0,NULL,0)",
+        "DELETE FROM photos WHERE id=1",
+    ]
+    for sql in changes:
+        with _flow() as (conn, scan, db, repo, merges, trace):
+            begin = db.begin_immediate
+            def change_then_lock(statement=sql, acquire=begin):
+                scan.execute(statement)
+                scan.commit()
+                acquire()
+            db.begin_immediate = change_then_lock
+            result = db.bulk(["hash"], "invented/keep")
+            assert result == {
+                "resolved": [], "skipped": [{"file_hash": "hash", "reason": "group changed during preflight"}],
+            }, sql
+            assert merges == [] and not conn.in_transaction

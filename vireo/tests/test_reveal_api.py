@@ -4,6 +4,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from services import photo_ingest
 
 
 def _expected_full_path(db, pid):
@@ -303,8 +304,8 @@ def test_reveal_photo_outside_active_workspace_returns_404(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     other_fid = db.add_folder('/secret/ws-photos', name='secret')
-    pid = db.add_photo(
-        folder_id=other_fid, filename='hidden.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(
+        db, folder_id=other_fid, filename='hidden.jpg', extension='.jpg',
         file_size=10, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
     )
     db.set_active_workspace(default_ws)
@@ -332,11 +333,11 @@ def test_reveal_duplicate_outside_workspace(app_and_db, rejected):
     app, db = app_and_db
     default_ws = db.active_workspace_id
     fid = db.add_folder('/photos/duplicates')
-    db.add_photo(folder_id=fid, filename='kept.jpg', extension='.jpg',
+    photo_ingest.add_photo(db, folder_id=fid, filename='kept.jpg', extension='.jpg',
                  file_size=10, file_mtime=1.0, file_hash='REVEAL_DUPLICATE')
     db.set_active_workspace(db.create_workspace("Other"))
     other_fid = db.add_folder('/other/duplicates')
-    pid = db.add_photo(folder_id=other_fid, filename='copy.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=other_fid, filename='copy.jpg', extension='.jpg',
                        file_size=10, file_mtime=1.0, file_hash='REVEAL_DUPLICATE')
     db.photo_review.set_flag(pid, 'rejected' if rejected else 'none')
     db.set_active_workspace(default_ws)
@@ -359,7 +360,7 @@ def test_reveal_duplicate_scope_rejects_nonmember(app_and_db):
     default_ws = db.active_workspace_id
     db.set_active_workspace(db.create_workspace("Other"))
     fid = db.add_folder('/other/private')
-    pid = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='hidden.jpg', extension='.jpg',
                        file_size=10, file_mtime=1.0, file_hash='UNIQUE_REVEAL')
     db.set_active_workspace(default_ws)
     with app.test_client() as c, patch("web.system.subprocess.run") as run:

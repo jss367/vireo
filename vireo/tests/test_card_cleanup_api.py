@@ -15,6 +15,7 @@ import card_cleanup
 import pytest
 from page_scripts import page_with_scripts
 from scanner import compute_file_hash as _sha
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -36,8 +37,8 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
     f.write_bytes(content)
     st = os.stat(f)
     fid = db.add_folder(str(folder_path))
-    pid = db.add_photo(
-        folder_id=fid, filename=name, extension=os.path.splitext(name)[1],
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename=name, extension=os.path.splitext(name)[1],
         file_size=st.st_size, file_mtime=st.st_mtime,
         file_hash=_sha(str(f)),
     )

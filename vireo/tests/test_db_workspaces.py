@@ -25,6 +25,7 @@ from db import (
     normalize_browse_stack_config,
 )
 from repositories.workspaces import WorkspaceRepository
+from services import workspace_config
 
 
 class _RecordingCache:
@@ -268,39 +269,39 @@ def test_get_effective_config_falls_back_to_global(db, raw):
 
 def test_browse_stack_settings_without_config_uses_defaults(db):
     db.workspaces.update(db._ws_id(), config_overrides={"browse_stack_time_gap": 9})
-    assert db.browse_stack_settings() == normalize_browse_stack_config(None)
+    assert workspace_config.browse_stack_settings(db) == normalize_browse_stack_config(None)
 
 
 def test_browse_stack_settings_applies_workspace_override(db):
     db.workspaces.update(db._ws_id(), config_overrides={"browse_stack_time_gap": 9})
-    settings = db.browse_stack_settings({"browse_stack_time_gap": 3})
+    settings = workspace_config.browse_stack_settings(db, {"browse_stack_time_gap": 3})
     assert settings == normalize_browse_stack_config({"browse_stack_time_gap": 9})
 
 
 def test_min_detector_confidence_takes_minimum_across_workspaces(db):
     low = db.create_workspace("Low", config_overrides={"detector_confidence": 0.05})
     db.create_workspace("High", config_overrides={"detector_confidence": 0.6})
-    assert db.min_detector_confidence_across_workspaces({"detector_confidence": 0.3}) == 0.05
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.05
     db.delete_workspace(low)
-    assert db.min_detector_confidence_across_workspaces({"detector_confidence": 0.3}) == 0.3
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.3}) == 0.3
 
 
 def test_min_detector_confidence_invalid_global_defaults_to_point_two(db):
-    assert db.min_detector_confidence_across_workspaces({"detector_confidence": "x"}) == 0.2
-    assert db.min_detector_confidence_across_workspaces({}) == 0.2
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": "x"}) == 0.2
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {}) == 0.2
 
 
 def test_min_detector_confidence_ignores_malformed_overrides(db):
     for name, raw in [("bad-json", "{"), ("list", "[1]"), ("bad-value", '{"detector_confidence": "nope"}')]:
         ws_id = db.create_workspace(name)
         _raw_overrides(db, ws_id, raw)
-    assert db.min_detector_confidence_across_workspaces({"detector_confidence": 0.4}) == 0.4
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.4}) == 0.4
 
 
 def test_min_detector_confidence_without_workspaces_returns_default(db):
     db.conn.execute("DELETE FROM workspaces")
     db.conn.commit()
-    assert db.min_detector_confidence_across_workspaces({"detector_confidence": 0.7}) == 0.7
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {"detector_confidence": 0.7}) == 0.7
 
 
 def test_get_subject_types_filters_to_known_string_types(db, isolated_config):
@@ -324,16 +325,16 @@ def test_get_subject_types_non_list_falls_back_to_default(db, isolated_config):
 )
 def test_get_workspace_active_labels_rejects_malformed_values(db, raw):
     _raw_overrides(db, db._ws_id(), raw)
-    assert db.get_workspace_active_labels() is None
+    assert workspace_config.get_workspace_active_labels(db) is None
 
 
 @pytest.mark.parametrize("raw", ["{", "[1]"])
 def test_set_workspace_active_labels_replaces_malformed_overrides(db, raw):
     _raw_overrides(db, db._ws_id(), raw)
-    db.set_workspace_active_labels(["a.txt"])
+    workspace_config.set_workspace_active_labels(db, ["a.txt"])
     row = db.workspaces.get(db._ws_id())
     assert json.loads(row["config_overrides"]) == {"active_labels": ["a.txt"]}
-    assert db.get_workspace_active_labels() == ["a.txt"]
+    assert workspace_config.get_workspace_active_labels(db) == ["a.txt"]
 
 
 def test_forget_label_file_removes_from_every_workspace(db):
@@ -576,10 +577,10 @@ def test_workspace_method_delegates_to_repository(name):
 
 
 def test_update_workspace_shares_the_unset_sentinel_with_the_repository():
-    import db as db_module
+    import repositories.workspaces as workspaces_module
     from repositories import UNSET
 
-    assert db_module._UNSET is UNSET
+    assert workspaces_module.UNSET is UNSET
     repo = inspect.signature(WorkspaceRepository.update).parameters
     assert list(repo) == [
         "self", "workspace_id", "name", "config_overrides", "ui_state",

@@ -1,6 +1,7 @@
 """Turning filters off keeps the current photo in view across lazy pages."""
 
 import pytest
+from services import photo_ingest
 
 from e2e.test_browse_filterbar import _open_browse
 from e2e.test_browse_sort_keeps_selection import _stall_first_focused_query
@@ -18,8 +19,8 @@ def _prepare(page, live_server, action, photo_link=False):
     keyword = db.add_keyword("Portfolio") if action == "sidebar_keyword" else None
     ids = []
     for i in range(180):
-        photo_id = db.add_photo(
-            folder_id=live_server["data"]["folders"][0],
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=live_server["data"]["folders"][0],
             filename=f"bird{i:03d}.jpg", extension=".jpg", file_size=1000 + i,
             file_mtime=1.0, timestamp=("2024-05-02T08:00:00"
                 if action == "calendar_clear" and i >= 120 else "2024-05-01T08:00:00"),
@@ -358,8 +359,8 @@ def test_replacing_or_adding_extension_values_starts_fresh(live_server, page, op
     # Formats can only be picked when present in the workspace (or already
     # saved in the rule). Seed GIF so both radio replacement and checkbox
     # addition exercise the real picker instead of the retired text input.
-    live_server['db'].add_photo(
-        folder_id=live_server['data']['folders'][0], filename='new.gif',
+    photo_ingest.add_photo(
+        live_server['db'], folder_id=live_server['data']['folders'][0], filename='new.gif',
         extension='.gif', file_size=1000, file_mtime=1.0,
     )
     page.evaluate("rule => VireoFilter.loadExpression([rule])", {

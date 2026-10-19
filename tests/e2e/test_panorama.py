@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp_path):
@@ -20,8 +21,8 @@ def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp
         path = folder / f"landscape{i}.png"
         Image.fromarray(pixels).save(path)
         ids.append(
-            db.add_photo(
-                folder_id=fid,
+            photo_ingest.add_photo(
+                db, folder_id=fid,
                 filename=path.name,
                 extension=".png",
                 file_size=path.stat().st_size,

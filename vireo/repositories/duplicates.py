@@ -10,9 +10,10 @@ candidates, the disk-cleanup summary). Every method is catalog-wide
 
 Callers reach it as ``db.duplicates`` (a fresh repository per access, see
 ``Database.duplicates``); the reads and ``reopen`` have no forwarding
-wrappers on ``Database``. Resolution goes through ``Database``
-(``apply_duplicate_resolution`` and friends), not the plan and ``reject``
-methods here.
+wrappers on ``Database``. Resolution goes through
+``services/duplicate_resolution.py`` (``apply_duplicate_resolution`` and
+friends) and ``Database._apply_winner_loser_merge``, not the plan and
+``reject`` methods here.
 
 Not to be confused with the top-level ``duplicates`` module, the pure
 resolver this repository feeds.
@@ -372,74 +373,70 @@ class DuplicatesRepository:
         loser_ids = [lid for lid, _reason in losers_with_reasons]
         return winner_id, loser_ids
 
-    def keep_folder_plan(self, file_hash, keep_folder_norm):
-        """Pick the ``file_hash`` winner that lives in ``keep_folder_norm``.
+    def _keep_folder_rows(self, file_hash: str) -> list[sqlite3.Row]:
+        """Catalog identity and selection fields, including rejected members."""
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.file_mtime, p.rating,
+                      p.flag, p.xmp_import_pending, f.path AS folder_path
+               FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+               WHERE p.file_hash = ? ORDER BY p.id""",
+            (file_hash,),
+        ).fetchall()
 
-        ``keep_folder_norm`` is already ``os.path.normpath``-ed (or ``""``).
-        Returns ``(winner_id, loser_ids, None)`` when the group is
-        actionable, else ``(None, None, reason)`` with the skip reasons
-        documented on ``Database.bulk_resolve_by_folder``. Writes nothing.
+    def keep_folder_preflight(self, file_hash, keep_folder_norm):
+        """Snapshot group identity and probe candidate paths before locking.
+
+        The snapshot covers all members, flags, pending state, paths and
+        winner-selection fields. A changed snapshot requires a fresh preflight.
+        """
+        rows = self._keep_folder_rows(file_hash)
+        if any(row["xmp_import_pending"] for row in rows):
+            return tuple(tuple(row) for row in rows), frozenset()
+        present = frozenset(
+            row["id"] for row in rows
+            if row["flag"] != "rejected"
+            and os.path.normpath(row["folder_path"] or "") == keep_folder_norm
+            and os.path.exists(os.path.join(row["folder_path"] or "", row["filename"] or ""))
+        )
+        return tuple(tuple(row) for row in rows), present
+
+    def keep_folder_plan(self, file_hash, keep_folder_norm, *, preflight=None):
+        """Pick a folder winner; supplied preflight makes this disk-free.
+
+        The service supplies a pre-lock preflight and calls this inside its
+        writer transaction. A changed membership, path, flag, pending state
+        or winner-selection field fails closed instead of trusting stale I/O.
+        Direct read-only callers may omit preflight for the original behavior.
         """
         from duplicates import DupCandidate, resolve_duplicates
 
-        # An explicit choice must not reject a copy before its keywords
-        # have been imported, even when that copy was already rejected.
-        if self.conn.execute(
-            "SELECT 1 FROM photos WHERE file_hash = ? AND xmp_import_pending != 0 LIMIT 1",
-            (file_hash,),
-        ).fetchone() is not None:
+        if preflight is None:
+            preflight = self.keep_folder_preflight(file_hash, keep_folder_norm)
+        rows = self._keep_folder_rows(file_hash)
+        if tuple(tuple(row) for row in rows) != preflight[0]:
+            return None, None, "group changed during preflight"
+        if any(row["xmp_import_pending"] for row in rows):
             return None, None, "sidecar keywords pending"
-
-        rows = self.conn.execute(
-            """SELECT p.id, p.filename, p.file_mtime, p.rating,
-                      f.path AS folder_path
-               FROM photos p
-               LEFT JOIN folders f ON f.id = p.folder_id
-               WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')""",
-            (file_hash,),
-        ).fetchall()
+        rows = [row for row in rows if row["flag"] != "rejected"]
         if not rows:
             return None, None, "no candidates"
         if len(rows) < 2:
             return None, None, "fewer than 2 candidates"
-        in_folder = [
-            r for r in rows
-            if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
-        ]
+        in_folder = [row for row in rows if os.path.normpath(row["folder_path"] or "") == keep_folder_norm]
         if not in_folder:
             return None, None, "no candidate in keep_folder"
-        # Existence-check the keep_folder candidate(s) before promoting.
-        # If the row's file has been deleted externally but a sibling in
-        # another folder still exists, force-picking the missing row as
-        # winner would reject the surviving copy — and chained delete
-        # would then trash it. Skip the hash instead.
-        in_folder_paths = [
-            (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
-            for r in in_folder
-        ]
-        present_in_folder = [
-            (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
-        ]
+        present_in_folder = [row for row in in_folder if row["id"] in preflight[1]]
         if not present_in_folder:
             return None, None, "keep_folder candidate missing on disk"
         if len(present_in_folder) == 1:
-            winner_id = present_in_folder[0][0]["id"]
+            winner_id = present_in_folder[0]["id"]
         else:
-            # Same-folder duplicates among the keep_folder candidates —
-            # let the resolver pick deterministically among them. All
-            # candidates passed in exist on disk (filtered above), so
-            # Rule 0 is a no-op here.
-            cands = [
-                DupCandidate(
-                    id=r["id"], path=p,
-                    mtime=r["file_mtime"] or 0.0,
-                    exists=True,
-                )
-                for (r, p) in present_in_folder
-            ]
-            winner_id, _ = resolve_duplicates(cands)
-        loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
-        return winner_id, loser_ids, None
+            candidates = [DupCandidate(
+                id=row["id"], path=os.path.join(row["folder_path"] or "", row["filename"] or ""),
+                mtime=row["file_mtime"] or 0.0, exists=True,
+            ) for row in present_in_folder]
+            winner_id, _ = resolve_duplicates(candidates)
+        return winner_id, [row["id"] for row in rows if row["id"] != winner_id], None
 
     def keep_copy_refusal(self, photo_id):
         """Why ``photo_id`` can't become the kept copy of its group, or ``None``.

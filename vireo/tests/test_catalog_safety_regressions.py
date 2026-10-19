@@ -6,13 +6,14 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanOptions
+from services import photo_ingest
 
 
 def seed(db, path, name="bird.jpg"):
     path.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (32, 24), "red").save(path / name)
     fid = db.add_folder(str(path), name=path.name)
-    pid = db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                        file_size=(path / name).stat().st_size, file_mtime=1)
     return fid, pid
 
@@ -63,7 +64,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     assert len(rows) == 1
     # Also protect catalogs that already contain an alias from older versions.
     alias_fid = db.add_folder(str(dst) + "/", name="legacy alias")
-    alias_pid = db.add_photo(folder_id=alias_fid, filename="bird.jpg", extension=".jpg", file_size=1, file_mtime=1)
+    alias_pid = photo_ingest.add_photo(db, folder_id=alias_fid, filename="bird.jpg", extension=".jpg", file_size=1, file_mtime=1)
     rows = db.conn.execute("SELECT p.id, f.path FROM photos p JOIN folders f ON p.folder_id=f.id WHERE filename='bird.jpg'").fetchall()
     assert len(rows) == 2
     assert os.path.samefile(*(os.path.join(r["path"], "bird.jpg") for r in rows))
@@ -184,7 +185,7 @@ def test_paired_jpeg_remains_in_dedup_index(db, tmp_path):
     jpeg_hash = compute_file_hash(str(source))
     raw = tmp_path / "photos/bird.nef"
     raw.write_bytes(b"placeholder RAW bytes")
-    raw_id = db.add_photo(folder_id=fid, filename="bird.nef", extension=".nef", file_size=raw.stat().st_size, file_mtime=1)
+    raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="bird.nef", extension=".nef", file_size=raw.stat().st_size, file_mtime=1)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (jpeg_hash, jpeg_id))
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (compute_file_hash(str(raw)), raw_id))
     db.conn.commit()
@@ -275,7 +276,7 @@ def test_cropped_raw_route_uses_sensor_dimensions(app_and_db, tmp_path, monkeypa
     # RAW decoding itself is stubbed; this exercises the route's size bound.
     Image.new("RGB", (160, 120)).save(path, format="TIFF")
     fid = db.add_folder(str(root), name="raw")
-    pid = db.add_photo(folder_id=fid, filename=path.name, extension=".nef", file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename=path.name, extension=".nef", file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
     db.conn.execute("UPDATE photos SET width=6000,height=4000 WHERE id=?", (pid,))
     db.conn.commit()
     sizes = []

@@ -10,6 +10,7 @@ import runpy
 import sqlite3
 from pathlib import Path
 from types import MethodType, SimpleNamespace
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_xmp_keyword_snapshot.py")))
@@ -18,6 +19,11 @@ SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_xmp_keyword_snapshot
 def _selected(module, name, namespace, cls=None):
     tree = ast.parse((ROOT / module).read_text(encoding="utf-8"))
     body = tree.body if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls).body
+    if not any(isinstance(n, ast.FunctionDef) and n.name == name for n in body) and module == "db.py":
+        body = ast.parse((ROOT / "services/duplicate_resolution.py").read_text()).body
+        namespace["duplicate_resolution"] = SimpleNamespace(apply_duplicate_resolution=lambda db, ids: db._fake_apply_duplicate_resolution(ids))
+        namespace["log"] = SimpleNamespace(warning=lambda *a: None)
+        namespace["cast"] = cast
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
     exec(compile(ast.Module(body=[node], type_ignores=[]), "<pending memory>", "exec",
                  flags=__future__.annotations.compiler_flag), namespace)
@@ -63,6 +69,7 @@ def _flow():
         db.commit_with_retry = conn.commit
         db._commits_held = contextlib.nullcontext
         db._duplicates_repository = lambda: repo
+        db.duplicates = repo
         trace = []
         def merge(winner, losers):
             trace.append(("merge", winner, tuple(losers)))
@@ -74,7 +81,7 @@ def _flow():
         db_ns = {"sqlite3": sqlite3,"logging": SimpleNamespace(getLogger=lambda *a: SimpleNamespace(warning=lambda *a: None)),
                  "__builtins__": {**vars(builtins), "__import__": imports}}
         for name in ("apply_duplicate_resolution", "check_and_resolve_duplicates_for_hash"):
-            setattr(db, name, MethodType(_selected("db.py", name, db_ns, "Database"), db))
+            setattr(db, "_fake_" + name, MethodType(_selected("db.py", name, db_ns, "Database"), db))
         parse = ns["ET"].parse
         unreadable = [True]
         def read(path):
@@ -125,7 +132,7 @@ def test_pending_group_defers_readable_and_sideless_siblings_in_either_order():
                 row=f.conn.execute("SELECT flag,xmp_import_pending FROM photos WHERE id=2").fetchone()
                 assert tuple(row)==(None,1)
                 # A fresh caller has no scan-local deferred-hash set.
-                assert f.db.check_and_resolve_duplicates_for_hash('hash').get('deferred') is True
+                assert f.db._fake_check_and_resolve_duplicates_for_hash('hash').get('deferred') is True
                 f.unreadable[0]=False
                 f.visit(4,sidecar=sidecar)
                 assert f.conn.execute("SELECT flag FROM photos WHERE id=2").fetchone()[0] is None
@@ -138,7 +145,7 @@ def test_repeated_incremental_failure_with_nonnull_stamp_recovers_before_rejecti
         for _ in range(2):
             assert f.retry(2) is True
             assert tuple(f.conn.execute("SELECT xmp_mtime,xmp_import_pending,flag FROM photos WHERE id=2").fetchone())==(5,1,None)
-            assert f.db.check_and_resolve_duplicates_for_hash('hash').get('deferred') is True
+            assert f.db._fake_check_and_resolve_duplicates_for_hash('hash').get('deferred') is True
         f.unreadable[0]=False
         assert f.retry(2) is True
         assert tuple(f.conn.execute("SELECT xmp_mtime,xmp_import_pending,flag FROM photos WHERE id=2").fetchone())==(9,0,'rejected')

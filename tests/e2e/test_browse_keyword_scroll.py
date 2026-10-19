@@ -11,6 +11,7 @@ all, and a filter it can move is reloaded in place.
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.stack_seed import seed_browse_stack
 
@@ -19,8 +20,8 @@ def _seed_filtered_library(db, folder_id, count=160):
     """Photos that all match one keyword, so a keyword filter is scrollable."""
     kw = db.add_keyword("Marsh")
     for i in range(count):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"marsh{i:03d}.jpg",
             extension=".jpg",
             file_size=1000,

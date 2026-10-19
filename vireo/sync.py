@@ -19,6 +19,7 @@ from keyword_identity import (
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from services import pending_changes
 from xmp import SidecarEditor, read_keyword_snapshot
 
 log = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ class _PhotoSyncPlan:
     cleanup_location_keywords: bool = False
     # (change_id, change_token) per supported change. The clear runs after
     # the sidecar write, by which time a reused rowid can name a different
-    # row -- see Database.clear_pending_by_token.
+    # row -- see pending_changes.clear_pending_by_token.
     supported_changes: list = field(default_factory=list)
     unsupported_changes: list = field(default_factory=list)
 
@@ -665,7 +666,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     changes = db.pending_changes.list_all()
     if change_ids is not None:
         changes = _select_changes(changes, change_ids)
-    changes = db.claim_pending_changes_for_sync(changes)
+    changes = pending_changes.claim_pending_changes_for_sync(db, changes)
     if not changes:
         return _sync_result(0, [])
 
@@ -987,14 +988,14 @@ class _XmpSyncRun:
             return
         # Immutable tokens protect edits replaced while the write was in flight.
         if self.synced_tokens:
-            self.db.clear_pending_by_token(
-                self.synced_tokens, clear_equivalent_flat_removals=True,
+            pending_changes.clear_pending_by_token(
+                self.db, self.synced_tokens, clear_equivalent_flat_removals=True,
             )
             self.synced_tokens.clear()
         if self.synced_legacy_ids:
             # A legacy rowid may now name a newly queued, tokened edit.
-            self.db.clear_pending(
-                self.synced_legacy_ids,
+            pending_changes.clear_pending(
+                self.db, self.synced_legacy_ids,
                 expected_tokens=[None] * len(self.synced_legacy_ids),
                 clear_equivalent_flat_removals=True,
             )

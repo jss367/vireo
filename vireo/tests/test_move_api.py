@@ -4,6 +4,7 @@ import os
 
 import pytest
 from page_scripts import page_with_scripts
+from services import photo_ingest
 
 
 def _seed_missing_originals_cache(app, db):
@@ -208,7 +209,7 @@ def test_move_photos_job_with_photo_already_in_destination_completes(
     folder.mkdir()
     (folder / "heron.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
     fid = db.add_folder(str(folder), name="already_here")
-    pid = db.add_photo(folder_id=fid, filename="heron.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="heron.jpg", extension=".jpg",
                        file_size=52, file_mtime=1.0)
 
     client = app.test_client()
@@ -432,8 +433,8 @@ def test_move_folder_job_organizes_photos_into_capture_date_folders(
     for index, day in enumerate(("12", "13"), start=1):
         filename = f"dated-{index}.jpg"
         (src / filename).write_bytes(b"photo")
-        db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=5, file_mtime=float(index),
             timestamp=f"2026-07-{day}T10:00:00",
         )
@@ -489,8 +490,8 @@ def test_move_folder_job_single_date_shows_the_date_folder_as_destination(
     for index in (1, 2, 3):
         filename = f"same-day-{index}.jpg"
         (src / filename).write_bytes(b"photo")
-        db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=5, file_mtime=float(index),
             timestamp=f"2026-09-12T1{index}:00:00",
         )
@@ -527,8 +528,8 @@ def test_move_folder_job_caps_the_stored_date_folder_list(
     for day in days:
         filename = f"day-{day:02d}.jpg"
         (src / filename).write_bytes(b"photo")
-        db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=5, file_mtime=float(day),
             timestamp=f"2026-07-{day:02d}T10:00:00",
         )
@@ -656,8 +657,8 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     src.mkdir()
     (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
     fid = db.add_folder(str(src), name="cleanup_src")
-    db.add_photo(
-        folder_id=fid,
+    photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="bird.jpg",
         extension=".jpg",
         file_size=22,
@@ -797,8 +798,8 @@ def test_move_folder_preflight_plans_multiple_capture_date_folders(
     for index, day in enumerate(("12", "13"), start=1):
         filename = f"bird-{index}.jpg"
         (src / filename).write_bytes(b"bird")
-        db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=4, file_mtime=float(index),
             timestamp=f"2026-07-{day}T10:00:00",
         )
@@ -838,8 +839,8 @@ def test_move_folder_preflight_samples_match_the_folders_it_reports(
     for index, day in enumerate(("13", "11"), start=1):
         filename = f"bird-{index}.jpg"
         (src / filename).write_bytes(b"bird")
-        db.add_photo(
-            folder_id=fid, filename=filename, extension=".jpg",
+        photo_ingest.add_photo(
+            db, folder_id=fid, filename=filename, extension=".jpg",
             file_size=4, file_mtime=float(index),
             timestamp=f"2026-07-{day}T10:00:00",
         )
@@ -877,8 +878,8 @@ def test_move_folder_preflight_samples_say_unsorted_without_capture_dates(
     src.mkdir()
     fid = db.add_folder(str(src), name="undated-source")
     (src / "unknown.jpg").write_bytes(b"x")
-    db.add_photo(
-        folder_id=fid, filename="unknown.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="unknown.jpg", extension=".jpg",
         file_size=1, file_mtime=None,
     )
 
@@ -909,8 +910,8 @@ def test_move_folder_preflight_samples_fall_back_to_file_mtime(
     src.mkdir()
     fid = db.add_folder(str(src), name="mtime-source")
     (src / "bird.jpg").write_bytes(b"bird")
-    db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=4,
         file_mtime=datetime(2026, 3, 25, 9, 0, 0).timestamp(),
     )
@@ -936,8 +937,8 @@ def test_move_folder_preflight_rejects_date_destination_occupied_by_file(
     src = tmp_path / "dated-source"
     src.mkdir()
     fid = db.add_folder(str(src), name="dated-source")
-    db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
     )
     archive = tmp_path / "archive"
@@ -968,8 +969,8 @@ def test_move_folder_job_rejects_file_at_date_destination(
     src.mkdir()
     fid = db.add_folder(str(src), name="conflict-job-source")
     (src / "bird.jpg").write_bytes(b"bird")
-    db.add_photo(
-        folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.jpg", extension=".jpg",
         file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
     )
     archive = tmp_path / "archive"
@@ -1482,7 +1483,7 @@ def test_date_move_all_in_place_reports_successful_rerun(app_and_db, tmp_path, m
     source = tmp_path / "date-source"
     source.mkdir()
     fid = db.add_folder(str(source), name="date-source")
-    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                  file_size=1, file_mtime=1, timestamp="2026-07-12T10:00:00")
     monkeypatch.setattr(move, "move_folder_by_date", lambda *a, **kw: {
         "moved": 0, "already_in_place": 3, "errors": errors,

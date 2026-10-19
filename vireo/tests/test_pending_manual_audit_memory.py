@@ -1,10 +1,13 @@
 """Pending manual plans and drift reads on invented SQLite and fake paths only."""
 
+import __future__
+
 import ast
 import builtins
 import contextlib
 import posixpath
 import sqlite3
+import typing
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
@@ -15,8 +18,11 @@ VIREO = Path(__file__).resolve().parents[1]
 def _selected(module, name, namespace, cls=None):
     tree = ast.parse((VIREO / module).read_text(encoding="utf-8"))
     body = tree.body if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls).body
+    if module == "db.py" and not any(isinstance(n, ast.FunctionDef) and n.name == name for n in body):
+        body = ast.parse((VIREO / "services/duplicate_resolution.py").read_text()).body
+        namespace["cast"] = typing.cast
     node = next(n for n in body if isinstance(n, ast.FunctionDef) and n.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "<manual/audit memory>", "exec"), namespace)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<manual/audit memory>", "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace[name]
 
 
@@ -43,7 +49,7 @@ def _manual():
                      "__builtins__": {**vars(builtins), "__import__": fake_import}}
         repo = SimpleNamespace(conn=conn, keep_copy_refusal=lambda pid: None,
                                photo_metadata=lambda pid: SimpleNamespace(rating=4))
-        for name in ("keep_folder_plan", "keep_copy_plan"):
+        for name in ("_keep_folder_rows", "keep_folder_preflight", "keep_folder_plan", "keep_copy_plan"):
             setattr(repo, name, MethodType(_selected("repositories/duplicates.py", name, namespace, "DuplicatesRepository"), repo))
         events = []
         def merge(*args, **kwargs):
@@ -51,8 +57,9 @@ def _manual():
             conn.commit()
         db = SimpleNamespace(_duplicates_repository=lambda: repo, begin_immediate=lambda: conn.execute("BEGIN IMMEDIATE"),
                              rollback=conn.rollback, transaction=lambda: conn, _apply_winner_loser_merge=merge)
+        db.duplicates = repo
         for name in ("keep_duplicate_copy", "bulk_resolve_by_folder"):
-            setattr(db, name, MethodType(_selected("db.py", name, {"os": SimpleNamespace(path=paths)}, "Database"), db))
+            setattr(db, "_fake_" + name, MethodType(_selected("db.py", name, {"os": SimpleNamespace(path=paths)}, "Database"), db))
         yield conn, repo, db, paths, events
 
 
@@ -63,7 +70,7 @@ def test_manual_folder_defers_pending_kept_loser_and_rejected_members():
             conn.commit()
             before = conn.total_changes
             assert repo.keep_folder_plan("hash", "invented/keep") == (None, None, "sidecar keywords pending")
-            assert db.bulk_resolve_by_folder(["hash"], "invented/keep") == {
+            assert db._fake_bulk_resolve_by_folder(["hash"], "invented/keep") == {
                 "resolved": [], "skipped": [{"file_hash": "hash", "reason": "sidecar keywords pending"}],
             }
             assert events == [] and conn.total_changes == before
@@ -78,7 +85,7 @@ def test_manual_copy_defers_pending_chosen_live_and_rejected_members():
                 conn.commit()
                 before = conn.total_changes
                 assert repo.keep_copy_plan(chosen) == (None, "sidecar keywords pending")
-                assert db.keep_duplicate_copy(chosen) == {"error": "sidecar keywords pending"}
+                assert db._fake_keep_duplicate_copy(chosen) == {"error": "sidecar keywords pending"}
                 assert not conn.in_transaction and conn.total_changes == before and events == []
 
 
@@ -93,8 +100,8 @@ def test_manual_operations_resume_only_after_all_members_recover():
         assert repo.keep_folder_plan("hash", "invented/keep") == (1, [2], None)
         plan, reason = repo.keep_copy_plan(3)
         assert reason is None and plan == {"file_hash": "hash", "loser_ids": [1, 2], "winner_flag": "flagged"}
-        assert db.keep_duplicate_copy(3)["winner_id"] == 3
-        assert db.bulk_resolve_by_folder(["hash"], "invented/keep")["resolved"][0]["winner_id"] == 1
+        assert db._fake_keep_duplicate_copy(3)["winner_id"] == 3
+        assert db._fake_bulk_resolve_by_folder(["hash"], "invented/keep")["resolved"][0]["winner_id"] == 1
         assert len(events) == 2
         assert [tuple(row) for row in conn.execute("SELECT * FROM keywords")] == [
             (1, "User keyword", "manual"), (2, "Sidecar keyword", "xmp"),

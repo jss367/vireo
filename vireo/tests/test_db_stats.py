@@ -22,7 +22,7 @@ import config as cfg
 import pytest
 from db import Database
 from repositories.stats import StatsRepository
-from services import dashboard_stats, stage_counts
+from services import dashboard_stats, photo_ingest, stage_counts
 
 MODEL = "bioclip"
 OTHER_MODEL = "other-model"
@@ -38,8 +38,8 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def _photo(db, folder_id, name, timestamp=None):
-    return db.add_photo(
-        folder_id=folder_id, filename=name, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=name, extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=timestamp, width=1, height=1,
     )
 

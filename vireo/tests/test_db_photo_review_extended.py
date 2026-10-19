@@ -20,6 +20,7 @@ import textwrap
 import db as db_module
 import pytest
 from db import Database
+from services import photo_ingest
 
 
 def _reader(db):
@@ -64,8 +65,8 @@ def _stored_overrides(db, workspace_id):
 
 def _add_photos(db, folder_id, count, prefix="p"):
     return [
-        db.add_photo(
-            folder_id=folder_id,
+        photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"{prefix}{i}.jpg",
             extension=".jpg",
             file_size=100,

@@ -3,6 +3,7 @@
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -11,8 +12,8 @@ def editor_photo(live_server, page, tmp_path):
     Image.new('RGB', (600, 400), (80, 120, 160)).save(path)
     db = live_server['db']
     folder_id = db.add_folder(str(tmp_path))
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename=path.name, extension='.jpg',
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=path.name, extension='.jpg',
         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
         width=600, height=400,
     )

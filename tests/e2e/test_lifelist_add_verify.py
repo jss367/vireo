@@ -7,6 +7,7 @@ no accepted species keyword, so they are the zero-species cases.
 import re
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_large_hawk_life_list(live_server, count=101):
@@ -14,8 +15,8 @@ def _seed_large_hawk_life_list(live_server, count=101):
     folder_id = live_server["data"]["folders"][0]
     keyword_id = db.add_keyword("Red-tailed Hawk", is_species=True)
     for i in range(count):
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"hawk-extra-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -273,8 +274,8 @@ def test_alphabetical_sort_ignores_leading_okina(live_server, page):
 
     for i, species in enumerate(("Hutton's vireo", "\u02bbapapane", "Java sparrow")):
         keyword_id = db.add_keyword(species, is_species=True)
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"okina-sort-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -335,8 +336,8 @@ def test_taxonomic_group_and_identification_level_filters(live_server, page):
             "UPDATE keywords SET taxon_id = ? WHERE id = ?",
             (taxon_id, keyword_id),
         )
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"{name.lower().replace(' ', '-')}.jpg",
             extension=".jpg",
             file_size=1000,

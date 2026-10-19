@@ -10,6 +10,7 @@ from burst_evidence import (
     group_folder_bursts,
 )
 from PIL import Image
+from services import photo_ingest
 
 
 def _row(pid, filename, timestamp=None, extension=None, flag="none"):
@@ -217,8 +218,8 @@ def _seed_burst(db, folder_id, start, sharpness_by_frame, *, prefix="DSC_", ts_b
     pids = []
     for offset, sharp in enumerate(sharpness_by_frame):
         idx = start + offset
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"{prefix}{idx:04d}.jpg",
             extension=".jpg",
             file_size=1000 + idx,
