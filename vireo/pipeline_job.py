@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import queue
+import sqlite3
 import tempfile
 import threading
 import time
@@ -57,6 +58,7 @@ from resource_ledger import (
     bind_resource_pure_cancel_check,
     suspend_resource_wait_timing,
 )
+from services import detection_store
 from volume_reachability import (
     load_known_mount_roots as _load_known_mount_roots,  # noqa: F401
 )
@@ -150,7 +152,7 @@ class _StagedMaskFile:
                 stage_dir, staged_path, final_path,
                 previous_path=previous_path,
             )
-        except Exception:
+        except Exception:  # broad: remove the staged mask on any failure, then re-raise
             if staged_path:
                 with contextlib.suppress(OSError):
                     os.unlink(staged_path)
@@ -495,8 +497,8 @@ def _preflight_mask_detections(
         and weak_detection_confidence is not None
     ):
         dets = [
-            d for d in thread_db.get_detections(
-                photo_id,
+            d for d in detection_store.get_detections(
+                thread_db, photo_id,
                 min_conf=weak_detection_confidence,
                 detector_model="megadetector-v6",
             )
@@ -504,8 +506,8 @@ def _preflight_mask_detections(
         ]
     else:
         dets = [
-            d for d in thread_db.get_detections(
-                photo_id, min_conf=detector_confidence,
+            d for d in detection_store.get_detections(
+                thread_db, photo_id, min_conf=detector_confidence,
             )
             if d["detector_model"] != "full-image"
         ]
@@ -961,7 +963,7 @@ def _retry_thumbnail_with_companion(
                 photo_id, file_mtime,
             )
             thread_db.commit_with_retry()
-        except Exception:
+        except sqlite3.Error:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
@@ -1005,7 +1007,7 @@ def _retry_thumbnail_with_working_copy(
                 photo_id, file_mtime,
             )
             thread_db.commit_with_retry()
-        except Exception:
+        except sqlite3.Error:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     return generate_thumbnail(
@@ -1076,7 +1078,7 @@ def _release_classifier_cache_handle(loaded_models):
     try:
         handle.release()
     except Exception:
-        # Releasing a cache handle must never break pipeline cleanup.
+        # broad: releasing a cache handle must never break pipeline cleanup.
         # The cache's idle timer will reclaim leaked entries eventually.
         log.exception("ModelCache: handle release raised; leak will be reclaimed by idle timer")
 
@@ -1836,7 +1838,8 @@ def _resolve_model_specs(params, effective_model_ids):
                     )
                 resolved_specs.append(spec)
         except Exception as e:
-            # Reported to the user through the pipeline's model step.
+            # broad: model discovery raises a wide set; reported to the user
+            # through the pipeline's model step.
             log.warning("Could not resolve pipeline models", exc_info=True)
             resolution_error = str(e)
     return resolved_specs, resolution_error

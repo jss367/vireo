@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from pipeline_stages.context import PipelineRun
+from services import detection_store
 
 if TYPE_CHECKING:
     import threading
@@ -443,8 +444,8 @@ class _DetectPass:
                 contextual_weak_photo_ids,
             )
 
-            _raw_mdv6 = thread_db.get_detections_for_photos(
-                [p["id"] for p in photos],
+            _raw_mdv6 = detection_store.get_detections_for_photos(
+                thread_db, [p["id"] for p in photos],
                 min_conf=_weak_conf,
                 detector_model="megadetector-v6",
             )
@@ -520,12 +521,12 @@ class _DetectPass:
                 # detect stage; keep full_input=None so
                 # the surrounding write still runs.
                 full_input = None
-        existing_full = thread_db.get_detections(
-            photo_id, detector_model="full-image",
+        existing_full = detection_store.get_detections(
+            thread_db, photo_id, detector_model="full-image",
             min_conf=0,
         )
         if not existing_full:
-            thread_db.save_detections(
+            thread_db.detections.save(
                 photo_id,
                 [{
                     "box": {"x": 0, "y": 0, "w": 1, "h": 1},

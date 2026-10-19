@@ -208,7 +208,12 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         open=lambda buf: Image((100, 100), events, "mask"),
         composite=lambda crop, shaded, mask: events.append(("composite",)) or crop,
     )
-    helpers = {"math": math}
+    helpers = {
+        "math": math,
+        "detection_store": types.SimpleNamespace(
+            get_detections=lambda db, pid: db.get_detections(pid),
+        ),
+    }
     load("focus_crop.py", helpers)
     modules = {
         "focus_crop": types.SimpleNamespace(**helpers),

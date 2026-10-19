@@ -2,24 +2,26 @@
 
 The ``detections`` table is global across workspaces: a detector's boxes are a
 pure function of (photo, model), and confidence floors apply at read time.
-``Database`` keeps everything workspace- or config-dependent: it resolves the
-active workspace id and the effective detector/classifier floors, builds the
-filter-bar scope clause, asks the model-runs domain whether a detector run is
-pinned, and re-syncs the primary subject after id-based deletes. This
+The services keep everything workspace- or config-dependent:
+``services/detection_store.py`` resolves the effective detector/classifier
+floors, asks the model-runs domain whether a detector run is pinned, and
+re-syncs the primary subject after id-based deletes; ``services/miss_flags.py``
+resolves the active workspace id and builds the filter-bar scope clause. This
 repository owns the SQL those steps read and write, plus the one read of a
 detection's subject analysis (``detection_subjects.exposure_ev``) that the
 subject-crop preview applies; ``subjects`` still owns that table's writes.
 
 Callers reach the pass-through operations as ``db.detections`` (a fresh
-repository per access, see ``Database.detections``): ``upsert_rows``,
-``clear``, ``get_ids_for_photos``, ``runtime_fingerprints_for_photos``,
-``confidence_summary``, ``subject_exposure_ev`` and
-``promote_full_image_runtime`` (the classify job's and the detect stage's
-legacy full-image anchor promotion, SQL unchanged from ``classify_job``). The rest stay behind the ``Database`` methods that
-add the steps above (``save_detections``, ``write_detection_batch``,
-``get_detections``, ``get_detections_for_photos``,
-``get_predictions_for_detection``, the misses methods and
-``delete_detections_by_ids``).
+repository per access, see ``Database.detections``): ``save``,
+``upsert_rows``, ``clear``, ``get_ids_for_photos``,
+``runtime_fingerprints_for_photos``, ``confidence_summary``,
+``subject_exposure_ev`` and ``promote_full_image_runtime`` (the classify job's
+and the detect stage's legacy full-image anchor promotion, SQL unchanged from
+``classify_job``). The rest stay behind the service functions that add the
+steps above (``write_detection_batch``, ``get_detections``,
+``get_detections_for_photos``, ``get_predictions_for_detection`` and
+``delete_detections_by_ids`` in ``detection_store``; the misses functions in
+``miss_flags``).
 
 ``misses`` derives and stores miss flags through the accessor too:
 ``workspace_miss_rows``, ``miss_detection_rows`` and ``write_miss_flags``
@@ -61,10 +63,29 @@ class DetectionsRepository:
         self,
         photo_id: int,
         detections: Sequence[Mapping[str, Any]],
-        detector_model: str,
-        runtime_fingerprint: str,
+        detector_model: str | None,
+        runtime_fingerprint: str = "legacy",
     ) -> list[int]:
-        """Upsert one (photo, model)'s detections and commit; see ``Database.save_detections``."""
+        """Replace all detections for (photo_id, detector_model) with the given list.
+
+        Global: no workspace scoping. The model's output is a pure function of
+        (photo, model); any workspace re-running the same (photo, model) is a
+        bug — callers should short-circuit via `get_detector_run_photo_ids`.
+
+        IDs are content-addressed (see vireo.detection_id) so two pipelines
+        writing the same (photo, model, detections) produce identical rows
+        — the second writer's UPSERT is a no-op rather than a CASCADE-deleting
+        DELETE+INSERT. Commits.
+
+        Args:
+            photo_id: the photo
+            detections: list of dicts {box: {x,y,w,h}, confidence, category}
+            detector_model: required, e.g. "megadetector-v6"
+        Returns:
+            list of detection IDs (empty if detections was empty).
+        """
+        if detector_model is None:
+            raise ValueError("detector_model is required")
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
         )

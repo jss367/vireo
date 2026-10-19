@@ -22,6 +22,7 @@ from db import Database
 from detection_id import detection_id
 from repositories.detections import DetectionsRepository
 from repositories.model_runs import ModelRunsRepository
+from services import detection_store, miss_flags
 
 MODEL = "megadetector-v6"
 
@@ -142,14 +143,14 @@ def _config_recorder(monkeypatch, db, effective):
 def test_save_detections_requires_a_detector_model(db):
     pid = _photo(db)
     with pytest.raises(ValueError, match="detector_model is required"):
-        db.save_detections(pid, [_d()], None)
+        db.detections.save(pid, [_d()], None)
     assert _det_rows(db, pid) == []
 
 
 def test_save_detections_writes_content_addressed_rows_and_commits(db, monkeypatch):
     pid = _photo(db)
     commits = _commit_recorder(monkeypatch)
-    ids = db.save_detections(
+    ids = db.detections.save(
         pid,
         [_d(0.8, x=0.1), _d(0.7, category=None, x=0.5), _d(0.6, "person", x=0.7)],
         MODEL,
@@ -209,13 +210,13 @@ def test_runtime_fingerprints_for_photos_are_distinct_over_the_given_photos(db):
 
 def test_save_detections_defaults_runtime_fingerprint_to_legacy(db):
     pid = _photo(db)
-    db.save_detections(pid, [_d()], MODEL)
+    db.detections.save(pid, [_d()], MODEL)
     assert [r["runtime_fingerprint"] for r in _det_rows(db, pid)] == ["legacy"]
 
 
 def test_duplicate_boxes_keep_highest_confidence_then_latest(db):
     pid = _photo(db)
-    ids = db.save_detections(
+    ids = db.detections.save(
         pid,
         [
             _d(0.5, x=0.1),   # A, first seen
@@ -235,10 +236,10 @@ def test_duplicate_boxes_keep_highest_confidence_then_latest(db):
 
 def test_resave_upserts_in_place_and_keeps_predictions(db):
     pid = _photo(db)
-    (det_id,) = db.save_detections(pid, [_d(0.5)], MODEL)
+    (det_id,) = db.detections.save(pid, [_d(0.5)], MODEL)
     db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
     statements = _trace(db)
-    assert db.save_detections(pid, [_d(0.75)], MODEL) == [det_id]
+    assert db.detections.save(pid, [_d(0.75)], MODEL) == [det_id]
     db.conn.set_trace_callback(None)
     assert not any("INSERT OR REPLACE" in s for s in statements)
     assert [r["detector_confidence"] for r in _det_rows(db, pid)] == [0.75]
@@ -249,13 +250,13 @@ def test_resave_upserts_in_place_and_keeps_predictions(db):
 
 def test_resave_retires_only_same_model_same_runtime_stale_rows(db):
     pid = _photo(db)
-    keep, stale = db.save_detections(
+    keep, stale = db.detections.save(
         pid, [_d(0.9, x=0.1), _d(0.8, x=0.3)], MODEL, runtime_fingerprint="rt",
     )
     other_runtime = _raw_det(db, pid, runtime_fingerprint="other", x=0.9)
     other_model = _raw_det(db, pid, model="other-det", runtime_fingerprint="rt")
 
-    assert db.save_detections(
+    assert db.detections.save(
         pid, [_d(0.9, x=0.1)], MODEL, runtime_fingerprint="rt",
     ) == [keep]
     ids = {r["id"] for r in _det_rows(db, pid)}
@@ -265,8 +266,8 @@ def test_resave_retires_only_same_model_same_runtime_stale_rows(db):
 
 def test_save_empty_list_clears_same_runtime_rows(db):
     pid = _photo(db)
-    db.save_detections(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
-    assert db.save_detections(pid, [], MODEL) == []
+    db.detections.save(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
+    assert db.detections.save(pid, [], MODEL) == []
     assert _det_rows(db, pid) == []
 
 
@@ -288,7 +289,7 @@ def test_stale_sweep_deletes_in_chunks_of_500(db):
     for i in range(1001):
         _raw_det(db, pid, x=i / 10000)
     statements = _trace(db)
-    db.save_detections(pid, [], MODEL)
+    db.detections.save(pid, [], MODEL)
     db.conn.set_trace_callback(None)
     # Cascade sub-programs re-report the statement; count distinct ones.
     deletes = list(dict.fromkeys(
@@ -303,14 +304,14 @@ def test_stale_sweep_deletes_in_chunks_of_500(db):
 def test_write_detection_batch_requires_a_detector_model(db):
     pid = _photo(db)
     with pytest.raises(ValueError, match="detector_model is required"):
-        db.write_detection_batch(pid, None, [_d()])
+        detection_store.write_detection_batch(db, pid, None, [_d()])
 
 
 def test_write_detection_batch_records_run_and_commits_once(db, monkeypatch):
     pid = _photo(db)
     commits = _commit_recorder(monkeypatch)
-    ids = db.write_detection_batch(
-        pid, MODEL, [_d(0.9, x=0.1), _d(0.8, x=0.2)],
+    ids = detection_store.write_detection_batch(
+        db, pid, MODEL, [_d(0.9, x=0.1), _d(0.8, x=0.2)],
         runtime_fingerprint="rt", input_fingerprint="in",
     )
     assert commits == [db.conn]
@@ -329,19 +330,19 @@ def test_write_detection_batch_records_run_and_commits_once(db, monkeypatch):
 
 def test_write_detection_batch_empty_scene_records_zero_boxes(db):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d()])
-    assert db.write_detection_batch(pid, MODEL, []) == []
+    detection_store.write_detection_batch(db, pid, MODEL, [_d()])
+    assert detection_store.write_detection_batch(db, pid, MODEL, []) == []
     assert _det_rows(db, pid) == []
     assert tuple(_run_row(db, pid)) == ("legacy", None, 0)
 
 
 def test_write_detection_batch_same_identity_keeps_other_runtime_rows(db):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+    detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)],
                              runtime_fingerprint="rt", input_fingerprint="in")
     leftover = _raw_det(db, pid, runtime_fingerprint="old", x=0.9)
     # input_fingerprint None on the new call never counts as a change.
-    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.2)],
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.2)],
                                    runtime_fingerprint="rt")
     assert {r["id"] for r in _det_rows(db, pid)} == {ids[0], leftover}
     assert tuple(_run_row(db, pid)) == ("rt", None, 1)
@@ -353,11 +354,11 @@ def test_write_detection_batch_same_identity_keeps_other_runtime_rows(db):
 ])
 def test_identity_change_retires_every_row_for_the_model(db, change):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+    detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)],
                              runtime_fingerprint="rt", input_fingerprint="in")
     leftover = _raw_det(db, pid, runtime_fingerprint="old", x=0.9)
     other_model = _raw_det(db, pid, model="other-det")
-    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.2)], **change)
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.2)], **change)
     assert {r["id"] for r in _det_rows(db, pid)} == {ids[0], other_model}
     assert leftover not in ids
     assert tuple(_run_row(db, pid)) == (
@@ -367,7 +368,7 @@ def test_identity_change_retires_every_row_for_the_model(db, change):
 
 def test_pinned_identity_change_returns_existing_ids_untouched(db, monkeypatch):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d(0.5, x=0.1), _d(0.9, x=0.2)],
+    detection_store.write_detection_batch(db, pid, MODEL, [_d(0.5, x=0.1), _d(0.9, x=0.2)],
                              runtime_fingerprint="rt")
     tie = _raw_det(db, pid, conf=0.5, runtime_fingerprint="rt", x=0.3)
     calls = []
@@ -378,7 +379,7 @@ def test_pinned_identity_change_returns_existing_ids_untouched(db, monkeypatch):
 
     monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned", pinned)
     before = [tuple(r) for r in _det_rows(db, pid)]
-    ids = db.write_detection_batch(pid, MODEL, [_d(0.7, x=0.6)],
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(0.7, x=0.6)],
                                    runtime_fingerprint="rt-2")
     assert calls == [(pid, MODEL)]
     by_conf = sorted(
@@ -392,14 +393,14 @@ def test_pinned_identity_change_returns_existing_ids_untouched(db, monkeypatch):
 
 def test_real_manual_review_pins_the_detector_run(db):
     pid = _photo(db)
-    (det_id,) = db.write_detection_batch(pid, MODEL, [_d()],
+    (det_id,) = detection_store.write_detection_batch(db, pid, MODEL, [_d()],
                                          runtime_fingerprint="rt")
     db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
     pred_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
     ).fetchone()["id"]
     db.set_review_status(pred_id, db._ws_id(), "accepted")
-    assert db.write_detection_batch(pid, MODEL, [_d(x=0.5)],
+    assert detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.5)],
                                     runtime_fingerprint="rt-2") == [det_id]
     assert db.conn.execute(
         "SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (det_id,),
@@ -408,25 +409,25 @@ def test_real_manual_review_pins_the_detector_run(db):
 
 def test_force_runtime_replace_skips_the_pin_check(db, monkeypatch):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d(x=0.1)], runtime_fingerprint="rt")
+    detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)], runtime_fingerprint="rt")
 
     def boom(*args):
         raise AssertionError("pin check must be skipped")
 
     monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned", boom)
-    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.5)],
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.5)],
                                    runtime_fingerprint="rt-2",
                                    force_runtime_replace=True)
     assert [r["id"] for r in _det_rows(db, pid)] == ids
     # Unchanged identity never consults the pin either.
-    db.write_detection_batch(pid, MODEL, [_d(x=0.5)], runtime_fingerprint="rt-2")
+    detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.5)], runtime_fingerprint="rt-2")
 
 
 def test_first_run_never_consults_the_pin(db, monkeypatch):
     pid = _photo(db)
     monkeypatch.setattr(ModelRunsRepository, "detector_run_is_pinned",
                         lambda *a: pytest.fail("no previous run"))
-    assert len(db.write_detection_batch(pid, MODEL, [_d()])) == 1
+    assert len(detection_store.write_detection_batch(db, pid, MODEL, [_d()])) == 1
 
 
 def test_force_replace_with_no_run_record_retires_stray_rows(db):
@@ -438,7 +439,7 @@ def test_force_replace_with_no_run_record_retires_stray_rows(db):
     stray = _raw_det(db, pid, runtime_fingerprint="old-rt", x=0.9)
     other_model = _raw_det(db, pid, model="other-det",
                            runtime_fingerprint="old-rt")
-    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)],
                                    runtime_fingerprint="rt-new",
                                    force_runtime_replace=True)
     remaining = {r["id"] for r in _det_rows(db, pid)}
@@ -451,7 +452,7 @@ def test_force_replace_with_no_run_record_retires_stray_rows(db):
 def test_no_force_replace_with_no_run_record_keeps_stray_rows(db):
     pid = _photo(db)
     stray = _raw_det(db, pid, runtime_fingerprint="old-rt", x=0.9)
-    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+    ids = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)],
                                    runtime_fingerprint="rt-new")
     # Non-forced writes keep unrelated-runtime rows: the pre-existing
     # non-reclassify behavior for save_detections stays intact.
@@ -461,14 +462,14 @@ def test_no_force_replace_with_no_run_record_keeps_stray_rows(db):
 
 def test_write_detection_batch_rolls_back_on_failure(db):
     pid = _photo(db)
-    first = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+    first = detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.1)],
                                      runtime_fingerprint="rt")
     db.conn.execute(
         """CREATE TEMP TRIGGER fail_run BEFORE UPDATE ON detector_runs
            BEGIN SELECT RAISE(ABORT, 'run write failed'); END""",
     )
     with pytest.raises(sqlite3.IntegrityError, match="run write failed"):
-        db.write_detection_batch(pid, MODEL, [_d(x=0.5)],
+        detection_store.write_detection_batch(db, pid, MODEL, [_d(x=0.5)],
                                  runtime_fingerprint="rt-2")
     assert not db.conn.in_transaction
     assert [r["id"] for r in _det_rows(db, pid)] == first
@@ -485,14 +486,14 @@ def test_get_detections_filters_at_read_time_and_orders_primary_first(db):
     full = _raw_det(db, pid, conf=0.99, model="full-image")
     mid = _raw_det(db, pid, conf=0.6)
     high = _raw_det(db, pid, conf=0.8)
-    rows = db.get_detections(pid, min_conf=0.5)
+    rows = detection_store.get_detections(db, pid, min_conf=0.5)
     assert isinstance(rows[0], sqlite3.Row)
     assert [r["id"] for r in rows] == [high, mid, full, person]
-    assert [r["id"] for r in db.get_detections(pid, min_conf=0)] == [
+    assert [r["id"] for r in detection_store.get_detections(db, pid, min_conf=0)] == [
         high, mid, low, full, person,
     ]
-    assert [r["id"] for r in db.get_detections(
-        pid, min_conf=0, detector_model="full-image")] == [full]
+    assert [r["id"] for r in detection_store.get_detections(
+        db, pid, min_conf=0, detector_model="full-image")] == [full]
 
 
 def test_get_detections_manual_choice_then_quality_beat_confidence(db):
@@ -506,13 +507,13 @@ def test_get_detections_manual_choice_then_quality_beat_confidence(db):
            VALUES (?, 'k', '{}', 0.99, 0.0, '{}')""", (c,),
     )
     db.conn.commit()
-    assert [r["id"] for r in db.get_detections(pid, min_conf=0)] == [c, a, b]
+    assert [r["id"] for r in detection_store.get_detections(db, pid, min_conf=0)] == [c, a, b]
     db.conn.execute(
         "INSERT INTO photo_subject_choices (photo_id, detection_id) VALUES (?, ?)",
         (pid, b),
     )
     db.conn.commit()
-    assert [r["id"] for r in db.get_detections(pid, min_conf=0)] == [b, c, a]
+    assert [r["id"] for r in detection_store.get_detections(db, pid, min_conf=0)] == [b, c, a]
 
 
 def test_get_detections_default_floor_comes_from_workspace_config(db, monkeypatch):
@@ -520,10 +521,10 @@ def test_get_detections_default_floor_comes_from_workspace_config(db, monkeypatc
     _raw_det(db, pid, conf=0.3)
     keep = _raw_det(db, pid, conf=0.7)
     calls = _config_recorder(monkeypatch, db, {"detector_confidence": 0.5})
-    assert [r["id"] for r in db.get_detections(pid)] == [keep]
+    assert [r["id"] for r in detection_store.get_detections(db, pid)] == [keep]
     assert len(calls) == 1
     _config_recorder(monkeypatch, db, {})
-    assert len(db.get_detections(pid)) == 2  # default floor 0.2
+    assert len(detection_store.get_detections(db, pid)) == 2  # default floor 0.2
 
 
 def test_get_detections_for_photos_shape_and_omissions(db):
@@ -532,32 +533,32 @@ def test_get_detections_for_photos_shape_and_omissions(db):
     a = _raw_det(db, p1, conf=0.6)
     b = _raw_det(db, p1, conf=0.9, model="other-det", category="animal", x=0.5)
     _raw_det(db, p2, conf=0.1)
-    result = db.get_detections_for_photos([p1, p2, p3], min_conf=0.5)
+    result = detection_store.get_detections_for_photos(db, [p1, p2, p3], min_conf=0.5)
     assert result == {p1: [
         {"id": b, "x": 0.5, "y": 0.0, "w": 1.0, "h": 1.0, "confidence": 0.9,
          "category": "animal", "detector_model": "other-det"},
         {"id": a, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "confidence": 0.6,
          "category": "animal", "detector_model": MODEL},
     ]}
-    assert [d["id"] for d in db.get_detections_for_photos(
-        [p1], min_conf=0, detector_model=MODEL)[p1]] == [a]
+    assert [d["id"] for d in detection_store.get_detections_for_photos(
+        db, [p1], min_conf=0, detector_model=MODEL)[p1]] == [a]
 
 
 def test_get_detections_for_photos_empty_input_skips_config(db, monkeypatch):
     monkeypatch.setattr(db, "get_effective_config",
                         lambda base: pytest.fail("config read"))
-    assert db.get_detections_for_photos([]) == {}
-    assert db.get_detections_for_photos(()) == {}
+    assert detection_store.get_detections_for_photos(db, []) == {}
+    assert detection_store.get_detections_for_photos(db, ()) == {}
 
 
 def test_get_detections_for_photos_default_floor(db, monkeypatch):
     pid = _photo(db)
     _raw_det(db, pid, conf=0.3)
     calls = _config_recorder(monkeypatch, db, {"detector_confidence": 0.5})
-    assert db.get_detections_for_photos([pid]) == {}
+    assert detection_store.get_detections_for_photos(db, [pid]) == {}
     assert len(calls) == 1
     _config_recorder(monkeypatch, db, {})
-    assert len(db.get_detections_for_photos([pid])[pid]) == 1
+    assert len(detection_store.get_detections_for_photos(db, [pid])[pid]) == 1
 
 
 def test_get_detections_for_photos_dedups_across_chunks(db):
@@ -566,7 +567,7 @@ def test_get_detections_for_photos_dedups_across_chunks(db):
     det = _raw_det(db, target)
     fillers = _bulk_photos(db, fid, db_module._SQLITE_PARAM_CHUNK_SIZE)
     statements = _trace(db)
-    result = db.get_detections_for_photos([target, *fillers, target], min_conf=0)
+    result = detection_store.get_detections_for_photos(db, [target, *fillers, target], min_conf=0)
     db.conn.set_trace_callback(None)
     selects = [s for s in statements if "FROM detections" in s]
     assert len(selects) == 2
@@ -576,7 +577,7 @@ def test_get_detections_for_photos_dedups_across_chunks(db):
 
 def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
     pid = _photo(db)
-    (det_id,) = db.save_detections(pid, [_d()], MODEL)
+    (det_id,) = db.detections.save(pid, [_d()], MODEL)
     for species, conf, model, fp in [
         ("Robin", 0.4, "clf-a", "fp1"),
         ("Wren", 0.9, "clf-a", "fp1"),
@@ -589,20 +590,20 @@ def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
     def species(rows):
         return [r["species"] for r in rows]
 
-    assert species(db.get_predictions_for_detection(
-        det_id, min_classifier_conf=0)) == ["Wren", "Crow", "Jay", "Robin"]
-    assert species(db.get_predictions_for_detection(
-        det_id, min_classifier_conf=0.5, classifier_model="clf-a",
+    assert species(detection_store.get_predictions_for_detection(
+        db, det_id, min_classifier_conf=0)) == ["Wren", "Crow", "Jay", "Robin"]
+    assert species(detection_store.get_predictions_for_detection(
+        db, det_id, min_classifier_conf=0.5, classifier_model="clf-a",
     )) == ["Wren", "Crow"]
-    assert species(db.get_predictions_for_detection(
-        det_id, min_classifier_conf=0, classifier_model="clf-a",
+    assert species(detection_store.get_predictions_for_detection(
+        db, det_id, min_classifier_conf=0, classifier_model="clf-a",
         labels_fingerprint="fp1",
     )) == ["Wren", "Robin"]
     calls = _config_recorder(monkeypatch, db, {"classifier_confidence": 0.75})
-    assert species(db.get_predictions_for_detection(det_id)) == ["Wren", "Crow"]
+    assert species(detection_store.get_predictions_for_detection(db, det_id)) == ["Wren", "Crow"]
     assert len(calls) == 1
     _config_recorder(monkeypatch, db, {})
-    assert len(db.get_predictions_for_detection(det_id)) == 4
+    assert len(detection_store.get_predictions_for_detection(db, det_id)) == 4
 
 
 # -- clears and deletes ------------------------------------------------------
@@ -611,9 +612,9 @@ def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
 def test_clear_detections_for_every_model(db):
     fid = _folder(db)
     pid, other = _photo(db, "a.jpg", fid), _photo(db, "b.jpg", fid)
-    db.write_detection_batch(pid, MODEL, [_d()])
-    db.write_detection_batch(pid, "other-det", [_d()])
-    db.write_detection_batch(other, MODEL, [_d()])
+    detection_store.write_detection_batch(db, pid, MODEL, [_d()])
+    detection_store.write_detection_batch(db, pid, "other-det", [_d()])
+    detection_store.write_detection_batch(db, other, MODEL, [_d()])
     db.detections.clear(pid)
     assert not db.conn.in_transaction
     with _reader(db) as reader:
@@ -629,28 +630,13 @@ def test_clear_detections_for_every_model(db):
 
 def test_clear_detections_for_one_model(db):
     pid = _photo(db)
-    db.write_detection_batch(pid, MODEL, [_d()])
-    (kept,) = db.write_detection_batch(pid, "other-det", [_d()])
+    detection_store.write_detection_batch(db, pid, MODEL, [_d()])
+    (kept,) = detection_store.write_detection_batch(db, pid, "other-det", [_d()])
     db.detections.clear(pid, detector_model=MODEL)
     assert not db.conn.in_transaction
     assert [r["id"] for r in _det_rows(db, pid)] == [kept]
     assert _run_row(db, pid) is None
     assert _run_row(db, pid, "other-det") is not None
-
-
-def test_get_existing_detection_photo_ids_delegates(db, monkeypatch):
-    from repositories.model_runs import ModelRunsRepository
-
-    calls = []
-
-    def fake(self, detector_model):
-        calls.append(detector_model)
-        return {1, 2}
-
-    monkeypatch.setattr(ModelRunsRepository, "get_detector_run_photo_ids", fake)
-    assert db.get_existing_detection_photo_ids() == {1, 2}
-    assert db.get_existing_detection_photo_ids("other") == {1, 2}
-    assert calls == ["megadetector-v6", "other"]
 
 
 def test_get_detection_subject_exposure_ev(db):
@@ -698,16 +684,16 @@ def test_get_detection_ids_for_photos_chunks_by_900(db):
 
 def test_delete_detections_by_ids_empty_is_a_no_op(db):
     statements = _trace(db)
-    assert db.delete_detections_by_ids([]) is None
+    assert detection_store.delete_detections_by_ids(db, []) is None
     db.conn.set_trace_callback(None)
     assert statements == []
 
 
 def test_delete_detections_by_ids_cascades_and_commits(db):
     pid = _photo(db)
-    a, b = db.save_detections(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
+    a, b = db.detections.save(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
     db.predictions.add(a, species="Robin", confidence=0.9, model="clf")
-    db.delete_detections_by_ids({a})
+    detection_store.delete_detections_by_ids(db, {a})
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         assert [r["id"] for r in reader.execute(
@@ -731,7 +717,7 @@ def test_delete_detections_by_ids_resyncs_subject_state(db):
     db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?",
                     (cleared,))
     db.conn.commit()
-    db.delete_detections_by_ids([top, only])
+    detection_store.delete_detections_by_ids(db, [top, only])
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         state = dict(reader.execute(
@@ -748,7 +734,7 @@ def test_delete_detections_by_ids_chunks_by_900(db):
     pid = _photo(db)
     ids = [_raw_det(db, pid, x=i / 10000) for i in range(901)]
     statements = _trace(db)
-    db.delete_detections_by_ids(ids)
+    detection_store.delete_detections_by_ids(db, ids)
     db.conn.set_trace_callback(None)
     # Cascade sub-programs re-report the statement; count distinct ones.
     deletes = list(dict.fromkeys(
@@ -781,13 +767,13 @@ def test_list_misses_categories_order_and_exclusions(db):
     _miss(db, rejected, miss_clipped=1, flag="rejected")
     _miss(db, null_flag, miss_oof=1, flag=None)
 
-    assert [m["id"] for m in db.list_misses()] == [clip, oof, ns, null_flag]
-    assert [m["id"] for m in db.list_misses("no_subject")] == [ns]
-    assert [m["id"] for m in db.list_misses("clipped")] == [clip]
-    assert [m["id"] for m in db.list_misses("oof")] == [oof, null_flag]
+    assert [m["id"] for m in miss_flags.list_misses(db)] == [clip, oof, ns, null_flag]
+    assert [m["id"] for m in miss_flags.list_misses(db, "no_subject")] == [ns]
+    assert [m["id"] for m in miss_flags.list_misses(db, "clipped")] == [clip]
+    assert [m["id"] for m in miss_flags.list_misses(db, "oof")] == [oof, null_flag]
     with pytest.raises(KeyError):
-        db.list_misses("blurry")
-    row = db.list_misses("clipped")[0]
+        miss_flags.list_misses(db, "blurry")
+    row = miss_flags.list_misses(db, "clipped")[0]
     assert set(row) == {
         "id", "folder_id", "filename", "companion_path", "timestamp",
         "burst_id", "subject_size", "crop_complete", "subject_tenengrad",
@@ -802,18 +788,18 @@ def test_list_misses_since_and_photo_scope(db):
     old, new = _photo(db, "old.jpg", fid), _photo(db, "new.jpg", fid)
     _miss(db, old, miss_clipped=1, miss_computed_at="2024-01-01")
     _miss(db, new, miss_clipped=1, miss_computed_at="2024-02-01")
-    assert [m["id"] for m in db.list_misses(since="2024-01-15")] == [new]
-    assert [m["id"] for m in db.list_misses("clipped", since="2024-01-15")] == [new]
-    assert db.list_misses(photo_ids=[]) == []
-    assert [m["id"] for m in db.list_misses(photo_ids={old})] == [old]
-    assert db.list_misses(since="2024-01-15", photo_ids=[old]) == []
+    assert [m["id"] for m in miss_flags.list_misses(db, since="2024-01-15")] == [new]
+    assert [m["id"] for m in miss_flags.list_misses(db, "clipped", since="2024-01-15")] == [new]
+    assert miss_flags.list_misses(db, photo_ids=[]) == []
+    assert [m["id"] for m in miss_flags.list_misses(db, photo_ids={old})] == [old]
+    assert miss_flags.list_misses(db, since="2024-01-15", photo_ids=[old]) == []
 
 
 def test_list_misses_large_photo_scope_is_staged(db):
     fid = _folder(db)
     pids = _bulk_photos(db, fid, db_module._SQLITE_PARAM_CHUNK_SIZE + 1,
                         miss_oof=1)
-    got = db.list_misses(photo_ids=pids[1:])
+    got = miss_flags.list_misses(db, photo_ids=pids[1:])
     assert {m["id"] for m in got} == set(pids[1:])
 
 
@@ -823,21 +809,21 @@ def test_list_misses_is_scoped_to_the_active_workspace(db):
     _miss(db, mine, miss_clipped=1)
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    assert db.list_misses() == []
-    assert db.bulk_reject_miss_category("clipped") == []
+    assert miss_flags.list_misses(db) == []
+    assert miss_flags.bulk_reject_miss_category(db, "clipped") == []
 
 
 def test_list_misses_requires_an_active_workspace_before_category(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.list_misses("blurry")
+        miss_flags.list_misses(db, "blurry")
 
 
 def test_list_misses_empty_skips_config(db, monkeypatch):
     _photo(db)
     monkeypatch.setattr(db, "get_effective_config",
                         lambda base: pytest.fail("config read"))
-    assert db.list_misses() == []
+    assert miss_flags.list_misses(db) == []
 
 
 def test_list_misses_attaches_primary_and_raw_detections(db, monkeypatch):
@@ -856,7 +842,7 @@ def test_list_misses_attaches_primary_and_raw_detections(db, monkeypatch):
     _raw_det(db, weak, conf=0.4, x=0.3)
     _raw_det(db, none, conf=0.9, category="vehicle")
 
-    misses = {m["id"]: m for m in db.list_misses()}
+    misses = {m["id"]: m for m in miss_flags.list_misses(db)}
     assert len(calls) == 1
     s, w, n = misses[strong], misses[weak], misses[none]
     assert s["detection_conf"] == 0.8
@@ -874,7 +860,7 @@ def test_list_misses_default_floor_and_detection_chunks(db):
     _raw_det(db, pids[0], conf=0.25)
     _raw_det(db, pids[-1], conf=0.15)
     statements = _trace(db)
-    misses = {m["id"]: m for m in db.list_misses()}
+    misses = {m["id"]: m for m in miss_flags.list_misses(db)}
     db.conn.set_trace_callback(None)
     det_selects = [s for s in statements if "FROM detections" in s
                    and "photo_id IN" in s]
@@ -888,8 +874,8 @@ def test_list_misses_default_floor_and_detection_chunks(db):
 def test_clear_miss_flag_zeroes_one_column_and_commits(db):
     pid = _photo(db)
     _miss(db, pid, miss_no_subject=1, miss_clipped=1, miss_oof=1)
-    db.clear_miss_flag(pid, "oof")
-    db.clear_miss_flag(pid, "no_subject")
+    miss_flags.clear_miss_flag(db, pid, "oof")
+    miss_flags.clear_miss_flag(db, pid, "no_subject")
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         row = reader.execute(
@@ -898,7 +884,7 @@ def test_clear_miss_flag_zeroes_one_column_and_commits(db):
         ).fetchone()
     assert tuple(row) == (0, 1, 0)
     with pytest.raises(KeyError):
-        db.clear_miss_flag(pid, "blurry")
+        miss_flags.clear_miss_flag(db, pid, "blurry")
 
 
 def test_clear_miss_flag_rejects_other_workspace_photos_first(db):
@@ -906,7 +892,7 @@ def test_clear_miss_flag_rejects_other_workspace_photos_first(db):
     _miss(db, pid, miss_clipped=1)
     db.set_active_workspace(db.create_workspace("Other"))
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.clear_miss_flag(pid, "blurry")
+        miss_flags.clear_miss_flag(db, pid, "blurry")
     assert db.conn.execute(
         "SELECT miss_clipped FROM photos WHERE id = ?", (pid,),
     ).fetchone()[0] == 1
@@ -919,7 +905,7 @@ def test_bulk_reject_returns_old_values_and_commits(db):
     _miss(db, b, miss_clipped=1, flag=None)
     _miss(db, c, miss_clipped=1, flag="rejected")
     _miss(db, d, miss_oof=1, flag="flagged")
-    affected = db.bulk_reject_miss_category("clipped")
+    affected = miss_flags.bulk_reject_miss_category(db, "clipped")
     assert sorted(affected, key=lambda r: r["photo_id"]) == [
         {"photo_id": a, "old_value": "none"},
         {"photo_id": b, "old_value": None},
@@ -936,14 +922,14 @@ def test_bulk_reject_since_and_scope(db):
     _miss(db, old, miss_oof=1, miss_computed_at="2024-01-01")
     _miss(db, new, miss_oof=1, miss_computed_at="2024-02-01")
     _miss(db, other, miss_oof=1, miss_computed_at="2024-02-01")
-    assert db.bulk_reject_miss_category("oof", photo_ids=[]) == []
-    assert db.bulk_reject_miss_category(
-        "oof", since="2024-01-15", photo_ids=[new, old],
+    assert miss_flags.bulk_reject_miss_category(db, "oof", photo_ids=[]) == []
+    assert miss_flags.bulk_reject_miss_category(
+        db, "oof", since="2024-01-15", photo_ids=[new, old],
     ) == [{"photo_id": new, "old_value": "none"}]
-    assert db.bulk_reject_miss_category("oof", since="2024-01-15") == [
+    assert miss_flags.bulk_reject_miss_category(db, "oof", since="2024-01-15") == [
         {"photo_id": other, "old_value": "none"},
     ]
-    assert db.bulk_reject_miss_category("oof") == [
+    assert miss_flags.bulk_reject_miss_category(db, "oof") == [
         {"photo_id": old, "old_value": "none"},
     ]
 
@@ -951,16 +937,16 @@ def test_bulk_reject_since_and_scope(db):
 def test_bulk_reject_validates_category_before_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(KeyError):
-        db.bulk_reject_miss_category("blurry")
+        miss_flags.bulk_reject_miss_category(db, "blurry")
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.bulk_reject_miss_category("oof")
+        miss_flags.bulk_reject_miss_category(db, "oof")
 
 
 def test_bulk_reject_updates_in_chunks_of_500(db):
     fid = _folder(db)
     pids = _bulk_photos(db, fid, 501, miss_no_subject=1)
     statements = _trace(db)
-    affected = db.bulk_reject_miss_category("no_subject")
+    affected = miss_flags.bulk_reject_miss_category(db, "no_subject")
     db.conn.set_trace_callback(None)
     # Distinct texts, in order: the trace callback re-reports the parent
     # statement each time the per-row duplicate_rejections trigger fires.
@@ -993,32 +979,36 @@ def test_get_detection_confidence_summary_covers_every_model_and_chunks(
 
 # -- structure ---------------------------------------------------------------
 
-# Coordinated detection operations kept on ``Database``: each adds a check, a
-# config floor, workspace/filter scope or a follow-up step before or after
-# the repository call.
-_DELEGATING_DETECTION_METHODS = (
-    "save_detections",
-    "write_detection_batch",
-    "get_detections",
-    "get_detections_for_photos",
-    "get_predictions_for_detection",
-    "list_misses",
-    "clear_miss_flag",
-    "bulk_reject_miss_category",
-    "delete_detections_by_ids",
+# Coordinated detection operations in the services: each adds a config
+# floor, workspace/filter scope, the pinned-run lookup or a follow-up step
+# before or after the repository call.
+_DELEGATING_DETECTION_FUNCTIONS = (
+    (detection_store, "write_detection_batch"),
+    (detection_store, "get_detections"),
+    (detection_store, "get_detections_for_photos"),
+    (detection_store, "get_predictions_for_detection"),
+    (detection_store, "delete_detections_by_ids"),
+    (miss_flags, "list_misses"),
+    (miss_flags, "clear_miss_flag"),
+    (miss_flags, "bulk_reject_miss_category"),
 )
+
+# The modules that compose the repository methods below.
+_DETECTION_SERVICES = ("detection_store.py", "miss_flags.py")
 
 _REMOVED_DETECTION_WRAPPERS = (
     "_upsert_detection_rows",
+    "save_detections",
+    "get_existing_detection_photo_ids",
     "clear_detections",
     "get_detection_ids_for_photos",
     "get_detection_subject_exposure_ev",
     "get_detection_confidence_summary",
 )
 
-# Repository methods reached only through the kept methods above.
+# Repository methods reached only through the service functions above.
 _FACADE_ONLY_DETECTION_METHODS = (
-    "save", "write_batch", "get", "get_for_photos", "get_predictions",
+    "write_batch", "get", "get_for_photos", "get_predictions",
     "delete_by_ids", "miss_column", "miss_where", "list_miss_photos",
     "attach_miss_detections", "clear_miss_flag", "reject_misses",
 )
@@ -1036,15 +1026,32 @@ def _self_attrs(fn_obj):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_DETECTION_METHODS)
-def test_detection_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
+def _db_attrs(fn_obj):
+    """Attributes a service function reads off its ``db`` argument."""
+    source = textwrap.dedent(inspect.getsource(fn_obj))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "db"
+    }
+
+
+@pytest.mark.parametrize(
+    "module,name", _DELEGATING_DETECTION_FUNCTIONS,
+    ids=[name for _module, name in _DELEGATING_DETECTION_FUNCTIONS],
+)
+def test_detection_function_delegates_to_repository(module, name):
+    attrs = _db_attrs(getattr(module, name))
     assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to DetectionsRepository"
+        f"{name} touches db.conn; move the SQL to DetectionsRepository"
     )
-    assert "_detections_repository" in attrs, (
-        f"Database.{name} no longer delegates to DetectionsRepository"
+    assert "detections" in attrs, (
+        f"{name} no longer delegates to DetectionsRepository"
     )
+    assert not hasattr(Database, name), f"Database.{name} came back"
 
 
 def test_detections_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
@@ -1078,7 +1085,7 @@ def test_detections_has_no_forwarding_wrappers_on_database():
 
 
 def test_production_code_uses_facade_for_coordinated_detection_work():
-    """Nothing outside the data layer reaches past a kept ``Database`` method."""
+    """Nothing outside the data layer reaches past a detection service."""
     import re
     from pathlib import Path
 
@@ -1091,38 +1098,34 @@ def test_production_code_uses_facade_for_coordinated_detection_work():
         rel = path.relative_to(root)
         if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
             continue
+        if rel.parts[0] == "services" and rel.name in _DETECTION_SERVICES:
+            continue
         text = path.read_text(encoding="utf-8")
         offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
     assert offenders == [], (
-        "Call the Database method instead (db.save_detections, "
-        "db.write_detection_batch, db.get_detections, db.list_misses, "
-        f"db.delete_detections_by_ids, ...): {offenders}"
+        "Call the service instead (detection_store.write_detection_batch, "
+        "detection_store.get_detections, miss_flags.list_misses, "
+        f"detection_store.delete_detections_by_ids, ...): {offenders}"
     )
-
-
-def test_existing_detection_photo_ids_composes_through_the_facade():
-    attrs = _self_attrs(Database.get_existing_detection_photo_ids)
-    assert "conn" not in attrs
-    assert "model_runs" in attrs
 
 
 def test_pin_check_comes_from_the_model_runs_domain():
     """``detector_run_is_pinned`` belongs to the model-runs domain."""
-    assert "model_runs" in _self_attrs(Database.write_detection_batch)
+    assert "model_runs" in _db_attrs(detection_store.write_detection_batch)
 
 
-@pytest.mark.parametrize("name", [
-    "get_detections", "get_detections_for_photos",
-    "get_predictions_for_detection", "list_misses",
+@pytest.mark.parametrize("fn", [
+    detection_store.get_detections, detection_store.get_detections_for_photos,
+    detection_store.get_predictions_for_detection, miss_flags.list_misses,
 ])
-def test_floors_read_config_through_the_facade(name):
-    assert "get_effective_config" in _self_attrs(getattr(Database, name))
+def test_floors_read_config_through_the_facade(fn):
+    assert "get_effective_config" in _db_attrs(fn)
 
 
-@pytest.mark.parametrize("name", ["list_misses", "bulk_reject_miss_category"])
-def test_misses_scope_through_the_facade(name):
-    attrs = _self_attrs(getattr(Database, name))
-    assert {"_ws_id", "stats"} <= attrs
+@pytest.mark.parametrize("fn", [miss_flags.list_misses, miss_flags.bulk_reject_miss_category])
+def test_misses_scope_through_the_facade(fn):
+    attrs = _db_attrs(fn)
+    assert {"require_workspace_id", "stats"} <= attrs
 
 
 def test_repository_imports_no_db_code():

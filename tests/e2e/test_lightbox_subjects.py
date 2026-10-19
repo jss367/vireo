@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from playwright.sync_api import expect
+from services import detection_store
 
 
 def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path):
@@ -22,7 +23,7 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     photo_id = db.add_photo(folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                            width=640, height=400)
-    ids = db.write_detection_batch(photo_id, 'megadetector-v6', [
+    ids = detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [
         {'box': {'x': .06, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .95, 'category': 'animal'},
         {'box': {'x': .59, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .8, 'category': 'animal'},
     ])
@@ -71,7 +72,7 @@ def test_existing_photo_can_analyze_without_rerunning_models(live_server, page, 
     folder_id = db.add_folder(str(tmp_path))
     photo_id = db.add_photo(folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=1, width=320, height=240)
-    db.write_detection_batch(photo_id, 'megadetector-v6', [
+    detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ])
     page.goto(live_server['url'] + '/browse')

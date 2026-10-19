@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
-from services import stage_counts, subject_masks
+from services import detection_store, stage_counts, subject_masks
 from subjects import analyze_photo, payload, select_primary
 
 
@@ -14,7 +14,7 @@ def subject_photo(db, tmp_path):
     pixels[:, 160:] = np.where((np.indices((160, 160)).sum(axis=0) // 4 % 2)[..., None], 160, 60)
     Image.fromarray(pixels).save(path)
     photo_id = db.add_photo(folder_id=folder, filename=path.name, extension=".jpg", file_size=path.stat().st_size, file_mtime=1)
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", [
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
         {"box": {"x": .05, "y": .1, "w": .35, "h": .8}, "confidence": .95, "category": "animal"},
         {"box": {"x": .6, "y": .1, "w": .35, "h": .8}, "confidence": .7, "category": "animal"},
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .05, "category": "animal"},
@@ -29,8 +29,8 @@ def test_analyzes_every_retained_subject_and_selects_quality(db, subject_photo):
     result = payload(db, photo_id)
     assert len(result["subjects"]) == 2
     assert result["primary_detection_id"] == ids[1]
-    assert db.get_detections(photo_id)[0]["id"] == ids[1]
-    assert db.get_detections_for_photos([photo_id])[photo_id][0]["id"] == ids[1]
+    assert detection_store.get_detections(db, photo_id)[0]["id"] == ids[1]
+    assert detection_store.get_detections_for_photos(db, [photo_id])[photo_id][0]["id"] == ids[1]
     for subject in result["subjects"]:
         analysis = subject["analysis"]
         assert 0 <= analysis["quality_score"] <= 1
@@ -82,10 +82,10 @@ def test_switch_clears_other_subjects_features(db, subject_photo):
 def test_choice_remembered_when_detection_temporarily_disappears(db, subject_photo):
     photo_id, ids, path = subject_photo
     select_primary(db, photo_id, ids[0])
-    original = dict(db.get_detections(photo_id)[0])
+    original = dict(detection_store.get_detections(db, photo_id)[0])
     db.detections.clear(photo_id)
     assert payload(db, photo_id)["choice_unavailable"]
-    db.write_detection_batch(photo_id, original["detector_model"], [{
+    detection_store.write_detection_batch(db, photo_id, original["detector_model"], [{
         "box": {k: original["box_" + k] for k in "xywh"}, "confidence": .95, "category": "animal"}])
     assert payload(db, photo_id)["primary_detection_id"] == ids[0]
     assert not payload(db, photo_id)["choice_unavailable"]
@@ -94,7 +94,7 @@ def test_choice_remembered_when_detection_temporarily_disappears(db, subject_pho
 def test_subject_api_workspace_and_validation(app_and_db):
     app, db = app_and_db
     photo_id = db.photos.list_page()[0]["id"]
-    ids = db.write_detection_batch(photo_id, "megadetector-v6", [{"box": {"x": .1, "y": .2, "w": .3, "h": .4}, "confidence": .9, "category": "animal"}])
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [{"box": {"x": .1, "y": .2, "w": .3, "h": .4}, "confidence": .9, "category": "animal"}])
     client = app.test_client()
     assert client.get(f"/api/photos/{photo_id}/subjects").get_json()["primary_detection_id"] == ids[0]
     response = client.put(f"/api/photos/{photo_id}/primary-subject", json={"detection_id": ids[0]})
@@ -108,7 +108,7 @@ def test_subject_api_workspace_and_validation(app_and_db):
 def test_stale_masks_follow_selected_subject(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
-    det = db.get_detections(photo_id)[0]
+    det = detection_store.get_detections(db, photo_id)[0]
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id,det["detector_model"],*(det["box_" + k] for k in "xywh")))
     assert db.masks_features.find_stale() == []
@@ -151,7 +151,7 @@ def test_purging_old_detection_projects_remaining_primary(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     select_primary(db, photo_id, ids[1])
-    db.delete_detections_by_ids([ids[1]])
+    detection_store.delete_detections_by_ids(db, [ids[1]])
     result = payload(db, photo_id)
     assert result['primary_detection_id'] == ids[0]
     assert result['choice_unavailable']
@@ -189,7 +189,7 @@ def test_predictions_stay_attached_to_each_subject_and_respect_review(db, subjec
 def test_cannot_reactivate_mask_from_previous_primary(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
-    det = db.get_detections(photo_id)[0]
+    det = detection_store.get_detections(db, photo_id)[0]
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id, det['detector_model'], *(det['box_' + k] for k in 'xywh')))
     subject_masks.set_active_mask_variant(db, photo_id, 'test')
@@ -212,7 +212,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     analyze_photo(db, photo_id, path)
     # Initial primary is ids[1] (sharp/higher-quality subject). Insert a
     # mask matching it and activate; photo_subject_state now names ids[1].
-    det_hi = next(d for d in db.get_detections(photo_id) if d['id'] == ids[1])
+    det_hi = next(d for d in detection_store.get_detections(db, photo_id) if d['id'] == ids[1])
     db.conn.execute(
         "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
         "detector_model,prompt_x,prompt_y,prompt_w,prompt_h) "
@@ -225,7 +225,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     # current effective primary flips to ids[0] (0.95) WITHOUT syncing
     # photo_subject_state, which still names ids[1].
     db.workspaces.update(db._ws_id(), config_overrides={'detector_confidence': 0.8})
-    det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
+    det_lo = next(d for d in detection_store.get_detections(db, photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
     # A re-extraction under the new floor would rewrite the mask row with
     # the new primary's prompt; activating that mask must not raise even
@@ -248,7 +248,7 @@ def test_eye_predictions_use_primary_even_when_other_detection_is_more_confident
     # ``set_active_mask_variant``, which requires a matching photo_masks
     # row for the current primary. The stale-mask predicate now insists
     # on the same invariant.
-    primary_det = next(d for d in db.get_detections(photo_id)
+    primary_det = next(d for d in detection_store.get_detections(db, photo_id)
                        if d['category'] == 'animal'
                        and d['detector_model'] != 'full-image')
     db.conn.execute(
@@ -285,7 +285,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     for detection_id in ids[:2]:
         db.predictions.add(detection_id, 'Test', .9, 'bioclip',
                           taxonomy={'class': 'Aves', 'scientific_name': 'Test bird'})
-    det_hi = next(d for d in db.get_detections(photo_id) if d['id'] == ids[1])
+    det_hi = next(d for d in detection_store.get_detections(db, photo_id) if d['id'] == ids[1])
     db.conn.execute(
         "INSERT INTO photo_masks(photo_id,variant,path,created_at,"
         "detector_model,prompt_x,prompt_y,prompt_w,prompt_h) "
@@ -312,7 +312,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # Regenerate the mask against the new primary (as extract_masks_stage
     # would). photo_subject_state is intentionally not touched — the eye
     # stage must resolve the primary at the current floor.
-    det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
+    det_lo = next(d for d in detection_store.get_detections(db, photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
     db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
@@ -365,7 +365,7 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
                                    runner, {"id": 1}, True, db, det_conf_threshold=.2)
     state = db.conn.execute("SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
     if replacement and not cancel_during_detection:
-        assert state["detection_id"] == db.get_detections(photo_id)[0]["id"]
+        assert state["detection_id"] == detection_store.get_detections(db, photo_id)[0]["id"]
     else:
         assert state is None
     row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
@@ -404,7 +404,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     if empty:
         db.detections.clear(photo_id)
-        db.write_detection_batch(photo_id, "megadetector-v6", [])
+        detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [])
     else:
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))
     db.conn.commit()

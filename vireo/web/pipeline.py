@@ -33,7 +33,7 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
-from services import subject_masks
+from services import detection_store, subject_masks
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -940,7 +940,7 @@ def create_pipeline_blueprint(
         result["render_key"] = render_key_for_recipe(result["edit_recipe"])
         # Get primary detection from global detections table (threshold
         # resolved from workspace-effective config inside get_detections).
-        dets = db.get_detections(photo_id)
+        dets = detection_store.get_detections(db, photo_id)
         if dets:
             det = dets[0]
             result["detection_box"] = {
@@ -1752,7 +1752,7 @@ def create_pipeline_blueprint(
         except (TypeError, ValueError):
             min_conf = 0.2
         raw_dets = [
-            d for d in db.get_detections(photo_id, min_conf=0)
+            d for d in detection_store.get_detections(db, photo_id, min_conf=0)
             if d["detector_model"] != "full-image"
         ]
         dets = [d for d in raw_dets if d["detector_confidence"] >= min_conf]
@@ -1772,7 +1772,7 @@ def create_pipeline_blueprint(
         # is left-joined from prediction_review; absent rows are 'pending'.
         #
         # Apply the same workspace-effective detector_confidence floor used
-        # by `db.get_detections` above so result["predictions"] stays in
+        # by `detection_store.get_detections` above so result["predictions"] stays in
         # sync with result["detections"]. Otherwise raising the threshold
         # leaves stale species rows for detections the UI is meant to hide.
         # Also pin to the most recent labels_fingerprint per

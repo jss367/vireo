@@ -19,6 +19,7 @@ import tempfile
 
 from flask import Blueprint, jsonify, make_response, request
 from photo_payload import attach_nested_edit_recipes
+from services import detection_store
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         # (mirrors serve_thumbnail's workspace gate).
         if db.photos.get(photo_id, verify_workspace=True) is None:
             return json_error("not found", 404)
-        dets = db.get_detections(photo_id)
+        dets = detection_store.get_detections(db, photo_id)
         return jsonify([dict(d) for d in dets])
 
     def _computation_store():

@@ -26,6 +26,7 @@ import them so a single change covers every flow.
 import json
 import logging
 import os
+import sqlite3
 from datetime import UTC, datetime
 
 from exif_orientation import orientation_swaps_axes
@@ -154,7 +155,7 @@ def image_size_after_exif_orientation(img):
     try:
         orientation = img.getexif().get(EXIF_ORIENTATION_TAG)
     except Exception:
-        # Malformed EXIF raises a wide set from PIL; treat as unrotated.
+        # broad: malformed EXIF raises a wide set from PIL; treat as unrotated.
         log.debug("Could not read EXIF orientation", exc_info=True)
     if orientation_swaps_axes(orientation):
         return height, width
@@ -281,7 +282,7 @@ def working_copy_satisfies_recipe_render(
         with _PILImage.open(wc_path) as wc_img:
             wc_w, wc_h = image_size_after_exif_orientation(wc_img)
     except Exception:
-        # PIL raises a wide set (OSError, SyntaxError, DecompressionBombError).
+        # broad: PIL raises a wide set (OSError, SyntaxError, DecompressionBombError).
         log.debug("Could not read working copy size of %s", wc_path, exc_info=True)
         return False
     original_w, original_h = recipe_source_dimensions(photo)
@@ -350,7 +351,7 @@ def path_satisfies_recipe_render(path, photo, recipe, max_size):
         from PIL import Image as _PILImage
         with _PILImage.open(path) as img:
             width, height = image_size_after_exif_orientation(img)
-    except Exception:
+    except Exception:  # broad: PIL raises a wide set on bad files; the path is not used
         log.debug("Could not read image size of %s", path, exc_info=True)
         return False
     required_w, required_h = rendered_recipe_dimensions(
@@ -566,7 +567,7 @@ def record_working_copy_failure(db, photo, source_path=None):
     try:
         db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
         db.commit()
-    except Exception:
+    except sqlite3.Error:
         log.debug(
             "Could not refresh working_copy_failed marker for photo %s",
             photo_id, exc_info=True,

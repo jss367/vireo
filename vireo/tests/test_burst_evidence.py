@@ -240,7 +240,7 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     app, db = app_and_db
     folder_id = _folder_id(db)
     pids = _seed_burst(db, folder_id, 3069, [10, 80, 30])
-    db.save_detections(pids[1], [
+    db.detections.save(pids[1], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
         {"box": {"x": 0.6, "y": 0.6, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
     ], detector_model="MDV6")
@@ -465,7 +465,7 @@ def test_focus_crop_falls_back_to_subject_then_frame(app_and_db):
     assert client.get(f"/photos/{pid}/focus-crop?basis=eye").status_code == 404
     assert client.get(f"/photos/{pid}/focus-crop?basis=subject").status_code == 404
 
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     resp = client.get(f"/photos/{pid}/focus-crop?size=128")
@@ -577,7 +577,7 @@ def test_focus_crop_center_puts_the_window_where_the_reviewer_chose(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
-    db.save_detections(pid, [
+    db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
     client = app.test_client()

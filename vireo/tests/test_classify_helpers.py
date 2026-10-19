@@ -41,7 +41,7 @@ def test_detect_batch_uses_cached_detection():
 
     mock_db = MagicMock()
     # Mock get_detections to return existing detection data from detections table
-    mock_db.get_detections.return_value = [
+    mock_db.detections.get.return_value = [
         {"id": 42, "box_x": 0.1, "box_y": 0.2, "box_w": 0.3, "box_h": 0.4,
          "detector_confidence": 0.95, "category": "animal"},
     ]

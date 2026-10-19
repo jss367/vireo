@@ -227,7 +227,7 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
 
 def test_metadata_search_uses_current_visible_predictions(catalog):
     db, ids = catalog
-    det = db.save_detections(ids["empty"], [
+    det = db.detections.save(ids["empty"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="test")[0]
     for fingerprint, species, timestamp in [("old", "Old species", "2025-01-01"),
@@ -259,7 +259,7 @@ def test_metadata_search_ignores_guessed_binomials_on_custom_labels(catalog):
     ranks answer a search; the guessed binomial does not. A fixed-head row's
     binomial is the model's own output and does."""
     db, ids = catalog
-    det = db.save_detections(ids["empty"], [
+    det = db.detections.save(ids["empty"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
     ], detector_model="test")[0]
     db.predictions.add(det, "Lilac-crowned Amazon", 0.9, "BioCLIP-2.5", labels_fingerprint="custom",
@@ -287,7 +287,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
     db.conn.execute("UPDATE keywords SET taxon_id=? WHERE id=?", (genus_taxon, genus))
     db.tag_photo(ids["robin"], genus)
     for name in ("owl", "hawk", "robin", "empty"):
-        det = db.save_detections(ids[name], [
+        det = db.detections.save(ids[name], [
             {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
         ], detector_model="test")[0]
         db.conn.execute(

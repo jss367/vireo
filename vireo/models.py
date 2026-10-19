@@ -241,7 +241,7 @@ def _atomic_write_bytes(dest, raw_bytes):
             f.flush()
             os.fsync(f.fileno())
         replace_file(tmp_path, dest)
-    except BaseException:
+    except BaseException:  # broad: remove the temp file on any exit, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise
@@ -369,7 +369,7 @@ def _save_config(config):
             os.fsync(f.fileno())
         with _FILE_IO_LOCK:
             replace_file(tmp_path, CONFIG_PATH)
-    except BaseException:
+    except BaseException:  # broad: remove the temp file on any exit, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise
@@ -802,8 +802,8 @@ def _purge_hf_cache_for_model(model_id, hf_source=""):
     try:
         from services.hf_cache import purge_model, purge_outcome
         return purge_outcome(lambda mid: purge_model(mid, hf_source=hf_source), model_id)
-    except Exception as exc:  # pragma: no cover - cleanup must not fail the removal
-        log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+    except Exception as exc:  # pragma: no cover  # broad: cleanup must not fail the removal; the failure is returned
+        log.warning("Could not purge HF cache for %s: %s", model_id, exc, exc_info=True)
         return {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
             {"key": model_id, "error": str(exc)},
         ]}}
@@ -977,9 +977,9 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                         and os.path.isfile(pre_cached)
                     )
                 except Exception as e:
-                    # Cache lookup is best-effort — if it fails, fall through
+                    # broad: cache lookup is best-effort — if it fails, fall through
                     # to the network path; hf_hub_download will sort it out.
-                    log.debug("Cache lookup failed for %s: %s", filename, e)
+                    log.debug("Cache lookup failed for %s: %s", filename, e, exc_info=True)
 
             label_path = f"{subfolder}/{filename}" if subfolder else filename
             if progress_callback:
@@ -1025,11 +1025,11 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                 log.info("Download complete: %s", dest_path)
             return dest_path
 
-        except Exception as e:
+        except Exception as e:  # broad: hf_hub_download raises a wide set; retried until the stall limit, then re-raised
             stalled_count += 1
             log.warning(
                 "Download attempt %d failed (%d/%d stalled): %s",
-                attempt, stalled_count, max_stalled, e,
+                attempt, stalled_count, max_stalled, e, exc_info=True,
             )
 
             if stalled_count >= max_stalled:
@@ -1088,7 +1088,7 @@ def _copy_from_hub_cache(cached_path, local_dir, filename):
             # completeness check.
             try:
                 shutil.copy2(cached_path, dest_path)
-            except BaseException:
+            except BaseException:  # broad: remove the partial copy on any exit, then re-raise
                 with contextlib.suppress(OSError):
                     os.unlink(dest_path)
                 raise
@@ -1311,8 +1311,8 @@ def download_model(model_id, progress_callback=None):
         try:
             import timm_classifier
             timm_classifier.reset_label_desc_heal_state(model_str)
-        except Exception as e:  # pragma: no cover - defensive
-            log.debug("Could not reset label-description heal state: %s", e)
+        except Exception as e:  # pragma: no cover  # broad: resetting heal state is best-effort after a download
+            log.debug("Could not reset label-description heal state: %s", e, exc_info=True)
 
     state = _classify_model_state(model_dir, files)
     # "unverified" is an acceptable post-download state: every required file
@@ -1494,11 +1494,11 @@ def _download_optional_files(
         repo_files = set(list_repo_files(
             ONNX_REPO, revision=lookup_revision,
         ))
-    except Exception as e:
+    except Exception as e:  # broad: the HF API raises a wide set; optional files are skipped
         log.info(
             "Could not list %s@%s to probe optional files (%s); "
             "skipping optional downloads.",
-            ONNX_REPO, lookup_revision, e,
+            ONNX_REPO, lookup_revision, e, exc_info=True,
         )
         return
 
@@ -1738,10 +1738,10 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                     ["label_descriptions.json"], scratch_dir,
                     km.get("hf_subdir", km["id"]), {}, None, progress_callback,
                 )
-            except Exception as e:
+            except Exception as e:  # broad: the optional download raises a wide set; the heal retries later
                 log.info(
                     "Optional label_descriptions.json download failed for %s: %s",
-                    model_str, e,
+                    model_str, e, exc_info=True,
                 )
             # Validate before publishing: a scratch file that arrived
             # truncated or unparseable must not be promoted, or its
@@ -1765,11 +1765,11 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
 
     try:
         config = _load_upstream_timm_config(model_str)
-    except Exception as e:
+    except Exception as e:  # broad: the upstream config fetch raises a wide set; taxonomy names stay in use
         log.info(
             "Could not fetch upstream timm config for %s: %s. "
             "Predictions keep using taxonomy-based common names.",
-            model_str, e,
+            model_str, e, exc_info=True,
         )
         return False
 
@@ -1860,8 +1860,8 @@ def _purge_hf_cache_file(filename, hf_subdir, revision=None):
 
     try:
         cached = huggingface_hub.try_to_load_from_cache(**lookup_kwargs)
-    except Exception as e:
-        log.debug("HF cache lookup failed for %s: %s", filename, e)
+    except Exception as e:  # broad: HF cache lookup raises undocumented errors; nothing is purged
+        log.debug("HF cache lookup failed for %s: %s", filename, e, exc_info=True)
         return
 
     if not isinstance(cached, str):

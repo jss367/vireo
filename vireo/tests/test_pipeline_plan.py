@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from repositories.masks_features import PipelineFeatures
-from services import stage_counts, subject_masks
+from services import classify_preflight, stage_counts, subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -31,7 +31,7 @@ def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
         folder_id=folder_id, filename=filename, extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": conf, "category": "animal"}],
@@ -173,7 +173,7 @@ def test_count_real_detections_in_scope_excludes_full_image(tmp_path):
         folder_id=folder_id, filename="synth.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(
+    db.detections.save(
         pid_synth,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 1.0, "category": "anchor"}],
@@ -223,7 +223,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
     assert stage_counts.count_full_image_fallback_photos(db) == 1
     assert stage_counts.count_full_image_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 1
 
-    full_det_id = db.save_detections(
+    full_det_id = db.detections.save(
         pid_empty,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0, "category": "animal"}],
@@ -245,7 +245,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
         labels_fingerprint="fp1",
     )
     assert stage_counts.count_full_image_classify_pending_pairs(db, "BioCLIP-2", "fp1") == 0
-    assert db.count_classifier_runs([pid_empty, pid_weak], "BioCLIP-2", "fp1") == 1
+    assert classify_preflight.count_classifier_runs(db, [pid_empty, pid_weak], "BioCLIP-2", "fp1") == 1
 
 
 def test_full_image_fallback_counts_noise_only_boxes_at_workspace_floor(
@@ -403,7 +403,7 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
         folder_id=folder_id, filename="multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -431,7 +431,7 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
         folder_id=folder_id, filename="hiker.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(
+    db.detections.save(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.95, "category": "person"}],
@@ -611,7 +611,7 @@ def test_count_photos_pending_masks_ignores_photos_without_real_detections(tmp_p
         folder_id=folder_id, filename="anchor_only.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 1.0, "category": "anchor"}],
@@ -734,7 +734,7 @@ def test_count_eye_keypoint_eligible_ignores_predictions_on_non_primary(
     # High-confidence primary at (0.1, 0.1, 0.5, 0.5); lower-confidence
     # secondary at (0.6, 0.6, 0.2, 0.2). primary_order_sql ranks the
     # first ahead by detector_confidence, so it is the selected primary.
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -928,7 +928,7 @@ def test_count_extract_stale_ignores_photos_without_primary_detection(tmp_path):
         folder_id=folder_id, filename="anchor.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(
+    db.detections.save(
         pid,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 1.0, "category": "anchor"}],
@@ -1086,7 +1086,7 @@ def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, mod
         folder_id=folder_id, filename="multi.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -1322,7 +1322,7 @@ def test_classify_plan_done_prior_for_full_image_fallback(tmp_path, monkeypatch)
         file_size=100, file_mtime=1.0,
     )
     db.model_runs.record_detector_run(pid, "megadetector-v6", box_count=0)
-    full_det_id = db.save_detections(
+    full_det_id = db.detections.save(
         pid,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0, "category": "animal"}],
@@ -1368,7 +1368,7 @@ def test_classify_plan_tracks_contextual_weak_crop_instead_of_fallback(
             file_mtime=1.0 + index,
             timestamp=f"2026-07-18T08:36:3{index}",
         )
-        detection_id = db.save_detections(
+        detection_id = db.detections.save(
             photo_id,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
               "confidence": confidence, "category": "animal"}],

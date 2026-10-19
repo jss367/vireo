@@ -19,7 +19,7 @@ from resource_ledger import (
     ResourceWaitCancelled,
     bind_resource_cancel_check,
 )
-from services import subject_masks
+from services import detection_store, subject_masks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -366,8 +366,8 @@ class _MaskPass:
             and self.photos
         ):
             from weak_detections import contextual_weak_runs
-            raw_mdv6_dets = self.thread_db.get_detections_for_photos(
-                [p["id"] for p in self.photos],
+            raw_mdv6_dets = detection_store.get_detections_for_photos(
+                self.thread_db, [p["id"] for p in self.photos],
                 min_conf=self.weak_detection_confidence,
                 detector_model="megadetector-v6",
             )
@@ -574,7 +574,7 @@ class _MaskPass:
                 # photo isn't in the "what got skipped silently"
                 # diagnostic regardless of threshold).
                 raw_dets = [
-                    d for d in thread_db.get_detections(p["id"], min_conf=0)
+                    d for d in detection_store.get_detections(thread_db, p["id"], min_conf=0)
                     if d["detector_model"] != "full-image"
                 ]
                 if raw_dets:
@@ -604,16 +604,16 @@ class _MaskPass:
         # in to.
         if p["id"] in self.contextual_weak_ids:
             return [
-                d for d in thread_db.get_detections(
-                    p["id"],
+                d for d in detection_store.get_detections(
+                    thread_db, p["id"],
                     min_conf=self.weak_detection_confidence,
                     detector_model="megadetector-v6",
                 )
                 if d["category"] == "animal"
             ]
         return [
-            d for d in thread_db.get_detections(
-                p["id"], min_conf=self.detector_confidence,
+            d for d in detection_store.get_detections(
+                thread_db, p["id"], min_conf=self.detector_confidence,
             )
             if d["detector_model"] != "full-image"
         ]

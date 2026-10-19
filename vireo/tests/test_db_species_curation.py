@@ -177,7 +177,7 @@ def test_next_species_representative_order(db, cur):
 
 
 def _detect(db, pid, species_conf, model="m1", fingerprint="fp1"):
-    det_ids = db.save_detections(
+    det_ids = db.detections.save(
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],

@@ -1315,6 +1315,9 @@ async function changeHistory(operation, btn) {
     lbState.flagEditSeq++;
     var description = data[operation === 'undo' ? 'undone' : 'redone'];
     showToast((operation === 'undo' ? 'Undone: ' : 'Redone: ') + description, 'success');
+    // The change stands, but something that follows it did not (Process
+    // Review's saved results); say so instead of leaving it to the log.
+    if (data.warning) showToast(data.warning, 'warning');
     _historySessionCount = Math.max(0, _historySessionCount + (operation === 'undo' ? -1 : 1));
     /** @type {HTMLElement} */ (document.getElementById('historyBadge')).textContent = String(_historySessionCount || '');
     loadEditHistory();

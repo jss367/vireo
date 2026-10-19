@@ -15,6 +15,7 @@ from datetime import datetime
 
 import numpy as np
 import pytest
+from services import detection_store
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -554,7 +555,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
 
     # Add detections and predictions (all same species)
     for pid in photo_ids:
-        det_ids = db.save_detections(pid, [
+        det_ids = db.detections.save(pid, [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
         ], detector_model="MDV6")
         db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
@@ -569,7 +570,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
             noise = np.random.randn(128).astype(np.float32) * 0.01
             emb = base_emb + noise
             emb /= np.linalg.norm(emb)
-            db.upsert_photo_embedding(pid, "test-model", emb.tobytes())
+            detection_store.upsert_photo_embedding(db, pid, "test-model", emb.tobytes())
             db.conn.execute(
                 "UPDATE photos SET quality_score = ? WHERE id = ?",
                 (0.5 + i * 0.1, pid),
@@ -578,7 +579,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
         diff_emb = np.random.randn(128).astype(np.float32)
         diff_emb -= diff_emb.dot(base_emb) * base_emb  # Gram-Schmidt
         diff_emb /= np.linalg.norm(diff_emb)
-        db.upsert_photo_embedding(photo_ids[3], "test-model", diff_emb.tobytes())
+        detection_store.upsert_photo_embedding(db, photo_ids[3], "test-model", diff_emb.tobytes())
         db.conn.execute(
             "UPDATE photos SET quality_score = ? WHERE id = ?",
             (0.9, photo_ids[3]),
@@ -681,7 +682,7 @@ def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
     db.conn.execute(
         "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
     )
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
@@ -713,7 +714,7 @@ def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
         f.write(b"not a real raw file")
 
     pid = db.add_photo(fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
@@ -766,7 +767,7 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
     db.conn.execute(
         "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
     )
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.95, "test-model")
@@ -808,7 +809,7 @@ def test_phash_backfill_commits_per_photo(tmp_path):
             fid, fname, ".jpg", 1000, 1.0,
             timestamp=f"2024-01-01T10:00:0{i}",
         )
-        det_ids = db.save_detections(pid, [
+        det_ids = db.detections.save(pid, [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
              "confidence": 0.9, "category": "animal"},
         ], detector_model="MDV6")
@@ -880,7 +881,7 @@ def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
     )
     pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0,
                        timestamp="2024-01-01T10:00:00")
-    det_ids = db.save_detections(pid, [
+    det_ids = db.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")

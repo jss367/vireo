@@ -1,6 +1,7 @@
 # vireo/tests/test_sync.py
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -1374,6 +1375,17 @@ def test_sync_result_counts_distinct_photos_not_records():
     assert result["errors"] == ["unsupported change type: flag (2 photos)"]
 
 
+_SYNC_PANEL = Path(__file__).parents[1] / "static" / "sync-panel"
+
+
+def _sync_result_reporter():
+    """``_syncShowSyncResult``: how the sync panel reports a finished job
+    (``static/sync-panel/run.js``; runSync's onComplete calls it)."""
+    run_js = (_SYNC_PANEL / "run.js").read_text(encoding="utf-8")
+    reporter = run_js[run_js.index("function _syncShowSyncResult("):]
+    return reporter[:reporter.index("async function runSync(")]
+
+
 def test_sync_panel_does_not_report_zero_for_a_resultless_failure():
     """A crashed sync must not render as "Wrote 0, failed on 0".
 
@@ -1385,11 +1397,8 @@ def test_sync_panel_does_not_report_zero_for_a_resultless_failure():
     than on ``event.status`` so a resultless completed or cancelled event
     cannot reach the counter branches either.
     """
-    from pathlib import Path
 
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
-    handler = panel[panel.index("onComplete: function(event)"):]
-    handler = handler[:handler.index("onError:")]
+    handler = _sync_result_reporter()
     assert "typeof result.synced === 'number'" in handler
     assert "typeof result.failed === 'number'" in handler
     assert "Sync failed" in handler
@@ -1410,22 +1419,18 @@ def test_sync_panel_clears_stale_success_when_pending_remains():
     rather than the specific words, so future copy tweaks to the success
     branch cannot desync the check.
     """
-    from pathlib import Path
-
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
 
     # The success branches (``Synced!`` / ``Synced N photos!`` /
     # ``Nothing to sync.``) mark the element as success.
-    complete_handler = panel[panel.index("onComplete: function(event)"):]
-    complete_handler = complete_handler[:complete_handler.index("onError:")]
+    complete_handler = _sync_result_reporter()
     assert "status.dataset.syncState = 'success'" in complete_handler
 
     # ``checkPendingSync`` clears any stale success when pending remains,
     # so the marker approach must be used there too. The old literal-text
     # match (``status.textContent === 'Synced!'``) is gone: it silently
     # missed the ``Synced N photos!`` case runVisibleSync produces.
-    check_fn = panel[panel.index("async function checkPendingSync"):]
-    check_fn = check_fn[:check_fn.index("async function runSync")]
+    status_js = (_SYNC_PANEL / "status.js").read_text(encoding="utf-8")
+    check_fn = status_js[status_js.index("async function checkPendingSync"):]
     assert "status.dataset.syncState === 'success'" in check_fn
     assert "status.textContent === 'Synced!'" not in check_fn
 
@@ -1439,11 +1444,8 @@ def test_sync_panel_cancelled_summary_includes_failures():
     ``status: "cancelled"``. Reporting only the written count would present
     a NAS-wide permission failure as an ordinary cancellation.
     """
-    from pathlib import Path
 
-    panel = (Path(__file__).parents[1] / "templates/_sync_panel.html").read_text(encoding="utf-8")
-    handler = panel[panel.index("onComplete: function(event)"):]
-    handler = handler[:handler.index("onError:")]
+    handler = _sync_result_reporter()
 
     cancelled = handler[handler.index("event.status === 'cancelled'"):]
     # Take just the cancelled branch, up to the next ``else if`` / ``else``.

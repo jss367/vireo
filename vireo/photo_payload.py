@@ -11,6 +11,8 @@ accept the ``photo_id`` shape used by cached pipeline results.
 
 import hashlib
 
+from services import detection_store
+
 
 def render_key_for_recipe(recipe):
     """Fingerprint an edit recipe for cache-busting rendered-image URLs.
@@ -119,7 +121,7 @@ def attach_detections(db, photo_dicts):
     if not photo_dicts:
         return photo_dicts
     ids = [p["id"] for p in photo_dicts]
-    det_map = db.get_detections_for_photos(ids)
+    det_map = detection_store.get_detections_for_photos(db, ids)
     for p in photo_dicts:
         p["detections"] = det_map.get(p["id"], [])
     return photo_dicts
