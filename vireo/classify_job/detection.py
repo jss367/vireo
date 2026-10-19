@@ -37,7 +37,7 @@ def _stored_detection_list(db: Database, photo_id: int, min_conf: float | None =
             db.get_detections(photo_id) if min_conf is None
             else db.get_detections(photo_id, min_conf=min_conf)
         )
-    except Exception:
+    except Exception:  # broad: the read also loads config; a failure treats the photo as having no stored boxes
         log.warning(
             "Could not read stored detections for photo %s; treating it as having none",
             photo_id, exc_info=True,
@@ -352,7 +352,7 @@ class _DetectBatchRun:
                     normalized_detections,
                     store=_publish_store,
                 )
-        except Exception:
+        except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
             log.warning(
                 "Could not publish portable detector result for photo %s",
                 photo["id"], exc_info=True,
@@ -440,7 +440,7 @@ class _DetectBatchRun:
                 )
             finally:
                 img.close()
-        except Exception:
+        except Exception:  # broad: PIL and the sharpness math raise a wide set; whole-frame sharpness is the fallback
             log.debug(
                 "Subject-region sharpness failed for photo %s; "
                 "using whole-frame sharpness",
@@ -543,7 +543,7 @@ def _detect_batch(
         # entirely, which let the detect stage report success while the
         # batch's remaining photos were silently skipped.
         log.warning("Detection unavailable for batch (non-fatal): %s", e)
-    except Exception:
+    except Exception:  # broad: detection is optional for classify; any failure degrades to full-image classification
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
     run.sync_reclassified_subjects()
@@ -615,7 +615,7 @@ def _analyze_subjects(
                           checkpoint=checkpoint)
         except ResourceWaitCancelled:
             raise
-        except Exception:
+        except Exception:  # broad: per-photo boundary; subject analysis is optional and one photo must not stop the batch
             db.rollback()
             log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
 
@@ -1020,7 +1020,7 @@ def _detect_subjects(
         job["_detect_cancelled"] = True
     except (ImportError, RuntimeError) as e:
         run.report_detection_unavailable(e)
-    except Exception as e:
+    except Exception as e:  # broad: detection is optional for classify; any failure degrades to full-image classification and is reported
         log.warning(
             "Detection failed (non-fatal) — classifying full images", exc_info=True
         )

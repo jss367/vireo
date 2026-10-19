@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import subject_masks
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def masked_photo(live_server, tmp_path):
         photo_id, 'sam2-small', str(mask_path), 'megadetector-v6',
         (0.0, 0.0, 0.5, 1.0),
     )
-    db.set_active_mask_variant(photo_id, 'sam2-small')
+    subject_masks.set_active_mask_variant(db, photo_id, 'sam2-small')
     return photo_id
 
 

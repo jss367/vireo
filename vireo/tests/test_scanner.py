@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
+from services import dashboard_stats
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -876,7 +877,7 @@ def test_scan_imports_xmp_keywords(tmp_path):
 
     photos = db.photos.list_page()
     assert len(photos) == 1
-    keywords = db.keywords.get_for_photo(photos[0]['id'])
+    keywords = db.photo_keywords.get_for_photo(photos[0]['id'])
     kw_names = {k['name'] for k in keywords}
     assert 'Northern cardinal' in kw_names
     assert 'Birds' in kw_names
@@ -909,12 +910,12 @@ def test_scan_skips_empty_normalized_keywords(tmp_path):
 
     photos = db.photos.list_page()
     assert len(photos) == 1
-    kw_names = {k['name'] for k in db.keywords.get_for_photo(photos[0]['id'])}
+    kw_names = {k['name'] for k in db.photo_keywords.get_for_photo(photos[0]['id'])}
     # The valid flat keyword lands; the lone-quote entry is skipped without
     # raising. The empty-segment hierarchy is dropped entirely (chain
     # broken), but the well-formed sibling still lands as a hierarchy.
     assert 'Northern cardinal' in kw_names
-    tree_names = {k['name'] for k in db.keywords.get_tree()}
+    tree_names = {k['name'] for k in db.keyword_tree.get_tree()}
     assert 'Raptors' in tree_names
     assert 'Birds' in tree_names
 
@@ -950,10 +951,10 @@ def test_scan_imports_keywords_embedded_in_jpeg(tmp_path):
     scan(root, db)
 
     photo = db.photos.list_page()[0]
-    assert {k["name"] for k in db.keywords.get_for_photo(photo["id"])} == {
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])} == {
         "1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot",
     }
-    tree = {k["name"]: k for k in db.keywords.get_tree()}
+    tree = {k["name"]: k for k in db.keyword_tree.get_tree()}
     assert tree["Turquoise-browed motmot"]["parent_id"] == tree["2Birds"]["id"]
 
 
@@ -975,7 +976,7 @@ def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
     photo = db.photos.list_page()[0]
-    assert db.keywords.get_for_photo(photo["id"]) == []
+    assert db.photo_keywords.get_for_photo(photo["id"]) == []
 
     time.sleep(0.05)
     _embed_keywords(
@@ -984,7 +985,7 @@ def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
     )
     scan(root, db, options=ScanOptions(incremental=True))
 
-    assert {k["name"] for k in db.keywords.get_for_photo(photo["id"])} == {
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])} == {
         "2Birds", "Magnolia warbler",
     }
 
@@ -1016,7 +1017,7 @@ def test_scan_merges_embedded_keywords_with_sidecar(tmp_path, monkeypatch):
     scan(root, db)
 
     photo = db.photos.list_page()[0]
-    assert {k["name"] for k in db.keywords.get_for_photo(photo["id"])} == {
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])} == {
         "Dyke Marsh", "8Landscape", "Sunrise",
     }
 
@@ -1049,16 +1050,16 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     db.conn.commit()
 
     assert backfill_embedded_keywords(db) == 1
-    assert {k["name"] for k in db.keywords.get_for_photo(tagged)} == {"2Birds", "Heron"}
-    assert {k["name"] for k in db.keywords.get_for_photo(already)} == {"Egret"}
-    assert db.keywords.get_for_photo(raw) == []
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(tagged)} == {"2Birds", "Heron"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(already)} == {"Egret"}
+    assert db.photo_keywords.get_for_photo(raw) == []
     assert db.meta.get(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
 
     # One-shot: keywords the user removes afterwards are not re-imported.
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (tagged,))
     db.conn.commit()
     assert backfill_embedded_keywords(db) == 0
-    assert db.keywords.get_for_photo(tagged) == []
+    assert db.photo_keywords.get_for_photo(tagged) == []
 
 
 def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals(
@@ -1087,14 +1088,14 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
     monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", conflict)
     assert scanner.backfill_embedded_keywords(db) == 1
     assert db.meta.get(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) != "1"
-    assert db.keywords.get_for_photo(blocked) == []
+    assert db.photo_keywords.get_for_photo(blocked) == []
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (handled,))
     db.conn.commit()
 
     monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", original)
     assert scanner.backfill_embedded_keywords(db) == 1
-    assert {k["name"] for k in db.keywords.get_for_photo(blocked)} == {"Egret"}
-    assert db.keywords.get_for_photo(handled) == []
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(blocked)} == {"Egret"}
+    assert db.photo_keywords.get_for_photo(handled) == []
     assert db.meta.get(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
     assert scanner.backfill_embedded_keywords(db) == 0
 
@@ -1120,7 +1121,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
     assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
     # The hierarchy import tags only the leaf (Robin), not the parent,
     # so the photo carries exactly the two flat values plus the leaf.
-    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Robin", "Hawk"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Robin", "Hawk"}
 
     # User removes Robin (tag drop + pending removal reaching sync and
     # clearing). Only the catalog state is simulated; a real sync clears
@@ -1138,7 +1139,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
     # must not resurrect Robin. The hierarchy entry whose leaf is Robin is
     # filtered too, since the leaf is what the import would re-tag.
     assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
-    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Hawk"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Hawk"}
 
 
 def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
@@ -1161,7 +1162,7 @@ def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
     # a new Hawk. Robin stays suppressed (user removed), Hawk is new.
     second = {"XMP": {"Subject": ["Robin", "Hawk"]}}
     assert _import_embedded_keywords_for_photo(db, pid, second) is True
-    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Hawk"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Hawk"}
 
 
 def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_path):
@@ -1184,7 +1185,7 @@ def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_pat
 
     first = {"XMP": {"HierarchicalSubject": ["Birds|Robin"]}}
     assert _import_embedded_keywords_for_photo(db, pid, first) is True
-    assert db.keywords.embedded_offered_keys(pid) == {"birds|robin"}
+    assert db.photo_keywords.embedded_offered_keys(pid) == {"birds|robin"}
 
     # Lightroom later writes a genuinely new hierarchy that shares the leaf.
     # The embedded import must not treat it as "already offered."
@@ -1192,7 +1193,7 @@ def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_pat
     assert _import_embedded_keywords_for_photo(db, pid, second) is True
     # Both normalized paths are now recorded, and the photo carries two
     # distinct Robin keyword rows (one under Birds, one under People).
-    assert db.keywords.embedded_offered_keys(pid) == {
+    assert db.photo_keywords.embedded_offered_keys(pid) == {
         "birds|robin", "people|robin",
     }
     rows = db.conn.execute(
@@ -1227,14 +1228,14 @@ def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_pa
     # is NOT recorded as offered.
     broken = {"XMP": {"HierarchicalSubject": ["Birds||Hawk"]}}
     assert _import_embedded_keywords_for_photo(db, pid, broken) is False
-    assert db.keywords.get_for_photo(pid) == []
-    assert db.keywords.embedded_offered_keys(pid) == set()
+    assert db.photo_keywords.get_for_photo(pid) == []
+    assert db.photo_keywords.embedded_offered_keys(pid) == set()
 
     # Lightroom repairs the entry; the leaf imports normally on the next
     # scan because the suppression set never admitted it.
     repaired = {"XMP": {"HierarchicalSubject": ["Birds|Hawk"]}}
     assert _import_embedded_keywords_for_photo(db, pid, repaired) is True
-    assert "Hawk" in {k["name"] for k in db.keywords.get_for_photo(pid)}
+    assert "Hawk" in {k["name"] for k in db.photo_keywords.get_for_photo(pid)}
 
 
 def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monkeypatch):
@@ -1260,14 +1261,14 @@ def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monke
 
     file_meta = {"XMP": {"Subject": ["Springfield"]}}
     assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
-    assert db.keywords.get_for_photo(pid) == []
-    assert db.keywords.embedded_offered_keys(pid) == set()
+    assert db.photo_keywords.get_for_photo(pid) == []
+    assert db.photo_keywords.embedded_offered_keys(pid) == set()
 
     # Resolve the conflict (stop raising) and the import still gets a shot
     # at the keyword, because nothing was recorded above.
     monkeypatch.undo()
     assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
-    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Springfield"}
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(pid)} == {"Springfield"}
 
 
 def test_scan_imports_hierarchical_keywords(tmp_path):
@@ -1289,7 +1290,7 @@ def test_scan_imports_hierarchical_keywords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     names = {k['name'] for k in tree}
     assert 'Birds' in names
     assert 'Raptors' in names
@@ -1563,7 +1564,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
 
     # Verify initial keyword
     photos = db.photos.list_page()
-    kws = db.keywords.get_for_photo(photos[0]['id'])
+    kws = db.photo_keywords.get_for_photo(photos[0]['id'])
     assert {k['name'] for k in kws} == {'Sparrow'}
 
     # Modify XMP - add a keyword
@@ -1577,7 +1578,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     scan(root, db, options=ScanOptions(incremental=True))
 
     # Should now have both keywords (merge from XMP)
-    kws = db.keywords.get_for_photo(photos[0]['id'])
+    kws = db.photo_keywords.get_for_photo(photos[0]['id'])
     kw_names = {k['name'] for k in kws}
     assert 'Sparrow' in kw_names
     assert 'Cardinal' in kw_names
@@ -2282,7 +2283,7 @@ def test_recovered_changed_companion_synchronizes_before_no_churn(
     cat.scan(incremental=incremental)
 
     assert "Recovered keyword" in {
-        keyword["name"] for keyword in cat.db.keywords.get_for_photo(cat.raw_id)
+        keyword["name"] for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id)
     }
     assert not cat.jpeg_variant.exists() and not cat.display.exists()
     assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
@@ -2905,7 +2906,7 @@ def test_companion_imports_shared_sidecar_when_raw_is_not_scanned(
         assert cat.raw.name not in cat.extracted
         if incremental:
             assert cat.extracted == []
-        return {k["name"] for k in cat.db.keywords.get_for_photo(cat.raw_id)}
+        return {k["name"] for k in cat.db.photo_keywords.get_for_photo(cat.raw_id)}
 
     sidecar = str(cat.jpeg.with_suffix(".xmp"))
     write_sidecar(
@@ -2970,7 +2971,7 @@ def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
     assert cat.identity()[0]["file_hash"] == identity_hash
     # New keywords in the shared sidecar must land on the RAW's row.
     assert "Vanished RAW keyword" in {
-        k["name"] for k in cat.db.keywords.get_for_photo(cat.raw_id)
+        k["name"] for k in cat.db.photo_keywords.get_for_photo(cat.raw_id)
     }
 
     # A later edit of the same sidecar must also propagate.
@@ -2993,7 +2994,7 @@ def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
     )
     assert cat.merges == []
     assert {"Vanished RAW keyword", "Later keyword"} <= {
-        k["name"] for k in cat.db.keywords.get_for_photo(cat.raw_id)
+        k["name"] for k in cat.db.photo_keywords.get_for_photo(cat.raw_id)
     }
 
 
@@ -3089,7 +3090,7 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
     # The replacement row (same id, different identity) must NOT
     # receive the companion's XMP keywords.
     row_keywords = {
-        k["name"] for k in cat.db.keywords.get_for_photo(cat.raw_id)
+        k["name"] for k in cat.db.photo_keywords.get_for_photo(cat.raw_id)
     }
     assert "Companion keyword" not in row_keywords
 
@@ -3179,7 +3180,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
 
         counts = cat.scan(incremental=boundary == "stat-settle")
         assert evidence["attempted"]
-        keywords = {keyword["name"] for keyword in cat.db.keywords.get_for_photo(cat.raw_id)}
+        keywords = {keyword["name"] for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id)}
         companion_callback = (cat.raw_id, other.name)
         if evidence["replaced"]:
             assert "Ownership keyword" not in keywords
@@ -3190,7 +3191,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
             assert cat.photo_id(other.name) is not None
             assert "Ownership keyword" in {
                 keyword["name"]
-                for keyword in cat.db.keywords.get_for_photo(cat.photo_id(other.name))
+                for keyword in cat.db.photo_keywords.get_for_photo(cat.photo_id(other.name))
             }
             assert counts["indexed"] == counts["discovered"]
         else:
@@ -3244,7 +3245,7 @@ def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
     assert cat.merges == []
     assert cat.rows() == {"IMG_001.nef": "IMG_001.jpg"}
     assert "Late vanished RAW" in {
-        keyword["name"] for keyword in cat.db.keywords.get_for_photo(cat.raw_id)
+        keyword["name"] for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id)
     }
 
 
@@ -3300,7 +3301,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
 
     # Keywords should have been transferred
     raw_id = photos_after[0]["id"]
-    keywords = db.keywords.get_for_photo(raw_id)
+    keywords = db.photo_keywords.get_for_photo(raw_id)
     kw_names = {k["name"] for k in keywords}
     assert "Robin" in kw_names
 
@@ -3391,7 +3392,7 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
     # on it.
     file_meta = {"XMP": {"Subject": ["Robin"]}}
     assert _import_embedded_keywords_for_photo(db, jpeg_id, file_meta) is True
-    assert "robin" in db.keywords.embedded_offered_keys(jpeg_id)
+    assert "robin" in db.photo_keywords.embedded_offered_keys(jpeg_id)
 
     # Pairing must not raise and must leave the suppression on the survivor.
     _pair_raw_jpeg_companions(db)
@@ -3402,8 +3403,8 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
     assert len(survivors) == 1
     assert survivors[0]["filename"] == "IMG_002.cr3"
     assert survivors[0]["id"] == raw_id
-    assert db.keywords.embedded_offered_keys(raw_id) == {"robin"}
-    assert db.keywords.embedded_offered_keys(jpeg_id) == set()
+    assert db.photo_keywords.embedded_offered_keys(raw_id) == {"robin"}
+    assert db.photo_keywords.embedded_offered_keys(jpeg_id) == set()
 
 
 @pytest.mark.parametrize("removed_on_raw", [False, True])
@@ -3425,12 +3426,12 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
     db.tag_photo(jpeg, db.add_keyword("Field note"))
     if removed_on_raw:
         _import_embedded_keywords_for_photo(db, raw, metadata)
-        for keyword in db.keywords.get_for_photo(raw):
+        for keyword in db.photo_keywords.get_for_photo(raw):
             db.untag_photo(raw, keyword["id"])
 
     _pair_raw_jpeg_companions(db)
 
-    assert {k["name"] for k in db.keywords.get_for_photo(raw)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(raw)} == (
         {"Field note"} if removed_on_raw else {"Robin", "Field note"})
     assert not _import_embedded_keywords_for_photo(db, raw, metadata)
 
@@ -6139,7 +6140,7 @@ def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
     )
 
     # And coverage stats should still count it.
-    stats = db.get_coverage_stats()
+    stats = dashboard_stats.get_coverage_stats(db)
     assert stats["total"] >= 1, (
         f"coverage should count photos in partial folders, "
         f"got total={stats['total']!r}"
@@ -9018,7 +9019,7 @@ def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     }
     assert linked == {new_leaf}
     assert old_leaf not in linked
-    names = {k["name"] for k in db.keywords.get_for_photo(photo_id)}
+    names = {k["name"] for k in db.photo_keywords.get_for_photo(photo_id)}
     assert "House finch" in names, "unrelated sidecar keywords still import"
     db.close()
 
@@ -9120,7 +9121,7 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
     monkeypatch.setattr(
         tasks, "mark_species_keywords",
         lambda bg_db, _label: order.append(
-            {k["name"] for k in bg_db.keywords.get_for_photo(photo_id)}
+            {k["name"] for k in bg_db.photo_keywords.get_for_photo(photo_id)}
         ),
     )
     tasks.mark_species()
@@ -9137,7 +9138,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
 
     cat = _PairedCatalog(tmp_path, monkeypatch)
     cat.seed_raw_caches()
-    assert cat.db.keywords.get_for_photo(cat.raw_id) == []
+    assert cat.db.photo_keywords.get_for_photo(cat.raw_id) == []
     original_identity = dict(cat.identity()[0])
     extract = scanner.scan_run.extract_metadata
 
@@ -9166,10 +9167,10 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
 
     counts = cat.scan(incremental=mode != "full")
 
-    assert {kw["name"] for kw in cat.db.keywords.get_for_photo(cat.raw_id)} == {
+    assert {kw["name"] for kw in cat.db.photo_keywords.get_for_photo(cat.raw_id)} == {
         "Recovered bird",
     }
-    assert cat.db.keywords.embedded_offered_keys(cat.raw_id) == {
+    assert cat.db.photo_keywords.embedded_offered_keys(cat.raw_id) == {
         "recovered bird", "birds|recovered bird",
     }
     assert cat.rows() == {cat.raw.name: cat.jpeg.name}
@@ -9182,10 +9183,10 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
 
     # Once the user removes these offered tags, even a full re-extraction
     # must respect the durable suppression, without needing a pending queue.
-    for keyword in cat.db.keywords.get_for_photo(cat.raw_id):
+    for keyword in cat.db.photo_keywords.get_for_photo(cat.raw_id):
         cat.db.untag_photo(cat.raw_id, keyword["id"])
     assert cat.db.pending_changes.keyword_removal_keys(cat.raw_id) == set()
     cat.scan(incremental=False)
-    assert cat.db.keywords.get_for_photo(cat.raw_id) == []
+    assert cat.db.photo_keywords.get_for_photo(cat.raw_id) == []
     assert cat.merges == []
     assert cat.jpeg_variant.exists() and cat.display.exists()

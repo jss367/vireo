@@ -202,7 +202,7 @@ class _KnownCompanionKeeper:
             imported = _import_keywords_for_photo(
                 self.db, known["owner_id"], str(xmp_path),
             )
-        except Exception:
+        except Exception:  # broad: XMP parsing raises undocumented errors; one bad sidecar must not stop the scan
             log.exception(
                 "Failed to import companion sidecar %s for owner %s",
                 xmp_path, known["owner_id"],

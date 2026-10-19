@@ -18,6 +18,7 @@ import sys
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
+from services import subject_masks
 from web.background_jobs import make_background_job
 from working_copy_cache import working_copy_stats
 
@@ -407,7 +408,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         min_detector_conf = db.min_detector_confidence_across_workspaces(
             cfg.load()
         )
-        n = db.delete_stale_masks(detector_confidence=min_detector_conf)
+        n = subject_masks.delete_stale_masks(db, detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
         # Edit-mask snapshots piggyback on the same sweep: unreferenced,
         # aged-out snapshot files (no current recipe or edit-history entry

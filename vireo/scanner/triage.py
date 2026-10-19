@@ -88,16 +88,17 @@ class _IncrementalTriage:
             if self._settle_stat_unchanged_companions(files_to_process):
                 files_to_process.sort()
         except BaseException:
+            # broad: any interruption, cancel included, marks the folders partial and re-raises.
             # Pre-pass died (e.g. non-retryable DB error on an XMP commit).
             # Route through the same partial-status path as a main-loop failure
             # so users see the badge and can rescan.
             try:
                 self.db.rollback()
-            except Exception:
+            except Exception:  # broad: must not replace the pre-pass failure re-raised below
                 log.exception("Rollback after pre-pass failure also failed")
             try:
                 self.folders.update_folder_status("partial", only_from_partial=False)
-            except Exception:
+            except Exception:  # broad: must not replace the pre-pass failure re-raised below
                 log.exception("Failed to flag folders partial after pre-pass failure")
             raise
         return files_to_process

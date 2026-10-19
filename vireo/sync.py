@@ -505,7 +505,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
     """Apply durable merge work only to its recorded photo and keyword identity."""
     if not any(plan.keyword_merges for plan in plans.values()):
         return
-    rows = db.keywords.parent_rows()
+    rows = db.keyword_tree.parent_rows()
     paths = keyword_paths(rows)
     location_leaves = db.get_photo_location_keyword_ids([
         pid for pid, plan in plans.items() if plan.sync_location_keywords
@@ -513,7 +513,7 @@ def _plan_merged_keyword_hierarchies(db, plans):
     for photo_id, plan in plans.items():
         if not plan.keyword_merges:
             continue
-        tagged = db.keywords.get_for_photo(photo_id)
+        tagged = db.photo_keywords.get_for_photo(photo_id)
         tagged_ids = {k['id'] for k in tagged}
         tagged_names = {keyword_match_key(k['name']) for k in tagged}
         tagged_paths = {path_key(paths[k['id']]) for k in tagged}
@@ -1176,7 +1176,7 @@ def sync_from_xmp(db, photo_ids):
             )
 
             # Get current DB keywords
-            db_keywords = db.keywords.get_for_photo(photo_id)
+            db_keywords = db.photo_keywords.get_for_photo(photo_id)
             db_keywords_by_key = {
                 keyword_match_key(k["name"]): k for k in db_keywords
             }
