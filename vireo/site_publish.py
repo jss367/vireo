@@ -85,7 +85,7 @@ def _export_image(vireo_dir, photo, rel_path, destination, options, folders, ind
             max_size=max_size, wc_max=int(options.get("working_copy_max_size", 4096)),
             developed_dir=options.get("developed_dir") or "", developed_index=index,
         )
-    except Exception as exc:
+    except Exception as exc:  # broad: decoders raise a wide set; the photo is reported as not published
         log.warning("Could not load photo %s for publishing", photo.get("id"), exc_info=True)
         return False, f"{photo.get('filename') or photo.get('id')}: {exc}"
     try:
@@ -356,7 +356,7 @@ def _commit_site_locked(destination_path, staging_path, paths, cancel_check, beg
             modified.append(rel_path)
             # Keep the existing inode's ownership, ACLs, and mode.
             shutil.copyfile(staging_path / rel_path, destination_path / rel_path)
-    except BaseException as error:
+    except BaseException as error:  # broad: restore the previous site on any failure, interrupt included, then re-raise
         # Discard the staged NEW bytes first to make room for restoration
         # after ENOSPC. Never discard a backup until recovery has succeeded.
         for rel_path in paths:

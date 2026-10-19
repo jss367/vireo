@@ -164,7 +164,7 @@ def _hf_download_sam2_weights(variant, progress_callback=None):
                     # partial copy.
                     shutil.copy2(cached_path, tmp_path)
                     replace_file(tmp_path, final_path)
-                except Exception:
+                except Exception:  # broad: remove the partial download on any failure, then re-raise
                     with contextlib.suppress(OSError):
                         os.unlink(tmp_path)
                     raise
@@ -421,7 +421,7 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         # remaining image before the next cancellation checkpoint,
         # substantially delaying JobRunner.shutdown().
         raise
-    except Exception:
+    except Exception:  # broad: SAM2 inference raises undocumented errors; the caller falls back to no mask
         log.warning("SAM2 mask generation failed", exc_info=True)
         return None
 

@@ -194,7 +194,7 @@ def _register_group_routes(app, data_dir):
                             hierarchical_keywords=set(),
                         )
                         written += 1
-                    except Exception:
+                    except Exception:  # broad: per-file boundary; XMP writing raises undocumented errors
                         log.warning("Failed to write XMP: %s", xp, exc_info=True)
                         failed.append(xp)
 
@@ -291,7 +291,7 @@ def _batch_accept_photo(photo, model, min_confidence):
             )
             photo["status"] = "accepted"
             return "accepted"
-        except Exception:
+        except Exception:  # broad: per-file boundary; XMP writing raises undocumented errors
             log.warning(
                 "Failed to write XMP for %s",
                 photo.get("filename"),
@@ -318,7 +318,7 @@ def _batch_accept_photo(photo, model, min_confidence):
                     flat_keywords={pred["prediction"]},
                     hierarchical_keywords=set(),
                 )
-            except Exception:
+            except Exception:  # broad: per-file boundary; XMP writing raises undocumented errors
                 log.warning("Failed to write XMP: %s", xp, exc_info=True)
                 group_ok = False
 

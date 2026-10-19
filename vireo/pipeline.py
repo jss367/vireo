@@ -44,7 +44,7 @@ def _atomic_json_dump(data, path):
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
         replace_file(tmp_path, path)
-    except Exception:
+    except Exception:  # broad: remove the temp file on any failure, then re-raise
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
@@ -2519,7 +2519,7 @@ def detect_eye_keypoints_stage(
             # takes over with an accurate processed count.
             aborted = True
             break
-        except Exception:
+        except Exception:  # broad: per-photo boundary; keypoint inference raises undocumented errors
             log.warning(
                 "Eye keypoint detection failed for photo %s", row["id"],
                 exc_info=True,
