@@ -180,10 +180,46 @@ class _KeywordEdits:
                     sig = _li_signature(li)
                     if sig in seen:
                         continue
-                    bag.append(copy.deepcopy(li))
+                    bag.append(self._copy_with_source_markup(li))
                     seen.add(sig)
             owner.remove(extra)
             self.document.dirty = True
+
+    def _copy_with_source_markup(self, original):
+        """Deep-copy ``original`` and carry its ``SourceMarkup`` entries along.
+
+        ``SourceMarkup.namespaces`` and ``SourceMarkup.inner`` are keyed by
+        element identity, so a plain deep copy loses any binding or
+        comment/PI the source recorded on the subtree. Without this
+        transfer, a locally-declared prefix on the item would fall back to
+        ``ns0`` on rewrite, and comments or processing instructions inside
+        it would be silently dropped when the original property is removed.
+        """
+        duplicate = copy.deepcopy(original)
+        markup = getattr(getattr(self.document, "tree", None), "markup", None)
+        if markup is None:
+            return duplicate
+        original_elems = list(original.iter())
+        copy_elems = list(duplicate.iter())
+        mapping = {
+            id(orig): dup
+            for orig, dup in zip(original_elems, copy_elems, strict=True)
+        }
+        for orig, dup in zip(original_elems, copy_elems, strict=True):
+            declarations = markup.namespaces.get(orig)
+            if declarations:
+                markup.namespaces[dup] = list(declarations)
+            inner = markup.inner.get(orig)
+            if inner:
+                markup.inner[dup] = [
+                    (
+                        tuple(mapping.get(id(sib), sib) for sib in preceding),
+                        offset,
+                        node,
+                    )
+                    for preceding, offset, node in inner
+                ]
+        return duplicate
 
     def add_keywords(self, flat_keywords=(), hierarchical_keywords=()):
         """Merge keywords into dc:subject and lr:hierarchicalSubject.

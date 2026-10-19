@@ -348,3 +348,78 @@ def test_rewrites_leave_elementtree_prefix_registry_alone(tmp_path):
     assert dict(ET._namespace_map) == registry
     for index, path in enumerate(paths):
         assert f"tool{index}:TagsList" in path.read_text(encoding="utf-8")
+
+
+def test_duplicate_bag_merge_keeps_a_locally_declared_prefix_on_the_copy(tmp_path):
+    """A local xmlns on an rdf:li survives being deep-copied during a merge.
+
+    When ``_merge_duplicate_bags`` folds two unqualified ``dc:subject``
+    bags together, it deep-copies each item it keeps. ``SourceMarkup``
+    records per-element namespace declarations by element identity, so
+    the copy must inherit the original's recorded binding; otherwise
+    the ``<q:value>`` child inside it would fall back to ``ns0`` on
+    rewrite, dropping the sidecar's own prefix.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        f'<rdf:RDF xmlns:rdf="{NS_RDF}">'
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag>"
+        '<rdf:li xmlns:q="urn:item" rdf:parseType="Resource">'
+        "<q:value>Heron</q:value></rdf:li>"
+        "</rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        "</rdf:RDF></x:xmpmeta>",
+        encoding="utf-8",
+    )
+
+    editor = SidecarEditor(str(path))
+    editor.add_keywords({"Kiwi"}, set())
+    assert editor.commit() is True
+
+    text = path.read_text(encoding="utf-8")
+    assert 'xmlns:q="urn:item"' in text
+    assert "<q:value>Heron</q:value>" in text
+    assert "ns0:" not in text
+
+
+def test_duplicate_bag_merge_carries_inner_comments_onto_the_copy(tmp_path):
+    """A comment inside an rdf:li survives being deep-copied during a merge.
+
+    ``SourceMarkup.inner`` records inner comments and PIs by element
+    identity, so the merge's deep copy must carry those entries onto
+    the new element; otherwise an ordinary keyword edit would silently
+    drop the comment when the original property is removed.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        f'<rdf:RDF xmlns:rdf="{NS_RDF}">'
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag>"
+        '<rdf:li rdf:parseType="Resource">'
+        "<rdf:value>Heron</rdf:value><!-- source: Lightroom --></rdf:li>"
+        "</rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:subject><rdf:Bag><rdf:li>Egret</rdf:li></rdf:Bag></dc:subject>"
+        "</rdf:Description>"
+        "</rdf:RDF></x:xmpmeta>",
+        encoding="utf-8",
+    )
+
+    editor = SidecarEditor(str(path))
+    editor.add_keywords({"Kiwi"}, set())
+    assert editor.commit() is True
+
+    text = path.read_text(encoding="utf-8")
+    assert "<!-- source: Lightroom -->" in text
+    assert read_keywords(str(path)) == {"Heron", "Egret", "Kiwi"}
