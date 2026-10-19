@@ -50,7 +50,7 @@ def _manual():
             events.append((args, kwargs))
             conn.commit()
         db = SimpleNamespace(_duplicates_repository=lambda: repo, begin_immediate=lambda: conn.execute("BEGIN IMMEDIATE"),
-                             rollback=conn.rollback, _apply_winner_loser_merge=merge)
+                             rollback=conn.rollback, transaction=lambda: conn, _apply_winner_loser_merge=merge)
         for name in ("keep_duplicate_copy", "bulk_resolve_by_folder"):
             setattr(db, name, MethodType(_selected("db.py", name, {"os": SimpleNamespace(path=paths)}, "Database"), db))
         yield conn, repo, db, paths, events

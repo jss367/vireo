@@ -3206,13 +3206,20 @@ class Database:
         resolved = []
         skipped = []
         for file_hash in file_hashes:
-            winner_id, loser_ids, reason = repo.keep_folder_plan(
-                file_hash, keep_folder_norm,
-            )
-            if reason is not None:
-                skipped.append({"file_hash": file_hash, "reason": reason})
-                continue
-            self._apply_winner_loser_merge(winner_id, loser_ids)
+            # Match keep_duplicate_copy: the pending-group check and merge
+            # must share the writer lock so a scan cannot defer a member
+            # between them. BEGIN is outside the context: a nested caller's
+            # failed BEGIN must not roll back the caller's transaction.
+            self.begin_immediate()
+            with self.transaction():
+                winner_id, loser_ids, reason = repo.keep_folder_plan(
+                    file_hash, keep_folder_norm,
+                )
+                if reason is not None:
+                    self.rollback()
+                    skipped.append({"file_hash": file_hash, "reason": reason})
+                    continue
+                self._apply_winner_loser_merge(winner_id, loser_ids)
             resolved.append({
                 "file_hash": file_hash,
                 "winner_id": winner_id,
