@@ -64,7 +64,7 @@ function harness() {
     settingsErrorMessage: error => error.message, saveConfig() {},
   });
   const functions = new Set(['setSettingsScope', 'refreshAllSettingsValues', 'renderAllSettings', 'renderSettingRow', 'renderSettingWidget',
-    '_settingControlSelector', 'rerenderSettingRow', 'cssEscape', '_settingsScopeBaseFor', 'saveSchemaSetting', 'resetSchemaSetting',
+    '_settingControlSelector', 'rerenderSettingRow', 'cssEscape', 'scheduleSchemaSave', '_settingsScopeBaseFor', 'saveSchemaSetting', 'resetSchemaSetting',
     'showSettingSaveWarning', 'setRowStatus', 'formatSettingValue', 'settingsImportedMessage', 'importSettingsFile',
     'settingWarningToken', 'settingWarningOwnsStatus', 'settingRowStatus', 'claimSettingSave', 'reportSettingsImported', 'rememberSettingSaveWarning', 'restoreSettingSaveWarning', 'settingSaveRefreshFailed']);
   const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS', 'ALL_SETTINGS_SAVE_COMMITS', 'ALL_SETTINGS_ROW_STATUSES']);
@@ -506,3 +506,79 @@ test('an earlier import refresh cannot erase the newer failed save status', asyn
   assert.equal(h.rows.get(key).status.textContent, status);
   assert.equal(h.rows.get(key).status.style.color, 'var(--danger)');
 });
+
+
+async function settleScopeWrite(h, pending, result, outcome) {
+  if (['transport', 'validation', 'response-json'].includes(outcome)) failWrite(pending, 0, outcome);
+  else {
+    if (outcome === 'refresh') h.ctx.refreshAllSettingsValues = async () => { throw new Error('invented refresh failure'); };
+    finishWrite(pending, 0, outcome === 'warning' ? {ok: true, warning: 'scoped warning'} : {ok: true});
+  }
+  await result;
+}
+function expectedScopeStatus(outcome, method = 'save') {
+  if (outcome === 'transport') return 'Network error';
+  if (outcome === 'validation') return 'invented validation failure';
+  if (outcome === 'response-json' || outcome === 'refresh') return 'Saved, but the page could not refresh';
+  if (outcome === 'warning') return 'Saved with a warning';
+  return method === 'save' ? '✓ Saved' : '';
+}
+for (const outcome of ['transport', 'validation', 'response-json', 'refresh', 'success', 'warning']) {
+  test('debounced global ' + outcome + ' retains its request token after switching to workspace', async () => {
+    const h = harness(), pending = delayedWrites(h);
+    let request;
+    const save = h.ctx.saveSchemaSetting;
+    h.ctx.saveSchemaSetting = (...args) => (request = save(...args));
+    h.ctx.scheduleSchemaSave(key, false, false);
+    assert.equal(pending.length, 0);
+    h.ctx.setSettingsScope('workspace');
+    h.ctx.setRowStatus(key, 'Workspace state', false);
+    h.timers[0]();
+    assert.equal(pending[0].url, '/api/settings/global');
+    assert.equal(h.rows.get(key).status.textContent, 'Workspace state');
+    const globalToken = h.ctx.settingWarningToken(key, 'global');
+    assert.equal(h.ctx.ALL_SETTINGS_ROW_STATUSES[globalToken].message, 'Saving…');
+    await settleScopeWrite(h, pending, request, outcome);
+    assert.equal(h.rows.get(key).status.textContent, 'Workspace state');
+    h.ctx.setSettingsScope('global');
+    assert.equal(h.rows.get(key).status.textContent, expectedScopeStatus(outcome));
+    h.ctx.setSettingsScope('workspace');
+    assert.equal(h.rows.get(key).status.textContent, 'Workspace state');
+    h.timers.slice(1).forEach(fn => fn());
+    assert.equal(h.rows.get(key).status.textContent, 'Workspace state');
+  });
+}
+for (const method of ['save', 'reset']) {
+  for (const outcome of ['transport', 'validation', 'response-json', 'refresh', 'success', 'warning']) {
+    test(method + ' ' + outcome + ' preserves the captured workspace identity through scope changes', async () => {
+      const h = harness(); h.ctx.setSettingsScope('workspace');
+      const pending = delayedWrites(h), request = write(h, method);
+      h.values.workspace_id = 18; h.ctx.renderAllSettings(h.container);
+      h.ctx.setRowStatus(key, 'Workspace 18 state', false);
+      h.ctx.setSettingsScope('global'); h.ctx.setRowStatus(key, 'Global state', false);
+      await settleScopeWrite(h, pending, request, outcome);
+      assert.equal(h.rows.get(key).status.textContent, 'Global state');
+      h.ctx.setSettingsScope('workspace');
+      assert.equal(h.rows.get(key).status.textContent, 'Workspace 18 state');
+      h.values.workspace_id = 17; h.ctx.renderAllSettings(h.container);
+      assert.equal(h.rows.get(key).status.textContent, expectedScopeStatus(outcome, method));
+      assert.equal(h.rows.get(key).notice.textContent, outcome === 'warning' ? 'scoped warning' : '');
+    });
+  }
+}
+for (const outcome of ['success', 'warning']) {
+  test('global import ' + outcome + ' cannot replace workspace status or warning', async () => {
+    const h = harness(); h.ctx.setSettingsScope('workspace');
+    await write(h, 'save');
+    h.ctx.setRowStatus(key, 'Workspace state', true);
+    const pending = delayedWrites(h);
+    const imported = await startWrite(h, 'import', pending, 1);
+    finishWrite(pending, 0, outcome === 'warning' ? {ok: true, warning: 'global import warning'} : {ok: true});
+    await imported.result;
+    assert.equal(h.rows.get(key).status.textContent, 'Workspace state');
+    assert.equal(h.rows.get(key).notice.textContent, warning);
+    h.ctx.setSettingsScope('global');
+    assert.equal(h.rows.get(key).notice.textContent, outcome === 'warning' ? 'global import warning' : '');
+    assert.notEqual(h.rows.get(key).status.textContent, 'Workspace state');
+  });
+}

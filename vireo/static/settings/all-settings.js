@@ -361,7 +361,7 @@ async function refreshAllSettingsValues() {
   var warningToken = settingWarningToken(key, scope);
   var isCurrentSave = claimSettingSave(warningToken);
   var committed = false;
-  setRowStatus(key, 'Saving…', false);
+  setRowStatus(key, 'Saving…', false, warningToken);
   try {
     /** @type {{key:string;value:SettingsValue;_confirm_working_copy_eviction?:boolean}} */ var payload = { key: key, value: value };
     if (confirmedEviction) payload._confirm_working_copy_eviction = true;
@@ -384,10 +384,10 @@ async function refreshAllSettingsValues() {
         await refreshAllSettingsValues();
         if (!isCurrentSave()) return;
         rerenderSettingRow(key);
-        setRowStatus(key, 'Not changed', false);
+        setRowStatus(key, 'Not changed', false, warningToken);
         return;
       }
-      setRowStatus(key, err.error || 'Save failed', true);
+      setRowStatus(key, err.error || 'Save failed', true, warningToken);
       return;
     }
     committed = true;
@@ -406,11 +406,11 @@ async function refreshAllSettingsValues() {
     // a freshly-saved override).
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    if (!isCurrentSave() || warningToken !== settingWarningToken(key)) return;
-    if (restoreSettingSaveWarning(key)) return;
-    setRowStatus(key, '✓ Saved', false);
+    if (!isCurrentSave()) return;
+    if (restoreSettingSaveWarning(key, warningToken)) return;
+    setRowStatus(key, '✓ Saved', false, warningToken);
     setTimeout(function() {
-      if (isCurrentSave() && warningToken === settingWarningToken(key) && !ALL_SETTINGS_WARNINGS[warningToken]) setRowStatus(key, '', false);
+      if (isCurrentSave() && !ALL_SETTINGS_WARNINGS[warningToken]) setRowStatus(key, '', false, warningToken);
     }, 1500);
   } catch (err) {
     if (isCurrentSave()) settingSaveRefreshFailed(key, warningToken, committed);
@@ -421,7 +421,7 @@ async function refreshAllSettingsValues() {
   var warningToken = settingWarningToken(key);
   var isCurrentSave = claimSettingSave(warningToken);
   var committed = false;
-  setRowStatus(key, 'Resetting…', false);
+  setRowStatus(key, 'Resetting…', false, warningToken);
   try {
     var scope = ALL_SETTINGS_SCOPE;
     // Cancel any pending debounced autosave for this key+scope. Without
@@ -454,10 +454,10 @@ async function refreshAllSettingsValues() {
         await refreshAllSettingsValues();
         if (!isCurrentSave()) return;
         rerenderSettingRow(key);
-        setRowStatus(key, 'Not changed', false);
+        setRowStatus(key, 'Not changed', false, warningToken);
         return;
       }
-      setRowStatus(key, err.error || 'Reset failed', true);
+      setRowStatus(key, err.error || 'Reset failed', true, warningToken);
       return;
     }
     committed = true;
@@ -470,7 +470,7 @@ async function refreshAllSettingsValues() {
     rerenderSettingRow(key);
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    if (isCurrentSave() && warningToken === settingWarningToken(key)) restoreSettingSaveWarning(key);
+    if (isCurrentSave()) restoreSettingSaveWarning(key, warningToken);
   } catch (err) {
     if (isCurrentSave()) settingSaveRefreshFailed(key, warningToken, committed);
   }
@@ -513,12 +513,13 @@ async function refreshAllSettingsValues() {
   if (data.warning) ALL_SETTINGS_WARNINGS[token] = String(data.warning);
   else delete ALL_SETTINGS_WARNINGS[token];
   if (settingWarningOwnsStatus(token)) delete ALL_SETTINGS_ROW_STATUSES[token];
-  if (token === settingWarningToken(key)) restoreSettingSaveWarning(key);
+  restoreSettingSaveWarning(key, token);
 }
 
-/** @param {string} key */ function restoreSettingSaveWarning(key) {
-  var warning = ALL_SETTINGS_WARNINGS[settingWarningToken(key)];
-  if (warning && settingWarningOwnsStatus(settingWarningToken(key))) setRowStatus(key, 'Saved with a warning', false);
+/** @param {string} key @param {string=} token */ function restoreSettingSaveWarning(key, token = settingWarningToken(key)) {
+  var warning = ALL_SETTINGS_WARNINGS[token];
+  if (warning && settingWarningOwnsStatus(token)) setRowStatus(key, 'Saved with a warning', false, token);
+  if (token !== settingWarningToken(key)) return Boolean(warning);
   var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   var notice = row && row.querySelector(/** @type {'div'} */ ('.setting-row-warning'));
   if (notice) {
@@ -529,10 +530,8 @@ async function refreshAllSettingsValues() {
 }
 
 /** @param {string} key @param {string} token @param {boolean} committed */ function settingSaveRefreshFailed(key, token, committed) {
-  if (token === settingWarningToken(key)) {
-    restoreSettingSaveWarning(key);
-    if (!committed || !ALL_SETTINGS_WARNINGS[token] || !settingWarningOwnsStatus(token)) setRowStatus(key, committed ? 'Saved, but the page could not refresh' : 'Network error', !committed);
-  }
+  restoreSettingSaveWarning(key, token);
+  if (!committed || !ALL_SETTINGS_WARNINGS[token] || !settingWarningOwnsStatus(token)) setRowStatus(key, committed ? 'Saved, but the page could not refresh' : 'Network error', !committed, token);
   if (committed && typeof showToast === 'function') showToast('Setting saved, but the page could not refresh. Reload settings.', 'warning');
 }
 
@@ -550,8 +549,10 @@ async function refreshAllSettingsValues() {
   };
 }
 
-/** @param {string} key @param {string} msg @param {boolean} isError */ function setRowStatus(key, msg, isError) {
-  ALL_SETTINGS_ROW_STATUSES[settingWarningToken(key)] = {message: String(msg), isError: isError};
+/** @param {string} key @param {string} msg @param {boolean} isError @param {string=} token */ function setRowStatus(key, msg, isError, token = settingWarningToken(key)) {
+  ALL_SETTINGS_ROW_STATUSES[token] = {message: String(msg), isError: isError};
+  // Async requests retain their captured scope/workspace even offscreen.
+  if (token !== settingWarningToken(key)) return;
   var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   if (!row) return;
   var status = row.querySelector(/** @type {'div'} */ ('.setting-row-status'));
