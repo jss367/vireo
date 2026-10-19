@@ -105,6 +105,7 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", "vireo-server",
+        "--additional-hooks-dir", os.path.join(repo_root, "scripts", "pyinstaller_hooks"),
         "--paths", vireo_dir,
         "--paths", repo_root,
         "--hidden-import", "vireo._native_detail",
@@ -162,8 +163,8 @@ def main():
         "--hidden-import", "xmp",
         "--hidden-import", "catalog",
         # ``vireo-server --mcp``: the MCP server and the SDK it is built on.
+        # hook-mcp.py collects the SDK without importing its optional CLI.
         "--hidden-import", "mcp_server",
-        "--collect-submodules", "mcp",
         # ONNX Runtime and related libraries
         "--hidden-import", "onnx_runtime",
         "--hidden-import", "onnxruntime",
