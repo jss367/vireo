@@ -35,6 +35,7 @@ import logging
 import ntpath
 import os
 import posixpath
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -545,7 +546,7 @@ def _drive_is_remote(drive):
 
         root = drive.replace("/", "\\").rstrip("\\") + "\\"
         kind = ctypes.windll.kernel32.GetDriveTypeW(root)  # type: ignore[attr-defined]
-    except Exception:
+    except Exception:  # broad: ctypes raises a wide set; the drive is treated as remote
         log.debug("GetDriveTypeW failed for %s; treating it as remote", drive, exc_info=True)
         return True
     # DRIVE_UNKNOWN (0) / DRIVE_NO_ROOT_DIR (1) are not provably local:
@@ -882,7 +883,7 @@ def load_known_mount_roots(db) -> set[str]:
     """Return mount roots previously observed live in this catalog."""
     try:
         value = db.meta.get(KNOWN_MOUNT_ROOTS_KEY)
-    except Exception:
+    except sqlite3.Error:
         log.warning(
             "Could not read known mount roots; detached-stub detection "
             "runs without cross-run evidence",
@@ -927,11 +928,12 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
             KNOWN_MOUNT_ROOTS_KEY, json.dumps(sorted(merged)), _commit=False,
         )
         db.commit()
-    except Exception:
+    except Exception:  # broad: persisting evidence is best-effort; the next run lacks it
         if transaction_started:
-            # Must not replace the failure logged just below.
-            with contextlib.suppress(Exception):
+            try:
                 db.rollback()
+            except Exception:  # broad: must not replace the failure logged just below
+                log.debug("Rollback after a known-mount-roots write failed", exc_info=True)
         log.debug(
             "Could not persist known mount roots (%r); cold-start detached "
             "stub detection will lack that evidence next run.",
@@ -1204,7 +1206,7 @@ class VolumeReachability:
                 generation = self._generation
             try:
                 reachable = bool(self._probe(root))
-            except Exception:
+            except Exception:  # broad: a volume probe raises a wide set; the root is treated as offline
                 log.exception("volume probe raised for %s; treating as offline", root)
                 reachable = False
             with self._lock:

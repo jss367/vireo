@@ -437,6 +437,7 @@ class _ScanRun:
                 groups.mark_group_member_seen(image_path)
             groups.resolve_remaining_groups()
         except BaseException:
+            # broad: any interruption, cancel included, marks the folders partial and re-raises.
             # Waiting JPEGs have not been indexed or reported yet. Leave
             # them untouched if their group is interrupted: the partial
             # folder status makes the next scan retry the whole group.
@@ -447,11 +448,11 @@ class _ScanRun:
             # callers can detect and re-scan.
             try:
                 self.db.rollback()
-            except Exception:
+            except Exception:  # broad: must not replace the scan failure re-raised below
                 log.exception("Rollback after scan failure also failed")
             try:
                 self.folders.update_folder_status("partial", only_from_partial=False)
-            except Exception:
+            except Exception:  # broad: must not replace the scan failure re-raised below
                 log.exception("Failed to flag folders partial after scan failure")
             raise
         else:
@@ -464,7 +465,7 @@ class _ScanRun:
             # then succeeds needs the touched ids to reach touched subfolders.
             try:
                 self.folders.update_folder_status("ok", only_from_partial=True)
-            except Exception:
+            except Exception:  # broad: the scan succeeded; a stale partial flag only prompts a rescan
                 log.exception("Failed to clear partial flag after scan success")
         return indexer
 

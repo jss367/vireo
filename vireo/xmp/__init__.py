@@ -14,6 +14,8 @@ The package's modules, by responsibility:
 - ``location_marker``: Vireo's record of the location keywords it wrote.
 - ``readers``: the read-only functions (keywords, markers, the sync-review
   fields).
+- ``markup``: parsing a sidecar into a ``SidecarTree`` that remembers its
+  prefixes, comments and xpacket wrapper, and serializing it with them.
 - ``publish``: the atomic publish -- temp file, owner/mode/ACL/xattr/flag
   preservation, ``replace_file``.
 - ``editor``: ``SidecarEditor``, which parses a sidecar once, routes each

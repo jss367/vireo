@@ -130,7 +130,7 @@ def _grant_twin_visibility(
             cast("int", db.active_workspace_id), rows,
         )
         db.commit()
-    except Exception as exc:
+    except Exception as exc:  # broad: per-file boundary; the failure is rolled back and recorded for this file
         log.exception("Duplicate photo workspace visibility failed")
         db.rollback()
         _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")

@@ -1,4 +1,19 @@
 {
   "extends": "../tsconfig.frontend.base.json",
-  "files": ["../types/pages/cull.d.ts", "../vireo/static/cull-favorites.js"]
+  "files": [
+    "../types/pages/cull.d.ts",
+    "../types/page-hooks.d.ts",
+    "../vireo/static/cull/state.js",
+    "../vireo/static/cull/collections.js",
+    "../vireo/static/cull/settings.js",
+    "../vireo/static/cull/analysis.js",
+    "../vireo/static/cull/history.js",
+    "../vireo/static/cull/decisions.js",
+    "../vireo/static/cull/data.js",
+    "../vireo/static/cull/render.js",
+    "../vireo/static/cull/focus.js",
+    "../vireo/static/cull/actions.js",
+    "../vireo/static/cull/favorites.js",
+    "../vireo/static/cull/boot.js"
+  ]
 }

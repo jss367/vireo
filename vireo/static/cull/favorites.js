@@ -226,7 +226,7 @@ function cullFavoritesHtml(sg, si) {
     (days[day] || []).sort(function(a, b) {
       return Number(a.decision_source === 'auto') - Number(b.decision_source === 'auto') || b.quality - a.quality;
     }).forEach(function(p) {
-      html += cullCardHtml(p, si, p.group_index, 'cullPose_' + si + '_' + p.group_index, true);
+      html += cullCardHtml(p, si, /** @type {number} */ (p.group_index), 'cullPose_' + si + '_' + p.group_index, true);
     });
     html += '</div></div>';
   });
@@ -499,7 +499,7 @@ function initializeCullFavorites() {
   document.addEventListener('lightbox:photodeleted', function(e) { removeCullPhotos([e.detail.photoId]); });
 }
 
-/** @param {string} endpoint @param {string} statusText @param {boolean} [sourceOnly] */
+/** @param {string} endpoint @param {string} [statusText] @param {boolean} [sourceOnly] */
 async function recomputeCulling(endpoint, statusText, sourceOnly) {
   if (cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy())) {
     showToast('Wait for the current edit to finish before recomputing culling.', 'info');

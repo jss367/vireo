@@ -558,7 +558,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
         before['encounters'][0]['confirmed_species'] = 'Sparrow'
         before['encounters'][0]['species_confirmed'] = True
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())
-    keywords_before = {pid: db.keywords.get_for_photo(pid) for pid in ids}
+    keywords_before = {pid: db.photo_keywords.get_for_photo(pid) for pid in ids}
     history_before = db.edit_history.list_recent()
     pending_before = [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
     original_init = Database.__init__
@@ -586,7 +586,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
         assert response.status_code == 500
     assert _load(db) == before
     assert db.edit_history.list_recent() == history_before
-    assert {pid: db.keywords.get_for_photo(pid) for pid in ids} == keywords_before
+    assert {pid: db.photo_keywords.get_for_photo(pid) for pid in ids} == keywords_before
     assert [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')] == pending_before
     assert client.post('/api/encounters/species', json=payload).status_code == 200
 
@@ -642,20 +642,20 @@ def test_keyword_changing_auto_detach_is_one_atomic_history_action(app_and_db, r
         for pid in ids[:2]:
             db.tag_photo(pid, old_kid)
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())
-    keywords_before = {pid: [row["id"] for row in db.keywords.get_for_photo(pid)] for pid in ids}
+    keywords_before = {pid: [row["id"] for row in db.photo_keywords.get_for_photo(pid)] for pid in ids}
     assert client.post('/api/encounters/species', json={
         'species': 'Cardinal', 'photo_ids': ids[:2], 'burst_index': 0,
     }).status_code == 200
     after = _load(db)
-    keywords_after = {pid: [row["id"] for row in db.keywords.get_for_photo(pid)] for pid in ids}
+    keywords_after = {pid: [row["id"] for row in db.photo_keywords.get_for_photo(pid)] for pid in ids}
     assert len(after['encounters']) == 2
     assert client.get('/api/undo/status').json['count'] == 1
     assert client.post('/api/undo').status_code == 200
     assert _load(db)['encounters'] == before['encounters']
-    assert {pid: [row["id"] for row in db.keywords.get_for_photo(pid)] for pid in ids} == keywords_before
+    assert {pid: [row["id"] for row in db.photo_keywords.get_for_photo(pid)] for pid in ids} == keywords_before
     assert client.post('/api/redo').status_code == 200
     assert _load(db)['encounters'] == after['encounters']
-    assert {pid: [row["id"] for row in db.keywords.get_for_photo(pid)] for pid in ids} == keywords_after
+    assert {pid: [row["id"] for row in db.photo_keywords.get_for_photo(pid)] for pid in ids} == keywords_after
 
 
 @pytest.mark.parametrize('change_flags', [False, True])
@@ -729,7 +729,7 @@ def test_combined_history_failure_rolls_back_photos_and_cache(app_and_db, monkey
     if not undo:
         assert client.post('/api/undo').status_code == 200
     cache_before = _load(db)
-    keywords_before = {pid: list(db.keywords.get_for_photo(pid)) for pid in ids}
+    keywords_before = {pid: list(db.photo_keywords.get_for_photo(pid)) for pid in ids}
     pending_before = list(db.conn.execute('SELECT * FROM pending_changes'))
     history_before = list(db.conn.execute('SELECT * FROM edit_history'))
     apply = grouping_history.apply_grouping_photo_edit
@@ -743,7 +743,7 @@ def test_combined_history_failure_rolls_back_photos_and_cache(app_and_db, monkey
         patch.setattr(grouping_history, 'apply_grouping_photo_edit', fail_after_photo_write)
         assert client.post(route).status_code == 500
     assert _load(db) == cache_before
-    assert {pid: list(db.keywords.get_for_photo(pid)) for pid in ids} == keywords_before
+    assert {pid: list(db.photo_keywords.get_for_photo(pid)) for pid in ids} == keywords_before
     assert list(db.conn.execute('SELECT * FROM pending_changes')) == pending_before
     assert list(db.conn.execute('SELECT * FROM edit_history')) == history_before
     assert client.post(route).status_code == 200
@@ -756,7 +756,7 @@ def test_pipeline_results_refresh_species_from_database_after_confirm_and_undo(a
     client = app.test_client()
     ids, cached = _seed(db)
     for pid in ids:
-        for keyword in db.keywords.get_for_photo(pid):
+        for keyword in db.photo_keywords.get_for_photo(pid):
             db.untag_photo(pid, keyword['id'])
     for photo in cached['photos']:
         photo['confirmed_species'] = 'Stale cached label'
@@ -851,23 +851,23 @@ def test_species_confirmation_without_split_restores_labels_and_keywords(app_and
         before['encounters'][0].update(confirmed_species='Sparrow', species_confirmed=True)
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())
     before = _load(db)
-    keywords_before = {pid: [k['id'] for k in db.keywords.get_for_photo(pid)] for pid in ids}
+    keywords_before = {pid: [k['id'] for k in db.photo_keywords.get_for_photo(pid)] for pid in ids}
     payload = {'species': 'Cardinal', 'photo_ids': ids}
     if burst:
         payload['burst_index'] = 0
     assert client.post('/api/encounters/species', json=payload).status_code == 200
     after = _load(db)
     assert len(after['encounters']) == 1
-    keywords_after = {pid: [k['id'] for k in db.keywords.get_for_photo(pid)] for pid in ids}
+    keywords_after = {pid: [k['id'] for k in db.photo_keywords.get_for_photo(pid)] for pid in ids}
     assert client.get('/api/undo/status').json['count'] == 1
     assert client.post('/api/undo').status_code == 200
     assert _load(db)['encounters'] == before['encounters']
     restored = client.get('/api/pipeline/page-init').json['results']
     assert restored['summary']['confirmed_count'] == before['summary']['confirmed_count']
-    assert {pid: [k['id'] for k in db.keywords.get_for_photo(pid)] for pid in ids} == keywords_before
+    assert {pid: [k['id'] for k in db.photo_keywords.get_for_photo(pid)] for pid in ids} == keywords_before
     assert client.post('/api/redo').status_code == 200
     assert _load(db)['encounters'] == after['encounters']
-    assert {pid: [k['id'] for k in db.keywords.get_for_photo(pid)] for pid in ids} == keywords_after
+    assert {pid: [k['id'] for k in db.photo_keywords.get_for_photo(pid)] for pid in ids} == keywords_after
 
 
 def test_legacy_burst_photo_detach_is_undoable_and_clear_is_rejected(app_and_db):

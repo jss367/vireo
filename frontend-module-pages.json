@@ -1,4 +1,16 @@
 {
+  "audit": {
+    "route": "/audit",
+    "template": "audit.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "best-batch": {
+    "route": "/best-batch",
+    "template": "best_batch.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "browse": {
     "route": "/browse",
     "template": "browse.html",
@@ -39,6 +51,40 @@
       "_vireoShortcuts"
     ]
   },
+  "card-cleanup": {
+    "route": "/card-cleanup",
+    "template": "card_cleanup.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "dashboard": {
+    "route": "/dashboard",
+    "template": "stats.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "highlights": {
+    "route": "/highlights",
+    "template": "highlights.html",
+    "pageHooks": [
+      "afterHistoryChange",
+      "loadHighlights",
+      "updateHighlightsLightboxControls"
+    ],
+    "sharedWrites": []
+  },
+  "lightroom": {
+    "route": "/lightroom",
+    "template": "lightroom.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "logs": {
+    "route": "/logs",
+    "template": "logs.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "misses": {
     "route": "/misses",
     "template": "misses.html",
@@ -48,6 +94,26 @@
       "handleMissesLightboxFlagShortcut",
       "loadMisses",
       "openBrowseShortcutPhoto"
+    ],
+    "sharedWrites": []
+  },
+  "shortcuts": {
+    "route": "/shortcuts",
+    "template": "shortcuts.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "welcome": {
+    "route": "/welcome",
+    "template": "welcome.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "workspace": {
+    "route": "/workspace",
+    "template": "workspace.html",
+    "pageHooks": [
+      "loadWsFolders"
     ],
     "sharedWrites": []
   }

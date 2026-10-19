@@ -25,6 +25,53 @@ function dismissDegradedBanner() {
   /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
+// Remember each failed entry's last undo/redo direction. Only its opposite
+// can be the entry's own inverse. New edits delete the redo stack and SQLite
+// can reuse its row ids: another operation in the same direction therefore
+// cannot prove that the original stale cache was repaired. Keep that warning
+// as an unidentified entry (null), including through the replacement's inverse.
+// Missing ids/directions are likewise retained until the user leaves the page.
+/** @type {Map<number | null, 'undo' | 'redo' | null>} */ var _historyCacheStaleEntryIds = new Map();
+
+/**
+ * An undo or redo stood, but the saved review results could not follow it
+ * (the server could not rewrite the pipeline cache's species). This page
+ * reads those results, so say what is stale and what fixes it: a reload
+ * reads the same stale file, while a Process run rebuilds the results from
+ * the catalog. Stays up until the user leaves the page or every outstanding
+ * failed entry's own inverse succeeds (``_historyCacheStaleEntryIds`` above).
+ * @param {{pipeline_cache_stale?: boolean; undone?: string; redone?: string; entry_id?: number} | null | undefined} change
+ */
+function renderHistoryCacheStaleBanner(change) {
+  var banner = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBanner'));
+  var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
+  if (!banner || !text || !change) return;
+  var entryId = change.entry_id != null ? Number(change.entry_id) : null;
+  /** @type {'undo' | 'redo' | null} */ var operation = change.undone !== undefined ? 'undo' : change.redone !== undefined ? 'redo' : null;
+  var previous = _historyCacheStaleEntryIds.get(entryId);
+  if (change.pipeline_cache_stale) {
+    if (entryId == null || operation == null) _historyCacheStaleEntryIds.set(null, null);
+    else {
+      if (previous === operation) _historyCacheStaleEntryIds.set(null, null);
+      _historyCacheStaleEntryIds.set(entryId, operation);
+    }
+    var undo = change.undone !== undefined;
+    var description = (undo ? change.undone : change.redone) || 'the last edit';
+    text.innerHTML = '<strong>These review results may be out of date.</strong> '
+      + escapeHtml((undo ? 'Undoing' : 'Redoing') + ' “' + description + '” was saved, but Vireo '
+      + 'could not update the review results to match, so they may still list the old species for '
+      + 'the photos it changed. Reloading this page will not fix that: run Process on these photos '
+      + 'again to rebuild the review from your catalog.');
+    banner.style.display = 'flex';
+    return;
+  }
+  if (entryId != null && operation != null && _historyCacheStaleEntryIds.has(entryId)) {
+    if (previous === operation) _historyCacheStaleEntryIds.set(null, null);
+    _historyCacheStaleEntryIds.delete(entryId);
+    if (_historyCacheStaleEntryIds.size === 0) banner.style.display = 'none';
+  }
+}
+
 /** @param {ReviewCacheInfo | null} info */
 function renderCacheScopeBanner(info) {
   var banner = /** @type {HTMLElement} */ (document.getElementById('cacheScopeBanner'));

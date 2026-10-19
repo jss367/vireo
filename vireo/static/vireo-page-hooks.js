@@ -89,6 +89,8 @@
     'localHistoryStatus',
     // Missing Originals deletes.
     'loadMisses',
+    // Work Locally (vireo-work-locally.js) after a local-folder change.
+    'loadWsFolders',
     // The export modal's shared controllers (vireo-export-presets.js,
     // vireo-export-collisions.js), on Browse and the Photo Editor.
     'applyExportPreset',
@@ -97,6 +99,8 @@
     'updateExportPreview',
     'selectedExportMetadataFields',
     'buildExportPreflightRequest',
+    // Releasing local originals (vireo-release-originals.js), on Storage.
+    'loadStoragePanel',
   ]));
 
   /** @type {Record<string, boolean>} */

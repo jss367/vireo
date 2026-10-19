@@ -59,7 +59,7 @@ def _record_match_scores(db: Database, raw_results: list[RawResult], model_name:
                 score_kind=match.get("score_kind"),
             )
         except Exception:
-            # Diagnostic data must never fail a classification run.
+            # broad: diagnostic data must never fail a classification run.
             log.warning(
                 "Failed to record match score for detection %s", det_id,
                 exc_info=True,

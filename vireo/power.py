@@ -120,7 +120,7 @@ class _WindowsInhibitor:
                     "SetThreadExecutionState returned 0"
                 )
                 return
-        except Exception as exc:  # noqa: BLE001 - reported to caller
+        except Exception as exc:  # noqa: BLE001  # broad: ctypes raises a wide set; re-raised to the caller by start()
             self._start_error = exc
             return
         finally:
@@ -130,7 +130,7 @@ class _WindowsInhibitor:
             self._ctypes.windll.kernel32.SetThreadExecutionState(
                 self.ES_CONTINUOUS
             )
-        except Exception:
+        except Exception:  # broad: clearing the sleep assertion is best-effort on the way out
             log.warning(
                 "Clearing Windows sleep assertion failed", exc_info=True,
             )
@@ -211,7 +211,7 @@ class SleepBlocker:
                     "Vireo is running a job"
                 )
             except Exception:
-                # Missing caffeinate/systemd-inhibit, denied permission,
+                # broad: missing caffeinate/systemd-inhibit, denied permission,
                 # unsupported platform. Log once and carry on unprotected
                 # rather than failing the job.
                 log.warning(
@@ -237,7 +237,7 @@ class SleepBlocker:
             try:
                 handle.stop()
             except Exception:
-                # Already reaped, or the platform call failed. The handle
+                # broad: already reaped, or the platform call failed. The handle
                 # is dropped either way — holding onto it would leave the
                 # blocker permanently "active" and stop it ever inhibiting
                 # again.

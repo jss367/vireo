@@ -1120,7 +1120,7 @@ def test_merge_moves_embedded_keyword_offered_onto_the_survivor(db, tmp_path):
     the archive-side photo with a keyword the user had already removed.
     """
     t = _collision_tree(db, tmp_path)
-    db.keywords.record_embedded_offered_keys(t["staged"], ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(t["staged"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1143,7 +1143,7 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
     aborts on the FK.
     """
     t = _collision_tree(db, tmp_path, same_hash=False)
-    db.keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
+    db.photo_keywords.record_embedded_offered_keys(t["survivor"], ["robin"])
 
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
@@ -1169,7 +1169,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
     metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
                         else {"Subject": ["Robin"]})}
     assert _import_embedded_keywords_for_photo(db, losing, metadata)
-    keyword = db.keywords.get_for_photo(losing)[0]
+    keyword = db.photo_keywords.get_for_photo(losing)[0]
     source = db.conn.execute(
         "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
         (losing, keyword["id"]),
@@ -1180,10 +1180,10 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
 
-    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
-    assert {k["name"] for k in db.keywords.get_for_photo(survivor)} == (
+    assert {k["name"] for k in db.photo_keywords.get_for_photo(survivor)} == (
         set() if removed_on_survivor else {"Robin"})
     if not removed_on_survivor:
         assert db.conn.execute(
@@ -1200,7 +1200,7 @@ def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash
     losing, survivor = ((t["staged"], t["survivor"]) if same_hash
                         else (t["survivor"], t["staged"]))
     _import_embedded_keywords_for_photo(db, losing, {"XMP": {"Subject": ["Robin"]}})
-    keyword = db.keywords.get_for_photo(losing)[0]
+    keyword = db.photo_keywords.get_for_photo(losing)[0]
     db.tag_photo(survivor, keyword["id"])
 
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
@@ -1339,6 +1339,41 @@ def test_merge_scoped_workspace_prunes_instead_of_linking_broad_base(db):
     assert links["/arch/USA/2026"] == 1
 
 
+def _visible_to(db, ws):
+    return {
+        r["filename"] for r in db.conn.execute(
+            "SELECT p.filename FROM photos p JOIN photo_workspace_visibility v "
+            "ON v.photo_id = p.id WHERE v.workspace_id = ?", (ws,))
+    }
+
+
+def test_merge_into_existing_folder_keeps_photo_in_sharing_workspace(db):
+    """A staged photo folded into an existing archive folder stays visible to
+    a workspace that shared the staged folder, without exposing that
+    workspace to the archive folder's other photos."""
+    ws = db._active_workspace_id
+    sharing = db.create_workspace("Sharing")
+    linked = db.create_workspace("Linked")
+    db.set_active_workspace(ws)
+    arch = _folder(db, "/arch", root=True)
+    _photo(db, arch, "old.jpg")
+    db.add_workspace_folder(linked, arch)
+    stage = _folder(db, "/stage", root=True)
+    _photo(db, stage, "new.jpg")
+    db.add_workspace_folder(sharing, stage)
+    db.add_workspace_folder(linked, stage)
+
+    counts = db.merge_staged_tree_into_archive(stage, "/arch")
+
+    assert counts["new_photos"] == 1 and counts["merged_folders"] == 1
+    assert _visible_to(db, ws) == {"old.jpg", "new.jpg"}
+    assert _visible_to(db, sharing) == {"new.jpg"}
+    assert _visible_to(db, linked) == {"old.jpg", "new.jpg"}
+    # Only the workspace without a link to the archive folder needs a grant.
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT workspace_id FROM workspace_photos")] == [(sharing,)]
+
+
 def test_merge_new_path_roots_deepest_tracked_ancestor(db):
     ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
@@ -1469,10 +1504,36 @@ def test_folder_lookups_for_file_moves(db):
     assert moves.folder_source_row(b + 999) is None
     assert moves.folder_id_row("/lib/a/b")["id"] == b
     assert moves.folder_id_row("/lib/a/missing") is None
-    # LIKE: the caller filters ``_`` matches on a literal prefix.
-    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a")) == [
-        "/lib/a/b"]
-    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a_")) == []
+    # A literal prefix: ``_`` in the base is not a wildcard.
+    assert moves.folder_paths_below("/lib/a") == [("/lib/a/b", "b")]
+    assert moves.folder_paths_below("/lib/a_") == []
+
+
+def test_folder_paths_below_matches_windows_separators(db):
+    """Windows stores ``\\``-separated paths; the subtree must still match."""
+    a = _folder(db, "C:\\lib\\a", root=True)
+    b = _folder(db, "C:\\lib\\a\\b", a)
+    _folder(db, "C:\\lib\\a\\b\\c", b)
+    _folder(db, "C:\\lib\\ab", root=True)
+    assert sorted(db.moves_merge.folder_paths_below("C:\\lib\\a")) == [
+        ("C:\\lib\\a\\b", "b"),
+        ("C:\\lib\\a\\b\\c", "b/c"),
+    ]
+
+
+def test_folder_paths_below_does_not_fold_posix_backslashes(db):
+    """``\\`` is a legal POSIX filename character, so a base like
+    ``/lib/a\\b`` must not match the unrelated subtree ``/lib/a/b/...``.
+    """
+    _folder(db, "/lib/a\\b", root=True)
+    a = _folder(db, "/lib/a", root=True)
+    b = _folder(db, "/lib/a/b", a)
+    _folder(db, "/lib/a/b/c", b)
+    assert db.moves_merge.folder_paths_below("/lib/a\\b") == []
+    assert sorted(db.moves_merge.folder_paths_below("/lib/a")) == [
+        ("/lib/a/b", "b"),
+        ("/lib/a/b/c", "b/c"),
+    ]
 
 
 def test_folders_except_is_an_unfetched_cursor(db):

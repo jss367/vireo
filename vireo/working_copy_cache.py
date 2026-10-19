@@ -658,7 +658,7 @@ def arrange_deferred_over_quota_retry(
                 _sleep(delay)
                 try:
                     retry_db = Database(db_path, initialize_schema=False)
-                except Exception:
+                except Exception:  # broad: deferred retry thread top level; a failure is logged and the next write retries
                     log.exception(
                         "Deferred working-copy quota retry could not open "
                         "a database connection at %s", db_path,
@@ -668,7 +668,7 @@ def arrange_deferred_over_quota_retry(
                     result = evict_if_over_quota(
                         retry_db, vireo_dir, quota_mb=quota_mb,
                     )
-                except Exception:
+                except Exception:  # broad: deferred retry thread top level; a failure is logged and the next write retries
                     log.exception(
                         "Deferred working-copy quota retry failed"
                     )

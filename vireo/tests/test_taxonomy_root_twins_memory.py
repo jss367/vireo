@@ -79,13 +79,10 @@ def setup():
         ns,
         methods={
             "KeywordRepository": {
-                "taxonomy_root_twins",
                 "_placed_taxonomy_keyword",
                 "_find_add_candidate",
                 "top_level_species_keyword",
                 "add_source_species",
-                "lookup_taxon_id",
-                "_species_preferring_taxon_match",
                 "add",
                 "_reconcile_species_type",
                 "_backfill_candidate_taxon",
@@ -96,12 +93,30 @@ def setup():
         },
         functions=set(),
     )
+    load(
+        "repositories/keyword_taxa.py",
+        ns,
+        methods={"KeywordTaxonRepository": {"lookup_taxon_id", "_species_preferring_taxon_match"}},
+        functions=set(),
+    )
+    load(
+        "repositories/keyword_tree.py",
+        ns,
+        methods={"KeywordTreeRepository": {"taxonomy_root_twins"}},
+        functions=set(),
+    )
     load("repositories/keyword_provenance.py", ns, methods={"KeywordProvenanceRepository": {"merge_keyword_into"}})
+    # One stand-in object answers for the three keyword repositories the
+    # selected methods are split across.
+    for name in ("lookup_taxon_id", "_species_preferring_taxon_match"):
+        setattr(ns["KeywordRepository"], name, getattr(ns["KeywordTaxonRepository"], name))
+    ns["KeywordRepository"].taxonomy_root_twins = ns["KeywordTreeRepository"].taxonomy_root_twins
     db = ns["Database"]()
     db.conn = conn
     repo = ns["KeywordRepository"]()
     repo.conn = conn
     db.keywords = repo
+    db.keyword_tree = repo
     repo.db = db
 
     class Resolver:

@@ -1,7 +1,12 @@
-/* Workspace deletion uses an in-page dialog in browsers and the desktop shell. */
-/** @param {number} wsId @param {string} name */
-async function deleteWorkspaceConfirm(wsId, name) {
-  if (document.getElementById('workspaceDeleteDialog')) return;
+// Deleting a workspace: an in-page dialog (native confirm() does not work in
+// the desktop shell), then the delete request and the list reload.
+// ES module; was the classic workspace-deletion.js.
+
+import { safeFetch, showToast } from './shared.js';
+import { loadWorkspaces } from './workspaces.js';
+
+/** Ask in a modal dialog; resolves true for Delete, false for Cancel or Esc. @param {string} name */
+function confirmDeletion(name) {
   var dialog = document.createElement('dialog');
   dialog.id = 'workspaceDeleteDialog';
   dialog.className = 'modal';
@@ -24,7 +29,7 @@ async function deleteWorkspaceConfirm(wsId, name) {
   dialog.append(title, explanation, actions);
   document.body.appendChild(dialog);
   var previousFocus = document.activeElement;
-  var accepted = await new Promise(function(resolve) {
+  return new Promise(function(resolve) {
     /** @param {boolean} value */
     function finish(value) {
       dialog.close();
@@ -32,15 +37,21 @@ async function deleteWorkspaceConfirm(wsId, name) {
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
       resolve(value);
     }
-    cancel.onclick = function() { finish(false); };
-    remove.onclick = function() { finish(true); };
-    dialog.oncancel = function(event) { event.preventDefault(); finish(false); };
+    cancel.addEventListener('click', function() { finish(false); });
+    remove.addEventListener('click', function() { finish(true); });
+    dialog.addEventListener('cancel', function(event) { event.preventDefault(); finish(false); });
     dialog.showModal();
     cancel.focus();
   });
+}
+
+/** @param {number} wsId @param {string} name */
+export async function deleteWorkspaceConfirm(wsId, name) {
+  if (document.getElementById('workspaceDeleteDialog')) return;
+  var accepted = await confirmDeletion(name);
   if (!accepted) return;
   try {
-    var result = await /** @type {Promise<{cleanup_errors?: string[]}>} */ (safeFetch('/api/workspaces/' + wsId, {method: 'DELETE'}));
+    var result = /** @type {{cleanup_errors?: string[]}} */ (await safeFetch('/api/workspaces/' + wsId, {method: 'DELETE'}));
     if ((result.cleanup_errors || []).length) {
       showToast('Workspace deleted. Some saved result files could not be removed; Storage maintenance will retry. See Logs for paths.', 'warning');
     }

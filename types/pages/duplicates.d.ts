@@ -1,8 +1,8 @@
 interface DuplicatePhoto {id:number;filename?:string;path?:string;exists?:boolean;volume_offline?:boolean;workspaces?:string[];rating?:number;file_size?:number;rejected?:boolean;reason?:string}
 interface DuplicateKeepResponse {file_hash:string;winner_id:number;loser_ids:number[];rating:number;flag:string}
-interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean}
-interface DuplicateBucket {file_hashes:string[];folders:string[];group_count:number}
-interface DuplicateScan {proposals:DuplicateProposal[];buckets?:DuplicateBucket[];catalog_cleanup?:boolean;stale_group_count?:number;new_group_count?:number;changed_group_count?:number}
+interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean;all_missing?:boolean;all_offline?:boolean;_gi?:number}
+interface DuplicateBucket {file_hashes:string[];folders:string[];group_count:number;total_size?:number;example_filenames?:string[]}
+interface DuplicateScan {proposals:DuplicateProposal[];buckets?:DuplicateBucket[];catalog_cleanup?:boolean;stale_group_count?:number;new_group_count?:number;changed_group_count?:number;group_count?:number;loser_count?:number;resolved_group_count?:number;resolved_loser_count?:number}
 interface DuplicateCategory {id:string;label:string;groups:number;extras:number;bytes:number}
 interface DuplicateFailure {id:number;error?:string}
 interface DuplicateSkip {id:number;reason:string}
@@ -12,32 +12,17 @@ interface DuplicateTrashProgress {phase:string;total:number;completed:number;bat
 interface DuplicateTrashState {owner?:object;pending:boolean;terminal:boolean;message:string}
 interface DuplicateTrashError extends Error {trashSummary?:DuplicateTrashSummary}
 interface DuplicateLastScan {found:boolean;result?:DuplicateScan;finished_at?:string}
-declare var _filterMatchedIds:Set<number>|null;
-declare var _lastScanResult:DuplicateScan|null;
-declare var _proposals:DuplicateProposal[];
-declare var _scanInProgress:boolean;
-declare var _filterReady:Promise<void>;
-declare var _pendingFilterRefresh:Promise<void>|null;
-declare var TRASH_BATCH_SIZE:number;
-declare var DuplicateCategories:{classify(group:DuplicateProposal):string;label(id:string):string;summarize(groups:DuplicateProposal[]):DuplicateCategory[]};
 interface Window {vireoThumbnailUrl?:(photo:DuplicatePhoto)=>string;VIREO_REVEAL_LABEL:string;VIREO_FILE_MANAGER_NAME?:string}
 declare function safeFetch<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>;
 declare function escapeHtml(value:string):string;
 declare function formatBytes(value:number):string;
-declare function formatCount(value:number):string;
 declare function showToast(message:string,kind:string):void;
+interface DuplicateScanProgress {phase?:string;current_file?:string;current?:number|null;total?:number}
+interface DuplicateScanComplete {status:string;result?:DuplicateScan;errors?:string[]}
+declare function safeEventSource(url:string,callbacks:{onProgress?(progress:DuplicateScanProgress):void;onComplete?(event:DuplicateScanComplete):void;onError?():void}):EventSource;
 declare function showRevealFeedback(data:unknown):void;
 declare function openContextMenu(event:MouseEvent,items:Array<{label:string;onClick:()=>void}>):void;
-declare function renderResults(result:DuplicateScan):void;
-declare function renderResolvedGroup(group:DuplicateProposal):string;
-declare function visibleBucket(bucket:DuplicateBucket|undefined):DuplicateBucket|null;
-declare function isBulkTrashProtected(proposal:DuplicateProposal):boolean;
-declare function updateTrashProgress(container:HTMLElement|null,progress:DuplicateTrashProgress):void;
-declare function isActionableSkip(skip:DuplicateSkip):boolean;
-declare function pruneResolvedHashesFromScan(hashes:Set<string>):void;
-declare function clearResults():void;
-declare function setEmptyVisible(visible:boolean):void;
-declare function hideRestoredBanner():void;
-// duplicates.html's inline scan, registered as a page hook by duplicates-page-hooks.js.
-declare function startScan(): Promise<void>;
 declare var Vireo: VireoPageHookRegistry;
+declare var VireoFilter: {init(options:{page:string;root:HTMLElement|null;scopeLabel:string;onChange:()=>unknown}):Promise<void>;getRules():unknown;getVisual?():unknown;hasFilters?():boolean;isMuted():boolean;setResultTotal?(total:number|null):void;setVisualInfo?(info:unknown):void};
+interface Window {VireoFilter?:typeof VireoFilter}
+declare var DuplicateCategories:{classify(group:DuplicateProposal):string;label(id:string):string;summarize(groups:DuplicateProposal[]):DuplicateCategory[]};

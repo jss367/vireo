@@ -213,6 +213,18 @@ class _FolderTransfer:
                     if not dest_exists:
                         shutil.rmtree(self.target.catalog_path, ignore_errors=True)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
+            except OSError as exc:
+                # rsync exists but could not be started: not executable
+                # (PermissionError), an argv over the platform limit (E2BIG),
+                # or the like. Popen failed, so nothing was copied and the
+                # destination is as it was; report it as the move's failure
+                # rather than letting a raw exception end the job.
+                log.warning("Could not start rsync (%s) for %s", rsync_bin,
+                            src_path, exc_info=True)
+                return {"moved": 0, "errors": [
+                    f"Couldn't start rsync ('{rsync_bin}'): {exc}. Nothing was "
+                    f"copied. Originals untouched."
+                ]}
 
         error = _rsync_copy_error(returncode, stderr, timed_out)
         if error is not None:

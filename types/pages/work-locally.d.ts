@@ -13,12 +13,11 @@ interface WorkLocalStep {status?:string;id?:string;label?:string;current_file?:s
 interface WorkLocalProgress {steps?:WorkLocalStep[];root_folder_id?:number;current_file?:string;phase?:string;current?:number;total?:number;bytes_current?:number;bytes_total?:number}
 interface WorkLocalWatch {id:string;progress:WorkLocalProgress|null;progressByRoot:Record<string,WorkLocalProgress>;completedRoots:Record<string,boolean>;source:EventSource|null;eventCount:number}
 interface WorkLocalStarted {job_id:string;folder_ids?:number[]}
-declare var Vireo:{api:{fetch(url:string,options?:RequestInit):Promise<Response>;json<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>}};
+declare var Vireo:{api:{fetch(url:string,options?:RequestInit):Promise<Response>;json<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>}}&VireoPageHookRegistry;
 declare function formatBytes(value:number):string;
 declare function escapeHtml(value:string):string;
 declare function escapeAttr(value:string):string;
 declare function showToast(message:string,kind:string):void;
-declare function loadWsFolders():void;
 declare function pickDirectory(title:string,options:{defaultPath:string}):Promise<string|string[]|null>;
 declare function safeEventSource(url:string,handlers:{onProgress(progress:WorkLocalProgress):void;onComplete(event:{status:string;errors?:string[]}):void;onError():void}):EventSource;
 interface Window {formatJobType?:(type:string)=>string;vireoLocalFolderData:WorkLocalData|null;vireoLocalFolders:{load():Promise<WorkLocalData|null>;statusFor(folderId:number):WorkLocalFolder|null;jobFor(folderId:number):WorkLocalJob|null;blockingJob():WorkLocalBlocker|null|undefined;blockingJobFor(folderId:number):WorkLocalBlocker|null;blockingMessage(job?:WorkLocalBlocker|null):string;stage(folderId:number):Promise<boolean>;sync(folderId:number):Promise<void>;discard(folderId:number):Promise<void>}}

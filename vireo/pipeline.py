@@ -44,7 +44,7 @@ def _atomic_json_dump(data, path):
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
         replace_file(tmp_path, path)
-    except Exception:
+    except Exception:  # broad: remove the temp file on any failure, then re-raise
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
@@ -533,7 +533,7 @@ class _FeatureLoad:
         with multiple species tags we keep the alphabetically-first entry so
         the choice stays deterministic across runs.
         """
-        self.confirmed_identities = self.db.keywords.get_species_for_photos(
+        self.confirmed_identities = self.db.photo_species.get_species_for_photos(
             self.photo_ids_for_dets, include_identities=True,
         )
         species_names_by_photo = {pid: [entry["name"] for entry in entries] for pid, entries in self.confirmed_identities.items()}
@@ -1504,7 +1504,7 @@ def attach_species_identities(data, resolver):
     names = set()
     source_keys = defaultdict(set)
     if resolver.db is not None:
-        by_photo = resolver.db.keywords.get_species_for_photos(
+        by_photo = resolver.db.photo_species.get_species_for_photos(
             [p["id"] for p in data.get("photos", [])], include_identities=True,
         )
         for photo in data.get("photos", []):
@@ -1783,7 +1783,7 @@ def refresh_cache_species_for_photos(
     """Rewrite the on-disk pipeline cache so its per-photo, per-burst, and
     per-encounter species fields match ``species_by_photo`` — a
     ``{photo_id: [name, ...]}`` mapping as returned by
-    ``db.keywords.get_species_for_photos``.
+    ``db.photo_species.get_species_for_photos``.
 
     Called after undo / redo of a species-affecting edit (``keyword_add``,
     ``keyword_remove``, ``species_replace``, ``prediction_accept``): the DB
@@ -2519,7 +2519,7 @@ def detect_eye_keypoints_stage(
             # takes over with an accurate processed count.
             aborted = True
             break
-        except Exception:
+        except Exception:  # broad: per-photo boundary; keypoint inference raises undocumented errors
             log.warning(
                 "Eye keypoint detection failed for photo %s", row["id"],
                 exc_info=True,

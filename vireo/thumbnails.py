@@ -3,6 +3,7 @@
 import contextlib
 import logging
 import os
+import sqlite3
 import tempfile
 from datetime import UTC, datetime
 
@@ -172,7 +173,7 @@ def _retry_thumbnail_with_companion(
         try:
             db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
             db.commit()
-        except Exception:
+        except sqlite3.Error:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
@@ -214,7 +215,7 @@ def _retry_thumbnail_with_working_copy(
         try:
             db.working_copies.mark_raw_decode_failed(photo_id, file_mtime)
             db.commit()
-        except Exception:
+        except sqlite3.Error:
             # Without the marker the RAW decode is simply retried next time.
             log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo), "camera_metadata": photo}
@@ -314,7 +315,7 @@ def generate_thumbnail(
     try:
         img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
         replace_file(tmp_path, thumb_path)
-    except Exception:
+    except Exception:  # broad: remove the temp file on any failure, then re-raise
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise

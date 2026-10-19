@@ -728,7 +728,7 @@ def test_verification_callout_reason_stays_in_sync(app_and_db):
     """The scoped verification callout and backend reason stay coupled."""
     app, _ = app_and_db
     matched = card_cleanup.KEEP_NOT_VERIFIED
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     assert f"CARD_CLEANUP_VERIFY_REASON = '{matched}'" in body
     assert "/api/card-cleanup/verify" in body
     assert "/api/jobs/verify-hashes" not in body
@@ -744,7 +744,7 @@ def test_hash_failed_callout_reason_stays_in_sync(app_and_db):
     app, _ = app_and_db
     matched = "see the Audit page"
     assert matched in card_cleanup.KEEP_ARCHIVE_HASH_FAILED
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     assert f"CARD_CLEANUP_HASH_FAILED_REASON = '{matched}'" in body
     assert matched not in card_cleanup.KEEP_NOT_VERIFIED
     assert "run the integrity audit" not in card_cleanup.KEEP_ARCHIVE_HASH_FAILED
@@ -759,7 +759,7 @@ def test_hash_failed_callout_states_audit_workspace_scope(app_and_db):
     to an empty Audit page — mirroring the workspace-scope note added
     to the verify-hashes callout for the same asymmetry."""
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     # A dedicated hint element for the scope note, rendered inside the
     # hash-failed callout container.
     assert 'id="card-cleanup-hash-failed-scope"' in body
@@ -776,7 +776,7 @@ def test_finish_scoped_verification_refreshes_preview_without_rescan(
     """Scoped verification only promotes pending rows, so it can atomically
     refresh the existing manifest instead of forcing another card scan."""
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     finish = body.index("async function cardCleanupFinishVerification(")
     end = body.index("function cardCleanupBindBucket(", finish)
     section = body[finish:end]
@@ -813,7 +813,7 @@ def test_finish_scoped_verification_locks_delete_when_manifest_reload_fails(
     reload succeeding.
     """
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     finish = body.index("async function cardCleanupFinishVerification(")
     end = body.index("function cardCleanupBindBucket(", finish)
     section = body[finish:end]
@@ -876,8 +876,10 @@ def test_confirm_delete_locks_page_before_post(app_and_db):
     unlock, and must direct the user to the Jobs page. Pinning both here so
     a refactor can't quietly re-open the gap."""
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
-    start = body.index("async function cardCleanupConfirmDelete(")
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
+    # The refused-response handling (cardCleanupDeleteRefused) sits just
+    # above cardCleanupConfirmDelete, which calls it from its !resp.ok branch.
+    start = body.index("async function cardCleanupDeleteRefused(")
     end = body.index("function cardCleanupRenderDeleteResult(", start)
     section = body[start:end]
     # Busy must be set BEFORE the fetch — locate both and require the
@@ -894,7 +896,9 @@ def test_confirm_delete_locks_page_before_post(app_and_db):
     ok_branch_start = section.index("if (!resp.ok)")
     ok_branch_end = section.index("cardCleanupWatchJob", ok_branch_start)
     ok_branch = section[ok_branch_start:ok_branch_end]
-    assert "cardCleanupSetBusy(false)" in ok_branch, (
+    assert "await cardCleanupDeleteRefused(resp, data)" in ok_branch
+    refused = section[:section.index("async function cardCleanupConfirmDelete(")]
+    assert "cardCleanupSetBusy(false)" in refused, (
         "the !resp.ok branch must call cardCleanupSetBusy(false) — the "
         "server said the delete was not queued, so the page can safely hand "
         "the buttons back"
@@ -937,8 +941,10 @@ def test_confirm_delete_defaults_manifest_revision_for_pre_upgrade_manifests(
     same value to keep the two sides in sync.
     """
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
-    start = body.index("async function cardCleanupConfirmDelete(")
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
+    # The refused-response handling (cardCleanupDeleteRefused) sits just
+    # above cardCleanupConfirmDelete, which calls it from its !resp.ok branch.
+    start = body.index("async function cardCleanupDeleteRefused(")
     end = body.index("function cardCleanupRenderDeleteResult(", start)
     section = body[start:end]
     # Locate the confirmedRevision assignment and require a truthy
@@ -949,7 +955,7 @@ def test_confirm_delete_defaults_manifest_revision_for_pre_upgrade_manifests(
     rev_expr = section[rev_idx:body_idx]
     assert "|| 1" in rev_expr, (
         "cardCleanupConfirmDelete must default confirmedRevision to 1 "
-        "(INITIAL_MANIFEST_REVISION) when cardCleanupState.manifest.revision "
+        "(INITIAL_MANIFEST_REVISION) when state.manifest.revision "
         "is undefined — sending undefined here would omit manifest_revision "
         "from JSON.stringify and the delete endpoint would reject a "
         "pre-upgrade manifest that has no revision key with 400 required, "
@@ -971,7 +977,7 @@ def test_confirm_delete_awaits_manifest_reload_on_revision_mismatch(
     actually be deleted next.
 
     The prior flow ran cardCleanupSetBusy(false) first (re-enabling
-    Delete against the pre-mismatch cardCleanupState.manifest), then
+    Delete against the pre-mismatch state.manifest), then
     kicked cardCleanupLoadManifest() off as fire-and-forget. In the
     gap before the reload landed a user could reopen the confirm
     dialog with the old totals; once the reload swapped the manifest,
@@ -986,8 +992,10 @@ def test_confirm_delete_awaits_manifest_reload_on_revision_mismatch(
     stale preview cannot authorize a deletion.
     """
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
-    start = body.index("async function cardCleanupConfirmDelete(")
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
+    # The refused-response handling (cardCleanupDeleteRefused) sits just
+    # above cardCleanupConfirmDelete, which calls it from its !resp.ok branch.
+    start = body.index("async function cardCleanupDeleteRefused(")
     end = body.index("function cardCleanupRenderDeleteResult(", start)
     section = body[start:end]
     # Locate the mismatch branch.
@@ -1040,7 +1048,7 @@ def test_start_verification_keeps_page_locked_on_ambiguous_start(app_and_db):
     """An ambiguous POST outcome must not unlock deletion while the scoped
     verification job may be refreshing the manifest."""
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     start = body.index("async function cardCleanupStartVerification(")
     end = body.index("async function cardCleanupFinishVerification(", start)
     section = body[start:end]
@@ -1096,7 +1104,7 @@ def test_load_manifest_discards_stale_scan_response(app_and_db):
     If scan #1's response then arrives it would (a) render scan #1's
     source and totals over scan #2's state via cardCleanupRenderManifest
     — including re-enabling the Delete button based on scan #1's
-    deletable count — while the delete POST uses cardCleanupState.
+    deletable count — while the delete POST uses state.
     scanJobId, which is now jobId2, so the confirmation dialog would
     advertise a set that does not match the manifest the destructive job
     would operate on; or (b) on a 404, null out scanJobId and clobber
@@ -1108,7 +1116,7 @@ def test_load_manifest_discards_stale_scan_response(app_and_db):
     here so a refactor cannot quietly re-open either one.
     """
     app, _ = app_and_db
-    body = app.test_client().get("/card-cleanup").get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/card-cleanup")
     start = body.index("async function cardCleanupLoadManifest(")
     end = body.index("function cardCleanupRenderManifest(", start)
     section = body[start:end]
@@ -1118,11 +1126,11 @@ def test_load_manifest_discards_stale_scan_response(app_and_db):
     # totals and re-enables Delete based on them) would corrupt scan #2's
     # state if reached with a stale response.
     first_mutation_idx = min(
-        section.index("cardCleanupState.scanJobId = null"),
+        section.index("state.scanJobId = null"),
         section.index("cardCleanupRenderManifest("),
     )
     pre_mutation = section[:first_mutation_idx]
-    assert "cardCleanupState.scanJobId !==" in pre_mutation, (
+    assert "state.scanJobId !==" in pre_mutation, (
         "cardCleanupLoadManifest must compare state.scanJobId against the "
         "job id captured before the fetch, and return early on mismatch, "
         "BEFORE touching state or rendering — otherwise a scan started "
@@ -1135,7 +1143,7 @@ def test_load_manifest_discards_stale_scan_response(app_and_db):
     # inherit scan #1's error banner as if it had failed itself.
     catch_idx = section.index("} catch (e) {")
     catch_body = section[catch_idx:]
-    assert "cardCleanupState.scanJobId !==" in catch_body, (
+    assert "state.scanJobId !==" in catch_body, (
         "the catch branch of cardCleanupLoadManifest must also check "
         "state.scanJobId — a fetch or parse error on the stale scan #1 "
         "response must not surface as an error message while scan #2 is "
