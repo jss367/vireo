@@ -122,9 +122,14 @@ def _blocked_destination_developed_path(destination, developed_dir):
     return None
 
 
-def _refuse_every_photo(photo_ids, conflict_msg):
-    """Return the ``move_photos`` result that refuses the whole batch."""
+def _refuse_every_photo(photo_ids, conflict_msg, progress_cb):
+    """Return the ``move_photos`` result that refuses the whole batch.
+
+    Every photo is settled (with an error), so the bar reaches its total.
+    """
     log.warning("Move refused: %s", conflict_msg)
+    if progress_cb and photo_ids:
+        progress_cb(len(photo_ids), len(photo_ids), "")
     return {
         "moved": 0,
         "errors": [
@@ -193,6 +198,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     if os.path.lexists(destination) and not os.path.isdir(destination):
         return _refuse_every_photo(
             photo_ids, f"destination path is not a directory: {destination}",
+            progress_cb,
         )
     os.makedirs(destination, exist_ok=True)
     destination = catalog_folder_path(db, destination)
@@ -204,6 +210,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             photo_ids,
             "developed output path is not a directory: "
             f"{blocked_developed}",
+            progress_cb,
         )
     move = _PhotoMove(db, destination, developed_dir, developed_listing_cache,
                       keep_visible)
@@ -282,13 +289,27 @@ class _PhotoMove:
             photos_map, self.stems, self.files, self.errors,
         )
 
+    def move_one(self, item):
+        """Copy, repoint, rebase renders and delete originals for one photo.
+
+        A photo already in the destination, or whose copy fails, stops here;
+        the copy failure has recorded its error.
+        """
+        if self.preflight.is_already_in_place(item):
+            return
+        if not self.files.copy_files(item):
+            return
+        self.catalog.update_catalog(item)
+        self.renders.relocate_developed(item)
+        self.files.remove_originals(item)
+        self.moved += 1
+
     def run(self, photo_ids, progress_cb, cancel_check, pause_requested,
             pause_callback):
         """Move each photo in order; return ``move_photos``' result."""
         db = self.db
         total = len(photo_ids)
-        preflight, files = self.preflight, self.files
-        catalog, renders = self.catalog, self.renders
+        preflight, catalog = self.preflight, self.catalog
         try:
             for i, pid in enumerate(photo_ids):
                 if pause_requested and pause_requested():
@@ -298,22 +319,14 @@ class _PhotoMove:
                 if cancel_check and cancel_check():
                     break
                 item = preflight.check_photo(pid)
-                if item is None:
-                    continue
-                if preflight.is_already_in_place(item):
-                    if progress_cb:
-                        progress_cb(i + 1, total, item.photo["filename"])
-                    continue
-                if not files.copy_files(item):
-                    continue
-                catalog.update_catalog(item)
-                renders.relocate_developed(item)
-                files.remove_originals(item)
-
-                self.moved += 1
-
+                if item is not None:
+                    self.move_one(item)
+                # Every settled photo advances the bar, including one that
+                # was skipped or failed (its reason is already in errors);
+                # otherwise a batch with failures never reaches its total.
                 if progress_cb:
-                    progress_cb(i + 1, total, item.photo["filename"])
+                    photo = preflight.photos_map.get(pid)
+                    progress_cb(i + 1, total, photo["filename"] if photo else "")
         finally:
             # Always update folder counts so they stay consistent even if an
             # exception interrupts the move loop after some photos were committed.
