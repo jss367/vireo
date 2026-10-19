@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/logs.d.ts",
+    "../vireo/static/logs/boot.js",
+    "../vireo/static/logs/lines.js",
+    "../vireo/static/logs/shared.js",
+    "../vireo/static/logs/state.js"
+  ]
+}

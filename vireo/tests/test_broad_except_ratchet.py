@@ -57,6 +57,9 @@ SKIPPED_DIRS = {"tests", "testing"}
 DOCUMENTED_ROOTS: tuple[str, ...] = (
     "web/",
     "pipeline_stages/",
+    "classify_job/",
+    "job_runner/",
+    "jobs.py",
     "scanner/",
     "import_job/",
 )

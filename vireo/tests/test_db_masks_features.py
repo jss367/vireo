@@ -1290,7 +1290,7 @@ def test_detector_floor_reads_config_through_the_facade(name):
     "sam_variant_rerun_warning", "list_photos_for_eye_keypoint_stage",
 ])
 def test_photo_scope_clause_stays_on_the_facade(name):
-    assert "_scope_clause" in _self_attrs(getattr(Database, name))
+    assert "stats" in _self_attrs(getattr(Database, name))
 
 
 def test_upsert_photo_embedding_guards_through_the_facade():

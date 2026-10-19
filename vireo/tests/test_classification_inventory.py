@@ -1,6 +1,6 @@
 """Tests for the classification inventory feature.
 
-Covers `Database.get_classification_inventory()` (per-pair aggregates over the
+Covers `stage_counts.get_classification_inventory()` (per-pair aggregates over the
 active workspace) and the `/api/workspace/classification-inventory` endpoint
 that builds the cross-product, identifies stale rows, and computes medians.
 """
@@ -8,6 +8,7 @@ import json
 import os
 
 import pytest
+from services import stage_counts
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -78,12 +79,12 @@ def _seed_workspace(db, name="WS1", folder_path="/photos/ws1", n_photos=2):
 
 
 # ---------------------------------------------------------------------------
-# DB-level tests: Database.get_classification_inventory()
+# DB-level tests: stage_counts.get_classification_inventory()
 # ---------------------------------------------------------------------------
 
 def test_empty_workspace_returns_zero_pairs(db):
     ws_id, _ = _seed_workspace(db, n_photos=0)
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     assert inv["total_real_detections"] == 0
     assert inv["pairs"] == []
 
@@ -92,7 +93,7 @@ def test_no_predictions_returns_zero_classified(db):
     ws_id, photos = _seed_workspace(db, n_photos=2)
     for p in photos:
         _add_detection(db, p)
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     assert inv["total_real_detections"] == 2
     assert inv["pairs"] == []
 
@@ -104,7 +105,7 @@ def test_single_pair_fully_classified(db):
         _record_run(db, det, "BioCLIP-2.5", "fp_birds")
         _add_prediction(db, det, "BioCLIP-2.5", "fp_birds", "Robin", 0.85)
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     assert inv["total_real_detections"] == 2
     assert len(inv["pairs"]) == 1
     pair = inv["pairs"][0]
@@ -124,7 +125,7 @@ def test_two_pairs_independent(db):
     # Only 1 detection classified by iNat21 with tol
     _record_run(db, dets[0], "iNat21 (EVA-02 Large)", "tol")
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     pair_map = {(p["classifier_model"], p["labels_fingerprint"]): p for p in inv["pairs"]}
     assert pair_map[("BioCLIP-2.5", "fp_birds")]["classified_dets"] == 3
     assert pair_map[("iNat21 (EVA-02 Large)", "tol")]["classified_dets"] == 1
@@ -137,7 +138,7 @@ def test_below_threshold_excluded(db):
     _record_run(db, high, "M", "fp")
     _record_run(db, low, "M", "fp")
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     assert inv["total_real_detections"] == 1  # low excluded
     assert inv["pairs"][0]["classified_dets"] == 1
 
@@ -149,7 +150,7 @@ def test_full_image_detections_excluded(db):
     _record_run(db, real, "M", "fp")
     _record_run(db, full, "M", "fp")
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     assert inv["total_real_detections"] == 1
     assert inv["pairs"][0]["classified_dets"] == 1
 
@@ -164,11 +165,11 @@ def test_workspace_scoping_excludes_other_workspaces(db):
     _record_run(db, det2, "M", "fp")
 
     # Inventory for ws1 should see only its own detection
-    inv1 = db.get_classification_inventory(ws1_id, min_conf=0.2)
+    inv1 = stage_counts.get_classification_inventory(db, ws1_id, min_conf=0.2)
     assert inv1["total_real_detections"] == 1
     assert inv1["pairs"][0]["classified_dets"] == 1
 
-    inv2 = db.get_classification_inventory(ws2_id, min_conf=0.2)
+    inv2 = stage_counts.get_classification_inventory(db, ws2_id, min_conf=0.2)
     assert inv2["total_real_detections"] == 1
     assert inv2["pairs"][0]["classified_dets"] == 1
 
@@ -180,7 +181,7 @@ def test_photos_covered_dedupes(db):
     for d in dets:
         _record_run(db, d, "M", "fp")
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     pair = inv["pairs"][0]
     assert pair["classified_dets"] == 5
     assert pair["photos_covered"] == 1
@@ -194,7 +195,7 @@ def test_median_top1_confidence_sample(db):
         _record_run(db, d, "M", "fp")
         _add_prediction(db, d, "M", "fp", "X", 0.9)
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     pair = inv["pairs"][0]
     # When all confidences are 0.9, median must be 0.9 regardless of sampling.
     assert pair["median_top1_conf"] == pytest.approx(0.9, abs=0.001)
@@ -225,7 +226,7 @@ def test_median_top1_sample_is_unbiased_by_detection_id(db):
         _record_run(db, d, "M", "fp")
         _add_prediction(db, d, "M", "fp", "X", 0.9)
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2,
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2,
                                            median_sample_per_pair=50)
     pair = inv["pairs"][0]
     # Random median is 0.9 with overwhelming probability; deterministic-by-ID
@@ -243,7 +244,7 @@ def test_median_top1_uses_max_per_detection(db):
     _add_prediction(db, d, "M", "fp", "Robin", 0.85)
     _add_prediction(db, d, "M", "fp", "Sparrow", 0.10)
 
-    inv = db.get_classification_inventory(ws_id, min_conf=0.2)
+    inv = stage_counts.get_classification_inventory(db, ws_id, min_conf=0.2)
     pair = inv["pairs"][0]
     assert pair["median_top1_conf"] == pytest.approx(0.85, abs=0.001)
 

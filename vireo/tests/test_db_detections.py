@@ -1122,7 +1122,7 @@ def test_floors_read_config_through_the_facade(name):
 @pytest.mark.parametrize("name", ["list_misses", "bulk_reject_miss_category"])
 def test_misses_scope_through_the_facade(name):
     attrs = _self_attrs(getattr(Database, name))
-    assert {"_ws_id", "_scope_clause"} <= attrs
+    assert {"_ws_id", "stats"} <= attrs
 
 
 def test_repository_imports_no_db_code():
