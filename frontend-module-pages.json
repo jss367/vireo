@@ -1,4 +1,10 @@
 {
+  "audit": {
+    "route": "/audit",
+    "template": "audit.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "best-batch": {
     "route": "/best-batch",
     "template": "best_batch.html",
@@ -73,6 +79,20 @@
     "route": "/shortcuts",
     "template": "shortcuts.html",
     "pageHooks": [],
+    "sharedWrites": []
+  },
+  "welcome": {
+    "route": "/welcome",
+    "template": "welcome.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "workspace": {
+    "route": "/workspace",
+    "template": "workspace.html",
+    "pageHooks": [
+      "loadWsFolders"
+    ],
     "sharedWrites": []
   }
 }

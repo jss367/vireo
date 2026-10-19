@@ -58,7 +58,7 @@ EXPECTED_HOOKS = {
     "/keywords": set(),
     "/move": set(),
     "/import": set(),
-    "/workspace": set(),
+    "/workspace": {"loadWsFolders"},
     "/dashboard": set(),
     "/storage": set(),
     "/logs": set(),

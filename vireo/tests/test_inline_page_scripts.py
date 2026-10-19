@@ -19,7 +19,6 @@ STATIC = Path(__file__).resolve().parents[1] / "static"
 # script out; never raise one: put new page code in vireo/static/ instead.
 INLINE_SCRIPT_LINE_LIMITS = {
     "_sync_panel.html": 876,
-    "audit.html": 480,
     "card_cleanup.html": 915,
     "cull.html": 780,
     "duplicates.html": 820,
@@ -27,8 +26,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "id_conflicts.html": 968,
     "stats.html": 992,
     "storage.html": 867,
-    "welcome.html": 374,
-    "workspace.html": 366,
 }
 
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)

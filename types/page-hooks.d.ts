@@ -105,6 +105,10 @@ interface VireoPageHooks {
   // ---- Missing Originals deletes (navbar-folder-banners.js) ----
   loadMisses?(): unknown;
 
+  // ---- Work Locally (vireo-work-locally.js) ----
+  /** Re-render the Workspace page's folder rows after a local-folder status load or job start. */
+  loadWsFolders?(): unknown;
+
   // ---- The export modal (vireo-export-presets.js, vireo-export-collisions.js) ----
   /** Apply a built-in preset (``original-jpg``, ...) to the modal's controls. */
   applyExportPreset?(preset: string): void;

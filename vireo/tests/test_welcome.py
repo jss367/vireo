@@ -24,10 +24,7 @@ def test_welcome_starts_embedding_precompute_after_label_download(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
 
-    resp = client.get("/welcome")
-
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    html = page_with_scripts(client, "/welcome")
     assert "startWelcomeEmbeddingPrecompute" in html
     assert "/api/jobs/precompute-embeddings" in html
     assert "embedding_precompute" in html
@@ -371,8 +368,9 @@ def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
     client = app.test_client()
     resp = client.get("/welcome")
     assert resp.status_code == 200
-    assert b"/browse" in resp.data
-    assert b"skip" in resp.data.lower() or b"Skip" in resp.data
+    assert b"Skip for now" in resp.data
+    # Skipping finishes setup and lands on Browse (static/welcome/).
+    assert "window.location.href = '/browse'" in page_with_scripts(client, "/welcome")
 
 
 def test_setup_complete_flag_default(tmp_path, monkeypatch):

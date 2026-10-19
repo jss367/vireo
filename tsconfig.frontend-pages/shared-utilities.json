@@ -17,7 +17,6 @@
     "../vireo/static/vireo-utils.js",
     "../vireo/static/vireo-page-hooks.js",
     "../vireo/static/sync-panel-page-hooks.js",
-    "../vireo/static/workspace-deletion.js",
     "../vireo/static/keymap.js",
     "../vireo/static/vireo-search.js",
     "../tests/frontend/shared-type-contracts.ts",
