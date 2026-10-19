@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pytest
 from repositories.masks_features import PipelineFeatures
+from services import subject_masks
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -2457,7 +2458,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     return db, pid
 
 
@@ -2523,13 +2524,13 @@ def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypat
     # Any call through to list_photos_for_eye_keypoint_stage would be a bug —
     # the disabled flag must short-circuit before the DB helper.
     called = {"listed": False}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
     def _spy(*args, **kwargs):
         called["listed"] = True
         return orig(*args, **kwargs)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": False})
 
@@ -2578,7 +2579,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2591,7 +2592,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     )
 
     captured = {}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
     def _spy(photo_ids=None):
         captured["photo_ids"] = (
@@ -2599,7 +2600,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         )
         return orig(photo_ids=photo_ids)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(
         db, config={"eye_detect_enabled": True}, collection_id=cid,
@@ -2661,7 +2662,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
 
     calls = {"n": 0}
 
@@ -2751,7 +2752,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         detector_model="MegaDetector",
         prompt=(0.1, 0.1, 0.8, 0.8),
     )
-    db.set_active_mask_variant(other_pid, "test")
+    subject_masks.set_active_mask_variant(db, other_pid, "test")
     db.predictions.add(
         det_ids[0], species="Vulpes vulpes", confidence=0.9,
         model="bioclip-2.5", category="match",
@@ -2764,7 +2765,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
     )
 
     captured = {}
-    orig = db.list_photos_for_eye_keypoint_stage
+    orig = subject_masks.list_photos_for_eye_keypoint_stage
 
     def _spy(photo_ids=None):
         captured["photo_ids"] = (
@@ -2772,7 +2773,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         )
         return orig(photo_ids=photo_ids)
 
-    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+    monkeypatch.setattr(subject_masks, "list_photos_for_eye_keypoint_stage", _spy)
 
     detect_eye_keypoints_stage(
         db, config={"eye_detect_enabled": True}, collection_id=cid,
@@ -2849,7 +2850,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
         detector_model="MegaDetector",
         prompt=(0.125, 0.167, 0.75, 0.667),
     )
-    db.set_active_mask_variant(pid, "test")
+    subject_masks.set_active_mask_variant(db, pid, "test")
     db.predictions.add(
         det_ids[0],
         species="Vulpes vulpes",
@@ -2940,7 +2941,7 @@ def test_eye_stage_gate1_failure_does_not_stamp_fingerprint(tmp_path, monkeypatc
     )
 
     # Photo must still surface as a candidate for the next stage run.
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert any(r["id"] == pid for r in rows)
 
     # Second pass: lower the gate. Now the model runs and writes eye fields.
@@ -2988,7 +2989,7 @@ def test_eye_stage_unrouted_taxonomy_does_not_stamp_fingerprint(tmp_path, monkey
         "the routing map / taxonomy data can be extended later and the "
         "photo must remain eligible to re-run then."
     )
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert any(r["id"] == pid for r in rows)
 
 
@@ -3021,7 +3022,7 @@ def test_eye_stage_gate3_failure_stamps_fingerprint(tmp_path, monkeypatch):
     ).fetchone()
     assert fp_row[0] == EYE_KP_FINGERPRINT_VERSION
     # And the photo is no longer eligible on the next selection pass.
-    rows = db.list_photos_for_eye_keypoint_stage()
+    rows = subject_masks.list_photos_for_eye_keypoint_stage(db)
     assert not any(r["id"] == pid for r in rows)
 
 
@@ -3086,7 +3087,7 @@ def test_eye_stage_persists_when_state_lags_current_primary(tmp_path, monkeypatc
     db.conn.commit()
 
     # Sanity check: the eye stage sees the FIRST detection's box.
-    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    queued = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])
     assert queued and queued[0]["box_x"] == existing_det["box_x"]
 
     good = [
@@ -3123,7 +3124,7 @@ def test_eye_stage_skips_when_primary_disappears_before_lock(tmp_path, monkeypat
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
 
-    queued = db.list_photos_for_eye_keypoint_stage([pid])
+    queued = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])
     assert queued, "fixture must satisfy the worklist"
     row = queued[0]
 
@@ -3159,7 +3160,7 @@ def test_eye_stage_rejects_other_detector_with_identical_box(tmp_path, monkeypat
 
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
-    row = db.list_photos_for_eye_keypoint_stage([pid])[0]
+    row = subject_masks.list_photos_for_eye_keypoint_stage(db, [pid])[0]
     new_id = db.write_detection_batch(pid, "other-detector", [{
         "box": {k: row["box_" + k] for k in "xywh"},
         "confidence": .99, "category": "animal",
@@ -3270,11 +3271,11 @@ def test_eye_stage_refreshes_mask_path_under_photo_lock(tmp_path, monkeypatch):
 
     db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
     monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
-    eligible = [dict(row) for row in db.list_photos_for_eye_keypoint_stage()]
+    eligible = [dict(row) for row in subject_masks.list_photos_for_eye_keypoint_stage(db)]
     eligible[0]["mask_path"] = str(tmp_path / "removed-predecessor.png")
     monkeypatch.setattr(
-        db, "list_photos_for_eye_keypoint_stage",
-        lambda **_kwargs: eligible,
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **_kwargs: eligible,
     )
     lock_events = []
 

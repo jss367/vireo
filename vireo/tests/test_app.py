@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
+from services import subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -16214,8 +16215,8 @@ def _seed_masks(db, tmp_path):
     # realistic state. delete_inactive_masks now skips photos with NULL
     # active (the partial-state case) rather than treating them as
     # entirely-inactive.
-    db.set_active_mask_variant(p1, "sam2-small")
-    db.set_active_mask_variant(p2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p2, "sam2-small")
     return masks_dir, p1, p2
 
 
