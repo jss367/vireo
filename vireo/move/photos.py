@@ -8,6 +8,7 @@ rewrite and the developed-render relocation.
 
 import logging
 import os
+import stat
 from dataclasses import dataclass, field
 
 from .paths import (
@@ -829,7 +830,16 @@ class _PhotoFileTransfer:
         leftovers = []
         for comp in companions:
             comp_src = os.path.join(src_dir, comp)
-            if not os.path.isfile(comp_src):
+            try:
+                mode = os.stat(comp_src).st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                log.warning("Post-commit inspection of %s failed: %s",
+                            comp_src, exc)
+                leftovers.append(f"{comp} (could not inspect; left untouched: {exc})")
+                continue
+            if not stat.S_ISREG(mode):
                 continue
             try:
                 os.remove(comp_src)
