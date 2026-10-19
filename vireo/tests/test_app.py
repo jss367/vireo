@@ -858,28 +858,31 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     client = app.test_client()
     resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
-    assert b'&limit=' in resp.data
-    assert b'Select all shown' in resp.data
-    assert b'Delete Entire Cache' in resp.data
+    html = _page_with_scripts(client, '/storage')
+    assert 'STORAGE_MODAL_FILE_LIMIT = 500' in html
+    assert '&limit=' in html
+    assert 'Select all shown' in html
+    assert 'Delete Entire Cache' in html
 
 
 def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
     """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
     assert page.status_code == 200
+    html = _page_with_scripts(client, '/storage')
     for marker in (
-        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
-        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
-        b'Download again', b'cannot currently be reclaimed separately',
-        b'loadMasksCard(s && s.masks)', b'cfgWorkingCopyCacheMaxGb',
-        b"{name: 'Working Copies'", b'Oldest files are removed first',
-        b'storageBreakdown', b'View files and folders',
+        'storageFreeSize', 'storageReclaimableSize', 'clearSafeCaches',
+        'openStorageFolder', 'refreshStoragePage', 'Safe to clear',
+        'Download again', 'cannot currently be reclaimed separately',
+        'loadMasksCard(s && s.masks)', 'cfgWorkingCopyCacheMaxGb',
+        "{name: 'Working Copies'", 'Oldest files are removed first',
+        'storageBreakdown', 'View files and folders',
     ):
-        assert marker in page.data
-    assert page.data.count(b"{name: 'Database'") == 1
-    assert b'Other Vireo Data' not in page.data
+        assert marker in html
+    assert html.count("{name: 'Database'") == 1
+    assert 'Other Vireo Data' not in html
 
 
 def test_storage_page_confirms_destructive_working_copy_quota_reduction(
@@ -887,43 +890,45 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
 ):
     """Quota input stays pending until Apply and explains cache eviction."""
     app, _ = app_and_db
-    page = app.test_client().get('/storage')
+    client = app.test_client()
+    page = client.get('/storage')
 
     assert page.status_code == 200
-    assert b'oninput="updateWorkingCopyLimitState()"' in page.data
-    assert b'onchange="saveStorageConfig()"' not in page.data.split(
-        b'id="cfgWorkingCopyCacheMaxGb"', 1,
-    )[1].split(b'</div>', 1)[0]
+    html = _page_with_scripts(client, '/storage')
+    assert 'data-storage-on="input:updateWorkingCopyLimitState"' in html
+    assert 'change:saveStorageConfig' not in html.split(
+        'id="cfgWorkingCopyCacheMaxGb"', 1,
+    )[1].split('</div>', 1)[0]
     for marker in (
-        b'applyWorkingCopyLimitBtn',
-        b'<dialog class="modal-overlay" id="workingCopyLimitModal"',
-        b'modal.showModal()',
-        b'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        b'quotaMb > _committedWorkingCopyQuotaMb',
-        b'Lower working-copy storage limit?',
-        b'Lower limit and remove copies',
-        b'Your original photos will not be deleted',
-        b'working_copy_cache_max_mb: workingCopyQuotaMb',
+        'applyWorkingCopyLimitBtn',
+        '<dialog class="modal-overlay" id="workingCopyLimitModal"',
+        'modal.showModal()',
+        'MAX_WORKING_COPY_QUOTA_MB = 1048576',
+        'quotaMb > _committedWorkingCopyQuotaMb',
+        'Lower working-copy storage limit?',
+        'Lower limit and remove copies',
+        'Your original photos will not be deleted',
+        'working_copy_cache_max_mb: workingCopyQuotaMb',
         # 409 recovery flow: confirm flag sent after modal confirmation,
         # and stale-cache 409 rerouted back into the modal.
-        b'_confirm_working_copy_eviction = true',
-        b"'working_copy_eviction_confirmation_required'",
-        b'previous_working_copy_quota_mb',
+        '_confirm_working_copy_eviction = true',
+        "'working_copy_eviction_confirmation_required'",
+        'previous_working_copy_quota_mb',
         # Apply must flush a queued autosave for the other storage
         # controls instead of dropping it via clearTimeout.
-        b'await flushPendingStorageAutosave()',
-        b'function flushPendingStorageAutosave',
-        b'saveStorageConfig();',
-        b'throw e;',
-        b'the working-copy limit was not updated',
+        'await flushPendingStorageAutosave()',
+        'function flushPendingStorageAutosave',
+        'saveStorageConfig();',
+        'throw e;',
+        'the working-copy limit was not updated',
         # Refresh syncs the cached committed quota from the server's
         # authoritative working.quota_bytes so a concurrent quota change
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
-        b'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        b'currentInputMb === _committedWorkingCopyQuotaMb',
+        'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
+        'currentInputMb === _committedWorkingCopyQuotaMb',
     ):
-        assert marker in page.data
+        assert marker in html
 
 
 def test_api_storage_includes_offline_originals(app_and_db):
@@ -4859,7 +4864,7 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     client = app.test_client()
     resp = client.get('/cull')
     assert resp.status_code == 200
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/cull')
     assert 'id="slRejectCrop"' in html
     assert 'id="slWTime"' in html
     assert 'id="slEncCut"' in html
@@ -26000,6 +26005,140 @@ def test_encounter_species_remove_redo_refreshes_pipeline_cache(app_and_db):
     assert cache["encounters"][0]["bursts"][0]["species_override"] == {
         "species": None, "confirmed": False, "species_list": [],
     }
+
+
+def _remove_teal_from_cached_burst(app, db):
+    """Seed a confirmed-teal cache and remove teal from its first burst."""
+    app_client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    override = {
+        "species": "Green-winged Teal", "confirmed": True,
+        "species_list": ["Green-winged Teal"],
+    }
+    _seed_encounter_cache(
+        app, db, photo_ids, confirmed_species="Green-winged Teal",
+        bursts=[
+            {"photo_ids": photo_ids[:2], "species_predictions": [],
+             "species_override": dict(override)},
+            {"photo_ids": photo_ids[2:], "species_predictions": [],
+             "species_override": dict(override)},
+        ],
+    )
+    teal = db.add_keyword("Green-winged Teal", is_species=True)
+    for pid in photo_ids:
+        db.tag_photo(pid, teal)
+    resp = app_client.post("/api/encounters/species", json={
+        "species": "Green-winged Teal", "photo_ids": photo_ids[:2],
+        "burst_index": 0, "remove": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return photo_ids[:2]
+
+
+def test_undo_redo_report_a_failed_pipeline_cache_refresh(app_and_db, monkeypatch):
+    """A cache refresh that fails after undo/redo is a warning in the response.
+
+    Regression: the failure was only logged, so Process Review kept showing
+    the old species with nothing on screen saying why. The undo and redo
+    still succeed (the catalog change committed); the response says the
+    review results were not updated.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    burst_ids = _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+
+    resp = client.post("/api/undo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["undone"]
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Undo saved, but Vireo could not update")
+    assert "Process Review" in body["warning"]
+    assert "old species" in body["warning"]
+    for pid in burst_ids:
+        assert _species_names(db, pid) == ["Green-winged Teal"]
+
+    resp = client.post("/api/redo")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["pipeline_cache_stale"] is True
+    assert body["warning"].startswith("Redo saved, but Vireo could not update")
+    for pid in burst_ids:
+        assert _species_names(db, pid) == []
+
+
+def test_undo_redo_without_a_cache_failure_carry_no_warning(app_and_db):
+    """A refresh that succeeds (or has nothing to do) keeps the old shape."""
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    for route in ("/api/undo", "/api/redo"):
+        body = client.post(route).get_json()
+        assert body["ok"] is True
+        assert "warning" not in body
+        assert "pipeline_cache_stale" not in body
+
+
+def test_undo_redo_responses_carry_the_entry_id(app_and_db, monkeypatch):
+    """Undo and redo report ``entry_id`` so the Process Review banner can
+    detect its own inverse. The failed Undo and the Redo that reverses it
+    both act on the same ``edit_history`` row, so their ``entry_id`` match;
+    on that match the client drops the stale banner the Undo put up.
+    """
+    import pipeline
+
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+    undo_body = client.post("/api/undo").get_json()
+    assert undo_body["pipeline_cache_stale"] is True
+    assert isinstance(undo_body["entry_id"], int)
+    monkeypatch.undo()
+
+    redo_body = client.post("/api/redo").get_json()
+    assert redo_body["ok"] is True
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+
+
+def test_undo_redo_entry_id_differs_across_separate_history_entries(app_and_db):
+    """A later undo/redo for a different edit carries a different
+    ``entry_id`` than an earlier one, so the client can tell "unrelated
+    successful edit" from "this failure's own inverse".
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    _remove_teal_from_cached_burst(app, db)
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids must not collide.
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    chat = db.add_keyword("Yellow-breasted Chat", is_species=True)
+    for pid in photo_ids[:1]:
+        db.tag_photo(pid, chat)
+    resp = client.post("/api/encounters/species", json={
+        "species": "Yellow-breasted Chat", "photo_ids": photo_ids[:1],
+        "burst_index": 0, "remove": False,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    first_undo = client.post("/api/undo").get_json()
+    second_undo = client.post("/api/undo").get_json()
+    assert first_undo["entry_id"] != second_undo["entry_id"]
 
 
 def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override(app_and_db):

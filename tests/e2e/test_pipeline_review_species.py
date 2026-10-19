@@ -2318,3 +2318,170 @@ def test_pipeline_review_conflicting_burst_can_split_and_undo(live_server, page)
     page.locator("#historyUndoBtn").click()
     expect(page.locator(".encounter-card")).to_have_count(1)
     expect(page.locator("[data-species-conflict]")).to_have_count(2)
+
+
+def _add_species_in_pipeline_review(live_server, page, species):
+    """Confirm ``species`` on a predictionless encounter through the UI."""
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+    page.goto(f"{live_server['url']}/pipeline/review")
+    species_name = page.locator(".species-widget .species-name").first
+    expect(species_name).to_have_text("Add species")
+    species_name.click()
+    input_box = page.locator(".species-dropdown.open input").first
+    input_box.fill(species)
+    input_box.press("Enter")
+    expect(species_name).to_have_text(species)
+
+
+def _fail_pipeline_cache_refresh(monkeypatch):
+    import pipeline
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+
+
+def test_pipeline_review_says_when_undo_cannot_update_its_results(
+    live_server, page, monkeypatch,
+):
+    """Undo stands, but a cache refresh that failed must not be silent.
+
+    The review results this page reads still list the old species, and a
+    reload reads the same file, so the page says so and what rebuilds them.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+    expect(banner).to_be_hidden()
+    _fail_pipeline_cache_refresh(monkeypatch)
+
+    with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
+        page.locator("#historyUndoBtn").click()
+    assert undo.value.json()["pipeline_cache_stale"] is True
+
+    expect(banner).to_be_visible()
+    expect(banner).to_contain_text("These review results may be out of date.")
+    expect(banner).to_contain_text("Undoing “Confirmed species")
+    expect(banner).to_contain_text("may still list the old species")
+    expect(banner).to_contain_text("Reloading this page will not fix that")
+    expect(banner).to_contain_text("run Process on these photos again")
+    expect(banner.get_by_role("link", name="Open Process")).to_have_attribute(
+        "href", "/pipeline"
+    )
+    toast = page.locator('#toastContainer [data-type="warning"]')
+    expect(toast).to_have_text(
+        "Undo saved, but Vireo could not update Process Review's saved "
+        "results to match, so they may still list the old species for these photos."
+    )
+
+    page.locator("#historyRedoBtn").click()
+    expect(banner).to_contain_text("Redoing “Confirmed species")
+
+
+def test_pipeline_review_banner_clears_when_its_inverse_succeeds(
+    live_server, page, monkeypatch,
+):
+    """A failed Undo puts up the stale-cache banner; when the user clicks
+    Redo on the same entry and that refresh succeeds, the cache for those
+    photos is back in sync so the banner is misleading and comes down.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+
+    # Scope the cache-refresh failure to its own context: a bare
+    # ``monkeypatch.undo()`` would also revert ``live_server``'s HOME,
+    # config, model, taxonomy, and disk-space patches, so the Redo and
+    # ``/api/pipeline/page-init`` requests below would read
+    # developer-machine state.
+    with monkeypatch.context() as patch:
+        _fail_pipeline_cache_refresh(patch)
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
+            page.locator("#historyUndoBtn").click()
+        undo_body = undo.value.json()
+        assert undo_body["pipeline_cache_stale"] is True
+        expect(banner).to_be_visible()
+
+    # Exiting the context restored the real refresh so the next Redo resyncs the cache.
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as redo:
+        page.locator("#historyRedoBtn").click()
+    redo_body = redo.value.json()
+    assert "pipeline_cache_stale" not in redo_body
+    assert redo_body["entry_id"] == undo_body["entry_id"]
+    expect(banner).to_be_hidden()
+
+
+def test_pipeline_review_banner_stays_while_an_earlier_stale_undo_remains(
+    live_server, page, monkeypatch,
+):
+    """Two consecutive failed cache refreshes stack: the inverse of the
+    latest failed undo repairs only its own entry's cache, so the banner
+    must stay up while an earlier failed undo's photos are still stale,
+    and come down only once every outstanding entry has been repaired.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids do not collide (same backend contract as
+    # test_undo_redo_entry_id_differs_across_separate_history_entries).
+    species_name = page.locator(".species-widget .species-name").first
+    species_name.click()
+    input_box = page.locator(".species-dropdown.open input").first
+    input_box.fill("American Robin")
+    input_box.press("Enter")
+    expect(species_name).to_have_text("American Robin")
+
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+    expect(banner).to_be_hidden()
+
+    with monkeypatch.context() as patch:
+        _fail_pipeline_cache_refresh(patch)
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as first_undo:
+            page.locator("#historyUndoBtn").click()
+        first_undo_body = first_undo.value.json()
+        assert first_undo_body["pipeline_cache_stale"] is True
+        expect(banner).to_be_visible()
+
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as second_undo:
+            page.locator("#historyUndoBtn").click()
+        second_undo_body = second_undo.value.json()
+        assert second_undo_body["pipeline_cache_stale"] is True
+        assert second_undo_body["entry_id"] != first_undo_body["entry_id"]
+        expect(banner).to_be_visible()
+
+    # Transient failure cleared; the next Redo is the inverse of the SECOND
+    # undo. Its successful refresh resyncs only those photos, so the earlier
+    # failed undo's entry is still stale and the banner must stay up.
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as first_redo:
+        page.locator("#historyRedoBtn").click()
+    first_redo_body = first_redo.value.json()
+    assert "pipeline_cache_stale" not in first_redo_body
+    assert first_redo_body["entry_id"] == second_undo_body["entry_id"]
+    expect(banner).to_be_visible()
+
+    # Second Redo clears the remaining stale entry; the banner finally hides.
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as second_redo:
+        page.locator("#historyRedoBtn").click()
+    second_redo_body = second_redo.value.json()
+    assert "pipeline_cache_stale" not in second_redo_body
+    assert second_redo_body["entry_id"] == first_undo_body["entry_id"]
+    expect(banner).to_be_hidden()
+
+
+def test_undo_elsewhere_warns_when_process_review_results_go_stale(
+    live_server, page, monkeypatch,
+):
+    """The navbar's undo shows the warning on every page, not just Review."""
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    _fail_pipeline_cache_refresh(monkeypatch)
+    page.goto(f"{live_server['url']}/browse")
+    expect(page.locator("#historyUndoBtn")).to_be_enabled()
+
+    page.locator("#historyUndoBtn").click()
+
+    expect(page.locator('#toastContainer [data-type="success"]')).to_contain_text(
+        "Undone: "
+    )
+    expect(page.locator('#toastContainer [data-type="warning"]')).to_have_text(
+        "Undo saved, but Vireo could not update Process Review's saved "
+        "results to match, so they may still list the old species for these photos."
+    )

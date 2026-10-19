@@ -54,7 +54,9 @@ window.VireoReleaseOriginals = (function() {
             summary += '. ' + result.kept_reasons[0] + '. See Jobs for details.';
           }
           showToast(summary, done.status === 'failed' ? 'error' : result.kept || done.status !== 'completed' ? 'info' : 'success');
-          if (typeof loadStoragePanel === 'function') loadStoragePanel();
+          // Storage shows the space just freed; other pages register no reload.
+          var loadStoragePanel = Vireo.pageHook('loadStoragePanel');
+          if (loadStoragePanel) loadStoragePanel();
           window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
         },
         onError: function() {
