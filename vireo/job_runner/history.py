@@ -435,6 +435,6 @@ class JobHistory:
                 attach_result_text(d)
                 result.append(d)
             return result
-        except Exception:
+        except Exception:  # broad: history rows hold arbitrary stored JSON; the Jobs page gets an empty list rather than a 500
             log.warning("Could not read job history", exc_info=True)
             return []
