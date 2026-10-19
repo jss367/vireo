@@ -1188,7 +1188,7 @@ class Taxonomy:
             req.add_header("User-Agent", "vireo-taxonomy/1.0")
             with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
                 data = json.loads(resp.read())
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException, RecursionError):
             log.debug("iNat API lookup failed for '%s'", name, exc_info=True)
             return None
 

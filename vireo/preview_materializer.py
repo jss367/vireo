@@ -285,10 +285,9 @@ def _encode_preview(
         img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
         return encoded.getvalue()
     finally:
-        try:
+        # broad: cleanup must not replace the render's own exception (or its bytes)
+        with contextlib.suppress(Exception):
             img.close()
-        except Exception:  # broad: cleanup must not replace the render's own exception
-            log.debug("Could not close the rendered preview image", exc_info=True)
 
 
 def render_preview_bytes(
