@@ -834,6 +834,68 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         event(f"move_photos with failing companion: moved={result.get('moved')}")
 
     @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data(), locked=st.sampled_from(["original", "companion"]))
+    def move_photos_when_a_source_file_cannot_be_deleted(self, data, locked):
+        """Move Photos where deleting a moved photo's original, or only its
+        companion JPEG, from the source fails (a file another app holds open
+        on Windows, a read-only source). The copy at the destination is
+        already cataloged, and the error says which file was left behind.
+        """
+        import move
+
+        visible = self._visible_photo_ids()
+        chosen = data.draw(st.lists(st.sampled_from(visible),
+                                    min_size=1, max_size=3, unique=True))
+        dest = data.draw(st.sampled_from([
+            os.path.join(self.moved, "picked"),
+            os.path.join(self.library, "picked"),
+        ]))
+        os.makedirs(dest, exist_ok=True)
+        before = {
+            r["id"]: r for r in (dict(row) for row in self.db.conn.execute(
+                "SELECT p.id, p.filename, p.companion_path, f.path AS folder_path "
+                "FROM photos p JOIN folders f ON f.id = p.folder_id"))
+            if r["id"] in chosen
+        }
+        locked_paths = {
+            os.path.normcase(os.path.join(
+                r["folder_path"],
+                r["filename"] if locked == "original" else (r["companion_path"] or ""),
+            ))
+            for r in before.values()
+            if locked == "original" or r["companion_path"]
+        }
+        real_remove = os.remove
+
+        def remove(path, *args, **kwargs):
+            if os.path.normcase(path) in locked_paths:
+                raise PermissionError("simulated: file is open in another app")
+            return real_remove(path, *args, **kwargs)
+
+        os.remove = remove
+        try:
+            result = move.move_photos(self.db, chosen, dest)
+        finally:
+            os.remove = real_remove
+        errors = result.get("errors") or []
+        after = {r["id"]: r for r in self._catalog_rows() if r["id"] in before}
+        for pid, row in before.items():
+            moved = pid in after and \
+                os.path.normcase(after[pid]["folder_path"]) == os.path.normcase(dest) and \
+                os.path.normcase(row["folder_path"]) != os.path.normcase(dest)
+            if not moved:
+                continue
+            mine = [e for e in errors if e.startswith(f"{row['filename']}: moved")]
+            original_left = os.path.exists(os.path.join(row["folder_path"], row["filename"]))
+            if original_left:
+                assert any("the original could not be deleted" in e for e in mine), errors
+            elif mine:
+                # Only a companion was left; the message must not claim the
+                # original was kept.
+                assert all("original deleted" in e for e in mine), mine
+            event(f"move_photos with {locked} locked: original_left={original_left} reported={bool(mine)}")
+
+    @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
     def move_a_folder(self, data):
         import move
