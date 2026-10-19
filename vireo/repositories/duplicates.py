@@ -290,7 +290,7 @@ class DuplicatesRepository:
 
         Returns ``(winner_id, loser_ids)``, or ``None`` when fewer than 2
         non-rejected candidates remain, or the ``DEFERRED_PLAN`` sentinel
-        when at least one candidate lives on an offline volume (state
+        when a candidate awaits its sidecar import or lives on an offline volume (state
         unknown; the resolver can't safely pick a winner until the volume
         returns). Writes nothing.
         """
@@ -305,7 +305,7 @@ class DuplicatesRepository:
         for chunk in self._chunks(list(dict.fromkeys(photo_ids))):
             placeholders = ",".join("?" * len(chunk))
             rows.extend(self.conn.execute(
-                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
+                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag, p.xmp_import_pending,
                            f.path AS folder_path
                     FROM photos p
                     LEFT JOIN folders f ON f.id = p.folder_id
@@ -314,6 +314,12 @@ class DuplicatesRepository:
             ).fetchall())
         if len(rows) < 2:
             return None
+
+        # Resolution merges loser metadata and permanently rejects it. An
+        # unread sidecar on ANY member must hold the entire group, including
+        # auto-resolve calls made by a later readable/sidecarless sibling.
+        if any(row["xmp_import_pending"] for row in rows):
+            return DEFERRED_PLAN
 
         candidates = []
         any_offline = False

@@ -162,13 +162,14 @@ def _scanner_method(namespace, file, class_name, name):
 
 def _incremental_boundary(namespace, db):
     existing = {
-        "id": 731, "file_mtime": 1, "file_size": 100, "xmp_mtime": 5,
+        "id": 731, "xmp_import_pending": 0, "file_mtime": 1, "file_size": 100, "xmp_mtime": 5,
         "extension": ".jpg", "width": 1200, "timestamp": "invented",
         "exif_extracted": True, "summary_needs_extract": False,
         "file_hash": "invented hash", "folder_id": 17, "filename": "photo.jpg",
     }
     commits = []
-    db.scanning = SimpleNamespace(set_xmp_mtime=lambda pid, value: existing.update(xmp_mtime=value))
+    db.scanning = SimpleNamespace(set_xmp_mtime=lambda pid, value: existing.update(xmp_mtime=value, xmp_import_pending=0),
+                                 defer_xmp_import=lambda pid: existing.update(xmp_import_pending=1))
     db.commit_with_retry = lambda: commits.append("commit")
     db.check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(db=db, repair_missing_metadata=False,
@@ -201,7 +202,7 @@ def test_incremental_sidecar_failure_retries_after_same_mtime_recovery():
     assert reuse() is True
     assert reuse() is True
     assert first_stamp == 5
-    assert row["xmp_mtime"] == 9 and commits == ["commit"]
+    assert row["xmp_mtime"] == 9 and commits == ["commit", "commit"]
     assert len(attempts) == 2 and imported == [({"Paris"}, [])]
 
 
@@ -238,7 +239,7 @@ class _MemorySidecar:
 
 def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp_mtime=9,
                       deferred_hashes=None):
-    row = {"exists": existing, "xmp_mtime": 5 if existing else None,
+    row = {"exists": existing, "xmp_import_pending": 0, "xmp_mtime": 5 if existing else None,
            "file_mtime": 5, "file_size": 50}
     events = []
 
@@ -252,12 +253,15 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
     def set_mtime(photo_id, value):
         events.append("acknowledged" if value is not None else "cleared")
         row["xmp_mtime"] = value
+        row["xmp_import_pending"] = 0
 
     def update_photo(photo_id, assignments, values):
         events.append("photo-update")
         bindings = iter(values)
         for assignment in assignments:
-            if assignment == "xmp_mtime=NULL":
+            if assignment.startswith("xmp_import_pending="):
+                row["xmp_import_pending"] = int(assignment.split("=")[1])
+            elif assignment == "xmp_mtime=NULL":
                 row["xmp_mtime"] = None
             else:
                 value = next(bindings)
@@ -268,7 +272,13 @@ def _catalog_boundary(namespace, db, *, existing, file_hash="invented hash", xmp
     db.add_photo = add_photo
     db._commits_held = contextlib.nullcontext
     db.commit_with_retry = lambda: events.append("commit")
-    db.scanning = SimpleNamespace(set_xmp_mtime=set_mtime, update_photo=update_photo)
+    def defer(photo_id, *, clear_mtime=False):
+        row["xmp_import_pending"] = 1
+        if clear_mtime:
+            events.append("cleared")
+            row["xmp_mtime"] = None
+
+    db.scanning = SimpleNamespace(set_xmp_mtime=set_mtime, update_photo=update_photo, defer_xmp_import=defer)
     db.check_and_resolve_duplicates_for_hash = lambda file_hash: None
     owner = SimpleNamespace(
         db=db, vireo_dir=None, extract_full_metadata=False,

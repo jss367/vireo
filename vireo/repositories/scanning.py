@@ -45,7 +45,7 @@ class ScanningRepository:
         return self.conn.execute(
             f"WITH requested(folder_path, filename) AS (VALUES {placeholders}) "
             "SELECT f.path AS folder_path, p.id, p.folder_id, p.filename, "
-            "p.extension, p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, "
+            "p.extension, p.file_size, p.file_mtime, p.xmp_mtime, p.xmp_import_pending, p.timestamp, "
             "p.width, p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
             "(p.exif_data IS NULL AND p.camera_make IS NULL "
             "AND p.camera_model IS NULL AND p.lens IS NULL "
@@ -141,14 +141,19 @@ class ScanningRepository:
         """Record the sidecar's mtime; None clears it (the sidecar is gone)."""
         if xmp_mtime is None:
             self.conn.execute(
-                "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                "UPDATE photos SET xmp_mtime = NULL, xmp_import_pending = 0 WHERE id = ?",
                 (photo_id,),
             )
             return
         self.conn.execute(
-            "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
+            "UPDATE photos SET xmp_mtime = ?, xmp_import_pending = 0 WHERE id = ?",
             (xmp_mtime, photo_id),
         )
+
+    def defer_xmp_import(self, photo_id: int, *, clear_mtime: bool = False) -> None:
+        """Do not resolve this row's duplicate group before its keywords land."""
+        stamp = ", xmp_mtime = NULL" if clear_mtime else ""
+        self.conn.execute(f"UPDATE photos SET xmp_import_pending = 1{stamp} WHERE id = ?", (photo_id,))
 
     def set_folder_status(
         self, new_status: str, *, paths: Collection[str] | None = None,

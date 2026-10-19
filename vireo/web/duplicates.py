@@ -63,7 +63,7 @@ def create_duplicates_blueprint(
         resolver and flags the losers as rejected. Returns the total number
         of photos rejected across all hashes, plus ``deferred_hashes``:
         the subset the resolver refused to touch because at least one
-        candidate was on an offline volume. The UI keeps those groups on
+        candidate was offline or still awaiting its sidecar import. The UI keeps those groups on
         the page (state unknown, not resolved).
         """
         body = request.get_json(silent=True)

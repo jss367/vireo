@@ -213,7 +213,7 @@ class _FileIndexer:
         xmp_path = image_path.with_suffix(".xmp")
         try:
             xmp_mtime = xmp_path.stat().st_mtime
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             xmp_mtime = None
 
         meta = self._read_file_metadata(image_path)
@@ -293,7 +293,7 @@ class _FileIndexer:
                 # successful scan left a non-NULL acknowledgement behind.
                 sidecar_import_deferred = True
                 if item.row_already_existed:
-                    db.scanning.set_xmp_mtime(photo_id, None)
+                    db.scanning.defer_xmp_import(photo_id, clear_mtime=True)
                     db.commit_with_retry()
                 if file_hash is not None:
                     self._deferred_hashes.add(file_hash)
@@ -491,6 +491,12 @@ class _FileIndexer:
         if row_already_existed and item.xmp_mtime is None:
             # A deleted sidecar needs no read to clear its acknowledgement.
             updates.append("xmp_mtime=NULL")
+        # Publish the hash and pending-read guard together. A later sibling's
+        # group-wide resolver must not reject this row before its keywords land.
+        if item.xmp_mtime is not None:
+            updates.append("xmp_import_pending=1")
+        elif row_already_existed:
+            updates.append("xmp_import_pending=0")
         # catalog_file acknowledges XMP only after its keyword read succeeds.
         if updates:
             self.db.scanning.update_photo(photo_id, updates, update_params)

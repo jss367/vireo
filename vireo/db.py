@@ -3042,7 +3042,7 @@ class Database:
         Returns ``{"winner_id": int|None, "loser_ids": [int], "rejected": int}``.
         If fewer than 2 non-rejected candidates remain, returns the no-op
         shape with ``winner_id=None``. When at least one candidate lives
-        on an offline volume, the resolver defers instead of picking a
+        on an offline volume or has a pending sidecar import, the resolver defers instead of picking a
         winner: the return dict adds ``"deferred": True`` so callers can
         tell deferrals apart from no-ops and keep the group visible.
         """

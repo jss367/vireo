@@ -117,7 +117,7 @@ class _IncrementalTriage:
         xmp_path = image_path.with_suffix(".xmp")
         try:
             xmp_mtime = xmp_path.stat().st_mtime
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             # Covers both "no sidecar" and a sidecar deleted between
             # exists() and stat() — same outcome either way.
             xmp_mtime = None
@@ -190,6 +190,7 @@ class _IncrementalTriage:
             and existing["file_size"] == stat.st_size
         )
         xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+        xmp_import_pending = bool(existing["xmp_import_pending"])
         # Re-process if ExifTool never ran for this photo (both
         # timestamp and exif_data are NULL). Photos with genuinely
         # missing timestamps (screenshots, exports) will have
@@ -220,7 +221,7 @@ class _IncrementalTriage:
         )
 
         if (
-            file_unchanged and xmp_unchanged
+            file_unchanged and xmp_unchanged and not xmp_import_pending
             and not metadata_missing
             and not hash_needs_repair
         ):
@@ -232,25 +233,22 @@ class _IncrementalTriage:
 
         # XMP changed: re-import keywords
         retry_duplicate_resolution = False
-        if not xmp_unchanged and xmp_mtime is not None:
-            # catalog_file defers duplicate auto-resolve when the sidecar
-            # read failed on the initial pass, clearing the stored
-            # xmp_mtime to NULL in the same transaction so a prior
-            # successful acknowledgement cannot mask the deferred state.
-            # Captured before set_xmp_mtime so a mock that mutates the
-            # pre-read row still sees the real recovery edge.
+        if (not xmp_unchanged or xmp_import_pending) and xmp_mtime is not None:
             prior_mtime = existing["xmp_mtime"]
             if _import_keywords_for_photo(db, existing["id"], str(xmp_path)):
+                # Acknowledgement clears the durable guard in the same UPDATE.
                 db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
                 db.commit_with_retry()
-                retry_duplicate_resolution = prior_mtime is None
-        elif not xmp_unchanged:
-            # Sidecar deleted: clear the stored mtime so the row
-            # converges instead of looking "XMP changed" on every
-            # later scan (this skip path never reaches the main
-            # loop, so nothing else would ever reset it).
+                retry_duplicate_resolution = xmp_import_pending or prior_mtime is None
+            else:
+                db.scanning.defer_xmp_import(existing["id"])
+                db.commit_with_retry()
+        elif not xmp_unchanged or xmp_import_pending:
+            # Removal settles a deferred read too; there are no keywords left
+            # to import. Keep acknowledgement and guard clearing atomic.
             db.scanning.set_xmp_mtime(existing["id"], None)
             db.commit_with_retry()
+            retry_duplicate_resolution = xmp_import_pending
 
         if (
             file_unchanged

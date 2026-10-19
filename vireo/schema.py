@@ -194,6 +194,13 @@ def _validate_current_flag_attribution(conn):
         raise RuntimeError("current flag attribution invalidation trigger is missing")
 
 
+def _add_xmp_import_pending(conn):
+    """Keep failed sidecar imports pending across scans and catalog reopen."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(photos)")}
+    if "xmp_import_pending" not in columns:
+        conn.execute("ALTER TABLE photos ADD COLUMN xmp_import_pending INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -218,6 +225,7 @@ MIGRATIONS = (
         20, "current_flag_attribution",
         create_current_flag_attribution, _validate_current_flag_attribution,
     ),
+    Migration(21, "pending_sidecar_import", _add_xmp_import_pending),
 )
 
 

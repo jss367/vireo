@@ -31,9 +31,9 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
         conn.row_factory = sqlite3.Row
         conn.executescript("""
             CREATE TABLE photos(id INTEGER PRIMARY KEY, flag TEXT, file_hash TEXT,
-                                xmp_mtime REAL, file_mtime REAL, file_size INTEGER);
+                                xmp_mtime REAL, file_mtime REAL, file_size INTEGER, xmp_import_pending INTEGER DEFAULT 0);
             CREATE TABLE keywords(photo_id INTEGER, name TEXT, PRIMARY KEY(photo_id,name));
-            INSERT INTO photos VALUES(700,NULL,'invented hash',NULL,1,100);
+            INSERT INTO photos VALUES(700,NULL,'invented hash',NULL,1,100,0);
             INSERT INTO keywords VALUES(700,'Winner keyword');
         """)
         row, catalog_events, catalog = SUPPORT["_catalog_boundary"](
@@ -43,7 +43,7 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
 
         def add(**values):
             result = add_photo(**values)
-            conn.execute("INSERT OR IGNORE INTO photos VALUES(731,NULL,NULL,NULL,1,100)")
+            conn.execute("INSERT OR IGNORE INTO photos VALUES(731,NULL,NULL,NULL,1,100,0)")
             return result
 
         db.add_photo = add
@@ -54,13 +54,13 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
 
         def update(pid, assignments, values):
             update_photo(pid, assignments, values)
-            conn.execute("UPDATE photos SET file_hash=?,xmp_mtime=?,file_mtime=?,file_size=? WHERE id=?",
-                         (row.get("file_hash"), row["xmp_mtime"], row["file_mtime"], row["file_size"], pid))
+            conn.execute("UPDATE photos SET file_hash=?,xmp_mtime=?,file_mtime=?,file_size=?,xmp_import_pending=? WHERE id=?",
+                         (row.get("file_hash"), row["xmp_mtime"], row["file_mtime"], row["file_size"], row["xmp_import_pending"], pid))
 
         def acknowledge(pid, value):
             set_mtime(pid, value)
             trace.append(("acknowledge", pid))
-            conn.execute("UPDATE photos SET xmp_mtime=? WHERE id=?", (value, pid))
+            conn.execute("UPDATE photos SET xmp_mtime=?,xmp_import_pending=0 WHERE id=?", (value, pid))
 
         def commit_catalog():
             commit()
@@ -98,15 +98,16 @@ def duplicate_flow(*, sidecar="unreadable", repeated_failures=0, recover=True, c
         def retry():
             existing, commits, _unused = SUPPORT["_incremental_boundary"](ns, db)
             stored = dict(conn.execute("SELECT * FROM photos WHERE id=731").fetchone())
-            existing.update({key: stored[key] for key in ("xmp_mtime", "file_mtime", "file_size", "file_hash")})
+            existing.update({key: stored[key] for key in ("xmp_mtime", "file_mtime", "file_size", "file_hash", "xmp_import_pending")})
             acknowledge_retry = db.scanning.set_xmp_mtime
 
             def ack(pid, value):
                 acknowledge_retry(pid, value)
                 trace.append(("acknowledge", pid))
-                conn.execute("UPDATE photos SET xmp_mtime=? WHERE id=?", (value, pid))
+                conn.execute("UPDATE photos SET xmp_mtime=?,xmp_import_pending=0 WHERE id=?", (value, pid))
 
             db.scanning.set_xmp_mtime = ack
+            db.scanning.defer_xmp_import = lambda pid: conn.execute("UPDATE photos SET xmp_import_pending=1 WHERE id=?", (pid,))
             db.commit_with_retry = conn.commit
             db.check_and_resolve_duplicates_for_hash = resolve
             owner = SimpleNamespace(db=db, repair_missing_metadata=False,
