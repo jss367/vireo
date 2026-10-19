@@ -89,7 +89,15 @@ def queue_location_keyword_cleanup_reporting(db, workspace_id):
     """Queue one workspace's cleanup; return a warning if it failed, else None."""
     if queue_location_keyword_cleanup_for_workspace(db, workspace_id):
         return None
-    ws = db.workspaces.get(int(workspace_id))
+    try:
+        ws = db.workspaces.get(int(workspace_id))
+    except sqlite3.Error:
+        # A display name must not turn an already-saved setting into an error.
+        log.warning(
+            "Failed to read workspace %s for location cleanup warning",
+            workspace_id, exc_info=True,
+        )
+        ws = None
     name = ws["name"] if ws else f"#{workspace_id}"
     return location_keyword_cleanup_warning([name])
 
