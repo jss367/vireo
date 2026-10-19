@@ -322,6 +322,12 @@ class _Writer:
 
     def _content(self, elem, scope, children, kept):
         text = elem.text or ""
+        if not children:
+            # ET.indent leaves leaf text unchanged, including whitespace.
+            # Partition it once at the recorded offsets instead of treating
+            # it as indentation to repeat around retained markup.
+            self._write_slot_with_offsets(text, kept.get(-1, ()), "")
+            return
         # The indentation in front of each child, reused to set off a
         # comment kept between two of them.
         separator = text if text.isspace() else ""
