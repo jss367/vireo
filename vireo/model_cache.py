@@ -54,9 +54,11 @@ def _make_cancellation_error():
     """Build a caller-visible cancellation exception without importing at load."""
     try:
         from classifier import ClassificationCancelled
-    except Exception:
+    except Exception:  # broad: importing classifier can fail in many ways (onnxruntime, native libraries)
         # Cancellation must still surface as a cancellation when the
         # classifier module cannot load; a local stand-in keeps the name.
+        log.debug("classifier unavailable; using a stand-in cancellation class", exc_info=True)
+
         class ClassificationCancelled(RuntimeError):
             pass
     return ClassificationCancelled("classification cancelled")
@@ -122,6 +124,7 @@ class _Handle:
         # Safety net for legacy/script callers that unwind before their normal
         # explicit release. ``release`` is idempotent and does only in-memory
         # bookkeeping plus timer creation.
+        # broad: a finalizer must never raise, and logging may be torn down.
         with contextlib.suppress(Exception):
             self.release()
 
@@ -287,7 +290,7 @@ class ModelCache:
         if post_load_key is not None:
             try:
                 actual_key = post_load_key(value)
-            except Exception:
+            except Exception:  # broad: a caller's key callback must not lose the loaded model
                 log.exception(
                     "ModelCache: post_load_key callback raised; "
                     "leaving entry keyed by the pre-load key"

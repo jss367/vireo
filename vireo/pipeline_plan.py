@@ -181,8 +181,8 @@ def _resolve_labels_for_models(models, labels_files, db):
         )
         try:
             return load_merged_labels(active_sets) if active_sets else []
-        except Exception as e:
-            log.warning("plan: failed to load labels %s: %s", active_sets, e)
+        except Exception as e:  # broad: label files raise a wide set; the plan shows no labels
+            log.warning("plan: failed to load labels %s: %s", active_sets, e, exc_info=True)
             return []
 
     if labels_files:

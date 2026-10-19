@@ -170,7 +170,7 @@ def rearm_pending_label_desc_heal(model_str, model_dir):
     try:
         import models as _models_mod
         descs = _models_mod.load_label_descriptions(label_desc_path)
-    except Exception:
+    except Exception:  # broad: a missing or malformed descriptions file schedules a heal
         log.debug("Could not read %s; scheduling a heal", label_desc_path, exc_info=True)
         descs = None
     if descs is not None:
@@ -216,9 +216,10 @@ def _spawn_label_desc_heal(model_dir, model_str):
             ok = _models_mod.ensure_timm_label_descriptions(
                 model_dir, model_str,
             )
-        except Exception as e:
+        except Exception as e:  # broad: the heal raises a wide set (network, HF, IO); it is retried on the next load
             log.info(
                 "label_descriptions heal failed for %s: %s", model_str, e,
+                exc_info=True,
             )
             ok = False
         with _HEAL_LOCK:

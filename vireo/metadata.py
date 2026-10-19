@@ -112,8 +112,9 @@ def _probe_exiftool_ver(path: str) -> tuple[bool, str | None, str | None]:
                 or f"exiftool -ver exited with status {result.returncode}"
             ),
         )
-    except Exception as e:
+    except Exception as e:  # broad: resolving and running ExifTool raises a wide set; reported as its status
         # Reported to the caller, which shows it as the ExifTool status.
+        log.debug("ExifTool -ver probe failed", exc_info=True)
         return False, None, str(e) or e.__class__.__name__
 
 
