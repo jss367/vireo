@@ -90,7 +90,7 @@ def thumbnail_stage(
             thumbs.thumbnail_collection()
 
         thumbs.finish()
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[thumbnails] Fatal: {e}")
         log.exception("Pipeline thumbnail stage failed")
         run.stages["thumbnails"]["status"] = "failed"
@@ -264,7 +264,7 @@ class _ThumbPass:
             try:
                 if not self._thumbnail_scanned_photo(thumb):
                     continue
-            except Exception as exc:
+            except Exception as exc:  # broad: per-photo boundary; the failure is recorded and the batch continues
                 self.failed += 1
                 self._record_failure(thumb.photo_id, thumb.photo_path, str(exc))
                 log.debug(
@@ -446,7 +446,7 @@ class _ThumbPass:
             try:
                 if not self._thumbnail_collection_photo(thumb, photo, folders, folder_path):
                     continue
-            except Exception as exc:
+            except Exception as exc:  # broad: per-photo boundary; the failure is recorded and the batch continues
                 self.failed += 1
                 self._record_failure(thumb.photo_id, thumb.photo_path, str(exc))
                 log.debug(
@@ -739,7 +739,7 @@ def previews_stage(
         evict_if_over_quota(thread_db, base_dir)
 
         _record_previews_result(run, generated, skipped, failed, total)
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[previews] Fatal: {e}")
         log.exception("Pipeline previews stage failed")
         run.stages["previews"]["status"] = "failed"

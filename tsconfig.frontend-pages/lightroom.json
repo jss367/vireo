@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/lightroom.d.ts",
+    "../vireo/static/lightroom/boot.js",
+    "../vireo/static/lightroom/catalogs.js",
+    "../vireo/static/lightroom/import-job.js",
+    "../vireo/static/lightroom/preview.js",
+    "../vireo/static/lightroom/shared.js",
+    "../vireo/static/lightroom/state.js"
+  ]
+}

@@ -223,6 +223,38 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     }
 
 
+def test_move_folder_by_date_progress_counts_each_photo_once(tmp_path):
+    """Date-organized progress counts every photo exactly once, skipped
+    ones included, and ends at the total."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    (archive / "2026-07-12").mkdir(parents=True)
+    fid = db.add_folder(str(src), name="card")
+    for name, stamp in (("a.jpg", "2026-07-12T09:00:00"),
+                        ("b.jpg", "2026-07-12T09:01:00"),
+                        ("c.jpg", "2026-07-13T09:00:00")):
+        (src / name).write_bytes(name.encode())
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=5, file_mtime=1.0, timestamp=stamp)
+    # b.jpg collides at its date folder and is skipped.
+    (archive / "2026-07-12" / "b.jpg").write_bytes(b"other")
+
+    calls = []
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        progress_cb=lambda cur, tot, fn, phase: calls.append((cur, tot)),
+    )
+
+    assert result["moved"] == 2
+    assert len(result["errors"]) == 1
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
     """Same-stem photos split by date each retain their shared XMP."""
     from move import move_folder_by_date
@@ -3147,6 +3179,66 @@ def test_move_photos_companion_files(move_env):
     assert not (env["src"] / "bird1.nef").exists()
 
 
+def test_move_photos_reports_partial_copy_cleanup_failure(move_env, monkeypatch):
+    """A failed companion copy whose partial-copy cleanup also fails stays a
+    per-photo error: the rest of the batch moves, the errors already
+    collected are kept, and the error names the copy left at the destination.
+
+    Before the fix the cleanup's ``os.remove`` raised out of ``move_photos``,
+    aborting the batch with a raw exception and dropping every error it had
+    collected.
+    """
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    # bird0 is missing on disk, so the batch collects an error before bird1.
+    p0 = db.add_photo(folder_id=env["fid_src"], filename="bird0.jpg",
+                      extension=".jpg", file_size=10, file_mtime=0.5)
+    db.conn.execute("UPDATE photos SET companion_path = 'bird1.nef' WHERE id = ?",
+                    (env["p1"],))
+    db.conn.commit()
+    (env["src"] / "bird1.nef").write_bytes(b"\x00" * 50)
+
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_companion_copy(src, dst):
+        if os.path.basename(src) == "bird1.nef":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_companion_copy)
+    original_remove = move_mod.photos.os.remove
+    locked = os.path.normcase(os.path.normpath(str(env["dst"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            raise PermissionError("locked by antivirus")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=db, photo_ids=[p0, env["p1"], env["p2"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1  # bird2 still moved
+    assert (env["dst"] / "bird2.jpg").exists()
+    errors = result["errors"]
+    assert any("bird0.jpg: source file missing" in e for e in errors)
+    assert any("bird1.nef" in e and "companion copy failed" in e for e in errors)
+    leftover = [e for e in errors if "bird1.jpg" in e and "locked by antivirus" in e]
+    assert leftover, errors
+    assert str(env["dst"] / "bird1.jpg") in leftover[0]
+    # The original and its companion are untouched at the source, and the
+    # catalog still points there.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.nef").exists()
+    row = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?",
+                          (env["p1"],)).fetchone()
+    assert row["folder_id"] == env["fid_src"]
+
+
 def test_move_folder_copies_tree(move_env):
     """move_folder moves entire folder tree preserving structure."""
     from move import move_folder
@@ -5924,6 +6016,64 @@ def test_move_photos_progress_callback(move_env):
     assert calls[0][0] == 1  # current=1
     assert calls[1][0] == 2  # current=2
     assert calls[0][1] == 2  # total=2
+
+
+def test_move_photos_progress_counts_skipped_and_failed_photos(move_env, monkeypatch):
+    """Every photo the batch settles advances the bar, not only the moved
+    ones: a missing source, a destination collision and a failed copy each
+    report their position, so the bar reaches the total."""
+    import move as move_mod
+
+    env = move_env
+    db = env["db"]
+    missing = db.add_photo(folder_id=env["fid_src"], filename="gone.jpg",
+                           extension=".jpg", file_size=10, file_mtime=0.5)
+    (env["src"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x01" * 30)
+    (env["dst"] / "clash.jpg").write_bytes(b"\xff\xd8" + b"\x02" * 30)
+    clash = db.add_photo(folder_id=env["fid_src"], filename="clash.jpg",
+                         extension=".jpg", file_size=32, file_mtime=0.6)
+    real_copy = move_mod.photos._copy_and_verify
+
+    def failing_copy(src, dst):
+        if os.path.basename(src) == "bird2.jpg":
+            raise OSError("share dropped")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(move_mod.photos, "_copy_and_verify", failing_copy)
+    calls = []
+    result = move_mod.move_photos(
+        db=db,
+        photo_ids=[missing, env["p1"], clash, env["p2"], 999999],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 4
+    assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
+    assert {c[1] for c in calls} == {5}
+    assert [c[2] for c in calls] == [
+        "gone.jpg", "bird1.jpg", "clash.jpg", "bird2.jpg", "",
+    ]
+
+
+def test_move_photos_refused_batch_reports_full_progress(move_env):
+    """A batch refused up front (destination is a file) still finishes the
+    bar, so the job does not sit at 0 of N while reporting N errors."""
+    from move import move_photos
+
+    env = move_env
+    blocker = env["tmp_path"] / "not-a-dir"
+    blocker.write_text("x")
+    calls = []
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"], env["p2"]],
+        destination=str(blocker),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 2
+    assert calls[-1][:2] == (2, 2)
 
 
 def test_move_folder_reports_phases_and_per_file_progress(move_env):

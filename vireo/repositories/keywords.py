@@ -1,4 +1,4 @@
-"""Persistence for keywords: rows, tagging reads, species names.
+"""Persistence for keywords: rows, the tree, species names.
 
 This module owns the SQL behind the keyword domain:
 
@@ -6,17 +6,18 @@ This module owns the SQL behind the keyword domain:
   source-taxon species path), the default genre seed, the keyword tree
   and listing reads, counts, and the rename / retype statements
   ``Database.update_keyword`` issues;
-- tagging reads (per photo, per batch, species-rank names, equivalent
-  species) and ``untag``;
 - species-name resolution (``resolve_species_display``, taxon lookup,
   case-convention detection, lineage resolution, species marking);
 - the scope and liveness reads of ``Database._merge_duplicate_keywords_pass``;
-- the reads and the delete behind the ``/api/keywords`` and ``/api/species``
-  routes (duplicate groups and per-workspace counts, the rename state, the
-  photo/workspace pairs a rename or delete re-queues sidecar changes for,
-  the species-name search, ``delete``), moved verbatim from ``web/``.
-- the species-confirmation reads ``/api/encounters/species`` runs to find
-  the rows standing for the species it replaces or removes.
+- the keyword-row reads and the delete behind the ``/api/keywords`` and
+  ``/api/species`` routes (duplicate groups, the rename state, the
+  species-name search, ``delete``), moved verbatim from ``web/``;
+- the keyword-row reads ``/api/encounters/species`` runs to find the root
+  rows standing for the species it replaces or removes.
+
+Which keywords a photo carries, and which photos carry a keyword, is
+``repositories/photo_keywords.py`` (``db.photo_keywords``); which species a
+photo carries is ``repositories/photo_species.py`` (``db.photo_species``).
 
 The method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
@@ -32,8 +33,7 @@ SQL text, parameter order, chunk sizes and commit placement are unchanged.
 Callers reach it through the ``db.keywords`` accessor, which builds a fresh
 repository per access. The methods ``FACADE_METHODS`` binds back from the
 façade (``add_keyword``, ``resolve_species_display_name`` ...) keep their
-``Database`` wrappers, as does ``untag_photo``, which the structural guards
-pair with ``tag_photo``.
+``Database`` wrappers.
 
 What lives in ``repositories/keyword_provenance.py`` instead: the
 ``photo_keywords`` writers that create or converge an association
@@ -68,7 +68,7 @@ caller owns the transaction, and no method here commits unless the
 """
 
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 from keyword_identity import identity_sql
@@ -115,7 +115,6 @@ class KeywordRepository:
         detect_case_convention_sentinel,
         taxon_lookup_variants,
         resolve_import_alias,
-        filter_subject_chunk,
         facade,
     ):
         self.conn = conn
@@ -128,8 +127,6 @@ class KeywordRepository:
         self._DETECT_CASE_CONVENTION = detect_case_convention_sentinel
         self._taxon_lookup_variants = taxon_lookup_variants
         self.resolve_import_alias = resolve_import_alias
-        # ``Database`` class attributes, kept under their class names.
-        self._FILTER_SUBJECT_CHUNK = filter_subject_chunk
         # The ``Database`` itself, for the two helpers the moved bodies hand
         # it to (``resolve_import_alias`` and ``SpeciesResolver``).
         self.db = facade
@@ -141,111 +138,6 @@ class KeywordRepository:
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
-
-    def embedded_offered_keys(self, photo_id):
-        """Normalized keys the scanner has imported from the image file itself.
-
-        The pending-removal filter (``db.pending_changes.keyword_removal_keys``)
-        suppresses a value only until the next XMP sync clears the queue
-        entry, but Vireo never writes into image files, so a later full scan
-        or image rewrite re-reads the same embedded value. The scanner records every embedded value it offers to
-        a photo here so ``_import_embedded_keywords_for_photo`` can filter
-        them out on later passes -- a user removal is not silently undone when
-        the queued removal has already been synced away.
-        """
-        return {
-            row["keyword_key"]
-            for row in self.conn.execute(
-                "SELECT keyword_key FROM photo_embedded_keyword_offered "
-                "WHERE photo_id = ?",
-                (photo_id,),
-            )
-        }
-
-    def record_embedded_offered_keys(self, photo_id, keys, _commit=True):
-        """Mark these normalized keys as embedded-offered for the photo.
-
-        See ``embedded_offered_keys`` for why the record exists. Idempotent (INSERT OR IGNORE on the composite
-        primary key). ``keys`` empty is a no-op. ``_commit=False`` leaves the
-        commit to the caller for batch work.
-        """
-        rows = [(photo_id, key) for key in keys if key]
-        if not rows:
-            return
-        self.conn.executemany(
-            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
-            "(photo_id, keyword_key) VALUES (?, ?)",
-            rows,
-        )
-        if _commit:
-            self.conn.commit()
-
-    def transfer_embedded_offered_keys(self, losing_id, surviving_id):
-        """Move the losing row's embedded-offered keys onto the survivor.
-
-        Used by every merge path that deletes a photo row with a different
-        row inheriting its identity: the suppression record exists so a
-        user's keyword removal survives a later rescan, and that intent must
-        follow the surviving row rather than be dropped with the losing one.
-        No commit; the caller folds this into its own transaction. The
-        non-cascading FK on ``photo_embedded_keyword_offered.photo_id``
-        would otherwise block the ``DELETE FROM photos``.
-        """
-        self.conn.execute(
-            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
-            "(photo_id, keyword_key) "
-            "SELECT ?, keyword_key FROM photo_embedded_keyword_offered "
-            "WHERE photo_id = ?",
-            (surviving_id, losing_id),
-        )
-        self.conn.execute(
-            "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?",
-            (losing_id,),
-        )
-
-    def filter_out_subject_tagged(self, photo_ids, subject_types):
-        """Return the subset of photo_ids whose photos do NOT have any keyword
-        of a type in subject_types. Empty subject_types or empty photo_ids
-        returns photo_ids unchanged (preserving input order).
-
-        Photo ids are chunked under SQLite's bind-variable limit so callers
-        can safely pass arbitrarily large lists. The classify job sources
-        photo ids from get_collection_photos(per_page=999999), which can
-        exceed older SQLite builds' 999-variable cap and trip
-        OperationalError: too many SQL variables.
-
-        When ``'taxonomy'`` is among the requested types, legacy species rows
-        (``is_species=1`` with a non-taxonomy ``type``) also count as
-        subject-tagged. Upgraded databases carry these rows until the
-        background ``mark_species_keywords`` pass retypes them; without this
-        guard, already-identified photos would still be classified and would
-        appear in 'Needs Identification' during that window.
-        """
-        if not subject_types or not photo_ids:
-            return list(photo_ids)
-        types = [t for t in subject_types if t in self.KEYWORD_TYPES]
-        if not types:
-            return list(photo_ids)
-        type_placeholders = ",".join("?" * len(types))
-        type_clause = f"k.type IN ({type_placeholders})"
-        if "taxonomy" in types:
-            type_clause = f"({type_clause} OR k.is_species = 1)"
-        photo_ids_list = list(photo_ids)
-        excluded = set()
-        chunk_size = self._FILTER_SUBJECT_CHUNK
-        for i in range(0, len(photo_ids_list), chunk_size):
-            chunk = photo_ids_list[i:i + chunk_size]
-            pid_placeholders = ",".join("?" * len(chunk))
-            rows = self.conn.execute(
-                f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE {type_clause}
-                      AND pk.photo_id IN ({pid_placeholders})""",
-                types + chunk,
-            ).fetchall()
-            for r in rows:
-                excluded.add(r["photo_id"])
-        return [pid for pid in photo_ids_list if pid not in excluded]
 
     def ensure_default_genres(self):
         """Insert the default genre keywords if none exist of type='genre'.
@@ -339,46 +231,6 @@ class KeywordRepository:
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
         ).fetchone()[0]
-
-    def get_accepted_species(self):
-        """Return distinct marker species from geolocated photos in the active workspace.
-
-        Uses the same "geolocated" definition as locations.get_geolocated_photos: a
-        photo is included if it has EXIF coords OR a ``type='location'``
-        keyword with coords. That keeps the species filter dropdown in sync
-        with which photos can actually appear as markers — otherwise photos
-        placed via location-keyword coords would render on the map but their
-        species would be missing from the filter.
-        """
-        ws = self.workspace_id
-        return [
-            row[0]
-            for row in self.conn.execute(
-                """
-                SELECT DISTINCT k.name
-                FROM photos p
-                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-                JOIN photo_keywords pk ON pk.photo_id = p.id
-                JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
-                WHERE wf.workspace_id = ?
-                  AND (
-                    (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
-                    OR EXISTS (
-                      SELECT 1
-                      FROM photo_keywords pk_loc
-                      JOIN keywords k_loc ON k_loc.id = pk_loc.keyword_id
-                      WHERE pk_loc.photo_id = p.id
-                        AND k_loc.type = 'location'
-                        AND k_loc.latitude IS NOT NULL
-                        AND k_loc.longitude IS NOT NULL
-                    )
-                  )
-                ORDER BY k.name ASC
-                """,
-                (ws,),
-            ).fetchall()
-        ]
 
     def detect_case_convention(self):
         """Detect the casing convention used by existing species keywords.
@@ -1397,20 +1249,6 @@ class KeywordRepository:
             (self.workspace_id,),
         ).fetchall()
 
-    def untag(self, photo_id, keyword_id, _commit=True):
-        """Remove a keyword association from a photo.
-
-        Args:
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction).
-        """
-        self.conn.execute(
-            "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-            (photo_id, keyword_id),
-        )
-        if _commit:
-            self.conn.commit()
-
     def name_of(self, keyword_id):
         """The stored name of one keyword, or None when the id is unknown."""
         row = self.conn.execute(
@@ -1441,19 +1279,6 @@ class KeywordRepository:
             "SELECT id, name, type FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
 
-    def photo_ids_tagged_with(self, keyword_id, photo_ids):
-        """The set of ``photo_ids`` that carry ``keyword_id``."""
-        tagged = set()
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT photo_id FROM photo_keywords
-                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-                [keyword_id] + chunk,
-            ).fetchall()
-            tagged.update(row["photo_id"] for row in rows)
-        return tagged
-
     def parent_rows(self):
         """Every keyword's ``id``, ``name`` and ``parent_id`` (for ``keyword_paths``)."""
         return self.conn.execute(
@@ -1470,37 +1295,6 @@ class KeywordRepository:
                FROM keywords WHERE id = ?""",
             (keyword_id,),
         ).fetchone()
-
-    def photo_workspaces_tagged_with(self, keyword_id):
-        """Rows (``photo_id``, ``workspace_id``): each photo carrying
-        ``keyword_id`` once per workspace that can see it."""
-        return self.conn.execute(
-            """SELECT pk.photo_id, wf.workspace_id
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE pk.keyword_id = ?""",
-            (keyword_id,),
-        ).fetchall()
-
-    def subtree_photo_workspaces(self, keyword_id):
-        """Distinct rows (``photo_id``, ``workspace_id``) for every photo
-        tagged with ``keyword_id`` or any keyword below it, once per
-        workspace that can see the photo."""
-        return self.conn.execute(
-            """WITH RECURSIVE tree(id) AS (
-                   SELECT ?
-                   UNION ALL
-                   SELECT k.id FROM keywords k
-                   JOIN tree t ON k.parent_id = t.id
-               )
-               SELECT DISTINCT p.id AS photo_id, wf.workspace_id
-               FROM photos p
-               JOIN photo_keywords pk ON pk.photo_id = p.id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN tree t ON t.id = pk.keyword_id""",
-            (keyword_id,),
-        ).fetchall()
 
     def workspace_duplicate_groups(self, workspace_id):
         """Rows (``lname``, ``ids``, ``names``, ``cnt``) of keywords tagged in
@@ -1521,19 +1315,6 @@ class KeywordRepository:
                HAVING COUNT(DISTINCT k.id) > 1""",
             (workspace_id,),
         ).fetchall()
-
-    def workspace_photo_count(self, keyword_id, workspace_id):
-        """Row (``name``, ``cnt``): the keyword's tagged photos visible in
-        ``workspace_id``. Always one row; ``name`` is NULL when ``cnt`` is 0."""
-        return self.conn.execute(
-            """SELECT k.name, COUNT(pk.photo_id) as cnt
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE k.id = ? AND wf.workspace_id = ?""",
-            (keyword_id, workspace_id),
-        ).fetchone()
 
     def species_names_matching(self, query, match_case, whole_word):
         """Names of ``is_species`` keywords that match ``query`` under the
@@ -1558,47 +1339,6 @@ class KeywordRepository:
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
         self.conn.commit()
 
-    def species_rank_keywords_for_photo(self, photo_id):
-        """A photo's species-rank identification keywords.
-
-        Rows (``id``, ``name``, ``is_species``, ``type``) for keywords that are
-        ``is_species`` or ``taxonomy`` and linked to a ``species``-rank taxon or
-        to none; ``is_species`` rows first, then most recently tagged first.
-        """
-        return self.conn.execute(
-            """SELECT k.id, k.name, k.is_species, k.type
-               FROM photo_keywords pk
-               JOIN keywords k ON k.id = pk.keyword_id
-               LEFT JOIN taxa t ON t.id = k.taxon_id
-               WHERE pk.photo_id = ?
-                 AND (k.is_species = 1 OR k.type = 'taxonomy')
-                 AND (t.rank = 'species' OR t.rank IS NULL)
-               ORDER BY k.is_species DESC, pk.rowid DESC""",
-            (photo_id,),
-        ).fetchall()
-
-    def photo_ids_with_species_rank_keyword(self, photo_ids):
-        """Which of ``photo_ids`` carry a species-rank identification keyword.
-
-        Same keyword filter as :meth:`species_rank_keywords_for_photo`.
-        """
-        found = set()
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            found.update(
-                row["photo_id"] for row in self.conn.execute(
-                    f"""SELECT DISTINCT pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        LEFT JOIN taxa t ON t.id = k.taxon_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          AND (t.rank = 'species' OR t.rank IS NULL)""",
-                    chunk,
-                ).fetchall()
-            )
-        return found
-
     def species_identity_rows(self):
         """Every species or taxonomy keyword with what its identity resolves from.
 
@@ -1612,308 +1352,6 @@ class KeywordRepository:
             "t.name AS scientific_name FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
             "WHERE k.is_species = 1 OR k.type = 'taxonomy'"
         ).fetchall()
-
-    def get_for_photo(self, photo_id):
-        """Return all keywords for a photo."""
-        return self.conn.execute(
-            """SELECT k.id, k.name, k.parent_id, k.type
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               WHERE pk.photo_id = ?
-               ORDER BY k.name""",
-            (photo_id,),
-        ).fetchall()
-
-    def get_for_photos(self, photo_ids):
-        """Return keywords for a batch of photos keyed by photo id."""
-        if not photo_ids:
-            return {}
-        # Dedup-preserving-order: chunking that re-queries the same id
-        # in a later chunk would double-append it under setdefault.
-        photo_ids = list(dict.fromkeys(photo_ids))
-        result = {}
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
-                           k.is_species, k.taxon_id, t.rank AS taxon_rank
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                    ORDER BY k.type, k.name""",
-                list(chunk),
-            ).fetchall()
-            for r in rows:
-                result.setdefault(r["photo_id"], []).append(dict(r))
-        return result
-
-    def get_species_for_photos(self, photo_ids, include_identities=False):
-        """Return deduplicated species-rank keyword names for photos.
-
-        Returns a dict mapping photo_id -> list of species name strings.
-        With include_identities, each entry contains the stored name and a
-        source-aware identity key for comparisons that must preserve homonyms.
-
-        A linked taxon must actually have rank ``species``; linked family,
-        genus, and other ancestor keywords remain taxonomy keywords but are
-        not presented as species. Taxonomy rows without a resolvable taxon
-        retain the legacy behavior so user-created/offline species tags do
-        not disappear.
-
-        Multiple keyword nodes can represent the same taxon (for example a
-        Lightroom hierarchy leaf plus an older top-level confirmation row).
-        Collapse those by taxon_id and canonicalize to the same-taxon root's
-        stored spelling when one exists — species_representatives,
-        species_highlights, and life-list preference rows key on that root
-        spelling, so a photo whose only surviving species tag is a hierarchy
-        leaf ("verdin" after repair detached the redundant "Verdin" root)
-        would otherwise miss those curation lookups. Falls back to the
-        row's own name when no root exists, and taxonomy-less legacy rows
-        continue to use the normalized keyword name.
-        """
-        if not photo_ids:
-            return {}
-        # Dedup-preserving-order: chunking that re-queries the same id
-        # in a later chunk would double-append it under setdefault.
-        photo_ids = list(dict.fromkeys(photo_ids))
-        chosen = {}
-        source_keys = {}
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id,
-                           k.taxon_id, k.source_taxon_id, t.inat_id, t.name AS scientific_name, t.rank AS taxon_rank
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)
-                    ORDER BY pk.photo_id,
-                             CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
-                             k.id""",
-                list(chunk),
-            ).fetchall()
-            for r in rows:
-                if r["taxon_id"] is not None:
-                    identity = ("taxon", r["taxon_id"])
-                else:
-                    # Preserve exact spelling for NULL-taxon rows: unlinked
-                    # curation compares by exact ``k.name``, so a root ``Foo``
-                    # and a hierarchy leaf ``foo`` on the same photo must
-                    # both appear here — folding by ``keyword_match_key``
-                    # would drop the root and strand its representative /
-                    # highlight lookups.
-                    identity = ("name", r["name"])
-                # Track whether the chosen row is itself a root: attached root
-                # rows must keep their own stored spelling (curation is keyed
-                # by the actually attached ``k.name``, so a same-taxon sibling
-                # root row must not rewrite it). Only hierarchy leaves need the
-                # root-name fallback.
-                is_root = r["parent_id"] is None
-                chosen.setdefault(r["photo_id"], {}).setdefault(
-                    identity, (r["name"], is_root)
-                )
-                source_id = r["source_taxon_id"] or r["inat_id"]
-                key = f"taxon:{source_id}" if source_id else (
-                    "scientific:" + r["scientific_name"].casefold() if r["scientific_name"]
-                    else "name:" + keyword_match_key(r["name"])
-                )
-                source_keys.setdefault((r["photo_id"], identity), key)
-        canonical_roots = self._canonical_species_roots(chosen)
-        result = {}
-        for photo_id, by_identity in chosen.items():
-            names = []
-            for identity, (name, is_root) in by_identity.items():
-                if identity[0] == "taxon" and not is_root:
-                    name = canonical_roots.get(identity[1], name)
-                names.append({"name": name, "key": source_keys[(photo_id, identity)]} if include_identities else name)
-            result[photo_id] = sorted(names, key=lambda n: keyword_match_key(n["name"] if include_identities else n))
-        return result
-
-    def _canonical_species_roots(self, chosen):
-        """``{taxon_id: root spelling}`` for the taxa ``chosen`` links to."""
-        taxon_ids = {
-            identity[1]
-            for by_identity in chosen.values()
-            for identity in by_identity
-            if identity[0] == "taxon"
-        }
-        canonical_roots = {}
-        if taxon_ids:
-            for chunk in self._chunks(list(taxon_ids)):
-                placeholders = ",".join("?" for _ in chunk)
-                root_rows = self.conn.execute(
-                    f"""SELECT taxon_id, name FROM keywords
-                        WHERE taxon_id IN ({placeholders})
-                          AND parent_id IS NULL
-                          AND (is_species = 1 OR type = 'taxonomy')
-                        ORDER BY id""",
-                    list(chunk),
-                ).fetchall()
-                for row in root_rows:
-                    canonical_roots.setdefault(row["taxon_id"], row["name"])
-        return canonical_roots
-
-    def _species_homonym_conflict(self, target, keyword_id, target_key):
-        """Whether a distinct linked species shares the target's match key."""
-        # When another taxonomy/species keyword row shares the target's
-        # match key but points at a different taxon (e.g. legacy
-        # ``Robin`` alongside taxonomy ``robin``), the taxon_id-is-NULL
-        # fallback below is ambiguous: an unlinked same-key row on the
-        # photo could be either species. Treating it as the target would
-        # let a confirm/accept skip ``tag_photo``/``queue_change`` and
-        # leave the intended species keyword absent. Detect the homonym
-        # conflict once and gate the fallback.
-        #
-        # The same guard applies when the *target* itself is unlinked:
-        # if any other same-key row IS linked to a taxon, that linked
-        # row is a distinct species that must not be folded into the
-        # unlinked target during accept/confirm. In that case the
-        # name-only fallback matches only the exact target row.
-        homonym_conflict = False
-        if target["taxon_id"] is not None:
-            for row in self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND taxon_id != ?""",
-                (target["taxon_id"],),
-            ).fetchall():
-                if keyword_match_key(row["name"]) == target_key:
-                    homonym_conflict = True
-                    break
-        else:
-            for row in self.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND id != ?""",
-                (keyword_id,),
-            ).fetchall():
-                if keyword_match_key(row["name"]) == target_key:
-                    homonym_conflict = True
-                    break
-        return homonym_conflict
-
-    def _linked_species_photo_ids(
-        self, chunk, placeholders, target, target_key, excl_clause, excluded,
-        homonym_conflict,
-    ):
-        """Photos in ``chunk`` carrying a taxon-linked target species."""
-        found = set()
-        # Match rows linked to the same taxon first — the fast,
-        # authoritative case that survives any display-name rename.
-        rows = self.conn.execute(
-            f"""SELECT DISTINCT pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.taxon_id = ?
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          {excl_clause}""",
-            [*chunk, target["taxon_id"], *excluded],
-        ).fetchall()
-        found.update(row["photo_id"] for row in rows)
-        if homonym_conflict:
-            return found
-        # Fallback: upgraded libraries can carry a hierarchical
-        # species leaf typed as taxonomy/is_species that
-        # mark_species_keywords hasn't yet linked to a taxon_id
-        # (see the explicit ``taxon_id IS NULL`` branch it
-        # handles). A strict taxon_id equality above would miss
-        # those legacy leaves, so a follow-up
-        # confirm/accept-species after add_keyword created a
-        # linked top-level root would not recognize the existing
-        # hierarchy and would queue a duplicate root tag plus
-        # sidecar add. Match unlinked rows by normalized display
-        # name to preserve the hierarchy. Guarded above so an
-        # ambiguous same-key homonym doesn't get folded in.
-        rows = self.conn.execute(
-            f"""SELECT pk.photo_id, k.name
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.taxon_id IS NULL
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          {excl_clause}""",
-            [*chunk, *excluded],
-        ).fetchall()
-        found.update(
-            row["photo_id"] for row in rows
-            if keyword_match_key(row["name"]) == target_key
-        )
-        return found
-
-    def get_photos_with_equivalent_species(
-        self, photo_ids, keyword_id, exclude_keyword_ids=None,
-    ):
-        """Return submitted photo ids already carrying the target species.
-
-        Species identity is the linked taxon when available, not a particular
-        keyword row. This lets a hierarchical ``Birds|Verdin`` tag satisfy a
-        later confirmation that resolved to the top-level Verdin keyword.
-        Unlinked legacy species fall back to the normalized display name.
-
-        When ``exclude_keyword_ids`` is provided, keyword rows with those ids
-        are ignored during the match. Callers use this to look past rows that
-        are about to be removed — for example, a same-taxon replacement where
-        the "already carries this species" answer must reflect only the rows
-        that will survive the mutation.
-        """
-        if not photo_ids:
-            return set()
-        target = self.conn.execute(
-            "SELECT name, taxon_id FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
-        if target is None:
-            return set()
-        result = set()
-        ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
-        target_key = keyword_match_key(target["name"])
-        excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
-        excl_placeholders = ",".join("?" for _ in excluded)
-        excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
-        homonym_conflict = self._species_homonym_conflict(
-            target, keyword_id, target_key,
-        )
-        for chunk in self._chunks(ids):
-            placeholders = ",".join("?" for _ in chunk)
-            if target["taxon_id"] is not None:
-                result.update(self._linked_species_photo_ids(
-                    chunk, placeholders, target, target_key, excl_clause,
-                    excluded, homonym_conflict,
-                ))
-                continue
-            # Target is unlinked. When a distinct linked row shares this
-            # match key, any same-key row on the photo could be either
-            # species; only the exact target keyword row is safe to
-            # treat as equivalent.
-            if homonym_conflict:
-                rows = self.conn.execute(
-                    f"""SELECT pk.photo_id
-                        FROM photo_keywords pk
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND pk.keyword_id = ?""",
-                    [*chunk, keyword_id],
-                ).fetchall()
-                result.update(row["photo_id"] for row in rows)
-                continue
-            rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.name
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      {excl_clause}""",
-                [*chunk, *excluded],
-            ).fetchall()
-            result.update(
-                row["photo_id"] for row in rows
-                if keyword_match_key(row["name"]) == target_key
-            )
-        return result
 
     def list_all(self):
         """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info.
@@ -2337,9 +1775,10 @@ class KeywordRepository:
 
     # -- species-confirmation reads ------------------------------------------
     #
-    # The reads ``/api/encounters/species`` (``web/encounters.py``) runs inside
-    # its transaction to decide which attached rows stand for the species a
-    # confirmation replaces or removes. A "species row" is ``is_species = 1
+    # The keyword-row reads ``/api/encounters/species`` (``web/encounters.py``)
+    # runs inside its transaction to decide which attached rows stand for the
+    # species a confirmation replaces or removes (the per-photo reads are
+    # ``repositories/photo_species.py``). A "species row" is ``is_species = 1
     # OR type = 'taxonomy'``.
 
     def species_root_by_name(self, name, *, prefer_taxonomy=False):
@@ -2390,87 +1829,9 @@ class KeywordRepository:
             ).fetchall()
         return [row["name"] for row in rows]
 
-    def previous_species_candidates(self, photo_ids, name, linked_root_taxon):
-        """Species-rank rows on ``photo_ids`` that may stand for species ``name``.
-
-        Rows (``id``, ``name``, ``taxon_id``, ``photo_id``) of attached species
-        rows whose taxon is species-rank or unknown, named ``name`` (NOCASE),
-        or also linked to ``linked_root_taxon`` when that is set. Each
-        chunk's rows come root rows first, then by keyword id.
-        """
-        rows = []
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            if linked_root_taxon is not None:
-                rows.extend(self.conn.execute(
-                    f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        LEFT JOIN taxa t ON t.id = k.taxon_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          AND (t.rank = 'species' OR t.rank IS NULL)
-                          AND (k.taxon_id = ?
-                               OR k.name = ? COLLATE NOCASE)
-                        ORDER BY CASE WHEN k.parent_id IS NULL
-                                      THEN 0 ELSE 1 END,
-                                 k.id""",
-                    [*chunk, linked_root_taxon, name],
-                ).fetchall())
-            else:
-                rows.extend(self.conn.execute(
-                    f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        LEFT JOIN taxa t ON t.id = k.taxon_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND k.name = ? COLLATE NOCASE
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                          AND (t.rank = 'species' OR t.rank IS NULL)
-                        ORDER BY CASE WHEN k.parent_id IS NULL
-                                      THEN 0 ELSE 1 END,
-                                 k.id""",
-                    [*chunk, name],
-                ).fetchall())
-        return rows
-
-    def attached_species_rows(self, photo_ids):
-        """Every species-rank (or unranked) species row attached to ``photo_ids``.
-
-        Rows (``photo_id``, ``id``, ``name``, ``taxon_id``); each chunk's rows
-        come by photo, then root rows first, then by keyword id.
-        """
-        rows = []
-        for chunk in self._chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows.extend(self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)
-                    ORDER BY pk.photo_id,
-                             CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
-                             k.id""",
-                list(chunk),
-            ).fetchall())
-        return rows
-
     def commit(self):
         """Commit the connection's open transaction."""
         self.conn.commit()
-
-    def location_photo_rows(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
-        placeholders = ",".join("?" for _ in chunk)
-        return self.conn.execute(
-            "SELECT DISTINCT pk.photo_id "
-            "FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            f"WHERE k.type = 'location' AND pk.photo_id IN ({placeholders})",
-            chunk,
-        ).fetchall()
 
     def import_tag_row(self, keyword_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -2478,9 +1839,3 @@ class KeywordRepository:
             (keyword_id,),
         ).fetchone()
 
-    def association_row(self, photo_id: int, keyword_id: int) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT 1 FROM photo_keywords "
-            "WHERE photo_id = ? AND keyword_id = ?",
-            (photo_id, keyword_id),
-        ).fetchone()

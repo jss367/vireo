@@ -65,7 +65,7 @@
   "pipeline_stages/grouping.py": 4,
   "pipeline_stages/media.py": 4,
   "pipeline_stages/models.py": 4,
-  "pipeline_stages/scanning.py": 7,
+  "pipeline_stages/scanning.py": 5,
   "places.py": 2,
   "power.py": 4,
   "preview_cache.py": 1,

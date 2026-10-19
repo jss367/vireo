@@ -199,7 +199,7 @@ class JobRunner:
                     promote_after_cancel=False,
                     db_timeout=remaining,
                 )
-            except Exception:
+            except Exception:  # broad: shutdown must try every queued job even if one cancel fails
                 queued_cancelled = False
                 log.exception(
                     "Failed to cancel queued job %s during shutdown", job_id,
@@ -308,7 +308,7 @@ class JobRunner:
             # to it, rowcount is 0 and the row stays in its final state.
             if self._history.db_path:
                 promoted = self._history.flip_queued_row_to_running(job_id)
-        except Exception:
+        except Exception:  # broad: any promotion failure unclaims the job for a retry instead of stranding it
             with self._lock:
                 if self._queue.unclaim_locked(job_id, ctx):
                     self._queue.schedule_retry_locked()
@@ -706,7 +706,7 @@ class JobRunner:
                     "Job %s reported failure via result: %s",
                     job["id"], "; ".join(job["errors"]) or "(no detail)",
                 )
-        except Exception as e:
+        except Exception as e:  # broad: worker-thread top level; every failure becomes the job's failed status
             # Cancellation takes precedence over failure: if the user cancelled
             # while the work function was raising (e.g. a stage crash happened
             # during shutdown), honor the cancel rather than recording a

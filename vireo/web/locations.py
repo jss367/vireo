@@ -236,7 +236,7 @@ def _record_place_link(db, keyword_id, details, result):
         [],
     )
 
-    photo_rows = db.keywords.photo_workspaces_tagged_with(result["keyword_id"])
+    photo_rows = db.photo_keywords.photo_workspaces_tagged_with(result["keyword_id"])
     for row in photo_rows:
         queue_location_sync_if_enabled(
             db, row["photo_id"],

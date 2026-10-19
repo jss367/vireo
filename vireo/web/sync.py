@@ -907,7 +907,7 @@ class _SyncPreviewPage:
     def _resolve_merge_targets(self, photo):
         merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
         if merges:
-            tagged_ids = {k['id'] for k in self.db.keywords.get_for_photo(photo['photo_id'])}
+            tagged_ids = {k['id'] for k in self.db.photo_keywords.get_for_photo(photo['photo_id'])}
             for change in merges:
                 target_id = self.resolve_merge_target(self.db, json.loads(change['value']))
                 change['merge_target_path'] = self.merge_paths.get(target_id) if target_id in tagged_ids else None
