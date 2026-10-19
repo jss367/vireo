@@ -8,6 +8,7 @@ var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 // Successful writes retire only their own scope/workspace/key's warning.
 /** @type {Record<string,string>} */ var ALL_SETTINGS_WARNINGS = Object.create(null);
 /** @type {Record<string,number>} */ var ALL_SETTINGS_SAVE_GENERATIONS = Object.create(null);
+/** @type {Record<string,number>} */ var ALL_SETTINGS_SAVE_COMMITS = Object.create(null);
 
 /** @param {string} scope */ function setSettingsScope(scope) {
   if (scope !== 'global' && scope !== 'workspace') return;
@@ -367,8 +368,8 @@ async function refreshAllSettingsValues() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!isCurrentSave()) return;
     if (!resp.ok) {
+      if (!isCurrentSave()) return;
       var err = await resp.json().catch(function() { return { error: resp.statusText }; });
       if (!isCurrentSave()) return;
       if (
@@ -389,8 +390,9 @@ async function refreshAllSettingsValues() {
     }
     committed = true;
     var saved = await resp.json();
-    if (!isCurrentSave()) return;
+    if (!isCurrentSave.commit()) return;
     showSettingSaveWarning(key, saved, warningToken);
+    if (!isCurrentSave()) return;
     await refreshAllSettingsValues();
     if (!isCurrentSave()) return;
     rerenderSettingRow(key);
@@ -436,8 +438,8 @@ async function refreshAllSettingsValues() {
         ? { _confirm_working_copy_eviction: true }
         : {}),
     });
-    if (!isCurrentSave()) return;
     if (!resp.ok) {
+      if (!isCurrentSave()) return;
       var err = await resp.json().catch(function() { return { error: resp.statusText }; });
       if (!isCurrentSave()) return;
       if (
@@ -458,8 +460,9 @@ async function refreshAllSettingsValues() {
     }
     committed = true;
     var reset = await resp.json();
-    if (!isCurrentSave()) return;
+    if (!isCurrentSave.commit()) return;
     showSettingSaveWarning(key, reset, warningToken);
+    if (!isCurrentSave()) return;
     await refreshAllSettingsValues();
     if (!isCurrentSave()) return;
     rerenderSettingRow(key);
@@ -492,7 +495,16 @@ async function refreshAllSettingsValues() {
 /** @param {string} token */ function claimSettingSave(token) {
   var generation = (ALL_SETTINGS_SAVE_GENERATIONS[token] || 0) + 1;
   ALL_SETTINGS_SAVE_GENERATIONS[token] = generation;
-  return function() { return ALL_SETTINGS_SAVE_GENERATIONS[token] === generation; };
+  var claim = function() { return ALL_SETTINGS_SAVE_GENERATIONS[token] === generation; };
+  // Failed attempts cannot retire an earlier committed cleanup warning.
+  // Only a readable successful result advances warning ownership; an
+  // unreadable response leaves the last known warning available.
+  claim.commit = function() {
+    if (generation < (ALL_SETTINGS_SAVE_COMMITS[token] || 0)) return false;
+    ALL_SETTINGS_SAVE_COMMITS[token] = generation;
+    return true;
+  };
+  return claim;
 }
 
 /** @param {string} key @param {{warning?: string}} data @param {string=} token */ function rememberSettingSaveWarning(key, data, token = settingWarningToken(key)) {
@@ -564,10 +576,11 @@ async function refreshAllSettingsValues() {
   return message + '\n\n' + data.warning;
 }
 
-/** @param {{warning?: string}} data @param {() => boolean} isCurrentWarning */ function reportSettingsImported(data, isCurrentWarning) {
-  if (isCurrentWarning()) rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
+/** @param {{warning?: string}} data @param {ReturnType<typeof claimSettingSave>} isCurrentWarning */ function reportSettingsImported(data, isCurrentWarning) {
+  var ownsWarning = isCurrentWarning.commit();
+  if (ownsWarning) rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
     settingWarningToken('write_location_keywords_to_xmp', 'global'));
-  alert(settingsImportedMessage(isCurrentWarning() ? data : {}));
+  alert(settingsImportedMessage(ownsWarning ? data : {}));
 }
 
 /** @param {File} file */ async function importSettingsFile(file) {

@@ -66,7 +66,7 @@ function harness() {
     '_settingControlSelector', 'rerenderSettingRow', 'cssEscape', '_settingsScopeBaseFor', 'saveSchemaSetting', 'resetSchemaSetting',
     'showSettingSaveWarning', 'setRowStatus', 'formatSettingValue', 'settingsImportedMessage', 'importSettingsFile',
     'settingWarningToken', 'claimSettingSave', 'reportSettingsImported', 'rememberSettingSaveWarning', 'restoreSettingSaveWarning', 'settingSaveRefreshFailed']);
-  const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS']);
+  const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS', 'ALL_SETTINGS_SAVE_COMMITS']);
   const nodes = parse(source, {ecmaVersion: 'latest'}).body.filter(node =>
     node.type === 'FunctionDeclaration' && functions.has(node.id.name) ||
     node.type === 'VariableDeclaration' && node.declarations.some(d => variables.has(d.id.name)));
@@ -195,7 +195,7 @@ function delayedWrites(h) {
   const pending = [];
   h.ctx.fetch = async (url, options) => {
     if (url === '/api/settings/values') return {ok: true, json: async () => h.values};
-    return new Promise(resolve => pending.push({url, options, resolve}));
+    return new Promise((resolve, reject) => pending.push({url, options, resolve, reject}));
   };
   return pending;
 }
@@ -302,7 +302,7 @@ for (const olderPayload of [{ok: true}, {ok: true, warning: 'old warning'}]) {
     const h = harness(), pending = delayedWrites(h);
     h.ctx.fetch = async (url, options) => {
       if (url === '/api/settings/values') throw new Error('invented latest refresh failure');
-      return new Promise(resolve => pending.push({url, options, resolve}));
+      return new Promise((resolve, reject) => pending.push({url, options, resolve, reject}));
     };
     const older = write(h, 'save'), newer = write(h, 'save');
     finishWrite(pending, 1, {ok: true, warning: 'new warning'}); await newer;
@@ -336,4 +336,94 @@ test('an older import response cannot overwrite a later schema warning', async (
   assert.equal(h.rows.get(key).notice.textContent, 'new warning');
   assert.equal(h.toasts.length, count);
   assert(!h.alerts.some(text => text.includes('old import warning')));
+});
+
+
+async function startWrite(h, method, pending, count) {
+  const result = method === 'import'
+    ? h.ctx.importSettingsFile({name: 'invented.json', text: async () => '{}'})
+    : write(h, method);
+  while (pending.length < count) await Promise.resolve();
+  return {result};
+}
+function failWrite(pending, index, failure) {
+  if (failure === 'transport') pending[index].reject(new Error('invented write transport'));
+  else if (failure === 'validation') pending[index].resolve({ok: false, status: 400,
+    json: async () => ({error: 'invented validation failure'})});
+  else pending[index].resolve({ok: true, status: 200,
+    json: async () => { throw new SyntaxError('invented successful response JSON'); }});
+}
+for (const olderMethod of ['save', 'reset', 'import']) {
+  for (const newerMethod of ['save', 'reset', 'import']) {
+    for (const failure of ['transport', 'validation', 'response-json']) {
+      test('delayed committed ' + olderMethod + ' warning survives newer ' + newerMethod + ' ' + failure, async () => {
+        const h = harness(), pending = delayedWrites(h);
+        const older = await startWrite(h, olderMethod, pending, 1);
+        const newer = await startWrite(h, newerMethod, pending, 2);
+        failWrite(pending, 1, failure); await newer.result;
+        finishWrite(pending, 0, {ok: true, warning: 'committed cleanup warning'}); await older.result;
+        assert.equal(h.rows.get(key).notice.textContent, 'committed cleanup warning');
+        assert.equal(h.rows.get(key).notice.hidden, false);
+        assert(h.toasts.some(args => args[0] === 'committed cleanup warning'));
+        h.ctx.setSettingsScope('workspace');
+        assert.equal(h.rows.get(key).notice.hidden, true);
+        h.ctx.setSettingsScope('global');
+        assert.equal(h.rows.get(key).notice.textContent, 'committed cleanup warning');
+      });
+    }
+  }
+}
+for (const newerPayload of [{ok: true}, {ok: true, warning: 'new committed warning'}]) {
+  for (const olderMethod of ['save', 'reset', 'import']) {
+    test('newer successful import owns warning before delayed ' + olderMethod + ' response ' + JSON.stringify(newerPayload), async () => {
+      const h = harness(), pending = delayedWrites(h);
+      const older = await startWrite(h, olderMethod, pending, 1);
+      const newer = await startWrite(h, 'import', pending, 2);
+      h.control.valuesError = new Error('invented refresh failure');
+      finishWrite(pending, 1, newerPayload); await newer.result;
+      const count = h.toasts.length;
+      finishWrite(pending, 0, {ok: true, warning: 'old cleanup warning'}); await older.result;
+      assert.equal(h.rows.get(key).notice.textContent, newerPayload.warning || '');
+      assert.equal(h.rows.get(key).notice.hidden, !newerPayload.warning);
+      assert.equal(h.toasts.length, count);
+    });
+  }
+}
+for (const method of ['save', 'reset']) {
+  test('warning recorded while newer ' + method + ' is pending survives its later transport failure', async () => {
+    const h = harness(), pending = delayedWrites(h);
+    const older = write(h, 'save'), newer = write(h, method);
+    finishWrite(pending, 0, {ok: true, warning: 'committed cleanup warning'}); await older;
+    assert.equal(h.rows.get(key).notice.textContent, 'committed cleanup warning');
+    failWrite(pending, 1, 'transport'); await newer;
+    assert.equal(h.rows.get(key).notice.textContent, 'committed cleanup warning');
+    assert.equal(h.rows.get(key).status.textContent, 'Network error');
+  });
+}
+
+for (const method of ['save', 'reset']) {
+  test('delayed ' + method + ' JSON warning survives a newer validation failure', async () => {
+    const h = harness(), pending = delayedWrites(h);
+    let releaseJson;
+    const json = new Promise(resolve => { releaseJson = resolve; });
+    const older = write(h, method);
+    pending[0].resolve({ok: true, json: () => json});
+    await Promise.resolve(); await Promise.resolve();
+    const newer = write(h, 'save');
+    failWrite(pending, 1, 'validation'); await newer;
+    releaseJson({ok: true, warning: 'committed JSON warning'}); await older;
+    assert.equal(h.rows.get(key).notice.textContent, 'committed JSON warning');
+  });
+}
+
+test('a failed newest attempt does not let an oldest response replace the newer committed result', async () => {
+  const h = harness(), pending = delayedWrites(h);
+  const oldest = write(h, 'save'), committed = write(h, 'reset');
+  finishWrite(pending, 1, {ok: true, warning: 'new committed warning'}); await committed;
+  const failed = write(h, 'save');
+  failWrite(pending, 2, 'transport'); await failed;
+  const count = h.toasts.length;
+  finishWrite(pending, 0, {ok: true}); await oldest;
+  assert.equal(h.rows.get(key).notice.textContent, 'new committed warning');
+  assert.equal(h.toasts.length, count);
 });
