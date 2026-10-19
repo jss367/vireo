@@ -4,6 +4,7 @@ Wraps the exiftool binary to extract comprehensive metadata from photo files.
 Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -94,28 +95,34 @@ def clear_exiftool_cache() -> None:
 
 def _probe_exiftool_ver(path: str) -> tuple[bool, str | None, str | None]:
     """Run ``exiftool -ver`` at ``path`` and return (ok, version, error)."""
-    try:
-        result = subprocess.run(
-            [*_exiftool_command(path), "-ver"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **no_window_kwargs(),
-        )
-        if result.returncode == 0:
-            return True, (result.stdout.strip() or None), None
-        return (
-            False,
-            None,
-            (
-                result.stderr.strip()
-                or f"exiftool -ver exited with status {result.returncode}"
-            ),
-        )
-    except Exception as e:  # broad: resolving and running ExifTool raises a wide set; reported as its status
-        # Reported to the caller, which shows it as the ExifTool status.
-        log.debug("ExifTool -ver probe failed", exc_info=True)
-        return False, None, str(e) or e.__class__.__name__
+    outcome = None
+    probe_error = None
+    # broad: probe and optional diagnostics must preserve the original status
+    with contextlib.suppress(Exception):
+        try:
+            result = subprocess.run(
+                [*_exiftool_command(path), "-ver"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **no_window_kwargs(),
+            )
+            if result.returncode == 0:
+                outcome = True, (result.stdout.strip() or None), None
+            else:
+                outcome = (
+                    False,
+                    None,
+                    result.stderr.strip()
+                    or f"exiftool -ver exited with status {result.returncode}",
+                )
+        finally:
+            if outcome is None:
+                probe_error = sys.exception()
+                if isinstance(probe_error, Exception):
+                    log.debug("ExifTool -ver probe failed", exc_info=True)
+        return outcome
+    return False, None, str(probe_error) or probe_error.__class__.__name__
 
 
 def _exiftool_command(path: str | None = None) -> list[str]:

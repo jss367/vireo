@@ -19,6 +19,7 @@ all receive the same object.
 
 import contextlib
 import logging
+import sys
 import threading
 
 log = logging.getLogger(__name__)
@@ -52,13 +53,17 @@ def _is_caller_cancelled_error(exc):
 
 def _make_cancellation_error():
     """Build a caller-visible cancellation exception without importing at load."""
-    try:
-        from classifier import ClassificationCancelled
-    except Exception:  # broad: importing classifier can fail in many ways (onnxruntime, native libraries)
-        # Cancellation must still surface as a cancellation when the
-        # classifier module cannot load; a local stand-in keeps the name.
-        log.debug("classifier unavailable; using a stand-in cancellation class", exc_info=True)
-
+    imported = False
+    # broad: import and optional diagnostics must preserve cancellation fallback
+    with contextlib.suppress(Exception):
+        try:
+            from classifier import ClassificationCancelled
+            imported = True
+        finally:
+            if not imported and isinstance(sys.exception(), Exception):
+                log.debug("classifier unavailable; using a stand-in cancellation class", exc_info=True)
+    if not imported:
+        # Keep cancellation recognizable even when the classifier cannot load.
         class ClassificationCancelled(RuntimeError):
             pass
     return ClassificationCancelled("classification cancelled")
