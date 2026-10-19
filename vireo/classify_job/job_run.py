@@ -194,7 +194,7 @@ class _ClassifyJobRun:
                     reused.get("detector_runs_applied", 0),
                     reused.get("classifier_runs_applied", 0),
                 )
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure classify recomputes
             log.warning("Could not apply local computation cache", exc_info=True)
 
     # -- cached-only shortcut ------------------------------------------
@@ -274,7 +274,7 @@ class _ClassifyJobRun:
                     peek.desired_classifier_model = (
                         params.model_name or peek.peek_model.get("name")
                     )
-        except Exception:
+        except Exception:  # broad: the model lookup reads config and model dirs; the explicit request is preserved so the guard below decides
             # A raising get_models() here left both peek and constraints
             # unresolved. Clearing ``model_id_missing`` or
             # ``desired_classifier_model`` unconditionally would let
@@ -338,7 +338,7 @@ class _ClassifyJobRun:
             # previous label space and finish "successfully" for a
             # selection the authoritative load below rejects.
             raise
-        except Exception:
+        except Exception:  # broad: label loading raises undocumented errors; cache reuse falls back to model-only filtering
             log.warning(
                 "Could not load labels before the cache check; "
                 "cache reuse falls back to model-only filtering",
@@ -844,7 +844,7 @@ class _ClassifyJobRun:
                     "Portable cache added %d classifier runs after detect",
                     reapplied["classifier_runs_applied"],
                 )
-        except Exception:
+        except Exception:  # broad: cache reuse is an optimization; on any failure the fresh results stand
             log.warning(
                 "Could not reapply local computation cache after detect",
                 exc_info=True,
@@ -949,7 +949,7 @@ class _ClassifyJobRun:
                     )
                     if crt:
                         known_classifier_runtimes.add(crt)
-            except Exception:
+            except Exception:  # broad: without fingerprints the reapply runs unfiltered, which is still correct
                 log.warning(
                     "Could not compute classifier runtime fingerprints; "
                     "reapplying without a classifier filter",
