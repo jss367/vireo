@@ -204,3 +204,63 @@ def test_auto_offline_and_small_group_keep_deferral_and_noop_contracts():
         namespace["_volume_offline"] = offline
         assert db.auto([1, 2]).get("deferred") is True
         assert probes == [] and merges == [] and not conn.in_transaction
+
+
+def _recording_auto():
+    trace = [None]
+    def execute(sql):
+        if trace[0] is not None:
+            trace[0](sql)
+    conn = SimpleNamespace(set_trace_callback=lambda callback: trace.__setitem__(0, callback), execute=execute)
+    repo = SimpleNamespace(resolution_preflight=Mock(return_value=((), None)), resolution_plan=Mock(return_value=None))
+    db = SimpleNamespace(conn=conn, duplicates=repo, in_transaction=False,
+                         begin_immediate=Mock(side_effect=lambda: execute("BEGIN IMMEDIATE")),
+                         rollback=Mock(side_effect=lambda: execute("ROLLBACK")), transaction=contextlib.nullcontext)
+    def imports(name, *args, **kwargs):
+        assert name == "repositories.duplicates"
+        return SimpleNamespace(DEFERRED_PLAN=object())
+    namespace = {"__builtins__": {**vars(builtins), "__import__": imports}, "cast": typing.cast}
+    auto = SUPPORT["_selected"]("db.py", "Database", "apply_duplicate_resolution", namespace)
+    return db, auto
+
+
+def test_original_short_input_assertion_passes_with_fake_recording_connection():
+    # Execute the existing assertion unchanged, without importing conftest,
+    # Database or the application, and without weakening its SQL check.
+    tree = ast.parse((VIREO / "tests/test_db_duplicates.py").read_text(encoding="utf-8"))
+    recorder = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_SqlRecorder")
+    test = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "test_apply_resolution_short_input_is_a_noop_without_sql")
+    test.decorator_list = []
+    db, auto = _recording_auto()
+    namespace = {"duplicate_resolution": SimpleNamespace(apply_duplicate_resolution=auto),
+                 "_NOOP": {"winner_id": None, "loser_ids": [], "rejected": 0}}
+    exec(compile(ast.Module(body=[recorder, test], type_ignores=[]), "<original SQL assertion>", "exec"), namespace)
+    for ids in (None, [], [1]):
+        namespace[test.name](db, ids)
+    db.begin_immediate.assert_not_called()
+    db.duplicates.resolution_preflight.assert_not_called()
+
+
+def test_auto_empty_singleton_duplicate_only_iterables_do_not_touch_sql():
+    for ids in (None, [], [1], [1, 1], (), iter([]), iter([1]), iter([1, 1])):
+        db, auto = _recording_auto()
+        statements = []
+        db.conn.set_trace_callback(statements.append)
+        assert auto(db, ids) == {"winner_id": None, "loser_ids": [], "rejected": 0}
+        assert statements == []
+        db.begin_immediate.assert_not_called()
+        db.rollback.assert_not_called()
+        db.duplicates.resolution_preflight.assert_not_called()
+        db.duplicates.resolution_plan.assert_not_called()
+
+
+def test_auto_short_input_preserves_caller_transaction_without_probes():
+    for ids in (None, [], [1], [1, 1]):
+        with _flow() as (conn, scan, db, repo, merges, trace, paths, probes):
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO notes VALUES('caller-owned')")
+            trace.clear()
+            assert db.auto(ids) == {"winner_id": None, "loser_ids": [], "rejected": 0}
+            assert trace == [] and conn.in_transaction and probes == [] and merges == []
+            conn.rollback()
+            assert conn.execute("SELECT * FROM notes").fetchall() == []

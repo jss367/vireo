@@ -47,7 +47,7 @@ def check_and_resolve_duplicates_for_hash(db: Database, file_hash: str | None) -
     return None
 
 
-def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDict:
+def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int] | None) -> JsonDict:
     """Resolve a group of photos sharing a file_hash.
 
     Picks a winner using :func:`vireo.duplicates.resolve_duplicates`,
@@ -64,6 +64,12 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDi
     winner: the return dict adds ``"deferred": True`` so callers can
     tell deferrals apart from no-ops and keep the group visible.
     """
+    # A short (including duplicate-only) input is a no-op even if the
+    # caller owns a transaction. Do not read repositories or acquire SQL locks.
+    ids = list(dict.fromkeys(photo_ids if photo_ids is not None else ()))
+    if len(ids) < 2:
+        return {"winner_id": None, "loser_ids": [], "rejected": 0}
+
     from repositories.duplicates import DEFERRED_PLAN
 
     repo = db.duplicates
@@ -72,7 +78,6 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDi
     deferred = {"winner_id": None, "loser_ids": [], "rejected": 0, "deferred": True}
     if db.in_transaction:
         return deferred
-    ids = list(dict.fromkeys(photo_ids))
     preflight = repo.resolution_preflight(ids)
     db.begin_immediate()
     with db.transaction():
