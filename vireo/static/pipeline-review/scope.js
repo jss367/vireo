@@ -25,21 +25,25 @@ function dismissDegradedBanner() {
   /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
-// The edit_history row id of the undo/redo whose cache refresh failed and is
-// currently reflected in the on-screen banner. The next undo/redo on the
-// same id is this entry's own inverse — its successful refresh resyncs the
-// same photos the failed one left stale, so the banner is dropped. An
-// undo/redo on a different id is a different edit (different photos usually)
-// and the earlier staleness still stands, so the banner is left alone.
-/** @type {number | null} */ var _historyCacheStaleEntryId = null;
+// The edit_history row ids of undo/redo operations whose cache refresh
+// failed and whose photos may still be stale on screen. The next undo/redo
+// on any of these ids is that operation's own inverse — its successful
+// refresh resyncs the same photos the failed one left stale, so that id
+// drops out. The banner stays up while any id remains, and comes down only
+// once every stale entry has been repaired, so two consecutive failures on
+// different entries do not let one inverse success hide the warning while
+// the other entry's cache is still out of sync. An undo/redo on an id that
+// is not in the set is a different edit (different photos usually) and the
+// outstanding staleness still stands, so the set is left alone.
+/** @type {Set<number>} */ var _historyCacheStaleEntryIds = new Set();
 
 /**
  * An undo or redo stood, but the saved review results could not follow it
  * (the server could not rewrite the pipeline cache's species). This page
  * reads those results, so say what is stale and what fixes it: a reload
  * reads the same stale file, while a Process run rebuilds the results from
- * the catalog. Stays up until the user leaves the page or the entry's own
- * inverse succeeds (``_historyCacheStaleEntryId`` above).
+ * the catalog. Stays up until the user leaves the page or every outstanding
+ * failed entry's own inverse succeeds (``_historyCacheStaleEntryIds`` above).
  * @param {{pipeline_cache_stale?: boolean; undone?: string; redone?: string; entry_id?: number} | null | undefined} change
  */
 function renderHistoryCacheStaleBanner(change) {
@@ -47,7 +51,7 @@ function renderHistoryCacheStaleBanner(change) {
   var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
   if (!banner || !text || !change) return;
   if (change.pipeline_cache_stale) {
-    _historyCacheStaleEntryId = change.entry_id != null ? Number(change.entry_id) : null;
+    if (change.entry_id != null) _historyCacheStaleEntryIds.add(Number(change.entry_id));
     var undo = change.undone !== undefined;
     var description = (undo ? change.undone : change.redone) || 'the last edit';
     text.innerHTML = '<strong>These review results may be out of date.</strong> '
@@ -58,10 +62,9 @@ function renderHistoryCacheStaleBanner(change) {
     banner.style.display = 'flex';
     return;
   }
-  if (_historyCacheStaleEntryId != null
-      && change.entry_id != null
-      && Number(change.entry_id) === _historyCacheStaleEntryId) {
-    _historyCacheStaleEntryId = null;
+  if (change.entry_id != null
+      && _historyCacheStaleEntryIds.delete(Number(change.entry_id))
+      && _historyCacheStaleEntryIds.size === 0) {
     banner.style.display = 'none';
   }
 }

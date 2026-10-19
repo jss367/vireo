@@ -2411,6 +2411,62 @@ def test_pipeline_review_banner_clears_when_its_inverse_succeeds(
     expect(banner).to_be_hidden()
 
 
+def test_pipeline_review_banner_stays_while_an_earlier_stale_undo_remains(
+    live_server, page, monkeypatch,
+):
+    """Two consecutive failed cache refreshes stack: the inverse of the
+    latest failed undo repairs only its own entry's cache, so the banner
+    must stay up while an earlier failed undo's photos are still stale,
+    and come down only once every outstanding entry has been repaired.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    # Second species edit on top of the first, so there are two undoable
+    # entries whose ids do not collide (same backend contract as
+    # test_undo_redo_entry_id_differs_across_separate_history_entries).
+    species_name = page.locator(".species-widget .species-name").first
+    species_name.click()
+    input_box = page.locator(".species-dropdown.open input").first
+    input_box.fill("American Robin")
+    input_box.press("Enter")
+    expect(species_name).to_have_text("American Robin")
+
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+    expect(banner).to_be_hidden()
+
+    with monkeypatch.context() as patch:
+        _fail_pipeline_cache_refresh(patch)
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as first_undo:
+            page.locator("#historyUndoBtn").click()
+        first_undo_body = first_undo.value.json()
+        assert first_undo_body["pipeline_cache_stale"] is True
+        expect(banner).to_be_visible()
+
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as second_undo:
+            page.locator("#historyUndoBtn").click()
+        second_undo_body = second_undo.value.json()
+        assert second_undo_body["pipeline_cache_stale"] is True
+        assert second_undo_body["entry_id"] != first_undo_body["entry_id"]
+        expect(banner).to_be_visible()
+
+    # Transient failure cleared; the next Redo is the inverse of the SECOND
+    # undo. Its successful refresh resyncs only those photos, so the earlier
+    # failed undo's entry is still stale and the banner must stay up.
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as first_redo:
+        page.locator("#historyRedoBtn").click()
+    first_redo_body = first_redo.value.json()
+    assert "pipeline_cache_stale" not in first_redo_body
+    assert first_redo_body["entry_id"] == second_undo_body["entry_id"]
+    expect(banner).to_be_visible()
+
+    # Second Redo clears the remaining stale entry; the banner finally hides.
+    with page.expect_response(lambda r: r.url.endswith("/api/redo")) as second_redo:
+        page.locator("#historyRedoBtn").click()
+    second_redo_body = second_redo.value.json()
+    assert "pipeline_cache_stale" not in second_redo_body
+    assert second_redo_body["entry_id"] == first_undo_body["entry_id"]
+    expect(banner).to_be_hidden()
+
+
 def test_undo_elsewhere_warns_when_process_review_results_go_stale(
     live_server, page, monkeypatch,
 ):
