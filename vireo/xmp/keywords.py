@@ -171,6 +171,8 @@ class _KeywordEdits:
             # earlier writes still collapse.
             if _bag_occurrence_is_qualified(extra, parent_map):
                 continue
+            if self._merge_would_drop_source_markup(extra, extra_bag, seen):
+                continue
             if extra_bag is not None:
                 # Copy every item, not just ones with direct text: a
                 # structured value (rdf:parseType="Resource" with an
@@ -180,10 +182,71 @@ class _KeywordEdits:
                     sig = _li_signature(li)
                     if sig in seen:
                         continue
-                    bag.append(copy.deepcopy(li))
+                    bag.append(self._copy_with_source_markup(li))
                     seen.add(sig)
             owner.remove(extra)
             self.document.dirty = True
+
+    def _merge_would_drop_source_markup(self, extra, extra_bag, seen):
+        """Keep a container whose recorded markup has no surviving copy.
+
+        Item copies carry their own namespace and comment/PI records. Records
+        on a removed wrapper/bag, or on an item discarded as a duplicate, have
+        no such destination. Leave that occurrence intact, as for qualified
+        containers, rather than silently dropping its source markup.
+        """
+        markup = getattr(getattr(self.document, "tree", None), "markup", None)
+        if markup is None:
+            return False
+        copied = set()
+        signatures = set(seen)
+        if extra_bag is not None:
+            for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
+                signature = _li_signature(li)
+                if signature not in signatures:
+                    copied.update(li.iter())
+                    signatures.add(signature)
+        return any(
+            node not in copied
+            and (markup.inner.get(node) or markup.namespaces.get(node))
+            for node in extra.iter()
+        )
+
+    def _copy_with_source_markup(self, original):
+        """Deep-copy ``original`` and carry its ``SourceMarkup`` entries along.
+
+        ``SourceMarkup.namespaces`` and ``SourceMarkup.inner`` are keyed by
+        element identity, so a plain deep copy loses any binding or
+        comment/PI the source recorded on the subtree. Without this
+        transfer, a locally-declared prefix on the item would fall back to
+        ``ns0`` on rewrite, and comments or processing instructions inside
+        it would be silently dropped when the original property is removed.
+        """
+        duplicate = copy.deepcopy(original)
+        markup = getattr(getattr(self.document, "tree", None), "markup", None)
+        if markup is None:
+            return duplicate
+        original_elems = list(original.iter())
+        copy_elems = list(duplicate.iter())
+        mapping = {
+            id(orig): dup
+            for orig, dup in zip(original_elems, copy_elems, strict=True)
+        }
+        for orig, dup in zip(original_elems, copy_elems, strict=True):
+            declarations = markup.namespaces.get(orig)
+            if declarations:
+                markup.namespaces[dup] = list(declarations)
+            inner = markup.inner.get(orig)
+            if inner:
+                markup.inner[dup] = [
+                    (
+                        tuple(mapping.get(id(sib), sib) for sib in preceding),
+                        offset,
+                        node,
+                    )
+                    for preceding, offset, node in inner
+                ]
+        return duplicate
 
     def add_keywords(self, flat_keywords=(), hierarchical_keywords=()):
         """Merge keywords into dc:subject and lr:hierarchicalSubject.
