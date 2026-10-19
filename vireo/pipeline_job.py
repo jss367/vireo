@@ -58,6 +58,7 @@ from resource_ledger import (
     bind_resource_pure_cancel_check,
     suspend_resource_wait_timing,
 )
+from services import detection_store
 from volume_reachability import (
     load_known_mount_roots as _load_known_mount_roots,  # noqa: F401
 )
@@ -496,8 +497,8 @@ def _preflight_mask_detections(
         and weak_detection_confidence is not None
     ):
         dets = [
-            d for d in thread_db.get_detections(
-                photo_id,
+            d for d in detection_store.get_detections(
+                thread_db, photo_id,
                 min_conf=weak_detection_confidence,
                 detector_model="megadetector-v6",
             )
@@ -505,8 +506,8 @@ def _preflight_mask_detections(
         ]
     else:
         dets = [
-            d for d in thread_db.get_detections(
-                photo_id, min_conf=detector_confidence,
+            d for d in detection_store.get_detections(
+                thread_db, photo_id, min_conf=detector_confidence,
             )
             if d["detector_model"] != "full-image"
         ]

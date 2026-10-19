@@ -99,6 +99,8 @@
     'updateExportPreview',
     'selectedExportMetadataFields',
     'buildExportPreflightRequest',
+    // Releasing local originals (vireo-release-originals.js), on Storage.
+    'loadStoragePanel',
   ]));
 
   /** @type {Record<string, boolean>} */

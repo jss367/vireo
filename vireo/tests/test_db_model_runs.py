@@ -20,6 +20,7 @@ import db as db_module
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
 from repositories.model_runs import ModelRunsRepository
+from services import classify_preflight, detection_store
 
 MODEL = "BioCLIP-2.5"
 
@@ -519,9 +520,9 @@ def test_cache_hits_and_unclassifiable_return_early_without_config(
 
     monkeypatch.setattr(Database, "get_effective_config", boom)
     for empty in ([], (), set(), None):
-        assert db.get_classifier_run_cache_hits(empty, MODEL, "fp-a") == set()
-        assert db.count_classifier_runs(empty, MODEL, "fp-a") == 0
-        assert db.get_unclassifiable_photos(empty) == set()
+        assert classify_preflight.get_classifier_run_cache_hits(db, empty, MODEL, "fp-a") == set()
+        assert classify_preflight.count_classifier_runs(db, empty, MODEL, "fp-a") == 0
+        assert classify_preflight.get_unclassifiable_photos(db, empty) == set()
 
 
 def test_cache_hits_read_the_workspace_detector_floor(db):
@@ -531,10 +532,10 @@ def test_cache_hits_read_the_workspace_detector_floor(db):
     _usable(db, cached)
     _det(db, pid, conf=0.3)  # uncached, qualifies only under the default floor
 
-    assert db.get_classifier_run_cache_hits([pid], MODEL, "fp-a") == set()
+    assert classify_preflight.get_classifier_run_cache_hits(db, [pid], MODEL, "fp-a") == set()
     _set_floor(db, 0.5)
-    assert db.get_classifier_run_cache_hits([pid], MODEL, "fp-a") == {pid}
-    assert db.count_classifier_runs([pid], MODEL, "fp-a") == 1
+    assert classify_preflight.get_classifier_run_cache_hits(db, [pid], MODEL, "fp-a") == {pid}
+    assert classify_preflight.count_classifier_runs(db, [pid], MODEL, "fp-a") == 1
 
 
 def test_cache_hits_ignore_negative_confidence_predictions_and_other_keys(db):
@@ -549,8 +550,8 @@ def test_cache_hits_ignore_negative_confidence_predictions_and_other_keys(db):
     _usable(db, _det(db, other_model), model="other")
     _usable(db, _det(db, other_fp), fingerprint="fp-b")
 
-    assert db.get_classifier_run_cache_hits(
-        [neg, other_model, other_fp], MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [neg, other_model, other_fp], MODEL, "fp-a",
     ) == set()
 
 
@@ -581,8 +582,8 @@ def test_cache_hits_count_runs_that_matched_nothing(db):
     db.model_runs.record_classifier_run(_det(db, torn), MODEL, "fp-a", 0)
 
     ids = [normal, weak, anchor, fresh_photo, torn]
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         contextual_weak_photo_ids={weak}, weak_confidence=0.05,
         fresh_detections_by_photo={fresh_photo: [
             {"id": fresh_det, "detector_model": "megadetector-v6",
@@ -603,8 +604,8 @@ def test_cache_hits_chunk_large_id_lists(db):
 
     filler = list(range(10_000, 10_000 + 1_200))
     ids = filler + [normal, weak, anchor_photo]
-    hits = db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         contextual_weak_photo_ids={weak}, weak_confidence=0.05,
     )
     assert hits == {normal, weak, anchor_photo}
@@ -636,12 +637,12 @@ def test_cache_hits_fresh_candidates_skip_ineligible_detections(db):
          "detector_confidence": 0.05},
         {"detector_model": "megadetector-v6", "confidence": 0.9},  # no id
     ]}
-    assert db.get_classifier_run_cache_hits(
-        [pid], MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [pid], MODEL, "fp-a",
         fresh_detections_by_photo=fresh, fresh_processed_photo_ids={pid},
     ) == {pid}
     # Without the fresh map the DB fallback sees the uncached rows.
-    assert db.get_classifier_run_cache_hits([pid], MODEL, "fp-a") == set()
+    assert classify_preflight.get_classifier_run_cache_hits(db, [pid], MODEL, "fp-a") == set()
 
 
 def test_cache_hits_fresh_contextual_weak_uses_top_megadetector_box(db):
@@ -668,8 +669,8 @@ def test_cache_hits_fresh_contextual_weak_uses_top_megadetector_box(db):
         top_cached: _weak_pair(top_cached, True),
         low_cached: _weak_pair(low_cached, False),
     }
-    hits = db.get_classifier_run_cache_hits(
-        [top_cached, low_cached], MODEL, "fp-a",
+    hits = classify_preflight.get_classifier_run_cache_hits(
+        db, [top_cached, low_cached], MODEL, "fp-a",
         contextual_weak_photo_ids={top_cached, low_cached},
         weak_confidence=0.05,
         fresh_detections_by_photo=fresh,
@@ -682,8 +683,8 @@ def test_cache_hits_fresh_weak_photo_without_candidates_uses_db(db):
     fid = _folder(db)
     pid = _photo(db, "a.jpg", fid)
     _usable(db, _det(db, pid, "megadetector-v6", conf=0.1))
-    assert db.get_classifier_run_cache_hits(
-        [pid], MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [pid], MODEL, "fp-a",
         contextual_weak_photo_ids=[pid], weak_confidence=0.05,
         fresh_detections_by_photo={pid: []},
         fresh_processed_photo_ids=[pid],
@@ -717,8 +718,8 @@ def test_cache_hits_fresh_full_image_anchor_unless_confident_non_animal(db):
         uncached_anchor: [],
     }
     ids = [noise, person, no_anchor, uncached_anchor]
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         fresh_detections_by_photo=fresh, fresh_processed_photo_ids=set(ids),
     ) == {noise}
 
@@ -732,11 +733,11 @@ def test_cache_hits_fresh_map_is_ignored_without_processed_ids(db):
     fresh = {pid: [{"id": fresh_id, "detector_model": "megadetector-v6",
                     "confidence": 0.9}]}
     assert stale
-    assert db.get_classifier_run_cache_hits(
-        [pid], MODEL, "fp-a", fresh_detections_by_photo=fresh,
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [pid], MODEL, "fp-a", fresh_detections_by_photo=fresh,
     ) == set()
-    assert db.get_classifier_run_cache_hits(
-        [pid], MODEL, "fp-a", fresh_processed_photo_ids={pid},
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [pid], MODEL, "fp-a", fresh_processed_photo_ids={pid},
     ) == set()
 
 
@@ -757,8 +758,8 @@ def test_cache_hits_db_full_image_anchor_requires_consistent_detector_run(db):
     # blocked: a confident non-animal box blocks the fallback.
     _det(db, blocked, "megadetector-v6", conf=0.9, category="vehicle")
 
-    assert db.get_classifier_run_cache_hits(
-        [consistent, torn, empty_run, blocked], MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, [consistent, torn, empty_run, blocked], MODEL, "fp-a",
     ) == {consistent, empty_run}
 
 
@@ -794,28 +795,28 @@ def test_cache_hits_runtime_map_applies_to_every_branch(db):
         fresh_processed_photo_ids={fresh_photo},
     )
     ids = [normal, weak, anchor, fresh_photo, raw, incomplete]
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a", **kwargs,
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a", **kwargs,
     ) == {normal, weak, anchor, fresh_photo}
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         expected_classifier_runtime_by_detector_runtime={},
         **kwargs,
     ) == {normal, weak, anchor, fresh_photo}
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         expected_classifier_runtime_by_detector_runtime={"rt-det": "cls-new"},
         **kwargs,
     ) == set()
-    assert db.get_classifier_run_cache_hits(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, ids, MODEL, "fp-a",
         expected_classifier_runtime_by_detector_runtime={
             "rt-det": "cls-old", "other-rt": None,
         },
         **kwargs,
     ) == {normal, weak, anchor, fresh_photo}
-    assert db.count_classifier_runs(
-        ids, MODEL, "fp-a",
+    assert classify_preflight.count_classifier_runs(
+        db, ids, MODEL, "fp-a",
         expected_classifier_runtime_by_detector_runtime={"rt-det": None},
         **kwargs,
     ) == 4
@@ -844,8 +845,8 @@ def test_unclassifiable_db_path(db):
     _det(db, weak_mdv6, "megadetector-v6", conf=0.1)
 
     filler = list(range(10_000, 10_000 + 1_100))
-    result = db.get_unclassifiable_photos(
-        filler + [person_only, with_animal, low_person, full_image_only,
+    result = classify_preflight.get_unclassifiable_photos(
+        db, filler + [person_only, with_animal, low_person, full_image_only,
                   weak_foreign, weak_mdv6],
         contextual_weak_photo_ids={weak_foreign, weak_mdv6},
         weak_confidence=0.05,
@@ -853,7 +854,7 @@ def test_unclassifiable_db_path(db):
     assert result == {person_only, weak_foreign}
 
     _set_floor(db, 0.95)
-    assert db.get_unclassifiable_photos([person_only]) == set()
+    assert classify_preflight.get_unclassifiable_photos(db, [person_only]) == set()
 
 
 def test_unclassifiable_fresh_path_without_processed_ids(db):
@@ -879,8 +880,8 @@ def test_unclassifiable_fresh_path_without_processed_ids(db):
             {"category": "person", "confidence": 0.9},
         ],
     }
-    assert db.get_unclassifiable_photos(
-        [person, animal, missing], fresh_detections_by_photo=fresh,
+    assert classify_preflight.get_unclassifiable_photos(
+        db, [person, animal, missing], fresh_detections_by_photo=fresh,
     ) == {person}
 
 
@@ -910,8 +911,8 @@ def test_unclassifiable_fresh_path_with_processed_ids(db):
             {"category": "person", "confidence": 0.9},
         ],
     }
-    assert db.get_unclassifiable_photos(
-        [person, no_person, unprocessed, weak_fresh, weak_db],
+    assert classify_preflight.get_unclassifiable_photos(
+        db, [person, no_person, unprocessed, weak_fresh, weak_db],
         contextual_weak_photo_ids=[weak_fresh, weak_db],
         weak_confidence=0.05,
         fresh_detections_by_photo=fresh,
@@ -1145,9 +1146,9 @@ _REMOVED_MODEL_RUN_WRAPPERS = (
     "upsert_labels_fingerprint",
 )
 
-# Still on ``Database``: the classify preflight reads resolve the workspace's
-# detector floor first.
-_FACADE_MODEL_RUN_METHODS = (
+# In ``services/classify_preflight.py``: the classify preflight reads resolve
+# the workspace's detector floor first.
+_PREFLIGHT_FUNCTIONS = (
     "get_classifier_run_cache_hits",
     "get_unclassifiable_photos",
 )
@@ -1207,28 +1208,48 @@ def test_model_runs_has_no_forwarding_wrappers_on_database():
     assert "conn" not in attrs
 
 
-@pytest.mark.parametrize("name", _FACADE_MODEL_RUN_METHODS)
-def test_facade_model_run_method_delegates_to_repository(name):
-    attrs = _self_attrs(getattr(Database, name))
+def _db_attrs(fn_obj):
+    """Attributes a service function reads off its ``db`` argument."""
+    source = textwrap.dedent(inspect.getsource(fn_obj))
+    fn = ast.parse(source).body[0]
+    return {
+        node.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "db"
+    }
+
+
+@pytest.mark.parametrize("name", _PREFLIGHT_FUNCTIONS)
+def test_preflight_function_delegates_to_repository(name):
+    attrs = _db_attrs(getattr(classify_preflight, name))
     assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to ModelRunsRepository"
+        f"classify_preflight.{name} touches db.conn; move the SQL to ModelRunsRepository"
     )
-    assert "_model_runs_repository" in attrs, (
-        f"Database.{name} no longer delegates to ModelRunsRepository"
+    assert "model_runs" in attrs, (
+        f"classify_preflight.{name} no longer delegates to ModelRunsRepository"
     )
+    assert not hasattr(Database, name), f"Database.{name} came back"
 
 
 def test_pin_check_is_bound_into_the_detection_writes():
     """The detection writes take the pin check from ``db.model_runs`` as a callback."""
-    source = textwrap.dedent(inspect.getsource(Database.write_detection_batch))
-    assert "is_pinned=self.model_runs.detector_run_is_pinned" in source
+    source = textwrap.dedent(inspect.getsource(detection_store.write_detection_batch))
+    assert "is_pinned=db.model_runs.detector_run_is_pinned" in source
     assert not hasattr(Database, "detector_run_is_pinned")
 
 
-def test_count_classifier_runs_composes_through_the_facade():
-    attrs = _self_attrs(Database.count_classifier_runs)
-    assert "conn" not in attrs
-    assert "get_classifier_run_cache_hits" in attrs
+def test_count_classifier_runs_composes_the_cache_hits():
+    source = textwrap.dedent(inspect.getsource(classify_preflight.count_classifier_runs))
+    fn = ast.parse(source).body[0]
+    called = {
+        node.func.id for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "conn" not in _db_attrs(classify_preflight.count_classifier_runs)
+    assert "get_classifier_run_cache_hits" in called
+    assert not hasattr(Database, "count_classifier_runs")
 
 
 @pytest.mark.parametrize("name", [
@@ -1236,7 +1257,7 @@ def test_count_classifier_runs_composes_through_the_facade():
 ])
 def test_preflight_reads_config_through_the_facade(name):
     """The workspace floor comes from ``Database.get_effective_config``."""
-    assert "get_effective_config" in _self_attrs(getattr(Database, name))
+    assert "get_effective_config" in _db_attrs(getattr(classify_preflight, name))
 
 
 def test_repository_imports_no_db_code():

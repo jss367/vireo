@@ -825,7 +825,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
         "UPDATE photos SET companion_path='developed.jpg' WHERE id=?",
         (photo_id,),
     )
-    db.save_detections(photo_id, [{
+    db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
         "confidence": 0.95,
         "category": "animal",

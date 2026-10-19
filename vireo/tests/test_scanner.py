@@ -3570,7 +3570,7 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
     jpeg_id = db.conn.execute("SELECT id FROM photos").fetchone()["id"]
 
     # Classify the JPEG — create detection then add a prediction
-    det_ids = db.save_detections(jpeg_id, [
+    det_ids = db.detections.save(jpeg_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], "Robin", 0.85, "bioclip")
@@ -3631,10 +3631,10 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
                           file_size=2000, file_mtime=1.0)
 
     # Both classified with same model + same box + same category.
-    jpeg_det = db.save_detections(jpeg_id, [
+    jpeg_det = db.detections.save(jpeg_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    raw_det = db.save_detections(raw_id, [
+    raw_det = db.detections.save(raw_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.predictions.add(jpeg_det[0], "Robin", 0.95, "bioclip")

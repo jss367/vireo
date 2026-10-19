@@ -426,7 +426,7 @@ def test_version_15_catalog_gains_prediction_history_instances_without_changing_
     with Database(db_path, initialize_schema=False) as db:
         fid = db.add_folder('/photos', name='Photos')
         pid = db.add_photo(fid, 'bird.jpg', '.jpg', 100, 1.0)
-        did = db.save_detections(pid, [
+        did = db.detections.save(pid, [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='test')[0]
         db.predictions.add(did, 'Bald Eagle', .9, 'test')

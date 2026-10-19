@@ -287,7 +287,7 @@ def app_and_db(tmp_path):
                       file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
 
     # Add a detection and prediction for the photo
-    det_ids = d.save_detections(pid, [
+    det_ids = d.detections.save(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     d.predictions.add(det_ids[0], "Northern Cardinal", 0.95, "test-model",

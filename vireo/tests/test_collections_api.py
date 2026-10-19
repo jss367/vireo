@@ -407,7 +407,7 @@ def test_collection_photos_includes_detections_and_species(app_and_db):
     client = app.test_client()
 
     target = [p for p in db.photos.list_page() if p["filename"] == "bird1.jpg"][0]
-    db.save_detections(target["id"], [
+    db.detections.save(target["id"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
     ], detector_model="MDV6")

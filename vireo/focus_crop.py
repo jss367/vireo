@@ -2,11 +2,13 @@
 
 import math
 
+from services import detection_store
+
 
 def focus_subject_detections(db, photo_id):
     """Prefer the subject whose active mask supplied the stored quality."""
     prompt = db.masks_features.active_prompt_detection(photo_id)
-    return [prompt] if prompt is not None else db.get_detections(photo_id)
+    return [prompt] if prompt is not None else detection_store.get_detections(db, photo_id)
 
 
 def parse_center(raw):

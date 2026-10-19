@@ -21,6 +21,7 @@ from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
 from classify_job.store_predictions import _store_grouped_predictions
 from models import get_active_model, get_models
+from services import detection_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -885,11 +886,11 @@ class _ClassifyJobRun:
                     )
                 except (ValueError, CacheFormatError):
                     full_input = None
-            existing_full = thread_db.get_detections(
-                photo_id, detector_model="full-image", min_conf=0,
+            existing_full = detection_store.get_detections(
+                thread_db, photo_id, detector_model="full-image", min_conf=0,
             )
             if not existing_full:
-                thread_db.save_detections(
+                thread_db.detections.save(
                     photo_id,
                     [{
                         "box": {"x": 0, "y": 0, "w": 1, "h": 1},

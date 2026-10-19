@@ -13,6 +13,7 @@ from classify_job.cache_coverage import _cache_run_filter
 from classify_job.common import _photo_timestamp
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
 from classify_job.store_predictions import _cached_prediction_taxonomy, _store_grouped_predictions
+from services import detection_store
 
 if TYPE_CHECKING:
     import sqlite3
@@ -242,8 +243,8 @@ def _cached_only_detection_map(thread_db: Database, photo_ids: list[int]) -> Det
     import config as cfg
     effective_cfg = thread_db.get_effective_config(cfg.load())
     det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-    detection_map = thread_db.get_detections_for_photos(
-        photo_ids, min_conf=det_conf_threshold,
+    detection_map = detection_store.get_detections_for_photos(
+        thread_db, photo_ids, min_conf=det_conf_threshold,
     )
     detection_map = {
         photo_id: [
@@ -257,8 +258,8 @@ def _cached_only_detection_map(thread_db: Database, photo_ids: list[int]) -> Det
     # positive MegaDetector threshold above hides them. They are nevertheless
     # classifier inputs and must participate in cached-only reconciliation.
     # Fetch them independently at min_conf=0 and merge them back.
-    full_image_map = thread_db.get_detections_for_photos(
-        photo_ids, min_conf=0, detector_model="full-image",
+    full_image_map = detection_store.get_detections_for_photos(
+        thread_db, photo_ids, min_conf=0, detector_model="full-image",
     )
     for photo_id, detections in full_image_map.items():
         existing = detection_map.setdefault(photo_id, [])
@@ -320,8 +321,8 @@ def _cached_only_raw_results(
         image_path = os.path.join(folder_path, photo["filename"])
         timestamp = _photo_timestamp(photo)
         for detection in detection_map.get(photo["id"], []):
-            cached = thread_db.get_predictions_for_detection(
-                detection["id"],
+            cached = detection_store.get_predictions_for_detection(
+                thread_db, detection["id"],
                 classifier_model=resolved_model,
                 labels_fingerprint=resolved_fingerprint,
                 min_classifier_conf=0,
