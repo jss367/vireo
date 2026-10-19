@@ -25,11 +25,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> None:
-    """Read flat and hierarchical keywords from XMP and populate the database."""
+def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> bool:
+    """Import readable XMP keywords; False leaves the sidecar retryable."""
     snapshot = read_keyword_snapshot(xmp_path_str)
     if snapshot is None:
-        return
+        return False
     flat_keywords, hier_keywords = snapshot[:2]
     # A sidecar whose location keywords Vireo wrote describes the place the
     # photo had at the last sync. If a newer place (or none) is already queued
@@ -39,6 +39,7 @@ def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -
         location_metadata=snapshot[2:],
     )
     _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
+    return True
 
 
 def _import_embedded_keywords_for_photo(db: Database, photo_id: int, file_meta: ExifMetadata | None, *,

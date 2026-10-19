@@ -270,8 +270,15 @@ class _FileIndexer:
         # the loser its keywords are visible to apply_duplicate_resolution's
         # metadata query and get merged onto the winner. Otherwise the
         # keywords would be stranded on the rejected row.
-        if xmp_path.exists():
-            _import_keywords_for_photo(db, photo_id, str(xmp_path))
+        if item.xmp_mtime is None:
+            # A deleted sidecar must clear a previous acknowledgement.
+            if item.row_already_existed:
+                db.scanning.set_xmp_mtime(photo_id, None)
+                db.commit_with_retry()
+        elif _import_keywords_for_photo(db, photo_id, str(xmp_path)):
+            # A stat alone cannot vouch for an unreadable sidecar's keywords.
+            db.scanning.set_xmp_mtime(photo_id, item.xmp_mtime)
+            db.commit_with_retry()
         # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
         # This path runs whenever the file is new or changed, which is also
         # when such a write lands: it rewrites the file, not a sidecar.
@@ -356,7 +363,8 @@ class _FileIndexer:
                 extension=item.image_path.suffix.lower(),
                 file_size=item.file_size,
                 file_mtime=item.file_mtime,
-                xmp_mtime=item.xmp_mtime,
+                # A newly inserted row has not imported its sidecar yet.
+                xmp_mtime=None,
                 timestamp=item.meta.timestamp,
                 width=item.meta.width,
                 height=item.meta.height,
@@ -435,7 +443,7 @@ class _FileIndexer:
             # extract_full_metadata is off) — prevents perpetual retry
             updates.append("exif_data=COALESCE(exif_data, ?)")
             update_params.append("{}")
-        if row_already_existed:
+        if row_already_existed and (file_hash is not None or file_size == 0):
             # add_photo is INSERT OR IGNORE, so the fresh stat values it
             # was passed never reach an existing row. Without these the
             # incremental pre-pass keeps comparing against the stale
@@ -447,16 +455,9 @@ class _FileIndexer:
             # such a file's mtime current would make the next incremental
             # scan skip it forever with a stale hash and stale derived
             # caches; leaving the old mtime in place retries it instead.
-            if file_hash is not None or file_size == 0:
-                updates.extend(["file_mtime=?", "file_size=?"])
-                update_params.extend([item.file_mtime, file_size])
-            # xmp_mtime stays unconditional — the sidecar is a separate
-            # file whose keyword import below runs regardless of image
-            # hash success, and it may be None here: writing NULL is
-            # correct (a deleted sidecar otherwise re-trips the "XMP
-            # changed" check on every scan).
-            updates.append("xmp_mtime=?")
-            update_params.append(item.xmp_mtime)
+            updates.extend(["file_mtime=?", "file_size=?"])
+            update_params.extend([item.file_mtime, file_size])
+        # catalog_file acknowledges XMP only after its keyword read succeeds.
         if updates:
             self.db.scanning.update_photo(photo_id, updates, update_params)
             if (

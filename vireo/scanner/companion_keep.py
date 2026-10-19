@@ -199,7 +199,7 @@ class _KnownCompanionKeeper:
         if not xmp_path.exists():
             return
         try:
-            _import_keywords_for_photo(
+            imported = _import_keywords_for_photo(
                 self.db, known["owner_id"], str(xmp_path),
             )
         except Exception:
@@ -208,7 +208,8 @@ class _KnownCompanionKeeper:
                 xmp_path, known["owner_id"],
             )
             return
-        self.db.commit_with_retry()
+        if imported:
+            self.db.commit_with_retry()
 
     def keep_known_companion(
         self, image_path: Path, folder_id: int, file_size: int, file_mtime: float,

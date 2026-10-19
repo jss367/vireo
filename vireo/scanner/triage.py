@@ -231,9 +231,9 @@ class _IncrementalTriage:
 
         # XMP changed: re-import keywords
         if not xmp_unchanged and xmp_mtime is not None:
-            _import_keywords_for_photo(db, existing["id"], str(xmp_path))
-            db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
-            db.commit_with_retry()
+            if _import_keywords_for_photo(db, existing["id"], str(xmp_path)):
+                db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
+                db.commit_with_retry()
         elif not xmp_unchanged:
             # Sidecar deleted: clear the stored mtime so the row
             # converges instead of looking "XMP changed" on every
