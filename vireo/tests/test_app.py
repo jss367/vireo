@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, photo_ingest, subject_masks
+from services import detection_store, pending_changes, photo_ingest, subject_masks, workspace_config
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -8158,7 +8158,7 @@ def test_set_active_labels_scoped_to_workspace(app_and_db, tmp_path):
         assert resp.status_code == 200
 
     # Verify it's stored in workspace config_overrides
-    result = db.get_workspace_active_labels()
+    result = workspace_config.get_workspace_active_labels(db)
     assert result == [label_path]
 
 
@@ -8177,7 +8177,7 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
     with open(meta_path, "w") as f:
         _json.dump({"name": "Test Birds", "labels_file": label_path, "species_count": 2}, f)
 
-    db.set_workspace_active_labels([label_path])
+    workspace_config.set_workspace_active_labels(db, [label_path])
 
     import labels as labels_mod
     orig_labels_dir = labels_mod.LABELS_DIR
@@ -8303,7 +8303,7 @@ def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_pat
     with open(str(labels_dir / "birds.json"), "w") as f:
         _json.dump({"name": "Birds", "labels_file": label_path}, f)
 
-    db.set_workspace_active_labels([label_path])
+    workspace_config.set_workspace_active_labels(db, [label_path])
     other = db.create_workspace("Other", config_overrides={"active_labels": [label_path]})
 
     orig = labels_mod.LABELS_DIR
@@ -8314,7 +8314,7 @@ def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_pat
     finally:
         labels_mod.LABELS_DIR = orig
 
-    assert db.get_workspace_active_labels() == []
+    assert workspace_config.get_workspace_active_labels(db) == []
     assert _json.loads(db.workspaces.get(other)["config_overrides"])["active_labels"] == []
 
 
@@ -19009,7 +19009,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     assert response.status_code == 200
     assert pending_types() == ([] if pending_removal else ["keyword_add"])
     if sync_after_accept:
-        db.clear_pending([row["id"] for row in db.pending_changes.list_all()])
+        pending_changes.clear_pending(db, [row["id"] for row in db.pending_changes.list_all()])
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
         db.undo_last_edit()

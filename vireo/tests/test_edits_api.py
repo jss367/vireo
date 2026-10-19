@@ -2,7 +2,7 @@ import json
 import os
 
 import pytest
-from services import photo_ingest
+from services import pending_changes, photo_ingest
 
 
 def test_editor_crop_ratio_persists_in_config(app_and_db):
@@ -363,7 +363,7 @@ def test_undo_old_rating_action_does_not_clear_new_pending_change_reusing_id(app
         c for c in db.pending_changes.list_all()
         if c['photo_id'] == pid and c['change_type'] == 'rating' and c['value'] == '4'
     )
-    db.clear_pending([old_change['id']])
+    pending_changes.clear_pending(db, [old_change['id']])
 
     db.conn.execute(
         """INSERT INTO pending_changes (id, photo_id, change_type, value, change_token, workspace_id)

@@ -12,9 +12,11 @@ from services import (
     detection_store,
     duplicate_resolution,
     miss_flags,
+    pending_changes,
     photo_ingest,
     stage_counts,
     subject_masks,
+    workspace_config,
 )
 
 
@@ -687,7 +689,7 @@ def test_pending_changes_queue(tmp_path):
     changes = db.pending_changes.list_all()
     assert len(changes) == 2
 
-    db.clear_pending([c['id'] for c in changes])
+    pending_changes.clear_pending(db, [c['id'] for c in changes])
     assert len(db.pending_changes.list_all()) == 0
 
 
@@ -820,14 +822,14 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
 
     # The sync captured (id, token) for the original -- clearing by both
     # leaves the replacement in place.
-    db.clear_pending([original_id], expected_tokens=[original_token])
+    pending_changes.clear_pending(db, [original_id], expected_tokens=[original_token])
     remaining = db.pending_changes.list_all()
     assert len(remaining) == 1
     assert remaining[0]['change_token'] == replacement_token
     assert remaining[0]['value'] == 'Kestrel'
 
     # Clearing with the replacement's own token drops it as expected.
-    db.clear_pending([original_id], expected_tokens=[replacement_token])
+    pending_changes.clear_pending(db, [original_id], expected_tokens=[replacement_token])
     assert db.pending_changes.list_all() == []
 
 
@@ -861,7 +863,7 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
         if row['change_token'] == tokened_token
     )
 
-    db.clear_pending([legacy['id']], expected_tokens=[None])
+    pending_changes.clear_pending(db, [legacy['id']], expected_tokens=[None])
 
     remaining = db.pending_changes.list_all()
     assert [row['id'] for row in remaining] == [tokened_id]
@@ -889,7 +891,7 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
     db.conn.commit()
     change_ids = [row["id"] for row in db.pending_changes.list_all()]
 
-    db.clear_pending(change_ids)
+    pending_changes.clear_pending(db, change_ids)
 
     assert len(db.pending_changes.list_all()) == 0
 
@@ -22055,11 +22057,11 @@ def test_min_detector_confidence_no_overrides(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "v.db"))
-    assert db.min_detector_confidence_across_workspaces(
-        {"detector_confidence": 0.3}
+    assert workspace_config.min_detector_confidence_across_workspaces(
+        db, {"detector_confidence": 0.3}
     ) == 0.3
     # Falls back to 0.2 if the global config doesn't define it.
-    assert db.min_detector_confidence_across_workspaces({}) == 0.2
+    assert workspace_config.min_detector_confidence_across_workspaces(db, {}) == 0.2
 
 
 def test_min_detector_confidence_picks_lowest_override(tmp_path):
@@ -22079,12 +22081,12 @@ def test_min_detector_confidence_picks_lowest_override(tmp_path):
     )
     # Active workspace shouldn't matter — try both.
     db.set_active_workspace(strict)
-    assert db.min_detector_confidence_across_workspaces(
-        {"detector_confidence": 0.3}
+    assert workspace_config.min_detector_confidence_across_workspaces(
+        db, {"detector_confidence": 0.3}
     ) == 0.1
     db.set_active_workspace(permissive)
-    assert db.min_detector_confidence_across_workspaces(
-        {"detector_confidence": 0.3}
+    assert workspace_config.min_detector_confidence_across_workspaces(
+        db, {"detector_confidence": 0.3}
     ) == 0.1
 
 
@@ -22100,8 +22102,8 @@ def test_min_detector_confidence_includes_unoverridden_workspaces(tmp_path):
         "strict", config_overrides={"detector_confidence": 0.5}
     )
     # The auto-created Default workspace has no overrides → uses 0.2.
-    assert db.min_detector_confidence_across_workspaces(
-        {"detector_confidence": 0.2}
+    assert workspace_config.min_detector_confidence_across_workspaces(
+        db, {"detector_confidence": 0.2}
     ) == 0.2
 
 
@@ -22840,10 +22842,10 @@ def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
 
     for bad in (["not", "a", "dict"], "just a string", 42):
         db.workspaces.update(ws_id, config_overrides=bad)
-        assert db.get_workspace_active_labels() is None
+        assert workspace_config.get_workspace_active_labels(db) is None
         # Setter must replace the junk rather than crash on item assignment.
-        db.set_workspace_active_labels(["birds.txt"])
-        assert db.get_workspace_active_labels() == ["birds.txt"]
+        workspace_config.set_workspace_active_labels(db, ["birds.txt"])
+        assert workspace_config.get_workspace_active_labels(db) == ["birds.txt"]
 
 
 def test_edit_presets_crud_strips_geometry(tmp_path):
@@ -25891,7 +25893,7 @@ def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
     from db import normalize_browse_stack_config
 
     db, _fid = _filter_db(tmp_path)
-    assert db.browse_stack_settings({}) == {
+    assert workspace_config.browse_stack_settings(db, {}) == {
         "time_gap": 3.0, "split_mode": "break",
     }
 
@@ -25902,7 +25904,7 @@ def test_browse_stack_settings_apply_workspace_overrides(tmp_path):
             "browse_stack_split_mode": "partition",
         },
     )
-    assert db.browse_stack_settings({"browse_stack_time_gap": 3.0}) == {
+    assert workspace_config.browse_stack_settings(db, {"browse_stack_time_gap": 3.0}) == {
         "time_gap": 0.5, "split_mode": "partition",
     }
 

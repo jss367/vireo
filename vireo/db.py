@@ -16,7 +16,6 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images import get_shared_cache
-from repositories import UNSET as _UNSET  # sentinel for "not provided" vs explicit None
 
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
@@ -1399,12 +1398,6 @@ class Database:
     # ------------------------------------------------------------------
     # Saved processes (user-editable process presets; global, not scoped)
     # ------------------------------------------------------------------
-    @staticmethod
-    def _saved_process_row_to_dict(row):
-        from repositories.processes import ProcessesRepository
-
-        return ProcessesRepository._row_to_dict(row)
-
     def _processes_repository(self):
         """Build the saved-processes repository on this connection.
 
@@ -1422,75 +1415,11 @@ class Database:
         A domain accessor, not a cached attribute: every access builds a fresh
         repository through ``_processes_repository``, exactly as a forwarding
         wrapper called at that moment would. Saved processes are global, so it
-        needs no active workspace. Update and delete stay on ``Database``
-        (``update_saved_process`` / ``delete_saved_process``), which check the
-        row exists first.
+        needs no active workspace. Update and delete live in
+        ``services/saved_processes.py`` (``update_saved_process`` /
+        ``delete_saved_process``), which check the row exists first.
         """
         return self._processes_repository()
-
-    def resolve_process(self, process_id):
-        """Expand a saved-process id into a full stage-flags dict over _BASE.
-
-        Raises ValueError if the id doesn't exist, so callers surface a clean
-        400/404 instead of an AttributeError deeper in the pipeline.
-        """
-        import process_strategies as ps
-
-        proc = self.processes.get(process_id)
-        if proc is None:
-            raise ValueError(f"unknown process id: {process_id!r}")
-        return {**ps._BASE, **{k: proc[k] for k in ps.FLAG_FIELDS}}
-
-    @staticmethod
-    def _normalize_process_fields(name, skip_classify, skip_extract_masks,
-                                  skip_eye_keypoints, skip_regroup,
-                                  miss_enabled, review_mode):
-        """Validate + coerce process fields. Raises ValueError on bad input."""
-        from repositories.processes import ProcessesRepository
-
-        return ProcessesRepository._normalize_fields(
-            name, skip_classify, skip_extract_masks, skip_eye_keypoints,
-            skip_regroup, miss_enabled, review_mode,
-        )
-
-    def update_saved_process(self, process_id, *, name=None,
-                             skip_classify=None, skip_extract_masks=None,
-                             skip_eye_keypoints=None, skip_regroup=None,
-                             miss_enabled=None, review_mode=_UNSET):
-        """Update an existing saved process. Returns True if it existed.
-
-        Any field left at its sentinel default (None, or _UNSET for
-        review_mode which is legitimately None) is untouched. Raises
-        ValueError on a blank/duplicate name or a bad review_mode.
-        """
-        repo = self._processes_repository()
-        current = repo.get(process_id)
-        if current is None:
-            return False
-        return repo.update(
-            process_id,
-            current,
-            name=name,
-            skip_classify=skip_classify,
-            skip_extract_masks=skip_extract_masks,
-            skip_eye_keypoints=skip_eye_keypoints,
-            skip_regroup=skip_regroup,
-            miss_enabled=miss_enabled,
-            review_mode=review_mode,
-        )
-
-    def delete_saved_process(self, process_id):
-        """Delete a saved process and null out every reference to it.
-
-        Any workspace whose pipeline.default_process_id pointed here falls
-        back to null ("import only"). Returns True if the process existed.
-        The app-wide global default (config.json) is cleared by the caller,
-        which owns config-file I/O. Does not run inside an outer transaction.
-        """
-        repo = self._processes_repository()
-        if repo.get(process_id) is None:
-            return False
-        return repo.delete(process_id)
 
     def repair_stale_folder_parents(self):
         """Repair parent links left behind by older folder moves.
@@ -1635,71 +1564,6 @@ class Database:
         # (``null``, ``"abc"``) falls back to the global value it shadows.
         return config_schema.repair_types(effective, global_config)
 
-    def browse_stack_settings(self, global_config=None):
-        """Resolve Browse's stack settings for the active workspace.
-
-        Reads through ``get_effective_config`` so a per-workspace override of
-        ``browse_stack_time_gap`` / ``browse_stack_split_mode`` applies — a
-        workspace of 20fps flight sequences and one of hand-held portraits
-        want different gaps.
-        """
-        if global_config is None:
-            return normalize_browse_stack_config(None)
-        return normalize_browse_stack_config(
-            self.get_effective_config(global_config)
-        )
-
-    def min_detector_confidence_across_workspaces(self, global_config):
-        """Return the minimum effective ``detector_confidence`` across all
-        workspaces.
-
-        Used by global mask-storage endpoints (``/api/storage/masks`` and
-        ``/api/storage/masks/delete-stale``). Stale-mask scoring depends
-        on the floor under which a detection is treated as too noisy to
-        re-extract from. Picking the *active* workspace's floor would
-        mean switching workspaces changes the global deletion set —
-        masks valid under another workspace's lower floor could be
-        deleted just because the user happened to be in a stricter
-        workspace at the moment. The minimum is the most permissive
-        view: a mask is only considered globally stale when **no**
-        workspace would still consider it fresh.
-        """
-        from config import _deep_merge
-
-        default = global_config.get("detector_confidence", 0.2)
-        try:
-            default = float(default)
-        except (TypeError, ValueError):
-            default = 0.2
-        workspaces = self.workspaces.list_all()
-        if not workspaces:
-            return default
-        values = []
-        for ws in workspaces:
-            overrides_raw = ws["config_overrides"]
-            if not overrides_raw:
-                values.append(default)
-                continue
-            try:
-                overrides = (
-                    json.loads(overrides_raw)
-                    if isinstance(overrides_raw, str)
-                    else overrides_raw
-                )
-            except (json.JSONDecodeError, TypeError):
-                values.append(default)
-                continue
-            if not isinstance(overrides, dict):
-                values.append(default)
-                continue
-            merged = _deep_merge(global_config, overrides)
-            v = merged.get("detector_confidence", default)
-            try:
-                values.append(float(v))
-            except (TypeError, ValueError):
-                values.append(default)
-        return min(values) if values else default
-
     def get_subject_types(self) -> set[str]:
         """Return the keyword types that count as 'identified' for the active
         workspace.
@@ -1723,20 +1587,6 @@ class Database:
     # leaves comfortable headroom for the type binds (up to 5) plus a
     # safety margin. Module-level constant so tests can monkeypatch.
     _FILTER_SUBJECT_CHUNK = 800
-
-    def get_workspace_active_labels(self):
-        """Return the active_labels list from workspace config_overrides, or None."""
-        ws = self.workspaces.get(self._ws_id())
-        if not ws or not ws["config_overrides"]:
-            return None
-        try:
-            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            if not isinstance(overrides, dict):
-                return None
-            labels = overrides.get("active_labels")
-            return labels if isinstance(labels, list) else None
-        except (json.JSONDecodeError, TypeError):
-            return None
 
     def _photo_visibility_repository(self):
         """Build the photo-visibility repository on this connection.
@@ -1800,20 +1650,6 @@ class Database:
         ``delete_workspace``) because they also clear the new-images cache.
         """
         return self._workspace_repository()
-
-    def set_workspace_active_labels(self, labels_files):
-        """Store active_labels in the workspace's config_overrides."""
-        ws = self.workspaces.get(self._ws_id())
-        overrides = {}
-        if ws and ws["config_overrides"]:
-            try:
-                overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except (json.JSONDecodeError, TypeError):
-                overrides = {}
-            if not isinstance(overrides, dict):
-                overrides = {}
-        overrides["active_labels"] = labels_files
-        self.workspaces.update(self._ws_id(), config_overrides=overrides)
 
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
@@ -5356,13 +5192,13 @@ class Database:
         is set). Do not hold the returned repository across
         ``set_active_workspace``.
 
-        Coordinated queue work stays on ``Database``: ``queue_change`` (bound
-        by name into the keyword-provenance and location repositories, so a
-        patch of ``Database.queue_change`` reaches them), the claim and token
-        removal with their empty-input guards, ``remove_pending_changes``,
-        ``clear_pending``, ``clear_pending_by_token`` and
-        ``queue_flag_change_if_enabled``. Queue a change through
-        ``db.queue_change``, not ``db.pending_changes.queue``.
+        Coordinated queue work stays on ``Database`` where something binds it
+        by name: ``queue_change`` and ``remove_pending_changes`` (bound into
+        the keyword-provenance and location repositories, so a patch of the
+        ``Database`` method reaches them) and ``queue_flag_change_if_enabled``
+        (the undo replay's flag setter). The claim, the token removal and the
+        clears live in ``services/pending_changes.py``. Queue a change
+        through ``db.queue_change``, not ``db.pending_changes.queue``.
         """
         return self._sync_repository()
 
@@ -5381,19 +5217,6 @@ class Database:
         return self._sync_repository().queue(
             photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
         )
-
-    def claim_pending_changes_for_sync(self, changes):
-        """Mark selected edits as possibly written and return surviving rows.
-
-        A cancelled keyword must leave an opposing edit once a writer can
-        have seen it. Persist that fact before any filesystem work, including
-        across failed writes or a process restart. Match immutable tokens so
-        a cancellation between selection and this claim cannot resurrect the
-        old edit or claim a replacement that reused its rowid.
-        """
-        if not changes:
-            return []
-        return self._sync_repository().claim_for_sync(changes)
 
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
@@ -5425,82 +5248,6 @@ class Database:
         if _commit:
             repo.commit()
         return len(removed)
-
-    def remove_pending_change_token(self, change_token):
-        """Delete a single pending change by immutable token. Returns rows removed."""
-        if not change_token:
-            return 0
-        return self._sync_repository().remove_token(change_token)
-
-    def clear_pending(
-        self, change_ids, *, clear_equivalent_flat_removals=False,
-        expected_tokens=None, _commit=True,
-    ):
-        """Delete pending changes by id.
-
-        ``_commit=False`` leaves the delete and any equivalent flat removals
-        in the caller's transaction, allowing an atomic discard/history edit.
-
-        When ``clear_equivalent_flat_removals`` is true, a successfully
-        applied flat keyword removal also clears equivalent rows from sibling
-        workspaces. The sidecar is global to the photo even though the review
-        queue is workspace-scoped; leaving migration-generated duplicates in
-        sibling queues would let a later sync replay a stale removal after the
-        user had re-added the keyword.
-
-        When ``expected_tokens`` is supplied (a list the same length as
-        ``change_ids``), each delete is conditioned on the row's
-        ``change_token`` matching too. That protects a concurrent sync from
-        clobbering a replacement queued mid-run: the edit route deletes the
-        selected pending row inside one transaction and immediately re-inserts,
-        and SQLite reissues the freshly-freed rowid to the new row. A
-        clear-by-id would drop that replacement without it ever being written
-        to XMP -- for the pre-transfer sync, the stale sidecar would then
-        travel to the NAS and the local original be removed. Rows predating
-        the ``change_token`` column have a NULL token with no backfill, and
-        for them the caller passes ``None`` in ``expected_tokens``; those fall
-        back to id-only clearing scoped to null-token rows, so they keep
-        exactly the exposure they always had.
-        """
-        if not change_ids:
-            return
-        repo = self._sync_repository()
-        synced_changes = repo.delete_by_ids(
-            change_ids,
-            clear_equivalent_flat_removals=clear_equivalent_flat_removals,
-            expected_tokens=expected_tokens,
-        )
-        if synced_changes:
-            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
-        if _commit:
-            repo.commit()
-
-    def clear_pending_by_token(
-        self, change_tokens, *, clear_equivalent_flat_removals=False,
-    ):
-        """Delete pending changes named by their immutable tokens.
-
-        ``pending_changes.id`` is a bare ``INTEGER PRIMARY KEY``, so SQLite
-        re-issues a deleted row's rowid to the next insert into the table. A
-        caller that selected rows a while ago -- the sidecar sync, whose
-        writes take as long as the storage does -- can find those ids now
-        naming a *replacement* row: ``queue_flag_change_if_enabled`` deletes
-        the old flag and inserts the new value, so clearing by id would throw
-        away the edit the user just made, unwritten. A token is a fresh uuid
-        per insert, so it names the row that was actually written.
-
-        ``clear_equivalent_flat_removals`` behaves as in :meth:`clear_pending`.
-        """
-        if not change_tokens:
-            return
-        repo = self._sync_repository()
-        synced_changes = repo.delete_by_tokens(
-            change_tokens,
-            clear_equivalent_flat_removals=clear_equivalent_flat_removals,
-        )
-        if synced_changes:
-            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
-        repo.commit()
 
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""

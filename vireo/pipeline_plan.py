@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from services import detection_store, stage_counts, subject_masks
+from services import detection_store, stage_counts, subject_masks, workspace_config
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ def _resolve_labels_for_models(models, labels_files, db):
         ]
         labels = _load(active_sets)
     else:
-        ws_labels = db.get_workspace_active_labels()
+        ws_labels = workspace_config.get_workspace_active_labels(db)
         if ws_labels is not None:
             active_sets = [
                 saved_by_file.get(p, {"labels_file": p}) for p in ws_labels

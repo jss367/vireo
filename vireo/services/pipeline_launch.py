@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from db import Database
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
+from services import saved_processes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -443,7 +444,7 @@ class PipelineChain:
         from pipeline_job import run_pipeline_job
 
         if expanded is None:
-            expanded = thread_db.resolve_process(process_id)
+            expanded = saved_processes.resolve_process(thread_db, process_id)
         params = _process_pipeline_params(collection_id, expanded)
         model_warning = apply_no_model_auto_skip(params)
 

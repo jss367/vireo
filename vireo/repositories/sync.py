@@ -402,7 +402,7 @@ class SyncRepository:
     def claim_for_sync(self, changes: Sequence[Mapping[str, Any]]) -> list[sqlite3.Row]:
         """Mark selected edits as possibly written and return surviving rows.
 
-        See ``Database.claim_pending_changes_for_sync``. Commits (or rolls
+        See ``pending_changes.claim_pending_changes_for_sync``. Commits (or rolls
         back) through ``with conn:``.
         """
         claimed = {}
@@ -487,7 +487,7 @@ class SyncRepository:
     ) -> list[sqlite3.Row]:
         """Delete pending changes by id (token-checked when tokens are given).
 
-        See ``Database.clear_pending``. Returns the flat keyword removals
+        See ``pending_changes.clear_pending``. Returns the flat keyword removals
         that were cleared when ``clear_equivalent_flat_removals`` is true
         (else an empty list). Does not commit.
         """
@@ -564,7 +564,7 @@ class SyncRepository:
     ) -> list[sqlite3.Row]:
         """Delete pending changes named by their immutable tokens.
 
-        See ``Database.clear_pending_by_token``. Returns the flat keyword
+        See ``pending_changes.clear_pending_by_token``. Returns the flat keyword
         removals that were cleared when ``clear_equivalent_flat_removals`` is
         true (else an empty list). Does not commit.
         """

@@ -4,6 +4,7 @@ import sys
 from page_scripts import page_with_scripts
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from services import workspace_config
 
 
 def test_models_status_endpoint(app_and_db):
@@ -94,7 +95,7 @@ def test_models_status_timm_model_ready_without_labels(app_and_db, monkeypatch, 
     # looks at labels for timm, so nothing about the list can block it.
     empty = tmp_path / "empty.txt"
     empty.write_text("\n  \n")
-    db.set_workspace_active_labels([str(empty)])
+    workspace_config.set_workspace_active_labels(db, [str(empty)])
     data = client.get("/api/models/status").get_json()
     assert data["needs_setup"] is False
     assert data["classification"]["labels_ready"] is True
@@ -113,7 +114,7 @@ def test_models_status_label_model_without_labels_needs_setup(app_and_db, monkey
     monkeypatch.setattr(labels, "get_active_labels", lambda: [])
 
     app, db = app_and_db
-    db.set_workspace_active_labels([])  # no active labels for the workspace
+    workspace_config.set_workspace_active_labels(db, [])  # no active labels for the workspace
     client = app.test_client()
     resp = client.get("/api/models/status")
     data = resp.get_json()
@@ -134,7 +135,7 @@ def test_models_status_label_model_with_labels_ready(app_and_db, monkeypatch, tm
     labels_file.write_text("Cardinalis cardinalis\n")
 
     app, db = app_and_db
-    db.set_workspace_active_labels([str(labels_file)])
+    workspace_config.set_workspace_active_labels(db, [str(labels_file)])
     client = app.test_client()
     resp = client.get("/api/models/status")
     data = resp.get_json()
@@ -156,7 +157,7 @@ def test_models_status_empty_label_file_not_ready(app_and_db, monkeypatch, tmp_p
     empty_file.write_text("\n  \n")  # whitespace only — no species
 
     app, db = app_and_db
-    db.set_workspace_active_labels([str(empty_file)])
+    workspace_config.set_workspace_active_labels(db, [str(empty_file)])
     client = app.test_client()
     resp = client.get("/api/models/status")
     data = resp.get_json()
@@ -184,14 +185,14 @@ def test_models_status_tol_model_with_empty_selection_not_ready(
     empty_file.write_text("\n  \n")
 
     app, db = app_and_db
-    db.set_workspace_active_labels([str(empty_file)])
+    workspace_config.set_workspace_active_labels(db, [str(empty_file)])
     data = app.test_client().get("/api/models/status").get_json()
     assert data["classification"]["labels_ready"] is False
     assert data["needs_setup"] is True
 
     # A selection naming only deleted files is a fallback, not a block —
     # same rule as classify_job._any_present — so ToL reports ready again.
-    db.set_workspace_active_labels([str(tmp_path / "gone.txt")])
+    workspace_config.set_workspace_active_labels(db, [str(tmp_path / "gone.txt")])
     data = app.test_client().get("/api/models/status").get_json()
     assert data["classification"]["labels_ready"] is True
     assert data["needs_setup"] is False
@@ -245,7 +246,7 @@ def test_index_resumes_welcome_when_model_downloaded_but_no_labels(app_and_db, m
     monkeypatch.setattr(labels, "get_active_labels", lambda: [])
 
     app, db = app_and_db
-    db.set_workspace_active_labels([])
+    workspace_config.set_workspace_active_labels(db, [])
     client = app.test_client()
     resp = client.get("/")
     assert resp.status_code == 302

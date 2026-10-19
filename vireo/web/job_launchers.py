@@ -36,7 +36,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
-from services import detection_store, subject_masks
+from services import detection_store, subject_masks, workspace_config
 from services.folder_moves import FolderMoveRequest
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -546,7 +546,7 @@ def create_job_launchers_blueprint(
                 observation_filter=observation_filter,
             )
             thread_db = ctx.thread_db()
-            thread_db.set_workspace_active_labels([labels_path])
+            workspace_config.set_workspace_active_labels(thread_db, [labels_path])
 
             precompute = _embedding_precompute_offer(load_label_set, labels_path)
 

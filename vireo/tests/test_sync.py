@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
-from services import photo_ingest
+from services import pending_changes, photo_ingest
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -371,10 +371,10 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
     (original_row,) = db.pending_changes.list_all()
     original_id = original_row["id"]
 
-    real_clear_by_token = db.clear_pending_by_token
+    real_clear_by_token = pending_changes.clear_pending_by_token
     injected = []
 
-    def race_replacement_then_clear(change_tokens, **kwargs):
+    def race_replacement_then_clear(sync_db, change_tokens, **kwargs):
         # Interject the race at the last possible moment before the sync
         # clears: delete the row the sync just wrote and reinsert a fresh
         # change for the same photo. SQLite reissues ``original_id`` to the
@@ -391,10 +391,10 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
             assert replacement_row["id"] == original_id
             assert replacement_row["change_token"] == replacement_token
             assert replacement_token != original_token
-        return real_clear_by_token(change_tokens, **kwargs)
+        return real_clear_by_token(sync_db, change_tokens, **kwargs)
 
     monkeypatch.setattr(
-        db, "clear_pending_by_token", race_replacement_then_clear,
+        pending_changes, "clear_pending_by_token", race_replacement_then_clear,
     )
 
     result = sync_to_xmp(db, change_ids=[original_id])
@@ -2586,7 +2586,7 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
     db.conn.execute("UPDATE pending_changes SET change_token = NULL")
     db.conn.commit()
     rowid = db.pending_changes.list_all()[0]["id"]
-    real_clear = db.clear_pending
+    real_clear = pending_changes.clear_pending
 
     def replace_before_clear(*args, **kwargs):
         db.remove_pending_changes(pid)
@@ -2594,7 +2594,7 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
         assert db.pending_changes.list_all()[0]["id"] == rowid
         return real_clear(*args, **kwargs)
 
-    monkeypatch.setattr(db, "clear_pending", replace_before_clear)
+    monkeypatch.setattr(pending_changes, "clear_pending", replace_before_clear)
     monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
     sync.sync_to_xmp(db)
     # Cancelling a possibly-written add now leaves a tokened inverse, which
@@ -2613,16 +2613,16 @@ def test_sync_checkpoint_failure_keeps_unacknowledged_changes(tmp_path, db, monk
         db.queue_change(pid, "keyword_add", "Osprey")
     monkeypatch.setattr(sync, "as_completed", lambda futures: iter(futures))
     monkeypatch.setattr(sync, "_SYNC_CHECKPOINT_CHANGES", 1)
-    real_clear = db.clear_pending_by_token
+    real_clear = pending_changes.clear_pending_by_token
     calls = []
 
-    def clear(tokens, **kwargs):
+    def clear(sync_db, tokens, **kwargs):
         calls.append(list(tokens))
         if len(calls) == 2:
             raise OSError("checkpoint failed")
-        return real_clear(tokens, **kwargs)
+        return real_clear(sync_db, tokens, **kwargs)
 
-    monkeypatch.setattr(db, "clear_pending_by_token", clear)
+    monkeypatch.setattr(pending_changes, "clear_pending_by_token", clear)
     progress = []
     with pytest.raises(OSError, match="checkpoint failed"):
         sync.sync_to_xmp(db, status_callback=progress.append)
@@ -2692,13 +2692,13 @@ def test_keyword_cancelled_before_sync_claim_is_not_written(tmp_path, db, monkey
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
-    real_claim = db.claim_pending_changes_for_sync
+    real_claim = pending_changes.claim_pending_changes_for_sync
 
-    def cancel_then_claim(changes):
+    def cancel_then_claim(sync_db, changes):
         db._flip_pending_keyword_change(pid, "Osprey", "keyword_add", "keyword_remove")
-        return real_claim(changes)
+        return real_claim(sync_db, changes)
 
-    monkeypatch.setattr(db, "claim_pending_changes_for_sync", cancel_then_claim)
+    monkeypatch.setattr(pending_changes, "claim_pending_changes_for_sync", cancel_then_claim)
     assert sync.sync_to_xmp(db)["synced"] == 0
     assert not read_keywords(path)
     assert not db.pending_changes.list_all()
@@ -2844,15 +2844,15 @@ def test_sync_claim_does_not_take_a_replacement_with_reused_id(tmp_path, db, mon
     db.set_active_workspace(db.ensure_default_workspace())
     pid, path = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
-    real_claim = db.claim_pending_changes_for_sync
+    real_claim = pending_changes.claim_pending_changes_for_sync
 
-    def replace_then_claim(changes):
+    def replace_then_claim(sync_db, changes):
         db.remove_pending_changes(pid)
         db.queue_change(pid, "keyword_add", "Kestrel")
         assert db.pending_changes.list_all()[0]["id"] == changes[0]["id"]
-        return real_claim(changes)
+        return real_claim(sync_db, changes)
 
-    monkeypatch.setattr(db, "claim_pending_changes_for_sync", replace_then_claim)
+    monkeypatch.setattr(pending_changes, "claim_pending_changes_for_sync", replace_then_claim)
     assert sync.sync_to_xmp(db)["synced"] == 0
     assert not read_keywords(path)
     remaining = db.pending_changes.list_all()
@@ -2877,7 +2877,7 @@ def test_started_keyword_cancellation_rolls_back_with_edit(tmp_path, db):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
-    claimed = db.claim_pending_changes_for_sync(db.pending_changes.list_all())
+    claimed = pending_changes.claim_pending_changes_for_sync(db, db.pending_changes.list_all())
     db.remove_pending_changes(pid, "keyword_add", "Osprey", _commit=False)
     assert [c["change_type"] for c in db.pending_changes.list_all()] == ["keyword_remove"]
     db.conn.rollback()

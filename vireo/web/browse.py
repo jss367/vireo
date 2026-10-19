@@ -22,6 +22,7 @@ import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
+from services import workspace_config
 from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
 from web.app_hooks import claim_search_lane
@@ -57,7 +58,7 @@ def _first_paint_photos(
     stack_count = None
     try:
         if stacks:
-            stack_cfg = db.browse_stack_settings(cfg.load())
+            stack_cfg = workspace_config.browse_stack_settings(db, cfg.load())
             photos = db.collections.query_browse_stacks(
                 [], folder_id=folder_id, collection_id=collection_id,
                 page=page, per_page=per_page, sort=sort,

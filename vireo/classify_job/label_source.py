@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from classify_job.cache_coverage import _cache_run_filter
 from classify_job.common import log
 from labels import get_active_labels, get_saved_labels
+from services import workspace_config
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -66,7 +67,7 @@ def _resolve_label_set_metas(params: LabelSourceParams, db: Database | None) -> 
         return _metas([p for p in params.labels_files if os.path.exists(p)])
     if params.labels_file and os.path.exists(params.labels_file):
         return _metas([params.labels_file])
-    ws_labels = db.get_workspace_active_labels() if db else None
+    ws_labels = workspace_config.get_workspace_active_labels(db) if db else None
     if ws_labels is not None:
         return _metas(list(ws_labels))
     return list(get_active_labels() or [])

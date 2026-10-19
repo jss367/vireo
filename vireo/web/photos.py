@@ -63,6 +63,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services import workspace_config
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from web.app_hooks import claim_search_lane
@@ -1957,7 +1958,7 @@ class _PhotosQuery:
             # P2 on PR #1561).
             stack_items = db.collections.collapse_browse_stack_photo_ids(
                 ordered_ids,
-                stack_config=db.browse_stack_settings(cfg.load()),
+                stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
             )
             stacked_ids = []
             seen_ids = set()
@@ -1994,7 +1995,7 @@ class _PhotosQuery:
         return (
             db.collections.collapse_browse_stack_photo_ids(
                 ordered_ids, standalone_ids=offline_ids,
-                stack_config=db.browse_stack_settings(cfg.load()),
+                stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
             )
             if self.stacks else None
         )
@@ -2080,7 +2081,7 @@ class _PhotosQuery:
                 ids = db.query_photo_ids_stacked(
                     self.rules, sort=self.sort,
                     collection_id=self.collection_id, folder_id=self.folder_id,
-                    stack_config=db.browse_stack_settings(cfg.load()),
+                    stack_config=workspace_config.browse_stack_settings(db, cfg.load()),
                 )
             else:
                 ids = db.collections.query_photo_ids(self.rules, sort=self.sort,
@@ -2143,7 +2144,7 @@ class _PhotosQuery:
         # One stack configuration for the whole request. The position
         # below has to be read under exactly the grouping the page
         # fetch uses, or a focused re-sort lands on the wrong page.
-        stack_cfg = db.browse_stack_settings(cfg.load()) if self.stacks else None
+        stack_cfg = workspace_config.browse_stack_settings(db, cfg.load()) if self.stacks else None
         if self.focus_candidates:
             # Stacked Browse pages logical items, so a hidden member
             # resolves to the page its cover sits on.

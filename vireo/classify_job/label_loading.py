@@ -18,6 +18,7 @@ from labels import (
     load_merged_labels_with_metas,
     read_label_file,
 )
+from services import workspace_config
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -103,7 +104,7 @@ def _select_labels(
             log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
         # Try workspace-scoped active labels first
-        ws_labels = db.get_workspace_active_labels() if db else None
+        ws_labels = workspace_config.get_workspace_active_labels(db) if db else None
         if ws_labels is not None:
             requested = _saved_label_metas(ws_labels)
             labels, label_metas = load_merged_labels_with_metas(requested)
