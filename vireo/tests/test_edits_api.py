@@ -448,7 +448,7 @@ def test_add_keyword_to_photo(app_and_db):
                        json={'name': 'Woodpecker'})
     assert resp.status_code == 200
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kw_names = {k['name'] for k in keywords}
     assert 'Woodpecker' in kw_names
 
@@ -463,13 +463,13 @@ def test_remove_keyword_from_photo(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kid = keywords[0]['id']
 
     resp = client.delete(f'/api/photos/{pid}/keywords/{kid}')
     assert resp.status_code == 200
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert len(keywords) == 0
 
     changes = db.pending_changes.list_all()
@@ -483,7 +483,7 @@ def test_undo_keyword_remove_clears_pending_change(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kid = keywords[0]['id']
     kw_name = keywords[0]['name']
 
@@ -493,7 +493,7 @@ def test_undo_keyword_remove_clears_pending_change(app_and_db):
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     assert {k['name'] for k in keywords} == {kw_name}
 
     changes = db.pending_changes.list_all()
@@ -510,7 +510,7 @@ def test_readding_removed_keyword_cancels_pending_remove(app_and_db):
     photos = db.photos.list_page()
     pid = photos[0]['id']
 
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kid = keywords[0]['id']
     kw_name = keywords[0]['name']
 
@@ -1537,7 +1537,7 @@ def test_edit_history_recorded_on_keyword_remove(app_and_db):
     client = app.test_client()
     photos = db.photos.list_page()
     pid = photos[0]['id']
-    keywords = db.keywords.get_for_photo(pid)
+    keywords = db.photo_keywords.get_for_photo(pid)
     kid = keywords[0]['id']
 
     client.delete(f'/api/photos/{pid}/keywords/{kid}')
@@ -1660,7 +1660,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     # Verify accepted state (review status lives in prediction_review per workspace)
     ws_id = db._active_workspace_id
     assert db.predictions.get_review_status(pred_id, ws_id) == 'accepted'
-    kws = {k['name'] for k in db.keywords.get_for_photo(pid)}
+    kws = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
     assert 'Blue Jay' in kws
 
     # Undo
@@ -1671,7 +1671,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     assert db.predictions.get_review_status(pred_id, ws_id) == 'pending'
 
     # Keyword removed
-    kws = {k['name'] for k in db.keywords.get_for_photo(pid)}
+    kws = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
     assert 'Blue Jay' not in kws
 
     # Pending keyword change removed
@@ -2040,13 +2040,13 @@ def test_undo_keyword_add_removes_keyword(app_and_db):
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Heron'})
-    kw_names = {k['name'] for k in db.keywords.get_for_photo(pid)}
+    kw_names = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
     assert 'Heron' in kw_names
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
-    kw_names = {k['name'] for k in db.keywords.get_for_photo(pid)}
+    kw_names = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
     assert 'Heron' not in kw_names
 
     changes = db.pending_changes.list_all()
@@ -2135,13 +2135,13 @@ def test_undo_batch_keyword_add_removes_from_all_photos(app_and_db):
 
     client.post('/api/batch/keyword', json={'photo_ids': pids, 'name': 'Owl'})
     for pid in pids:
-        assert 'Owl' in {k['name'] for k in db.keywords.get_for_photo(pid)}
+        assert 'Owl' in {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
     for pid in pids:
-        assert 'Owl' not in {k['name'] for k in db.keywords.get_for_photo(pid)}
+        assert 'Owl' not in {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
 
     changes = db.pending_changes.list_all()
     assert not any(c['change_type'] == 'keyword_add' and c['value'] == 'Owl' for c in changes)
@@ -2171,7 +2171,7 @@ def test_multiple_sequential_undos(app_and_db):
     # Undo 3: keyword add reversed
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert 'Finch' not in {k['name'] for k in db.keywords.get_for_photo(pid)}
+    assert 'Finch' not in {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
 
     # Undo 2: flag reversed
     resp = client.post('/api/undo')
@@ -2509,6 +2509,147 @@ def test_disabling_location_keywords_via_workspace_override_queues_cleanup(
     )
     assert resp.status_code == 200
 
+    assert [c["change_type"] for c in db.pending_changes.list_all()] == ["location"]
+
+
+def _fail_location_cleanup_queue(monkeypatch):
+    """Make queueing the location-keyword cleanup fail like a locked catalog."""
+    import sqlite3
+
+    from db import Database
+
+    def _raise(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        Database, "queue_location_changes_for_tagged_photos", _raise,
+    )
+
+
+def _turn_location_keywords_off(client, route):
+    """Turn location keyword writes off through one of the settings routes."""
+    key = "write_location_keywords_to_xmp"
+    if route == "global_patch":
+        return client.patch(
+            "/api/settings/global", json={"key": key, "value": False},
+        )
+    if route == "global_delete":
+        return client.delete(f"/api/settings/global/{key}", json={})
+    if route == "config_post":
+        return client.post("/api/config", json={key: False})
+    if route == "import":
+        return client.post(
+            "/api/settings/import", json={"json": json.dumps({key: False})},
+        )
+    if route == "workspace_patch":
+        return client.patch(
+            "/api/settings/workspace", json={"key": key, "value": False},
+        )
+    raise AssertionError(route)
+
+
+_LOCATION_OFF_ROUTES = [
+    "global_patch", "global_delete", "config_post", "import", "workspace_patch",
+]
+
+
+@pytest.mark.parametrize("route", _LOCATION_OFF_ROUTES)
+def test_failed_location_keyword_cleanup_is_reported_in_save_response(
+    client_with_photo, monkeypatch, route,
+):
+    """A cleanup that could not be queued is a warning on a successful save.
+
+    Regression: the cleanup's failure was only logged, so the Settings page
+    reported a plain success while the keywords Vireo wrote stayed in the
+    sidecars. The save itself still succeeds, but the response says what
+    failed and what it means for the sidecars.
+    """
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+    _fail_location_cleanup_queue(monkeypatch)
+
+    resp = _turn_location_keywords_off(app.test_client(), route)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    warning = body["warning"]
+    assert "could not queue" in warning
+    assert "XMP sidecars" in warning
+    assert '"Default"' in warning
+    assert "Queue location writes" in warning
+    assert db.pending_changes.list_all() == []
+    assert db.get_effective_config(cfg.load())[
+        "write_location_keywords_to_xmp"
+    ] is False
+
+
+def test_failed_cleanup_on_workspace_override_reset_is_reported(
+    client_with_photo, monkeypatch,
+):
+    """Resetting a workspace override that was keeping writes on warns too."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    key = "write_location_keywords_to_xmp"
+    assert client.patch(
+        "/api/settings/workspace", json={"key": key, "value": True},
+    ).status_code == 200
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+    _fail_location_cleanup_queue(monkeypatch)
+
+    resp = client.delete(f"/api/settings/workspace/{key}")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert '"Default"' in body["warning"]
+
+
+def test_failed_workspace_enumeration_is_reported_in_save_response(
+    client_with_photo, monkeypatch,
+):
+    """When the workspaces cannot even be listed, the warning still says so."""
+    import sqlite3
+
+    import repositories.workspaces as workspaces_repo
+
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+
+    def _raise(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(workspaces_repo.WorkspaceRepository, "list_all", _raise)
+
+    resp = _turn_location_keywords_off(app.test_client(), "global_patch")
+
+    assert resp.status_code == 200
+    warning = resp.get_json()["warning"]
+    assert "could not queue" in warning
+    assert "any workspace" in warning
+
+
+@pytest.mark.parametrize("route", _LOCATION_OFF_ROUTES)
+def test_successful_location_keyword_cleanup_has_no_warning(
+    client_with_photo, route,
+):
+    """A cleanup that queued normally keeps the old response shape."""
+    app, db, photo_id = client_with_photo
+    _enable_location_keyword_writes(db)
+    _assign_location(db, photo_id, ["United States", "Kumeyaay Lake"])
+    _drop_all_pending(db)
+
+    resp = _turn_location_keywords_off(app.test_client(), route)
+
+    assert resp.status_code == 200
+    assert "warning" not in resp.get_json()
     assert [c["change_type"] for c in db.pending_changes.list_all()] == ["location"]
 
 

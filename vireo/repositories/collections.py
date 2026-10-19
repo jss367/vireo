@@ -2484,7 +2484,7 @@ class _RuleQueryBuilder:
         # parameter per id — a static collection created from a large
         # selection would otherwise exceed SQLite's bound-parameter
         # cap on every query against the collection, permanently. A
-        # temp table (as _scope_clause uses) isn't composable here:
+        # temp table (as StatsRepository.scope_clause uses) isn't composable here:
         # the returned clause may be embedded in queries that run
         # later and repeatedly. Only ints are inlined (injection-safe);
         # any non-int leftovers (malformed rules, rare) keep the

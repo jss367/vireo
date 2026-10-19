@@ -23,7 +23,9 @@ Callers reach the simple reads as ``db.locations`` (a fresh repository per
 access, see ``Database.locations``).
 """
 
+import sqlite3
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 
 
@@ -815,6 +817,17 @@ class LocationRepository:
         """Every location keyword: rows (``id``, ``name``, ``parent_id``)."""
         return self.conn.execute(
             "SELECT id, name, parent_id FROM keywords WHERE type = 'location'"
+        ).fetchall()
+
+    def location_photo_rows(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
+        """Rows (``photo_id``) of the photos in ``chunk`` tagged with any location keyword."""
+        placeholders = ",".join("?" for _ in chunk)
+        return self.conn.execute(
+            "SELECT DISTINCT pk.photo_id "
+            "FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            f"WHERE k.type = 'location' AND pk.photo_id IN ({placeholders})",
+            chunk,
         ).fetchall()
 
     def located_keyword_points(self, min_lat, max_lat, min_lng, max_lng):

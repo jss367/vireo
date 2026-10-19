@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
+from services import subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -3264,8 +3265,8 @@ def _seed_workspace_with_masks(db_path):
         detector_model="md", prompt=(0, 0, 0, 0))
     db.masks_features.upsert_mask(p1, "sam2-large", "/m/a.large.png",
         detector_model="md", prompt=(0, 0, 0, 0))
-    db.set_active_mask_variant(p1, "sam2-small")
-    db.set_active_mask_variant(p2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p1, "sam2-small")
+    subject_masks.set_active_mask_variant(db, p2, "sam2-small")
     db.close()
     return p1, p2
 
@@ -3291,7 +3292,7 @@ def _seed_workspace_with_large_only_masks(db_path):
             detector_model="megadetector-v6",
             prompt=(0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, "sam2-large")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-large")
         photo_ids.append(pid)
     db.close()
     return photo_ids

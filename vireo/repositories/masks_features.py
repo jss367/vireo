@@ -14,7 +14,7 @@ resolves it, and the photo- and variant-keyed methods never read it.
 Callers reach it as ``db.masks_features`` (a fresh repository per access,
 see ``Database.masks_features``); there are no forwarding wrappers on
 ``Database``. It keeps everything that is not SQL: the workspace detector
-floor (``get_effective_config``), the photo-scope clause (``_scope_clause``),
+floor (``get_effective_config``), the photo-scope clause (``StatsRepository.scope_clause``),
 the workspace guard on embedding writes, and the masks-directory containment
 check (``_safe_remove_mask_file``), which the cleanup deletes receive as
 ``remove_file`` so file removal keeps its place between the reads and the

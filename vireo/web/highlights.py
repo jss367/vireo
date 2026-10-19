@@ -148,7 +148,7 @@ class _HighlightsRelabel:
         name.
         """
         current_species_by_pid = self.current_species_by_pid
-        for pid, names in self.db.keywords.get_species_for_photos(
+        for pid, names in self.db.photo_species.get_species_for_photos(
             self.photo_ids
         ).items():
             for name in names:
@@ -328,7 +328,7 @@ class _HighlightsRelabel:
             db.update_prediction_status(pred["id"], "rejected", _commit=False)
             self.rejected_prediction_ids.append(pred["id"])
 
-        old_rows = db.keywords.species_rank_keywords_for_photo(pid)
+        old_rows = db.photo_species.species_rank_keywords_for_photo(pid)
         old_primary = old_rows[0] if old_rows else None
         if old_primary is not None:
             self.has_old_species = True
@@ -764,7 +764,7 @@ def create_highlights_blueprint(get_db, json_error):
     def _highlights_confirm_under_lock(db, photo_ids):
         try:
             top_predictions = db.predictions.top_unrejected_by_photo(photo_ids)
-            accepted_photo_ids = db.keywords.photo_ids_with_species_rank_keyword(photo_ids)
+            accepted_photo_ids = db.photo_species.photo_ids_with_species_rank_keyword(photo_ids)
             processed = set()
             confirmable_photo_ids_by_key = {}
             for pid in photo_ids:

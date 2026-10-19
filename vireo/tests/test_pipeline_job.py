@@ -8,6 +8,7 @@ import sys
 import threading
 
 import pytest
+from services import subject_masks
 from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -9163,7 +9164,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
         "MegaDetector",
         (0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(cached, sam2_variant)
+    subject_masks.set_active_mask_variant(db, cached, sam2_variant)
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, cached),
@@ -9512,7 +9513,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         settings["pipeline"]["sam2_variant"] = "sam2-large"
         cfg.save(settings)
         assert run(False)["quality_input_recipe"] is None
-        db.set_active_mask_variant(ids[0], "sam2-small")
+        subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
         restored = db.conn.execute("SELECT quality_input_recipe FROM photos WHERE id=?", (ids[0],)).fetchone()
         assert restored[0] == raw_analysis.RECIPE
         restored_features = db.conn.execute("SELECT * FROM photos WHERE id=?", (ids[0],)).fetchone()
@@ -9528,7 +9529,7 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
         settings["pipeline"]["sam2_variant"] = "sam2-large"
         cfg.save(settings)
         run(True)
-        db.set_active_mask_variant(ids[0], "sam2-small")
+        subject_masks.set_active_mask_variant(db, ids[0], "sam2-small")
         settings["pipeline"]["sam2_variant"] = "sam2-small"
         cfg.save(settings)
         restored_normal = run(False)
@@ -10446,7 +10447,6 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10477,8 +10477,8 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     # The wrapping stage uses list_photos_for_eye_keypoint_stage to compute
     # `total`. Force a simple list of one photo.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": pid}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": pid}],
     )
     # Stub ensure_keypoint_weights so the auto-download path doesn't try to
     # hit HuggingFace from a unit test. Pretend weights are already there.
@@ -10553,7 +10553,6 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     per-photo Gate 2 check would skip every photo.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10582,8 +10581,8 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     # eye_classifier_conf_gate (0.5) so the conf-gate filter doesn't drop
     # them before _resolve_keypoint_model runs.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1000, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
@@ -10629,7 +10628,6 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     never use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10657,8 +10655,8 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     # (default 0.5) so the conf-gate filter doesn't drop the row before
     # routing.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
@@ -10697,7 +10695,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     variants even though `_resolve_keypoint_model` skips every photo.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10727,8 +10724,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     # the conf-gate threshold to isolate the routing skip from the
     # confidence skip.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Reptilia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Actinopterygii",
              "species_conf": 0.9},
@@ -10770,7 +10767,6 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10799,8 +10795,8 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     # species_conf above the conf-gate so they reach the download
     # planner.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 2, "taxonomy_class": "Mammalia", "species_conf": 0.9},
@@ -10878,7 +10874,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     """When no photos are eligible (total == 0), the stage must NOT trigger
     a multi-hundred-MB download — gate matches the SAM2/DINOv2 pattern."""
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10905,8 +10900,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
     # Force "no eligible photos" — preflight passes but the eligibility
     # query returns nothing.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [],
     )
     monkeypatch.setattr(
         pipeline_mod, "detect_eye_keypoints_stage",
@@ -10943,7 +10938,6 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     multi-hundred-MB SuperAnimal weights that no photo can use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -10969,8 +10963,8 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     )
     # Default eye_classifier_conf_gate is 0.5; both rows sit below it.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.2},
             {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.4},
         ],
@@ -11011,7 +11005,6 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     """
     import pipeline as pipeline_mod
     import pipeline_job as pj
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11037,8 +11030,8 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     )
     # One mammal + one bird so the planner queues both variants.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
             {"id": pid + 1, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
@@ -11096,7 +11089,6 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     RuntimeError out of run_pipeline_job for an optional stage.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11121,8 +11113,8 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11231,8 +11223,8 @@ def _run_eye_keypoints_download_failure_through_runner(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11321,7 +11313,6 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
     from resource_ledger import ResourceWaitCancelled
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -11350,8 +11341,8 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
         ],
     )
@@ -11446,7 +11437,6 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     wastes bandwidth on a variant that no included photo will use.
     """
     import pipeline as pipeline_mod
-    from db import Database
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -11475,8 +11465,8 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     # quadruped, but it's deselected so that variant is wasted bandwidth.
     excluded_id = pid + 7
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
             {"id": excluded_id, "taxonomy_class": "Mammalia",
              "species_conf": 0.9},
@@ -11525,7 +11515,6 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
@@ -11552,8 +11541,8 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     # Use the REAL preflight — the fix must feed it a config where
     # eye_detect_enabled=True regardless of the on-disk setting.
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
         ],
     )
@@ -11986,8 +11975,8 @@ def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [
             {"id": 1}, {"id": 2}, {"id": 3},
         ],
     )
@@ -12043,8 +12032,8 @@ def test_detect_eye_keypoints_stage_skips_synthetic_100pct_on_abort(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": 1}, {"id": 2}, {"id": 3}],
     )
     monkeypatch.setattr(
         FolderRepository, "tree",
@@ -12108,8 +12097,8 @@ def test_detect_eye_keypoints_stage_emits_final_100pct_on_clean_run(
         pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
     )
     monkeypatch.setattr(
-        Database, "list_photos_for_eye_keypoint_stage",
-        lambda self, **k: [{"id": 1}, {"id": 2}],
+        subject_masks, "list_photos_for_eye_keypoint_stage",
+        lambda _db, **k: [{"id": 1}, {"id": 2}],
     )
     monkeypatch.setattr(
         FolderRepository, "tree",
@@ -17938,7 +17927,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
         "MegaDetector",
         (0.1, 0.1, 0.5, 0.5),
     )
-    db.set_active_mask_variant(masked, sam2_variant)
+    subject_masks.set_active_mask_variant(db, masked, sam2_variant)
     db.conn.execute(
         "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
         (dinov2_variant, masked),
@@ -18013,7 +18002,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
             "MegaDetector",
             (0.1, 0.1, 0.5, 0.5),
         )
-        db.set_active_mask_variant(pid, sam2_variant)
+        subject_masks.set_active_mask_variant(db, pid, sam2_variant)
         db.conn.execute(
             "UPDATE photos SET dino_embedding_variant=? WHERE id=?",
             (dinov2_variant, pid),

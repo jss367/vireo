@@ -21,6 +21,7 @@ from contextlib import suppress
 import numpy as np
 from file_replace import replace_file
 from repositories.masks_features import PipelineFeatures
+from services import dashboard_stats, stage_counts, subject_masks
 
 log = logging.getLogger(__name__)
 
@@ -532,7 +533,7 @@ class _FeatureLoad:
         with multiple species tags we keep the alphabetically-first entry so
         the choice stays deterministic across runs.
         """
-        self.confirmed_identities = self.db.keywords.get_species_for_photos(
+        self.confirmed_identities = self.db.photo_species.get_species_for_photos(
             self.photo_ids_for_dets, include_identities=True,
         )
         species_names_by_photo = {pid: [entry["name"] for entry in entries] for pid, entries in self.confirmed_identities.items()}
@@ -1503,7 +1504,7 @@ def attach_species_identities(data, resolver):
     names = set()
     source_keys = defaultdict(set)
     if resolver.db is not None:
-        by_photo = resolver.db.keywords.get_species_for_photos(
+        by_photo = resolver.db.photo_species.get_species_for_photos(
             [p["id"] for p in data.get("photos", [])], include_identities=True,
         )
         for photo in data.get("photos", []):
@@ -1782,7 +1783,7 @@ def refresh_cache_species_for_photos(
     """Rewrite the on-disk pipeline cache so its per-photo, per-burst, and
     per-encounter species fields match ``species_by_photo`` — a
     ``{photo_id: [name, ...]}`` mapping as returned by
-    ``db.keywords.get_species_for_photos``.
+    ``db.photo_species.get_species_for_photos``.
 
     Called after undo / redo of a species-affecting edit (``keyword_add``,
     ``keyword_remove``, ``species_replace``, ``prediction_accept``): the DB
@@ -1953,7 +1954,7 @@ def _eye_keypoint_readiness_counts(db, total):
     eye_conf_gate = pipeline_cfg.get("eye_classifier_conf_gate", 0.5)
     eye_detect_enabled = bool(pipeline_cfg.get("eye_detect_enabled", False))
     eye_target = (
-        db.count_eye_keypoint_attemptable(eye_conf_gate) if total else 0
+        stage_counts.count_eye_keypoint_attemptable(db, eye_conf_gate) if total else 0
     )
     eye_attempts = _count_eye_keypoint_attempts(db) if eye_target else 0
     return eye_detect_enabled, eye_target, eye_attempts
@@ -1994,7 +1995,7 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
             "enhancing_missing": list[str],  # stages that would improve quality
         }
     """
-    cov = db.get_coverage_stats()
+    cov = dashboard_stats.get_coverage_stats(db)
     total = cov["total"]
     targets = _count_stage_targets(db) if total else {
         "detected": 0,
@@ -2437,7 +2438,7 @@ def _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids):
         photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
         if not photo_ids:
             return []
-    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
+    photos = subject_masks.list_photos_for_eye_keypoint_stage(db, photo_ids=photo_ids)
     if exclude_set and photo_ids is None:
         photos = [p for p in photos if p["id"] not in exclude_set]
     return photos
@@ -2450,7 +2451,7 @@ def detect_eye_keypoints_stage(
 ):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
-    For each eligible photo (see Database.list_photos_for_eye_keypoint_stage),
+    For each eligible photo (see subject_masks.list_photos_for_eye_keypoint_stage),
     run the routed keypoint model, apply the four-gate trust policy, and
     persist (eye_x, eye_y, eye_conf, eye_tenengrad) for gated-through photos.
     Per-photo exceptions are logged and do not abort the stage.

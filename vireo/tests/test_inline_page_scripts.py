@@ -22,7 +22,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "card_cleanup.html": 915,
     "cull.html": 780,
     "duplicates.html": 820,
-    "highlights.html": 1151,
     "id_conflicts.html": 968,
     "stats.html": 992,
     "storage.html": 867,
