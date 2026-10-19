@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import import_page_modules
 from e2e.test_life_list_explorer import _seed_hummingbird_tree
 
 
@@ -108,7 +109,7 @@ def test_native_find_uses_existing_page_search(live_server, page, path):
 @pytest.mark.parametrize("entry", ["Control+F", "Meta+F", "native"])
 def test_find_does_not_interrupt_shortcut_capture(live_server, page, entry):
     _open_desktop_page(page, f"{live_server['url']}/shortcuts")
-    button = page.locator(".shortcut-key-btn[onclick*=\"'navigation', 'browse'\"]")
+    button = page.locator('.shortcut-key-btn[data-ctx="navigation"][data-action="browse"]')
     expect(button).to_be_visible()
     button.click()
     expect(button).to_have_class(re.compile("capturing"))
@@ -120,7 +121,8 @@ def test_find_does_not_interrupt_shortcut_capture(live_server, page, entry):
         page.keyboard.press(entry)
     expect(page.locator("#pageFindPanel")).to_be_hidden()
     expect(page.locator(".shortcut-key-btn.capturing")).to_have_count(0)
-    assert page.evaluate("currentShortcuts.navigation.browse") == "ctrl+f"
+    import_page_modules(page, "shortcuts", ["state"])
+    assert page.evaluate("pageModules.state.state.currentShortcuts.navigation.browse") == "ctrl+f"
 
 
 def test_find_updates_when_details_open_or_close(live_server, page):
