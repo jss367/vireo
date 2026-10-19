@@ -967,7 +967,7 @@ def describe_result(job_type: str, result: Any, config: dict | None = None) -> d
             describer = _generic
         try:
             summary, details = describer(payload, config)
-        except Exception:
+        except Exception:  # broad: a describer bug must not hide the job's result; the generic summary is used
             log.warning("Job summary describer for %s failed; using the generic summary", job_type, exc_info=True)
             summary, details = _generic(payload, config)
         if authored:

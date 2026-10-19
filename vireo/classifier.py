@@ -333,7 +333,7 @@ def _run_text_batched(text_session, text_input_name, tokens, model_dir=None):
     try:
         with acquire_inference_resources(text_session):
             return text_session.run(None, {text_input_name: tokens})[0]
-    except Exception as e:
+    except Exception as e:  # broad: onnxruntime raises its own error types; anything but a stale export re-raises unchanged
         if not _looks_like_stale_batched_export(e):
             raise
         if model_dir:
@@ -610,7 +610,7 @@ def _image_encoder_embedding_dim(image_session):
     """
     try:
         shape = image_session.get_outputs()[0].shape
-    except Exception:
+    except Exception:  # broad: onnxruntime session introspection raises undocumented errors; the dimension stays unknown
         log.debug("Could not read the image encoder output shape", exc_info=True)
         return None
     if not shape:

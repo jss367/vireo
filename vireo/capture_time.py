@@ -461,7 +461,7 @@ def adjust_capture_time(
             log.warning("Capture-time adjustment failed for photo %s: %s", photo["id"], exc)
             failed += 1
             failures.append({"photo_id": photo["id"], "filename": photo["filename"], "error": str(exc)})
-        except Exception as exc:
+        except Exception as exc:  # broad: per-photo boundary; an unexpected error fails only this photo and is listed
             db.rollback()
             log.exception("Unexpected capture-time adjustment error for photo %s", photo["id"])
             failed += 1

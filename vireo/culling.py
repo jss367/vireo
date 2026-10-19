@@ -243,7 +243,7 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
             if img is None:
                 continue
             h = imagehash.phash(img)
-        except Exception:
+        except Exception:  # broad: per-photo boundary; decoders raise a wide set and a missing pHash only skips this photo
             log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
             continue
         phashes[pid] = h

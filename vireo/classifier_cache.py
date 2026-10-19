@@ -193,6 +193,6 @@ def acquire_cached_classifier(
     if hook is not None:
         try:
             hook()
-        except Exception:
+        except Exception:  # broad: a caller's reuse hook must not break the cache hit
             log.exception("classifier notify_reuse hook raised; ignoring")
     return handle
