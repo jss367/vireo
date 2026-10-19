@@ -638,7 +638,7 @@ def test_keyword_hierarchy(tmp_path):
     db.tag_photo(pid, raptors)
     db.tag_photo(pid, hawk)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) == 3
 
     hawk_row = [k for k in tree if k['name'] == 'Red-tailed hawk'][0]
@@ -2088,7 +2088,7 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -2118,7 +2118,7 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
                 return {"taxon_id": 123, "scientific_name": "California"}
             return None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
 
     assert updated == 0
     row = db.conn.execute(
@@ -3557,7 +3557,7 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    db.keywords.mark_species(FakeTaxonomy())
+    db.keyword_taxa.mark_species(FakeTaxonomy())
 
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -3589,7 +3589,7 @@ def test_mark_species_keywords_fixes_type_taxonomy_with_is_species_zero(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
@@ -3634,7 +3634,7 @@ def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path)
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
 
     row = db.conn.execute(
@@ -3667,7 +3667,7 @@ def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
@@ -5238,8 +5238,8 @@ def test_is_keyword_species(tmp_path):
     kid_species = db.add_keyword('Robin', is_species=True)
     kid_location = db.add_keyword('The Park', is_species=False)
 
-    assert db.keywords.is_species(kid_species) is True
-    assert db.keywords.is_species(kid_location) is False
+    assert db.keyword_taxa.is_species(kid_species) is True
+    assert db.keyword_taxa.is_species(kid_location) is False
 
 
 # --- Cluster 5: Calendar Data ---
@@ -6097,7 +6097,7 @@ def test_keyword_tree_includes_type(tmp_path):
     kid = db.add_keyword('Cardinal', is_species=True)
     db.tag_photo(pid, kid)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     assert len(tree) >= 1
     cardinal = [k for k in tree if k['name'] == 'Cardinal'][0]
     assert cardinal['type'] == 'taxonomy'
@@ -18768,8 +18768,8 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     assert db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
     ).fetchone()["taxon_id"] == taxa["Verdin"]
-    assert db.keywords.is_species(family) is False
-    assert db.keywords.is_species(nested) is True
+    assert db.keyword_taxa.is_species(family) is False
+    assert db.keyword_taxa.is_species(nested) is True
     assert db.photo_species.get_species_for_photos([pid]) == {pid: ["Verdin"]}
     assert db.get_photos_with_equivalent_species([pid], root) == {pid}
 
@@ -23751,7 +23751,7 @@ def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 1
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -23813,7 +23813,7 @@ def test_mark_species_keywords_links_subspecies_to_species_ancestor(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
         (keyword_id,),
@@ -23874,7 +23874,7 @@ def test_mark_species_keywords_rejects_sole_wrong_lineage_candidate(tmp_path):
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 0
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -23959,7 +23959,7 @@ def test_mark_species_keywords_disambiguates_homonym_species_by_lineage(tmp_path
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    assert db.keywords.mark_species(FakeTaxonomy()) == 1
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 1
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,),
     ).fetchone()
@@ -24013,7 +24013,7 @@ def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
@@ -24064,7 +24064,7 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
@@ -24120,7 +24120,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
         def is_taxon(self, name):
             return self.lookup(name) is not None
 
-    updated = db.keywords.mark_species(FakeTaxonomy())
+    updated = db.keyword_taxa.mark_species(FakeTaxonomy())
     assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",

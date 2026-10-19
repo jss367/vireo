@@ -915,7 +915,7 @@ def test_scan_skips_empty_normalized_keywords(tmp_path):
     # raising. The empty-segment hierarchy is dropped entirely (chain
     # broken), but the well-formed sibling still lands as a hierarchy.
     assert 'Northern cardinal' in kw_names
-    tree_names = {k['name'] for k in db.keywords.get_tree()}
+    tree_names = {k['name'] for k in db.keyword_tree.get_tree()}
     assert 'Raptors' in tree_names
     assert 'Birds' in tree_names
 
@@ -954,7 +954,7 @@ def test_scan_imports_keywords_embedded_in_jpeg(tmp_path):
     assert {k["name"] for k in db.photo_keywords.get_for_photo(photo["id"])} == {
         "1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot",
     }
-    tree = {k["name"]: k for k in db.keywords.get_tree()}
+    tree = {k["name"]: k for k in db.keyword_tree.get_tree()}
     assert tree["Turquoise-browed motmot"]["parent_id"] == tree["2Birds"]["id"]
 
 
@@ -1290,7 +1290,7 @@ def test_scan_imports_hierarchical_keywords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    tree = db.keywords.get_tree()
+    tree = db.keyword_tree.get_tree()
     names = {k['name'] for k in tree}
     assert 'Birds' in names
     assert 'Raptors' in names

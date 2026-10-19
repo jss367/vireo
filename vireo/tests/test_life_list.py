@@ -854,7 +854,7 @@ def test_higher_rank_taxonomy_link_survives_mark_species_pass(life_app):
 
     # The pass makes no changes because the row is already fully typed
     # and its higher-rank binding is preserved.
-    assert db.keywords.mark_species(FakeTaxonomy()) == 0
+    assert db.keyword_taxa.mark_species(FakeTaxonomy()) == 0
     row = db.conn.execute(
         "SELECT taxon_id, type, is_species FROM keywords WHERE id = ?",
         (seed["keyword"],),
