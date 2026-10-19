@@ -25,6 +25,29 @@ function dismissDegradedBanner() {
   /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
+/**
+ * An undo or redo stood, but the saved review results could not follow it
+ * (the server could not rewrite the pipeline cache's species). This page
+ * reads those results, so say what is stale and what fixes it: a reload
+ * reads the same stale file, while a Process run rebuilds the results from
+ * the catalog. Stays up until the page is left.
+ * @param {{pipeline_cache_stale?: boolean; undone?: string; redone?: string} | null | undefined} change
+ */
+function renderHistoryCacheStaleBanner(change) {
+  if (!change || !change.pipeline_cache_stale) return;
+  var banner = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBanner'));
+  var text = /** @type {HTMLElement | null} */ (document.getElementById('historyCacheBannerText'));
+  if (!banner || !text) return;
+  var undo = change.undone !== undefined;
+  var description = (undo ? change.undone : change.redone) || 'the last edit';
+  text.innerHTML = '<strong>These review results may be out of date.</strong> '
+    + escapeHtml((undo ? 'Undoing' : 'Redoing') + ' “' + description + '” was saved, but Vireo '
+    + 'could not update the review results to match, so they may still list the old species for '
+    + 'the photos it changed. Reloading this page will not fix that: run Process on these photos '
+    + 'again to rebuild the review from your catalog.');
+  banner.style.display = 'flex';
+}
+
 /** @param {ReviewCacheInfo | null} info */
 function renderCacheScopeBanner(info) {
   var banner = /** @type {HTMLElement} */ (document.getElementById('cacheScopeBanner'));

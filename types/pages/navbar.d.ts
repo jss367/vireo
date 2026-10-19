@@ -134,6 +134,9 @@ interface NavHistoryChange {
   undone?: string;
   redone?: string;
   edit_recipes?: Record<string, NavRecipe | null>;
+  /** Set when the change stands but Process Review's saved results could not follow it. */
+  pipeline_cache_stale?: boolean;
+  warning?: string;
 }
 interface NavLightboxToken {
   readonly photoId: number | null;

@@ -2318,3 +2318,82 @@ def test_pipeline_review_conflicting_burst_can_split_and_undo(live_server, page)
     page.locator("#historyUndoBtn").click()
     expect(page.locator(".encounter-card")).to_have_count(1)
     expect(page.locator("[data-species-conflict]")).to_have_count(2)
+
+
+def _add_species_in_pipeline_review(live_server, page, species):
+    """Confirm ``species`` on a predictionless encounter through the UI."""
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+    page.goto(f"{live_server['url']}/pipeline/review")
+    species_name = page.locator(".species-widget .species-name").first
+    expect(species_name).to_have_text("Add species")
+    species_name.click()
+    input_box = page.locator(".species-dropdown.open input").first
+    input_box.fill(species)
+    input_box.press("Enter")
+    expect(species_name).to_have_text(species)
+
+
+def _fail_pipeline_cache_refresh(monkeypatch):
+    import pipeline
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(pipeline, "refresh_cache_species_for_photos", _fail)
+
+
+def test_pipeline_review_says_when_undo_cannot_update_its_results(
+    live_server, page, monkeypatch,
+):
+    """Undo stands, but a cache refresh that failed must not be silent.
+
+    The review results this page reads still list the old species, and a
+    reload reads the same file, so the page says so and what rebuilds them.
+    """
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    banner = page.get_by_test_id("pipeline-review-history-cache-stale")
+    expect(banner).to_be_hidden()
+    _fail_pipeline_cache_refresh(monkeypatch)
+
+    with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
+        page.locator("#historyUndoBtn").click()
+    assert undo.value.json()["pipeline_cache_stale"] is True
+
+    expect(banner).to_be_visible()
+    expect(banner).to_contain_text("These review results may be out of date.")
+    expect(banner).to_contain_text("Undoing “Confirmed species")
+    expect(banner).to_contain_text("may still list the old species")
+    expect(banner).to_contain_text("Reloading this page will not fix that")
+    expect(banner).to_contain_text("run Process on these photos again")
+    expect(banner.get_by_role("link", name="Open Process")).to_have_attribute(
+        "href", "/pipeline"
+    )
+    toast = page.locator('#toastContainer [data-type="warning"]')
+    expect(toast).to_have_text(
+        "Undo saved, but Vireo could not update Process Review's saved "
+        "results to match, so they may still list the old species for these photos."
+    )
+
+    page.locator("#historyRedoBtn").click()
+    expect(banner).to_contain_text("Redoing “Confirmed species")
+
+
+def test_undo_elsewhere_warns_when_process_review_results_go_stale(
+    live_server, page, monkeypatch,
+):
+    """The navbar's undo shows the warning on every page, not just Review."""
+    _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
+    _fail_pipeline_cache_refresh(monkeypatch)
+    page.goto(f"{live_server['url']}/browse")
+    expect(page.locator("#historyUndoBtn")).to_be_enabled()
+
+    page.locator("#historyUndoBtn").click()
+
+    expect(page.locator('#toastContainer [data-type="success"]')).to_contain_text(
+        "Undone: "
+    )
+    expect(page.locator('#toastContainer [data-type="warning"]')).to_have_text(
+        "Undo saved, but Vireo could not update Process Review's saved "
+        "results to match, so they may still list the old species for these photos."
+    )

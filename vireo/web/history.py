@@ -73,6 +73,10 @@ def create_history_blueprint(
         cache's per-photo, per-burst, and per-encounter species fields so a
         Process / Rapid Review reload matches what ``/api/encounters/species``
         would see now.
+
+        Returns ``False`` only when the refresh failed, so the caller can
+        tell the user Process Review may be stale; ``True`` otherwise,
+        including when the entry had nothing to refresh.
         """
         action = entry.get("action_type") if entry else None
         if action == "pipeline_grouping":
@@ -88,16 +92,16 @@ def create_history_blueprint(
                 # Retired after its cache snapshot went stale: the newer
                 # cache belongs to a later analysis and must stay untouched;
                 # only the photo edit was reversed.
-                return
+                return True
             action = (payload.get("photo_edit") or {}).get("action_type")
         if action not in ("species_replace", "keyword_add", "prediction_accept"):
-            return
+            return True
         photo_ids = [
             pid for pid in db.edit_history.item_photo_ids(entry["id"], distinct=True)
             if pid is not None
         ]
         if not photo_ids:
-            return
+            return True
         try:
             species_by_photo = db.keywords.get_species_for_photos(photo_ids)
             # Photos with no surviving species tags must still be included so
@@ -120,6 +124,33 @@ def create_history_blueprint(
                 "Failed to refresh pipeline cache species after undo/redo of %s",
                 action,
             )
+            return False
+        return True
+
+    def _history_response(db, result, operation, edit_recipe_updates):
+        """The undo/redo response for ``result``, the entry just reversed.
+
+        A pipeline cache that could not be refreshed adds
+        ``pipeline_cache_stale`` and a ``warning`` saying what it means;
+        the history change itself stands.
+        """
+        cache_refreshed = _refresh_pipeline_cache_species_from_edit(db, result)
+        response = {
+            "ok": True,
+            "undone" if operation == "Undo" else "redone": result["description"],
+            "flags_changed": _history_flags_changed(db, result),
+        }
+        if edit_recipe_updates is not None:
+            response["action_type"] = "edit_recipe"
+            response["edit_recipes"] = edit_recipe_updates
+        if not cache_refreshed:
+            response["pipeline_cache_stale"] = True
+            response["warning"] = (
+                f"{operation} saved, but Vireo could not update Process "
+                "Review's saved results to match, so they may still list "
+                "the old species for these photos."
+            )
+        return response
 
     def _history_flags_changed(db, entry):
         action = entry["action_type"]
@@ -168,12 +199,7 @@ def create_history_blueprint(
             # rows and commits them itself, and it touches no prediction
             # state, so it has nothing to serialize against.
             edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        _refresh_pipeline_cache_species_from_edit(db, result)
-        response = {"ok": True, "undone": result["description"], "flags_changed": _history_flags_changed(db, result)}
-        if edit_recipe_updates is not None:
-            response["action_type"] = "edit_recipe"
-            response["edit_recipes"] = edit_recipe_updates
-        return jsonify(response)
+        return jsonify(_history_response(db, result, "Undo", edit_recipe_updates))
 
     @blueprint.route("/api/undo/status")
     def api_undo_status():
@@ -220,12 +246,7 @@ def create_history_blueprint(
         if result.get("action_type") == "edit_recipe":
             # Outside the locked section, for the reason ``api_undo`` gives.
             edit_recipe_updates = _edit_recipe_history_updates(db, result["id"])
-        _refresh_pipeline_cache_species_from_edit(db, result)
-        response = {"ok": True, "redone": result["description"], "flags_changed": _history_flags_changed(db, result)}
-        if edit_recipe_updates is not None:
-            response["action_type"] = "edit_recipe"
-            response["edit_recipes"] = edit_recipe_updates
-        return jsonify(response)
+        return jsonify(_history_response(db, result, "Redo", edit_recipe_updates))
 
     @blueprint.route("/api/redo/status")
     def api_redo_status():
