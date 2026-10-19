@@ -171,6 +171,8 @@ class _KeywordEdits:
             # earlier writes still collapse.
             if _bag_occurrence_is_qualified(extra, parent_map):
                 continue
+            if self._merge_would_drop_source_markup(extra, extra_bag, seen):
+                continue
             if extra_bag is not None:
                 # Copy every item, not just ones with direct text: a
                 # structured value (rdf:parseType="Resource" with an
@@ -184,6 +186,31 @@ class _KeywordEdits:
                     seen.add(sig)
             owner.remove(extra)
             self.document.dirty = True
+
+    def _merge_would_drop_source_markup(self, extra, extra_bag, seen):
+        """Keep a container whose recorded markup has no surviving copy.
+
+        Item copies carry their own namespace and comment/PI records. Records
+        on a removed wrapper/bag, or on an item discarded as a duplicate, have
+        no such destination. Leave that occurrence intact, as for qualified
+        containers, rather than silently dropping its source markup.
+        """
+        markup = getattr(getattr(self.document, "tree", None), "markup", None)
+        if markup is None:
+            return False
+        copied = set()
+        signatures = set(seen)
+        if extra_bag is not None:
+            for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
+                signature = _li_signature(li)
+                if signature not in signatures:
+                    copied.update(li.iter())
+                    signatures.add(signature)
+        return any(
+            node not in copied
+            and (markup.inner.get(node) or markup.namespaces.get(node))
+            for node in extra.iter()
+        )
 
     def _copy_with_source_markup(self, original):
         """Deep-copy ``original`` and carry its ``SourceMarkup`` entries along.
