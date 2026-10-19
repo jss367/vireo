@@ -47,7 +47,7 @@ def check_and_resolve_duplicates_for_hash(db: Database, file_hash: str | None) -
     return None
 
 
-def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDict:
+def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int] | None) -> JsonDict:
     """Resolve a group of photos sharing a file_hash.
 
     Picks a winner using :func:`vireo.duplicates.resolve_duplicates`,
@@ -64,22 +64,32 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDi
     winner: the return dict adds ``"deferred": True`` so callers can
     tell deferrals apart from no-ops and keep the group visible.
     """
+    # A short (including duplicate-only) input is a no-op even if the
+    # caller owns a transaction. Do not read repositories or acquire SQL locks.
+    ids = list(dict.fromkeys(photo_ids if photo_ids is not None else ()))
+    if len(ids) < 2:
+        return {"winner_id": None, "loser_ids": [], "rejected": 0}
+
     from repositories.duplicates import DEFERRED_PLAN
 
-    plan = db.duplicates.resolution_plan(photo_ids)
-    if plan is None:
-        return {"winner_id": None, "loser_ids": [], "rejected": 0}
-    if plan is DEFERRED_PLAN:
-        return {
-            "winner_id": None,
-            "loser_ids": [],
-            "rejected": 0,
-            "deferred": True,
-        }
-    winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
-
-    db._apply_winner_loser_merge(winner_id, loser_ids)
-
+    repo = db.duplicates
+    # This entry point owns its writer transaction. An outer transaction
+    # cannot safely run disk probes or be committed by the merge helper.
+    deferred = {"winner_id": None, "loser_ids": [], "rejected": 0, "deferred": True}
+    if db.in_transaction:
+        return deferred
+    preflight = repo.resolution_preflight(ids)
+    db.begin_immediate()
+    with db.transaction():
+        plan = repo.resolution_plan(ids, preflight=preflight)
+        if plan is None:
+            db.rollback()
+            return {"winner_id": None, "loser_ids": [], "rejected": 0}
+        if plan is DEFERRED_PLAN:
+            db.rollback()
+            return deferred
+        winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
+        db._apply_winner_loser_merge(winner_id, loser_ids)
     return {
         "winner_id": winner_id,
         "loser_ids": list(loser_ids),
@@ -172,13 +182,19 @@ def bulk_resolve_by_folder(
     resolved: list[JsonDict] = []
     skipped: list[JsonDict] = []
     for file_hash in file_hashes:
-        winner_id, loser_ids, reason = repo.keep_folder_plan(
-            file_hash, keep_folder_norm,
-        )
-        if reason is not None:
-            skipped.append({"file_hash": file_hash, "reason": reason})
-            continue
-        db._apply_winner_loser_merge(winner_id, loser_ids)
+        preflight = repo.keep_folder_preflight(file_hash, keep_folder_norm)
+        # Disk work precedes BEGIN; catalog revalidation and the merge share
+        # the writer lock. A failed nested BEGIN leaves caller work intact.
+        db.begin_immediate()
+        with db.transaction():
+            winner_id, loser_ids, reason = repo.keep_folder_plan(
+                file_hash, keep_folder_norm, preflight=preflight,
+            )
+            if reason is not None:
+                db.rollback()
+                skipped.append({"file_hash": file_hash, "reason": reason})
+                continue
+            db._apply_winner_loser_merge(winner_id, loser_ids)
         resolved.append({
             "file_hash": file_hash,
             "winner_id": winner_id,

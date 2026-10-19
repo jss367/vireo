@@ -14,7 +14,7 @@ from keyword_identity import (
 )
 from keyword_normalization import keyword_match_key
 from metadata import embedded_keywords
-from xmp import read_hierarchical_keywords, read_keywords
+from xmp import read_keyword_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -25,17 +25,21 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> None:
-    """Read flat and hierarchical keywords from XMP and populate the database."""
-    flat_keywords = read_keywords(xmp_path_str)
-    hier_keywords = read_hierarchical_keywords(xmp_path_str)
+def _import_keywords_for_photo(db: Database, photo_id: int, xmp_path_str: str) -> bool:
+    """Import readable XMP keywords; False leaves the sidecar retryable."""
+    snapshot = read_keyword_snapshot(xmp_path_str)
+    if snapshot is None:
+        return False
+    flat_keywords, hier_keywords = snapshot[:2]
     # A sidecar whose location keywords Vireo wrote describes the place the
     # photo had at the last sync. If a newer place (or none) is already queued
     # in Vireo, importing those entries would re-attach the old one.
     flat_keywords, hier_keywords = drop_stale_vireo_location_keywords(
         db, photo_id, xmp_path_str, flat_keywords, hier_keywords,
+        location_metadata=snapshot[2:],
     )
     _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
+    return True
 
 
 def _import_embedded_keywords_for_photo(db: Database, photo_id: int, file_meta: ExifMetadata | None, *,

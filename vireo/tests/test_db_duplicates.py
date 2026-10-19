@@ -414,8 +414,15 @@ def test_apply_resolution_chunks_its_candidate_lookup(db, folder, monkeypatch):
     with _SqlRecorder(db) as rec:
         result = duplicate_resolution.apply_duplicate_resolution(db, ids)
 
-    lookups = rec.matching("LEFT JOIN folders f ON f.id = p.folder_id")
-    assert len(lookups) == 2  # 800 + 1
+    # Candidate reads are chunked both before disk preflight and again
+    # under the writer lock. Match their purpose, not JOIN whitespace.
+    lookups = rec.matching("WHERE p.id IN (")
+    lookup_ids = [
+        [int(value) for value in query.split("WHERE p.id IN (", 1)[1].split(")", 1)[0].split(",")]
+        for query in lookups
+    ]
+    assert lookup_ids == [ids[:800], ids[800:], ids[:800], ids[800:]]
+    assert len(rec.matching("WHERE p.file_hash IN (")) == 2  # full group in both phases
     assert result["winner_id"] == ids[0]
     assert sorted(result["loser_ids"]) == ids[1:]
     assert merges == [(ids[0], result["loser_ids"])]

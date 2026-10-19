@@ -64,7 +64,7 @@ def create_duplicates_blueprint(
         resolver and flags the losers as rejected. Returns the total number
         of photos rejected across all hashes, plus ``deferred_hashes``:
         the subset the resolver refused to touch because at least one
-        candidate was on an offline volume. The UI keeps those groups on
+        candidate was offline or still awaiting its sidecar import. The UI keeps those groups on
         the page (state unknown, not resolved).
         """
         body = request.get_json(silent=True)
@@ -98,6 +98,9 @@ def create_duplicates_blueprint(
     keep_refusals = {
         "not found": (404, "That photo is no longer in the catalog."),
         "not a duplicate": (409, "That photo no longer has a duplicate copy."),
+        "sidecar keywords pending": (
+            409, "This group's sidecar keywords have not been imported yet. Retry after the scan recovers.",
+        ),
         "missing on disk": (
             409, "This copy's file is missing on disk, so it can't be the one you keep.",
         ),

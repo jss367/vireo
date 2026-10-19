@@ -21,20 +21,39 @@ log = logging.getLogger("xmp")
 
 
 def _parse_xmp(xmp_path):
-    """Parse an XMP file, returning (root, tree) or None if missing/corrupt."""
-    path = Path(xmp_path)
-    if not path.exists():
-        return None
+    """Parse an XMP file, returning (root, tree), or None when it can't be read.
 
+    None covers a missing sidecar, a corrupt one, and one that exists but
+    cannot be read (a permission error, a directory at the path, an I/O
+    error on a network share). Parse directly rather than checking that the
+    file exists first: a sidecar removed between the check and the open
+    would raise, and the check costs a network round trip on SMB/NFS.
+    """
     try:
-        tree = ET.parse(path)
+        tree = ET.parse(xmp_path)
+    except FileNotFoundError:
+        return None
     except ET.ParseError:
         log.warning("Corrupt XMP file: %s", xmp_path)
+        return None
+    except OSError as error:
+        log.warning("Unreadable XMP file %s: %s", xmp_path, error)
         return None
 
     root = tree.getroot()
     _register_document_uri(root, xmp_path)
     return root, tree
+
+
+def _bag_values(root, prop):
+    """The non-empty item values of every photo-scoped ``prop`` bag, in order."""
+    values = []
+    for bag in _photo_scoped_bags(root, prop):
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            value = _li_value(li)
+            if value:
+                values.append(value)
+    return values
 
 
 # ── Public API ──────────────────────────────────────────────────────────
@@ -46,39 +65,61 @@ def read_keywords(xmp_path):
         xmp_path: path to .xmp file
 
     Returns:
-        set of keyword strings (empty if file missing or corrupt)
+        set of keyword strings (empty if the file is missing, unreadable or
+        corrupt)
     """
     result = _parse_xmp(xmp_path)
     if result is None:
         return set()
-
     root, _tree = result
-    keywords = set()
-    for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            value = _li_value(li)
-            if value:
-                keywords.add(value)
-    return keywords
+    return set(_bag_values(root, f"{{{NS_DC}}}subject"))
 
 
 def read_hierarchical_keywords(xmp_path):
     """Read lr:hierarchicalSubject from an XMP sidecar.
 
-    Returns a list of pipe-delimited hierarchy strings, e.g. ['Birds|Raptors|Black kite'].
+    Returns a list of pipe-delimited hierarchy strings, e.g. ['Birds|Raptors|Black kite'],
+    empty if the file is missing, unreadable or corrupt.
     """
     result = _parse_xmp(xmp_path)
     if result is None:
         return []
-
     root, _tree = result
-    results = []
-    for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            value = _li_value(li)
-            if value:
-                results.append(value)
-    return results
+    return _bag_values(root, f"{{{NS_LR}}}hierarchicalSubject")
+
+
+def read_keyword_lists(xmp_path):
+    """Read both keyword properties from one parse, or None if it can't be read.
+
+    Returns ``(flat, hierarchical)`` -- what :func:`read_keywords` and
+    :func:`read_hierarchical_keywords` return -- or ``None`` when the
+    sidecar is missing, unreadable or corrupt. Those two return empty in
+    that case, which a caller that acts on a keyword's absence cannot tell
+    from a sidecar that carries none: a reconcile that untags what the
+    sidecar lacks would untag everything.
+    """
+    snapshot = read_keyword_snapshot(xmp_path)
+    return snapshot[:2] if snapshot is not None else None
+
+
+def read_keyword_snapshot(xmp_path):
+    """Read keyword lists and location ownership from one successful parse.
+
+    Returns ``(flat, hierarchical, location_marker, owned_marker)``, or
+    ``None`` if the sidecar cannot be read. Only a successful snapshot's
+    absent ownership marker may mean legacy ownership of both entries;
+    a failed read provides no evidence about ownership or absent keywords.
+    """
+    result = _parse_xmp(xmp_path)
+    if result is None:
+        return None
+    root, _tree = result
+    return (
+        set(_bag_values(root, f"{{{NS_DC}}}subject")),
+        _bag_values(root, f"{{{NS_LR}}}hierarchicalSubject"),
+        _get_property(root, LOCATION_KEYWORDS_MARKER),
+        _get_property(root, LOCATION_KEYWORDS_OWNED),
+    )
 
 
 def read_vireo_location_keywords(xmp_path):
@@ -218,19 +259,10 @@ def read_sync_preview_metadata(xmp_path):
         return {**empty, "status": "unreadable"}
     _register_document_uri(root, path)
 
-    keywords = set()
-    for bag in _photo_scoped_bags(root, f"{{{NS_DC}}}subject"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            value = _li_value(li)
-            if value:
-                keywords.add(value)
-
-    hierarchical_keywords = set()
-    for bag in _photo_scoped_bags(root, f"{{{NS_LR}}}hierarchicalSubject"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            value = _li_value(li)
-            if value:
-                hierarchical_keywords.add(value)
+    keywords = set(_bag_values(root, f"{{{NS_DC}}}subject"))
+    hierarchical_keywords = set(
+        _bag_values(root, f"{{{NS_LR}}}hierarchicalSubject"),
+    )
 
     if not _top_descriptions(root):
         # The sidecar parsed cleanly, so rating writes will land here even

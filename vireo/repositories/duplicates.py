@@ -286,147 +286,136 @@ class DuplicatesRepository:
 
     # -- resolution plans -----------------------------------------------------
 
-    def resolution_plan(self, photo_ids):
-        """Pick a winner among the non-rejected ``photo_ids``.
-
-        Returns ``(winner_id, loser_ids)``, or ``None`` when fewer than 2
-        non-rejected candidates remain, or the ``DEFERRED_PLAN`` sentinel
-        when at least one candidate lives on an offline volume (state
-        unknown; the resolver can't safely pick a winner until the volume
-        returns). Writes nothing.
-        """
-        from duplicates import DupCandidate, resolve_duplicates
-
-        if not photo_ids or len(photo_ids) < 2:
-            return None
-
-        # Chunked — a single duplicate group can exceed the bound-parameter
-        # cap (see duplicate_scan.py, which chunks its own reads).
-        rows = []
+    def _resolution_rows(self, photo_ids):
+        """Identity of selected rows and every member of their hash groups."""
+        fields = "p.id, p.folder_id, p.filename, p.file_hash, p.file_mtime, p.rating, p.flag, p.xmp_import_pending, f.path AS folder_path"
+        rows = {}
         for chunk in self._chunks(list(dict.fromkeys(photo_ids))):
-            placeholders = ",".join("?" * len(chunk))
-            rows.extend(self.conn.execute(
-                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
-                           f.path AS folder_path
-                    FROM photos p
-                    LEFT JOIN folders f ON f.id = p.folder_id
-                    WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
-                list(chunk),
-            ).fetchall())
-        if len(rows) < 2:
-            return None
+            marks = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT {fields} FROM photos p LEFT JOIN folders f ON f.id=p.folder_id WHERE p.id IN ({marks})",
+                chunk,
+            ).fetchall():
+                rows[row["id"]] = row
+        hashes = list(dict.fromkeys(row["file_hash"] for row in rows.values() if row["file_hash"] is not None))
+        for chunk in self._chunks(hashes):
+            marks = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT {fields} FROM photos p LEFT JOIN folders f ON f.id=p.folder_id WHERE p.file_hash IN ({marks})",
+                chunk,
+            ).fetchall():
+                rows[row["id"]] = row
+        return [rows[pid] for pid in sorted(rows)]
 
-        candidates = []
-        any_offline = False
-        for r in rows:
-            path = os.path.join(r["folder_path"] or "", r["filename"] or "")
-            # Stat each candidate so the resolver doesn't pick a winner
-            # whose file was moved/deleted on disk. The DB row would
-            # otherwise outvote a surviving twin solely on path-string
-            # heuristics.
-            #
-            # Probe volume reachability BEFORE ``os.path.exists``. This
-            # auto-resolver runs from ``add_photo`` and
-            # ``check_and_resolve_duplicates_for_hash`` on every import
-            # and scan; on a stale SMB/NFS mount an unqualified stat can
-            # block for minutes while the kernel waits for the transport,
-            # wedging the import/scan worker before the bounded volume
-            # gate ever runs. ``duplicate_scan._row_to_info`` uses the
-            # same ordering.
-            offline = _volume_offline(path)
-            present = False if offline else os.path.exists(path)
-            if offline:
-                any_offline = True
-            candidates.append(
-                DupCandidate(
-                    id=r["id"],
-                    path=path,
-                    mtime=r["file_mtime"] or 0.0,
-                    # Placeholder; overridden by the offline-defer below when
-                    # we return None. When every candidate is reachable, this
-                    # is the real on-disk state and Rule 0 applies as usual.
-                    exists=present,
-                )
-            )
-        # An offline candidate's on-disk state is unknown. Auto-resolution
-        # can't safely pick a winner without confirming: if the offline
-        # row wins by path/mtime and its file was actually deleted while
-        # the volume was down, ``apply_duplicate_resolution`` would reject
-        # the only reachable copy and stamp a ``duplicate_rejections`` row
-        # that ``reopen`` would then un-reject only after
-        # the volume returns and the scan re-runs. Defer instead and let
-        # the interactive duplicate scan surface the group; that scan
-        # treats offline as "state unknown" for the user to resolve.
-        # ``DEFERRED_PLAN`` is distinct from ``None`` so callers (and the
-        # ``/api/duplicates/apply`` route) can tell "state unknown, keep
-        # the group visible" apart from "fewer than 2 candidates, nothing
-        # to do" and communicate the deferral back to the user.
-        if any_offline:
-            return DEFERRED_PLAN
-        winner_id, losers_with_reasons = resolve_duplicates(candidates)
-        loser_ids = [lid for lid, _reason in losers_with_reasons]
-        return winner_id, loser_ids
-
-    def keep_folder_plan(self, file_hash, keep_folder_norm):
-        """Pick the ``file_hash`` winner that lives in ``keep_folder_norm``.
-
-        ``keep_folder_norm`` is already ``os.path.normpath``-ed (or ``""``).
-        Returns ``(winner_id, loser_ids, None)`` when the group is
-        actionable, else ``(None, None, reason)`` with the skip reasons
-        documented on ``duplicate_resolution.bulk_resolve_by_folder``. Writes nothing.
-        """
+    def resolution_preflight(self, photo_ids):
+        """Probe disk before locking and bind the result to catalog identity."""
         from duplicates import DupCandidate, resolve_duplicates
 
-        rows = self.conn.execute(
-            """SELECT p.id, p.filename, p.file_mtime, p.rating,
-                      f.path AS folder_path
-               FROM photos p
-               LEFT JOIN folders f ON f.id = p.folder_id
-               WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')""",
+        rows = self._resolution_rows(photo_ids)
+        snapshot = tuple(tuple(row) for row in rows)
+        selected = set(photo_ids)
+        candidates_rows = [row for row in rows if row["id"] in selected and row["flag"] != "rejected"]
+        if len(candidates_rows) < 2:
+            return snapshot, None
+        if any(row["xmp_import_pending"] for row in rows):
+            return snapshot, DEFERRED_PLAN
+        candidates = []
+        for row in candidates_rows:
+            path = os.path.join(row["folder_path"] or "", row["filename"] or "")
+            # Reachability precedes stat so an unhealthy mount cannot hang
+            # while the catalog writer lock is held.
+            if _volume_offline(path):
+                return snapshot, DEFERRED_PLAN
+            candidates.append(DupCandidate(
+                id=row["id"], path=path, mtime=row["file_mtime"] or 0.0,
+                exists=os.path.exists(path),
+            ))
+        winner, losers = resolve_duplicates(candidates)
+        return snapshot, (winner, [pid for pid, _reason in losers])
+
+    def resolution_plan(self, photo_ids, *, preflight=None):
+        """Disk-free locked revalidation when the service supplies preflight.
+
+        Membership, hash, flag, path, winner-selection fields and pending state
+        must still match, including siblings absent from the caller's id list.
+        Any change defers the group rather than applying a stale disk decision.
+        Read-only callers may omit preflight for the original convenience API.
+        """
+        if preflight is None:
+            preflight = self.resolution_preflight(photo_ids)
+        rows = self._resolution_rows(photo_ids)
+        if tuple(tuple(row) for row in rows) != preflight[0]:
+            return DEFERRED_PLAN
+        if preflight[1] is None:
+            return None
+        if any(row["xmp_import_pending"] for row in rows):
+            return DEFERRED_PLAN
+        return preflight[1]
+
+    def _keep_folder_rows(self, file_hash: str) -> list[sqlite3.Row]:
+        """Catalog identity and selection fields, including rejected members."""
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.file_mtime, p.rating,
+                      p.flag, p.xmp_import_pending, f.path AS folder_path
+               FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+               WHERE p.file_hash = ? ORDER BY p.id""",
             (file_hash,),
         ).fetchall()
+
+    def keep_folder_preflight(self, file_hash, keep_folder_norm):
+        """Snapshot group identity and probe candidate paths before locking.
+
+        The snapshot covers all members, flags, pending state, paths and
+        winner-selection fields. A changed snapshot requires a fresh preflight.
+        """
+        rows = self._keep_folder_rows(file_hash)
+        if any(row["xmp_import_pending"] for row in rows):
+            return tuple(tuple(row) for row in rows), frozenset()
+        present = frozenset(
+            row["id"] for row in rows
+            if row["flag"] != "rejected"
+            and os.path.normpath(row["folder_path"] or "") == keep_folder_norm
+            and os.path.exists(os.path.join(row["folder_path"] or "", row["filename"] or ""))
+        )
+        return tuple(tuple(row) for row in rows), present
+
+    def keep_folder_plan(self, file_hash, keep_folder_norm, *, preflight=None):
+        """Pick a folder winner; supplied preflight makes this disk-free.
+
+        The service supplies a pre-lock preflight and calls this inside its
+        writer transaction. A changed membership, path, flag, pending state
+        or winner-selection field fails closed instead of trusting stale I/O.
+        Direct read-only callers may omit preflight for the original behavior.
+        """
+        from duplicates import DupCandidate, resolve_duplicates
+
+        if preflight is None:
+            preflight = self.keep_folder_preflight(file_hash, keep_folder_norm)
+        rows = self._keep_folder_rows(file_hash)
+        if tuple(tuple(row) for row in rows) != preflight[0]:
+            return None, None, "group changed during preflight"
+        if any(row["xmp_import_pending"] for row in rows):
+            return None, None, "sidecar keywords pending"
+        rows = [row for row in rows if row["flag"] != "rejected"]
         if not rows:
             return None, None, "no candidates"
         if len(rows) < 2:
             return None, None, "fewer than 2 candidates"
-        in_folder = [
-            r for r in rows
-            if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
-        ]
+        in_folder = [row for row in rows if os.path.normpath(row["folder_path"] or "") == keep_folder_norm]
         if not in_folder:
             return None, None, "no candidate in keep_folder"
-        # Existence-check the keep_folder candidate(s) before promoting.
-        # If the row's file has been deleted externally but a sibling in
-        # another folder still exists, force-picking the missing row as
-        # winner would reject the surviving copy — and chained delete
-        # would then trash it. Skip the hash instead.
-        in_folder_paths = [
-            (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
-            for r in in_folder
-        ]
-        present_in_folder = [
-            (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
-        ]
+        present_in_folder = [row for row in in_folder if row["id"] in preflight[1]]
         if not present_in_folder:
             return None, None, "keep_folder candidate missing on disk"
         if len(present_in_folder) == 1:
-            winner_id = present_in_folder[0][0]["id"]
+            winner_id = present_in_folder[0]["id"]
         else:
-            # Same-folder duplicates among the keep_folder candidates —
-            # let the resolver pick deterministically among them. All
-            # candidates passed in exist on disk (filtered above), so
-            # Rule 0 is a no-op here.
-            cands = [
-                DupCandidate(
-                    id=r["id"], path=p,
-                    mtime=r["file_mtime"] or 0.0,
-                    exists=True,
-                )
-                for (r, p) in present_in_folder
-            ]
-            winner_id, _ = resolve_duplicates(cands)
-        loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
-        return winner_id, loser_ids, None
+            candidates = [DupCandidate(
+                id=row["id"], path=os.path.join(row["folder_path"] or "", row["filename"] or ""),
+                mtime=row["file_mtime"] or 0.0, exists=True,
+            ) for row in present_in_folder]
+            winner_id, _ = resolve_duplicates(candidates)
+        return winner_id, [row["id"] for row in rows if row["id"] != winner_id], None
 
     def keep_copy_refusal(self, photo_id):
         """Why ``photo_id`` can't become the kept copy of its group, or ``None``.
@@ -471,7 +460,8 @@ class DuplicatesRepository:
         keeps in one group must not both plan against the same old keeper).
         Returns ``(plan, None)`` with ``plan`` a dict of ``file_hash``,
         ``loser_ids`` and ``winner_flag`` (the flag the kept copy ends with),
-        or ``(None, reason)`` with ``"not found"`` or ``"not a duplicate"``.
+        or ``(None, reason)`` with ``"not found"``, ``"not a duplicate"``
+        or ``"sidecar keywords pending"``.
         Writes nothing.
         """
         row = self.conn.execute(
@@ -481,6 +471,13 @@ class DuplicatesRepository:
             return None, "not found"
         if not row["file_hash"]:
             return None, "not a duplicate"
+        # This check runs inside the caller's writer-locked transaction.
+        # Include the chosen copy and rejected siblings in the group guard.
+        if self.conn.execute(
+            "SELECT 1 FROM photos WHERE file_hash = ? AND xmp_import_pending != 0 LIMIT 1",
+            (row["file_hash"],),
+        ).fetchone() is not None:
+            return None, "sidecar keywords pending"
         siblings = self.conn.execute(
             "SELECT id, flag FROM photos WHERE file_hash = ? AND id != ?",
             (row["file_hash"], photo_id),

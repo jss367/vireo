@@ -20,7 +20,7 @@ from keyword_identity import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from services import pending_changes
-from xmp import SidecarEditor, read_hierarchical_keywords, read_keywords
+from xmp import SidecarEditor, read_keyword_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -1039,7 +1039,8 @@ def _read_sidecar_keywords(db, photo_id, xmp_path):
     """Read a sidecar's keywords, minus stale locations and pending removals.
 
     Returns ``(xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
-    pending_removals, pending_hierarchical_removals)``.
+    pending_removals, pending_hierarchical_removals)``, or ``None`` when the
+    sidecar is missing, unreadable or corrupt (the reader logs which).
     """
     # Read current XMP keywords. Compare with a normalized match key on
     # both sides so an XMP variant like `‘apapane` matches a DB row
@@ -1054,12 +1055,15 @@ def _read_sidecar_keywords(db, photo_id, xmp_path):
     # for names that normalize to empty, so keeping such entries would
     # abort the whole sidecar reconcile on a malformed edge-quote
     # keyword instead of ignoring it and processing the rest.
-    xmp_keywords = read_keywords(xmp_path)
-    sidecar_hierarchies = read_hierarchical_keywords(xmp_path)
+    snapshot = read_keyword_snapshot(xmp_path)
+    if snapshot is None:
+        return None
+    xmp_keywords, sidecar_hierarchies = snapshot[:2]
     # Vireo-written location keywords for a place the user has since
     # changed describe the sidecar's past, not the photo's present.
     xmp_keywords, sidecar_hierarchies = drop_stale_vireo_location_keywords(
         db, photo_id, xmp_path, xmp_keywords, sidecar_hierarchies,
+        location_metadata=snapshot[2:],
     )
     pending_removals = db.pending_changes.keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
@@ -1157,10 +1161,17 @@ def sync_from_xmp(db, photo_ids):
         # snapshot between this read and the final xmp_mtime update.
         db.begin_immediate()
         try:
+            sidecar = _read_sidecar_keywords(db, photo_id, xmp_path)
+            if sidecar is None:
+                # Removed, unreadable or corrupt since the check above.
+                # Reconciling would read that as a sidecar with no keywords
+                # and untag every keyword the photo has.
+                db.rollback()
+                continue
             (
                 xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
                 pending_removals, pending_hierarchical_removals,
-            ) = _read_sidecar_keywords(db, photo_id, xmp_path)
+            ) = sidecar
             pending_flat_only_removals = (
                 pending_removals - pending_hierarchical_removals
             )

@@ -16,6 +16,7 @@ from image_loader import RAW_EXTENSIONS
 from scanner.companions import _companion_stat_unchanged
 from scanner.hashing import EMPTY_FILE_SHA256
 from scanner.keywords import _import_keywords_for_photo
+from services import duplicate_resolution
 
 if TYPE_CHECKING:
     import sqlite3
@@ -117,7 +118,7 @@ class _IncrementalTriage:
         xmp_path = image_path.with_suffix(".xmp")
         try:
             xmp_mtime = xmp_path.stat().st_mtime
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             # Covers both "no sidecar" and a sidecar deleted between
             # exists() and stat() — same outcome either way.
             xmp_mtime = None
@@ -190,6 +191,7 @@ class _IncrementalTriage:
             and existing["file_size"] == stat.st_size
         )
         xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+        xmp_import_pending = bool(existing["xmp_import_pending"])
         # Re-process if ExifTool never ran for this photo (both
         # timestamp and exif_data are NULL). Photos with genuinely
         # missing timestamps (screenshots, exports) will have
@@ -220,7 +222,7 @@ class _IncrementalTriage:
         )
 
         if (
-            file_unchanged and xmp_unchanged
+            file_unchanged and xmp_unchanged and not xmp_import_pending
             and not metadata_missing
             and not hash_needs_repair
         ):
@@ -231,23 +233,32 @@ class _IncrementalTriage:
             return True
 
         # XMP changed: re-import keywords
-        if not xmp_unchanged and xmp_mtime is not None:
-            _import_keywords_for_photo(db, existing["id"], str(xmp_path))
-            db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
-            db.commit_with_retry()
-        elif not xmp_unchanged:
-            # Sidecar deleted: clear the stored mtime so the row
-            # converges instead of looking "XMP changed" on every
-            # later scan (this skip path never reaches the main
-            # loop, so nothing else would ever reset it).
+        retry_duplicate_resolution = False
+        if (not xmp_unchanged or xmp_import_pending) and xmp_mtime is not None:
+            prior_mtime = existing["xmp_mtime"]
+            if _import_keywords_for_photo(db, existing["id"], str(xmp_path)):
+                # Acknowledgement clears the durable guard in the same UPDATE.
+                db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
+                db.commit_with_retry()
+                retry_duplicate_resolution = xmp_import_pending or prior_mtime is None
+            else:
+                db.scanning.defer_xmp_import(existing["id"])
+                db.commit_with_retry()
+        elif not xmp_unchanged or xmp_import_pending:
+            # Removal settles a deferred read too; there are no keywords left
+            # to import. Keep acknowledgement and guard clearing atomic.
             db.scanning.set_xmp_mtime(existing["id"], None)
             db.commit_with_retry()
+            retry_duplicate_resolution = xmp_import_pending
 
         if (
             file_unchanged
             and not metadata_missing
             and not hash_needs_repair
         ):
+            # Reprocessing must decide against the new hash, not this old one.
+            if retry_duplicate_resolution and existing_file_hash:
+                duplicate_resolution.check_and_resolve_duplicates_for_hash(db, existing_file_hash)
             self.tally.credit_reused_row(
                 existing["id"], full_path_str,
                 existing["folder_id"], existing["filename"],

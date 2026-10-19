@@ -161,6 +161,11 @@ class _FileIndexer:
         # so the untracked-preview sweep can run once as a batch instead of
         # per-photo (avoids O(N × M) directory walks on large rescans).
         self.invalidated_photo_ids: set[int] = set()
+        # Hashes whose sidecar read failed earlier in this scan. A sibling
+        # cataloged after a deferred row must not fire the group-wide
+        # resolver, which would exclude the deferred row's forthcoming
+        # keywords when the retry path finally merges them onto the winner.
+        self._deferred_hashes: set[str] = set()
         # Photo IDs that already own cached derivative files, for the
         # recycled-rowid check on insert. Snapshotted once (lazily, on the
         # first insert) for the same batching reason as the sweep above.
@@ -209,7 +214,7 @@ class _FileIndexer:
         xmp_path = image_path.with_suffix(".xmp")
         try:
             xmp_mtime = xmp_path.stat().st_mtime
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             xmp_mtime = None
 
         meta = self._read_file_metadata(image_path)
@@ -273,8 +278,26 @@ class _FileIndexer:
         # the loser its keywords are visible to apply_duplicate_resolution's
         # metadata query and get merged onto the winner. Otherwise the
         # keywords would be stranded on the rejected row.
-        if xmp_path.exists():
-            _import_keywords_for_photo(db, photo_id, str(xmp_path))
+        sidecar_import_deferred = False
+        if item.xmp_mtime is not None:
+            if _import_keywords_for_photo(db, photo_id, str(xmp_path)):
+                # A stat alone cannot vouch for an unreadable sidecar's keywords.
+                db.scanning.set_xmp_mtime(photo_id, item.xmp_mtime)
+                db.commit_with_retry()
+            else:
+                # The retry path in _reuse_existing_row imports these keywords
+                # and fires resolution; running it now would reject this row
+                # with its sidecar still unread, stranding its keywords on the
+                # loser once the retry finally imports them. Normalize the
+                # stored mtime to NULL so the retry path's prior-NULL check
+                # correctly recognizes the deferred state even when a prior
+                # successful scan left a non-NULL acknowledgement behind.
+                sidecar_import_deferred = True
+                if item.row_already_existed:
+                    db.scanning.defer_xmp_import(photo_id, clear_mtime=True)
+                    db.commit_with_retry()
+                if file_hash is not None:
+                    self._deferred_hashes.add(file_hash)
         # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
         # This path runs whenever the file is new or changed, which is also
         # when such a write lands: it rewrites the file, not a sidecar.
@@ -282,8 +305,15 @@ class _FileIndexer:
 
         # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
         # are committed. add_photo was called without the hash, so the hook
-        # there was a no-op — we own firing it here.
-        if file_hash is not None:
+        # there was a no-op — we own firing it here. A sibling earlier in
+        # this scan that deferred its sidecar read suppresses this call too:
+        # firing it would reject the deferred row before its keywords are
+        # available for the winner's metadata merge.
+        if (
+            file_hash is not None
+            and not sidecar_import_deferred
+            and file_hash not in self._deferred_hashes
+        ):
             duplicate_resolution.check_and_resolve_duplicates_for_hash(db, file_hash)
 
         self.tally.report_cataloged(
@@ -365,7 +395,8 @@ class _FileIndexer:
                 extension=item.image_path.suffix.lower(),
                 file_size=item.file_size,
                 file_mtime=item.file_mtime,
-                xmp_mtime=item.xmp_mtime,
+                # A newly inserted row has not imported its sidecar yet.
+                xmp_mtime=None,
                 timestamp=item.meta.timestamp,
                 width=item.meta.width,
                 height=item.meta.height,
@@ -444,7 +475,7 @@ class _FileIndexer:
             # extract_full_metadata is off) — prevents perpetual retry
             updates.append("exif_data=COALESCE(exif_data, ?)")
             update_params.append("{}")
-        if row_already_existed:
+        if row_already_existed and (file_hash is not None or file_size == 0):
             # add_photo is INSERT OR IGNORE, so the fresh stat values it
             # was passed never reach an existing row. Without these the
             # incremental pre-pass keeps comparing against the stale
@@ -456,16 +487,18 @@ class _FileIndexer:
             # such a file's mtime current would make the next incremental
             # scan skip it forever with a stale hash and stale derived
             # caches; leaving the old mtime in place retries it instead.
-            if file_hash is not None or file_size == 0:
-                updates.extend(["file_mtime=?", "file_size=?"])
-                update_params.extend([item.file_mtime, file_size])
-            # xmp_mtime stays unconditional — the sidecar is a separate
-            # file whose keyword import below runs regardless of image
-            # hash success, and it may be None here: writing NULL is
-            # correct (a deleted sidecar otherwise re-trips the "XMP
-            # changed" check on every scan).
-            updates.append("xmp_mtime=?")
-            update_params.append(item.xmp_mtime)
+            updates.extend(["file_mtime=?", "file_size=?"])
+            update_params.extend([item.file_mtime, file_size])
+        if row_already_existed and item.xmp_mtime is None:
+            # A deleted sidecar needs no read to clear its acknowledgement.
+            updates.append("xmp_mtime=NULL")
+        # Publish the hash and pending-read guard together. A later sibling's
+        # group-wide resolver must not reject this row before its keywords land.
+        if item.xmp_mtime is not None:
+            updates.append("xmp_import_pending=1")
+        elif row_already_existed:
+            updates.append("xmp_import_pending=0")
+        # catalog_file acknowledges XMP only after its keyword read succeeds.
         if updates:
             self.db.scanning.update_photo(photo_id, updates, update_params)
             if (

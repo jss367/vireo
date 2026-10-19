@@ -241,7 +241,7 @@ async function applyRejections() {
       if (!deferredSet.has(h)) resolvedHashes.add(h);
     });
     var deferredToast = deferred.length > 0
-      ? ' (' + deferred.length + ' deferred — volume offline)'
+      ? ' (' + deferred.length + ' deferred — source access or metadata not ready)'
       : '';
     var toastKind = deferred.length > 0 && n === 0 ? 'info' : 'success';
     showToast(
@@ -250,7 +250,7 @@ async function applyRejections() {
     );
     _duplicateApplyMessage = deferred.length
       ? deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
-        ' deferred (reconnect the volume and try again)'
+        ' deferred (restore source access, rescan, and try again)'
       : '';
     pruneResolvedHashesFromScan(resolvedHashes);
     if (_scanInProgress) return;

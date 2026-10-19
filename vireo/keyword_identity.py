@@ -12,8 +12,7 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from xmp import (
     _parse_location_keywords_owned,
     location_keyword_entries,
-    read_vireo_location_keywords,
-    read_vireo_location_keywords_owned,
+    read_keyword_snapshot,
 )
 
 
@@ -191,7 +190,8 @@ def filter_removed_import_aliases(db, photo_id, flat_keywords, hierarchical_keyw
 
 
 def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
-                                       flat_keywords, hierarchical_keywords):
+                                       flat_keywords, hierarchical_keywords, *,
+                                       location_metadata=None):
     """Filter out location keywords Vireo wrote that the DB has since changed.
 
     Location keywords are the one kind Vireo owns end to end: the user assigns
@@ -205,16 +205,25 @@ def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
     dropped, and only when the ownership companion says Vireo actually
     inserted them -- a matching keyword the user typed in Lightroom is not
     Vireo's to drop and is imported exactly as before. Returns
-    ``(flat_set, hierarchical_list)``.
+    ``(flat_set, hierarchical_list)``. Callers that read keyword lists pass
+    their snapshot's ``(location_marker, owned_marker)`` as location_metadata
+    so a later read cannot mistake missing ownership for a legacy write.
+    Without a supplied snapshot, an unreadable sidecar raises OSError.
     """
     flat, hierarchical = set(flat_keywords), list(hierarchical_keywords)
     if not db.locations.has_pending_change(photo_id):
         return flat, hierarchical
-    leaf, path = location_keyword_entries(read_vireo_location_keywords(xmp_path))
+    if location_metadata is None:
+        snapshot = read_keyword_snapshot(xmp_path)
+        if snapshot is None:
+            raise OSError(f"Cannot read location keyword ownership from {xmp_path}")
+        location_metadata = snapshot[2:]
+    marker, owned_marker = location_metadata
+    leaf, path = location_keyword_entries(marker)
     if not path:
         return flat, hierarchical
     owns_flat, owns_hier = _parse_location_keywords_owned(
-        read_vireo_location_keywords_owned(xmp_path),
+        owned_marker,
     )
 
     leaf_key = keyword_match_key(leaf) if owns_flat else None
