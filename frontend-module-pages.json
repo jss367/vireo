@@ -51,6 +51,18 @@
       "_vireoShortcuts"
     ]
   },
+  "card-cleanup": {
+    "route": "/card-cleanup",
+    "template": "card_cleanup.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
+  "dashboard": {
+    "route": "/dashboard",
+    "template": "stats.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "highlights": {
     "route": "/highlights",
     "template": "highlights.html",

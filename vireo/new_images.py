@@ -780,7 +780,7 @@ def _root_walk_worker(state, walk, known, local_seen, progress, listing_pass,
             state["offline"] = exc
         except _WalkAbandoned:
             pass
-        except Exception as exc:  # surfaced to the caller below
+        except Exception as exc:  # broad: surfaced to the caller below as the root's error
             state["offline"] = exc
 
     return worker
@@ -826,7 +826,7 @@ def _walk_root_bounded(walk, known, seen_new_paths, progress, stall_timeout, *,
         _STALLED_WALKS[root_path] = thread
         try:
             thread.start()
-        except Exception:
+        except Exception:  # broad: unregister the stalled walk on any start failure, then re-raise
             if _STALLED_WALKS.get(root_path) is thread:
                 del _STALLED_WALKS[root_path]
                 _STALLED_WALK_PATHS.discard(root_path)
@@ -1135,7 +1135,7 @@ class NewImagesCache:
         if on_spawn is not None:
             try:
                 progress_cb = on_spawn(event)
-            except Exception:
+            except Exception:  # broad: a caller's callback must not stop the compute
                 log.exception(
                     "new-images on_spawn callback raised; continuing without it"
                 )
@@ -1243,7 +1243,7 @@ class NewImagesCache:
             with self._lock:
                 if self._generations.get(key, 0) == generation:
                     self._errors.pop(key, None)
-        except Exception as e:
+        except Exception as e:  # broad: background compute boundary; the error is stored and shown to the next request
             log.exception(
                 "new-images background compute failed for %s ws=%s",
                 db_path, workspace_id,

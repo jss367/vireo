@@ -283,7 +283,7 @@ def _hash_dest_file(path: str, cancel_check: StopCheck, *,
                         break
                     h.update(chunk)
             result["hash"] = h.hexdigest()
-        except BaseException as exc:  # surfaced on the caller's thread
+        except BaseException as exc:  # broad: handed to the caller's thread, which re-raises it
             result["exc"] = exc
         finally:
             done.set()

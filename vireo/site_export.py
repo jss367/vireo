@@ -226,7 +226,7 @@ def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
                     record["image"] = path
                     images[pid] = path
                     exported += 1
-                except Exception as exc:
+                except Exception as exc:  # broad: per-photo boundary; the failure is listed in the export's errors
                     log.warning("Site export failed for photo %s", pid, exc_info=True)
                     (output / path).unlink(missing_ok=True)
                     record["error"] = str(exc)

@@ -18,12 +18,8 @@ STATIC = Path(__file__).resolve().parents[1] / "static"
 # may have none. Lower an entry (or delete it at zero) when you move a page's
 # script out; never raise one: put new page code in vireo/static/ instead.
 INLINE_SCRIPT_LINE_LIMITS = {
-    "_sync_panel.html": 876,
-    "card_cleanup.html": 915,
     "cull.html": 780,
     "duplicates.html": 820,
-    "id_conflicts.html": 968,
-    "stats.html": 992,
     "storage.html": 867,
 }
 
@@ -82,6 +78,7 @@ SPLIT_PAGES = {
     "/review": "review",
     "/move": "move",
     "/keywords": "keywords",
+    "/id-conflicts": "id-conflicts",
 }
 
 
