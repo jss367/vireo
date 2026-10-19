@@ -2947,6 +2947,60 @@ def test_move_photos_original_left_behind_names_kept_companions(move_env, monkey
     assert "bird1.xmp" in error
 
 
+def test_move_photos_original_left_behind_still_names_companions_when_stat_fails(
+    move_env, monkeypatch,
+):
+    """When the source directory or mount is inaccessible, ``os.path.isfile``
+    on a companion silently returns False even though the companion is still
+    there (we never attempted to delete it on this branch). The error must
+    still name the companion as left with the original — otherwise it falsely
+    implies only the original remains.
+    """
+    import move as move_mod
+
+    env = move_env
+    original_remove = move_mod.photos.os.remove
+    original_isfile = move_mod.photos.os.path.isfile
+    locked = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+    xmp_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.xmp")))
+    # The simulated mount outage only takes effect once the original's
+    # delete has been attempted — before that, discovery and copy must see
+    # the real filesystem so the companion makes it into ``item.companions``.
+    mount_inaccessible = {"flag": False}
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == locked:
+            mount_inaccessible["flag"] = True
+            raise PermissionError("source mount inaccessible")
+        return original_remove(path)
+
+    def stat_failing_isfile(path):
+        # Simulate the stat-failure-swallowed-as-False behaviour of
+        # ``os.path.isfile`` on an inaccessible mount. The companion is
+        # physically still there — we just copied from it moments ago.
+        if (mount_inaccessible["flag"]
+                and os.path.normcase(os.path.normpath(path)) == xmp_src):
+            return False
+        return original_isfile(path)
+
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
+    monkeypatch.setattr(move_mod.photos.os.path, "isfile", stat_failing_isfile)
+
+    result = move_mod.move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird1.xmp").exists()
+    assert len(result["errors"]) == 1
+    error = result["errors"][0]
+    assert "original" in error and "source mount inaccessible" in error
+    # The companion must still be reported as left with the original even
+    # when isfile() silently returned False for it.
+    assert "bird1.xmp" in error
+
+
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """A post-commit os.remove failure must not roll back the catalog and
     must not abort remaining photos in the batch.

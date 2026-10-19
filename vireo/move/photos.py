@@ -767,11 +767,15 @@ class _PhotoFileTransfer:
         except OSError as exc:
             log.warning("Post-commit cleanup of %s failed: %s",
                         item.src_file, exc)
-            kept = [comp for comp in companions
-                    if os.path.isfile(os.path.join(src_dir, comp))]
+            # No companion was attempted on this branch, so every one in
+            # ``companions`` is still beside the original. Report them
+            # directly rather than probing with ``isfile``: when the source
+            # directory or mount is inaccessible (a likely reason the
+            # original delete failed), ``isfile`` silently returns False
+            # for files that are actually still there.
             with_companions = (
-                f"; its companions were left with it: {', '.join(kept)}"
-                if kept else ""
+                f"; its companions were left with it: {', '.join(companions)}"
+                if companions else ""
             )
             self.errors.append(
                 f"{filename}: moved to {self.destination}, but the original "
