@@ -151,6 +151,76 @@ def test_read_hierarchical_keywords_missing_file(missing_xmp):
     assert result == []
 
 
+# ── Readers never raise on a sidecar they cannot read ──────────────────
+
+
+def _unreadable_sidecar(tmp_path):
+    """A sidecar path that exists but cannot be opened as a file.
+
+    A directory at the sidecar's path makes ``open`` fail with an
+    ``OSError`` other than ``FileNotFoundError`` (``IsADirectoryError`` on
+    POSIX, ``PermissionError`` on Windows) on every platform and for every
+    user, root included, which a ``chmod 000`` file does not.
+    """
+    path = tmp_path / "photo.xmp"
+    path.mkdir()
+    return str(path)
+
+
+def test_readers_return_empty_for_a_sidecar_they_cannot_open(tmp_path, caplog):
+    """An unreadable sidecar reads as empty, like a missing or corrupt one."""
+    from xmp import (
+        read_hierarchical_keywords,
+        read_keywords,
+        read_vireo_location_keywords,
+        read_vireo_location_keywords_owned,
+    )
+
+    path = _unreadable_sidecar(tmp_path)
+    with caplog.at_level("WARNING", logger="xmp"):
+        assert read_keywords(path) == set()
+        assert read_hierarchical_keywords(path) == []
+        assert read_vireo_location_keywords(path) is None
+        assert read_vireo_location_keywords_owned(path) is None
+    # Each failed read says why, rather than passing for an empty sidecar.
+    assert sum("Unreadable XMP file" in r.getMessage() for r in caplog.records) == 4
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="POSIX permission bits do not stop root or apply on Windows",
+)
+def test_readers_return_empty_for_a_sidecar_without_read_permission(sample_xmp):
+    """A permission error reading the sidecar is not raised to the caller."""
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    os.chmod(sample_xmp, 0)
+    try:
+        assert read_keywords(sample_xmp) == set()
+        assert read_hierarchical_keywords(sample_xmp) == []
+    finally:
+        os.chmod(sample_xmp, 0o644)
+
+
+def test_readers_treat_a_sidecar_that_vanishes_before_the_read_as_missing(
+    tmp_path, monkeypatch,
+):
+    """A sidecar deleted between an existence check and the read is missing.
+
+    Simulates the race by reporting every path as existing: a reader that
+    checks first and then opens would see the file and then fail to open it.
+    """
+    from pathlib import Path
+
+    from xmp import read_hierarchical_keywords, read_keywords
+
+    monkeypatch.setattr(Path, "exists", lambda self, **kwargs: True)
+    monkeypatch.setattr(os.path, "exists", lambda path: True)
+    gone = str(tmp_path / "gone.xmp")
+    assert read_keywords(gone) == set()
+    assert read_hierarchical_keywords(gone) == []
+
+
 # ── write_sidecar ───────────────────────────────────────────────────────
 
 def test_write_sidecar_new_file(tmp_path):

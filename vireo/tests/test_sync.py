@@ -488,6 +488,38 @@ def test_sync_from_xmp_updates_db(tmp_path):
     assert 'Sparrow' not in kw_names
 
 
+@pytest.mark.parametrize("damage", ["unreadable", "corrupt"])
+def test_sync_from_xmp_keeps_keywords_when_the_sidecar_cannot_be_read(
+    tmp_path, damage,
+):
+    """A sidecar Vireo cannot read says nothing about the photo's keywords.
+
+    Reconciling treats a keyword the sidecar lacks as removed in
+    Lightroom, so reading an unreadable or corrupt sidecar as empty would
+    untag every keyword the photo has. The photo is skipped instead.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"Sparrow"})
+    db.tag_photo(pid, db.add_keyword("Sparrow"))
+
+    os.remove(xmp_path)
+    if damage == "unreadable":
+        # Exists, but cannot be opened as a file on any platform.
+        os.mkdir(xmp_path)
+    else:
+        with open(xmp_path, "w", encoding="utf-8") as f:
+            f.write("<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF")
+
+    sync_from_xmp(db, [pid])
+
+    assert {k["name"] for k in db.keywords.get_for_photo(pid)} == {"Sparrow"}
+    assert db.in_transaction is False
+
+
 def test_sync_from_xmp_locks_before_reading_sidecar(tmp_path, monkeypatch):
     """Reconciliation must hold the writer lock through its XMP read."""
     import sync
@@ -500,14 +532,14 @@ def test_sync_from_xmp_locks_before_reading_sidecar(tmp_path, monkeypatch):
         tmp_path, db, keywords={"Wildlife"},
     )
 
-    original_read_keywords = sync.read_keywords
+    original_read_keyword_lists = sync.read_keyword_lists
     observed_transactions = []
 
-    def read_keywords_under_lock(path):
+    def read_keyword_lists_under_lock(path):
         observed_transactions.append(db.conn.in_transaction)
-        return original_read_keywords(path)
+        return original_read_keyword_lists(path)
 
-    monkeypatch.setattr(sync, "read_keywords", read_keywords_under_lock)
+    monkeypatch.setattr(sync, "read_keyword_lists", read_keyword_lists_under_lock)
 
     sync.sync_from_xmp(db, [pid])
 
