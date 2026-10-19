@@ -804,6 +804,16 @@ class MovesMergeRepository:
         Windows catalog (``C:\\Photos\\Birds\\Day 1``) matches too, and a
         literal prefix, so ``_`` and ``%`` in ``base`` are not wildcards.
         ``relative`` is the path below ``base``, ``/``-separated.
+
+        The SQL ``REPLACE`` fold is only a prefilter: a literal
+        ``base + separator`` containment check in Python then rejects any
+        row whose stored path is not actually under ``base``. ``\\`` is a
+        legal filename character on POSIX, so a POSIX base (one that
+        starts with ``/``) treats only ``/`` as a separator — otherwise a
+        base like ``/archive/a\\b`` would wrongly match the unrelated
+        subtree ``/archive/a/b/...``, and the base's own siblings whose
+        names begin with its stem plus ``\\`` would be read as its
+        children.
         """
         prefix = self._subtree_prefix(base)
         rows = self.conn.execute(
@@ -811,8 +821,14 @@ class MovesMergeRepository:
             "WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?",
             (len(prefix), prefix),
         ).fetchall()
+        stem = base.rstrip("/\\")
+        if base.startswith("/"):
+            valid_prefixes = (stem + "/",)
+        else:
+            valid_prefixes = (stem + "\\", stem + "/")
         return [(row["path"], self._subtree_relative(row["path"], base))
-                for row in rows]
+                for row in rows
+                if row["path"].startswith(valid_prefixes)]
 
     def date_move_subtree_photos(self, folder_id, descendant_predicate,
                                  descendant_params, sql_functions=()):

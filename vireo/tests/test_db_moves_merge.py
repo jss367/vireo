@@ -1485,6 +1485,21 @@ def test_folder_paths_below_matches_windows_separators(db):
     ]
 
 
+def test_folder_paths_below_does_not_fold_posix_backslashes(db):
+    """``\\`` is a legal POSIX filename character, so a base like
+    ``/lib/a\\b`` must not match the unrelated subtree ``/lib/a/b/...``.
+    """
+    _folder(db, "/lib/a\\b", root=True)
+    a = _folder(db, "/lib/a", root=True)
+    b = _folder(db, "/lib/a/b", a)
+    _folder(db, "/lib/a/b/c", b)
+    assert db.moves_merge.folder_paths_below("/lib/a\\b") == []
+    assert sorted(db.moves_merge.folder_paths_below("/lib/a")) == [
+        ("/lib/a/b", "b"),
+        ("/lib/a/b/c", "b/c"),
+    ]
+
+
 def test_folders_except_is_an_unfetched_cursor(db):
     _folder(db, "/x", root=True)
     rows = db.moves_merge.folders_except(-1)
