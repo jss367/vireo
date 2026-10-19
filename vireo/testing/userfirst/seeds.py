@@ -7,13 +7,13 @@ realistic data visible in the UI.
 import os
 import sys
 
-from services import photo_ingest
-
 # The Database class lives in vireo/ and expects ``from db import Database``.
 # Mirror conftest.py's approach: ensure vireo/ is on sys.path.
 _VIREO_DIR = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 if _VIREO_DIR not in sys.path:
     sys.path.insert(0, _VIREO_DIR)
+
+from services import photo_ingest  # noqa: E402
 
 
 def _make_thumb(thumb_dir, photo_id):

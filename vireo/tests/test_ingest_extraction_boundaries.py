@@ -128,3 +128,34 @@ def test_no_removed_database_method_callers_remain():
                     assert isinstance(node.func.value, ast.Name) and node.func.value.id in {
                         "photo_ingest", "duplicate_resolution",
                     }, f"{path.relative_to(ROOT)}:{node.lineno}: {ast.unparse(node.func)}"
+
+
+def test_userfirst_seed_prefix_bootstraps_before_ingest_import():
+    import posixpath
+
+    fake_sys = SimpleNamespace(path=[])
+    ingest = object()
+    imports = []
+    filename = "/invented/checkout/vireo/testing/userfirst/seeds.py"
+    expected = posixpath.join(posixpath.dirname(filename), "..", "..")
+
+    def inert_import(name, *args, **kwargs):
+        imports.append(name)
+        if name == "os":
+            return SimpleNamespace(path=posixpath, pardir="..")
+        if name == "sys":
+            return fake_sys
+        assert name == "services", "Seed prefix unexpectedly imported a runtime dependency"
+        if expected not in fake_sys.path:
+            raise ModuleNotFoundError("services unavailable before seed path bootstrap")
+        return SimpleNamespace(photo_ingest=ingest)
+
+    tree = ast.parse((ROOT / "vireo/testing/userfirst/seeds.py").read_text(encoding="utf-8"))
+    for initial in ([], [expected]):
+        fake_sys.path[:] = initial
+        imports.clear()
+        ns = {"__file__": filename, "__builtins__": {**vars(builtins), "__import__": inert_import}}
+        exec(compile(ast.Module(body=_module_prefix(tree), type_ignores=[]), "<inert seed prefix>", "exec"), ns)
+        assert ns["photo_ingest"] is ingest
+        assert fake_sys.path == [expected]
+        assert imports == ["os", "sys", "services"]
