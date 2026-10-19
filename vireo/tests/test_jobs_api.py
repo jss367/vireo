@@ -11,6 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
+from services import subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2817,8 +2818,8 @@ def test_extract_masks_route_writes_photo_masks_row(
         (10, 20, 100, 200),
         quality=MaskQuality(noise_estimate=999),
     )
-    db.set_active_mask_variant(pid, "sam2-large")
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-large")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     restored = db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
     for field, value in expected_quality.items():
         assert restored[field] == value
@@ -2961,7 +2962,7 @@ def test_extract_masks_route_skips_sam_when_cached(
     # and counts the photo as masked without re-running SAM.
     if raw_cached:
         db.conn.execute("UPDATE photo_masks SET quality_input_recipe='raw', noise_estimate=999 WHERE photo_id=?", (pid,))
-        db.set_active_mask_variant(pid, "sam2-small")
+        subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     calls.clear()
     resp2 = client.post(
         "/api/jobs/extract-masks", json={"collection_id": col_id},

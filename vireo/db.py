@@ -3842,10 +3842,12 @@ class Database:
         reads and writes work in any workspace. Do not hold the returned
         repository across ``set_active_workspace``.
 
-        Work that reads the workspace config or the photo scope first stays
-        on ``Database`` (``set_active_mask_variant``, ``delete_stale_masks``,
-        ``sam_variant_rerun_warning``, ``get_photos_missing_masks``,
-        ``list_photos_for_eye_keypoint_stage``, ``upsert_photo_embedding``).
+        Work that reads the workspace config or the photo scope first lives
+        in ``services/subject_masks.py`` (``set_active_mask_variant``,
+        ``delete_stale_masks``, ``sam_variant_rerun_warning``,
+        ``get_photos_missing_masks``, ``list_photos_for_eye_keypoint_stage``);
+        ``upsert_photo_embedding`` stays on ``Database`` behind its workspace
+        guard.
         """
         return self._masks_features_repository()
 
@@ -3891,25 +3893,6 @@ class Database:
         hold the returned repository across a connection swap.
         """
         return self._culling_repository()
-
-    def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
-        """Mark `variant` as active for `photo_id` and denormalize its
-        fields into the photos row (mask_path + per-mask features) so
-        downstream readers (scoring, pipeline) see the active mask.
-
-        ``_commit=False`` lets bulk callers (e.g. the
-        ``/api/pipeline/active-mask-variant`` endpoint) batch many
-        per-photo updates into a single commit, instead of paying a WAL
-        fsync per photo. Bulk callers MUST call ``commit_with_retry``
-        themselves once the loop completes.
-        """
-        import config as cfg
-        effective = self.get_effective_config(cfg.load())
-        min_conf = effective.get("detector_confidence", 0.2)
-        self._masks_features_repository().set_active_variant(
-            photo_id, variant, min_conf, _commit,
-            weak_rescue_min_conf=weak_rescue_min_conf,
-        )
 
     def _masks_dir_real(self):
         """Realpath of the masks directory, used as the containment root
@@ -3958,132 +3941,6 @@ class Database:
                 os.remove(abs_path)
         except OSError:
             log.warning("Failed to remove mask file %s", abs_path)
-
-    def delete_stale_masks(self, detector_confidence=None):
-        """Remove rows + files for masks whose prompt no longer matches
-        the current primary detection. Skips active variants (caller can
-        re-run them through the pipeline instead of dropping the
-        currently-displayed mask).
-
-        ``detector_confidence`` is forwarded to ``find_stale`` so the
-        deletion set matches the count the storage card shows.
-        """
-        repo = self._masks_features_repository()
-        stale = repo.find_stale(detector_confidence=detector_confidence)
-        return repo.delete_stale(stale)
-
-    def sam_variant_rerun_warning(
-        self,
-        sam2_variant,
-        photo_ids=None,
-        min_conf=None,
-        selected_max_ratio=0.25,
-        alternate_min_ratio=0.80,
-    ):
-        """Warn when selected SAM coverage is poor but another variant is high.
-
-        The target set matches the extract-masks stage's existing-photo
-        eligibility: active-workspace photos in scope with at least one real
-        detection above the workspace detector-confidence floor. This keeps a
-        workspace-level SAM configuration from looking empty just because a
-        different variant already produced masks for those same target photos.
-        """
-        if not sam2_variant or sam2_variant == "unknown":
-            return None
-        if min_conf is None:
-            import config as cfg
-            min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
-            )
-
-        # Resolve the workspace before staging the photo scope, as the
-        # eagerly scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        scope_sql, scope_params = self.stats.scope_clause(photo_ids)
-        return repo.sam_variant_rerun_warning(
-            sam2_variant, min_conf, scope_sql, scope_params,
-            selected_max_ratio=selected_max_ratio,
-            alternate_min_ratio=alternate_min_ratio,
-        )
-
-    def get_photos_missing_masks(self, folder_ids=None):
-        """Get photos that have detections but no masks yet.
-
-        Returns photos that have at least one detection in the current workspace
-        but no mask_path set. Each row includes the selected primary
-        detection box.
-
-        Args:
-            folder_ids: optional list of folder IDs to filter by.
-                        If None, returns all workspace photos without masks.
-        Returns:
-            list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
-        """
-        import config as cfg
-        # Resolve the workspace before reading the config, as the eagerly
-        # scoped repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        return repo.photos_missing_masks(folder_ids, min_conf)
-
-    def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
-        """Return photos eligible for the eye-focus keypoint stage.
-
-        Eligibility:
-          * photo is in the active workspace (via workspace_folders)
-          * mask_path is set (SAM2 produced a subject mask)
-          * has at least one non-synthetic detection (excludes full-image
-            rows that exist only to anchor predictions)
-          * has at least one prediction on that detection
-          * has not been attempted with the current keypoint model fingerprint
-            yet. The stage stamps eye_kp_fingerprint even when no trustworthy
-            eye is found, so no-eye photos do not rerun forever.
-          * (optional) photo.id is in ``photo_ids`` when provided — lets the
-            caller scope the stage to a collection so a pipeline run doesn't
-            touch unrelated photos elsewhere in the workspace
-
-        Returns one row per photo. Only the effective primary detection
-        can supply eye predictions, resolved with the same
-        threshold-aware ordering (``subjects.primary_order_sql``) that
-        mask extraction and ``set_active_mask_variant`` use: user
-        override in ``photo_subject_choices`` → subject-analysis quality
-        score → detector confidence. Anchoring on the current floor
-        (not the cached ``photo_subject_state``) means a workspace
-        raising ``detector_confidence`` above the previously stored
-        subject still surfaces the new primary for the eye stage.
-        Within the chosen detection, predictions carrying routable
-        taxonomy info (``taxonomy_class`` or ``scientific_name`` set)
-        rank ahead of predictions missing both, so a top-confidence but
-        taxonomy-less prediction never masks a routable one that
-        ``_resolve_keypoint_model`` could actually run. Each row is a
-        dict with the fields the eye stage needs to run without further
-        DB calls: id, folder_id, filename, width, height, mask_path,
-        box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
-        scientific_name, species.
-        """
-        import config as cfg
-        from pipeline import EYE_KP_FINGERPRINT_VERSION
-        # Resolve the workspace before reading the config or staging the
-        # photo scope (an empty scope returns early), as the eagerly scoped
-        # repository did.
-        self._ws_id()
-        repo = self._masks_features_repository()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        if photo_ids is not None:
-            photo_ids = list(photo_ids)
-            if not photo_ids:
-                return []
-        extra_where, scope_params = self.stats.scope_clause(photo_ids)
-        return repo.list_photos_for_eye_keypoint_stage(
-            min_conf, extra_where, scope_params,
-            eye_kp_fingerprint_version=EYE_KP_FINGERPRINT_VERSION,
-        )
 
     # -- Keywords --
 

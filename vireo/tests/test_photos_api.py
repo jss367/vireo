@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import stage_counts
+from services import stage_counts, subject_masks
 from testing.waits import synchronization_timeout
 
 
@@ -11245,7 +11245,7 @@ def test_api_photo_masks_lists_variants_and_active(app_and_db):
 
     _seed_mask(db, masks_dir, pid, "sam2-small")
     _seed_mask(db, masks_dir, pid, "sam2-large")
-    db.set_active_mask_variant(pid, "sam2-large")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-large")
 
     client = app.test_client()
     resp = client.get(f"/api/photos/{pid}/masks")
@@ -11380,7 +11380,7 @@ def test_legacy_serve_mask_falls_back_to_active_variant(app_and_db):
     pid = db.photos.list_page()[0]["id"]
     masks_dir = _os.path.join(_os.path.dirname(db._db_path), "masks")
     _seed_mask(db, masks_dir, pid, "sam2-small", body=b"ACTIVEPNG")
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     # No literal `{pid}.png` on disk.
     assert not _os.path.exists(_os.path.join(masks_dir, f"{pid}.png"))
 
@@ -11403,7 +11403,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
     old_path = _seed_mask(
         db, masks_dir, pid, "sam2-small", body=b"PREDECESSOR",
     )
-    db.set_active_mask_variant(pid, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small")
     new_path = _os.path.join(masks_dir, f"{pid}.sam2-small.next.png")
     with open(new_path, "wb") as handle:
         handle.write(b"CURRENT")
@@ -11749,7 +11749,7 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
         "megadetector-v6",
         (0.0, 0.0, 0.5, 1.0),
     )
-    db.set_active_mask_variant(photo_id, "sam2-small")
+    subject_masks.set_active_mask_variant(db, photo_id, "sam2-small")
     return path
 
 
@@ -12296,7 +12296,7 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
         "megadetector-v6",
         (0.0, 0.0, 1.0, 0.5),
     )
-    db.set_active_mask_variant(pid2, "sam2-small")
+    subject_masks.set_active_mask_variant(db, pid2, "sam2-small")
 
     source_mask = client.post(
         f"/api/photos/{photo_id}/local-mask/snapshot"
