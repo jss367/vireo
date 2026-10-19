@@ -752,6 +752,87 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         for error in result.get("errors") or []:
             event(f"move_photos error: {_error_kind(error)}")
 
+    def _visible_paired_photo_ids(self):
+        visible = set(self._visible_photo_ids())
+        return [
+            r[0] for r in self.db.conn.execute(
+                "SELECT id FROM photos WHERE companion_path IS NOT NULL ORDER BY id"
+            ) if r[0] in visible
+        ]
+
+    @precondition(lambda self: self._visible_paired_photo_ids())
+    @rule(data=st.data(), cleanup_fails=st.booleans())
+    def move_photos_when_a_companion_copy_fails(self, data, cleanup_fails):
+        """Move Photos where a RAW's companion JPEG fails to copy (the share
+        drops mid-photo), and removing the photo's partial copy from the
+        destination can fail too (Windows antivirus holding the new file).
+
+        The photo stays at its source with its catalog row, the rest of the
+        batch still moves, and every failure is reported.
+        """
+        import move
+
+        paired = data.draw(st.sampled_from(self._visible_paired_photo_ids()))
+        others = data.draw(st.lists(st.sampled_from(self._visible_photo_ids()),
+                                    max_size=2, unique=True))
+        chosen = [paired] + [pid for pid in others if pid != paired]
+        dest = data.draw(st.sampled_from([
+            os.path.join(self.moved, "picked"),
+            os.path.join(self.library, "picked"),
+        ]))
+        os.makedirs(dest, exist_ok=True)
+        before_folder, before_path = self.db.conn.execute(
+            "SELECT f.id, f.path FROM photos p JOIN folders f ON f.id = p.folder_id "
+            "WHERE p.id = ?", (paired,),
+        ).fetchone()
+        already_there = os.path.normcase(before_path) == os.path.normcase(dest)
+        companions = {
+            os.path.normcase(p) for p in self._paired_companion_paths()
+        }
+        failing_names = {
+            r[0] for r in self.db.conn.execute(
+                "SELECT filename FROM photos WHERE companion_path IS NOT NULL"
+            )
+        }
+        real_copy = move.photos._copy_and_verify
+        real_remove = os.remove
+
+        def copy_and_verify(src, dst):
+            if os.path.normcase(src) in companions:
+                raise OSError("simulated: share dropped mid-copy")
+            return real_copy(src, dst)
+
+        def remove(path, *args, **kwargs):
+            if cleanup_fails and \
+                    os.path.normcase(os.path.dirname(path)) == os.path.normcase(dest) and \
+                    os.path.basename(path) in failing_names:
+                raise PermissionError("simulated: destination copy is locked")
+            return real_remove(path, *args, **kwargs)
+
+        move.photos._copy_and_verify = copy_and_verify
+        os.remove = remove
+        try:
+            result = move.move_photos(self.db, chosen, dest)
+        finally:
+            move.photos._copy_and_verify = real_copy
+            os.remove = real_remove
+        errors = result.get("errors") or []
+        # A companion that cannot be copied means the photo never moves, and
+        # the reason reaches the user (unless it already sat in ``dest``).
+        row = self.db.conn.execute(
+            "SELECT p.filename, p.companion_path, p.folder_id FROM photos p "
+            "WHERE p.id = ?", (paired,),
+        ).fetchone()
+        assert row["folder_id"] == before_folder, (
+            f"photo {paired} moved although its companion never copied"
+        )
+        if not already_there:
+            assert any(row["filename"] in e or row["companion_path"] in e
+                       for e in errors), errors
+        if cleanup_fails and any("partial copy could not be removed" in e for e in errors):
+            event("move_photos: partial copy left at destination")
+        event(f"move_photos with failing companion: moved={result.get('moved')}")
+
     @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
     def move_a_folder(self, data):
