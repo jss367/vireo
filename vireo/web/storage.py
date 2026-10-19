@@ -18,7 +18,7 @@ import sys
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
-from services import subject_masks
+from services import subject_masks, workspace_config
 from web.background_jobs import make_background_job
 from working_copy_cache import working_copy_stats
 
@@ -133,8 +133,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
 
         # This is a global view, so use the most permissive confidence floor
         # across workspaces. The stale set must not change with active workspace.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
+        min_detector_conf = workspace_config.min_detector_confidence_across_workspaces(
+            db, cfg.load()
         )
         variants = db.masks_features.variants_summary()
         stale = db.masks_features.find_stale(detector_confidence=min_detector_conf)
@@ -405,8 +405,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         # delete in sync and prevents deleting masks that another
         # workspace's lower detector_confidence would still consider
         # fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
+        min_detector_conf = workspace_config.min_detector_confidence_across_workspaces(
+            db, cfg.load()
         )
         n = subject_masks.delete_stale_masks(db, detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)

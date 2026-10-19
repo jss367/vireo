@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from services import dashboard_stats, photo_ingest
+from services import dashboard_stats, photo_ingest, workspace_config
 
 
 def test_database_creates_tables(db):
@@ -915,7 +915,7 @@ def test_get_workspace_active_labels_default_empty(db):
     """Workspace with no active_labels in config_overrides returns None."""
     ws = db.create_workspace("Fresh")
     db.set_active_workspace(ws)
-    assert db.get_workspace_active_labels() is None
+    assert workspace_config.get_workspace_active_labels(db) is None
 
 
 def test_set_and_get_workspace_active_labels(db):
@@ -923,16 +923,16 @@ def test_set_and_get_workspace_active_labels(db):
     ws = db.create_workspace("Labeled")
     db.set_active_workspace(ws)
     paths = ["/home/user/.vireo/labels/ca-birds.txt", "/home/user/.vireo/labels/ca-reptiles.txt"]
-    db.set_workspace_active_labels(paths)
-    assert db.get_workspace_active_labels() == paths
+    workspace_config.set_workspace_active_labels(db, paths)
+    assert workspace_config.get_workspace_active_labels(db) == paths
 
 
 def test_set_workspace_active_labels_preserves_other_overrides(db):
     """Setting active labels doesn't clobber other config_overrides."""
     ws = db.create_workspace("WithConfig", config_overrides={"threshold": 0.5})
     db.set_active_workspace(ws)
-    db.set_workspace_active_labels(["/path/to/labels.txt"])
-    result = db.get_workspace_active_labels()
+    workspace_config.set_workspace_active_labels(db, ["/path/to/labels.txt"])
+    result = workspace_config.get_workspace_active_labels(db)
     assert result == ["/path/to/labels.txt"]
     # Check threshold is still there
     overrides = json.loads(db.workspaces.get(ws)["config_overrides"])
@@ -1977,13 +1977,13 @@ def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")
     db.set_active_workspace(ws)
-    db.set_workspace_active_labels([])  # explicitly no labels
+    workspace_config.set_workspace_active_labels(db, [])  # explicitly no labels
 
-    result = db.get_workspace_active_labels()
+    result = workspace_config.get_workspace_active_labels(db)
     assert result == []  # should be empty list, not None
 
     # Simulate what _load_labels does: ws_labels is not None should be True
-    ws_labels = db.get_workspace_active_labels()
+    ws_labels = workspace_config.get_workspace_active_labels(db)
     assert ws_labels is not None  # must distinguish [] from None
 
 

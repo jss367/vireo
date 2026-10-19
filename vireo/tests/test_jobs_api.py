@@ -11,7 +11,7 @@ from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from repositories.masks_features import MaskQuality
-from services import photo_ingest, subject_masks
+from services import photo_ingest, saved_processes, subject_masks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -10229,11 +10229,11 @@ def test_import_photos_persists_after_import_snapshot(app_and_db, tmp_path):
     config = _job_config(client, resp.get_json()["job_id"])
     snap = config["after_import_snapshot"]
     assert snap is not None
-    # Snapshot mirrors db.resolve_process — a dict of the stage flags at
+    # Snapshot mirrors saved_processes.resolve_process — a dict of the stage flags at
     # enqueue time. The important invariant is that it's persisted and
     # matches the current resolution, so the retry validator has a frozen
     # record to fall back on.
-    assert snap == db.resolve_process(quick_look_id)
+    assert snap == saved_processes.resolve_process(db, quick_look_id)
 
 
 def test_import_photos_retry_reuses_parent_after_import_snapshot(
@@ -10260,8 +10260,8 @@ def test_import_photos_retry_reuses_parent_after_import_snapshot(
         # must not silently pick up. ``skip_classify`` starts True on the
         # Quick look seed, so flipping to False produces a different
         # resolution the frozen snapshot must not equal.
-        db.update_saved_process(quick_look_id, skip_classify=False)
-        current = db.resolve_process(quick_look_id)
+        saved_processes.update_saved_process(db, quick_look_id, skip_classify=False)
+        current = saved_processes.resolve_process(db, quick_look_id)
         assert current != parent_snapshot
 
         resp = client.post("/api/jobs/import-photos", json={
@@ -10278,7 +10278,7 @@ def test_import_photos_retry_reuses_parent_after_import_snapshot(
 def test_import_photos_retry_survives_deleted_process(app_and_db, tmp_path):
     """When the saved process is deleted after a failed run, a retry that
     still points at that id must still start — reusing the parent's frozen
-    snapshot instead of 404ing on ``db.resolve_process``."""
+    snapshot instead of 404ing on ``saved_processes.resolve_process``."""
     from wait import wait_for_job_via_client
 
     app, db = app_and_db
@@ -10293,7 +10293,7 @@ def test_import_photos_retry_survives_deleted_process(app_and_db, tmp_path):
             "after_import_snapshot"]
         assert parent_snapshot is not None
 
-        db.delete_saved_process(quick_look_id)
+        saved_processes.delete_saved_process(db, quick_look_id)
 
         resp = client.post("/api/jobs/import-photos", json={
             "sources": [_import_card(tmp_path)],
@@ -13242,7 +13242,7 @@ def test_chained_process_snapshot_survives_mid_import_edit(
         # closes: the chain hook fires from the import-job thread after
         # ingest, and without the snapshot it would call resolve_process
         # against this mutated row.
-        db.update_saved_process(full_id, skip_regroup=True)
+        saved_processes.update_saved_process(db, full_id, skip_regroup=True)
 
         job = wait_for_job_via_client(client, job_id)
         res = job["result"]

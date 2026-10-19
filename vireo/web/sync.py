@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
 from photo_payload import render_key_for_recipe
+from services import pending_changes
 from web.location_edits import walk_parent_chain
 from xmp import location_keyword_entries, read_sync_preview_metadata
 
@@ -1316,8 +1317,8 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             # between those steps, including across chunks and workspaces.
             db.begin_immediate()
             changes = db.pending_changes.get_by_ids(change_ids)
-            db.clear_pending(
-                change_ids, clear_equivalent_flat_removals=True, _commit=False,
+            pending_changes.clear_pending(
+                db, change_ids, clear_equivalent_flat_removals=True, _commit=False,
             )
             if changes:
                 items = _discard_history_items(changes)

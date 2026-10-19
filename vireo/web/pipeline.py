@@ -33,7 +33,7 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
-from services import detection_store, subject_masks
+from services import detection_store, saved_processes, subject_masks
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -167,7 +167,7 @@ def create_pipeline_blueprint(
                 f"process_id must be an integer, got {kind}", 400
             )
         try:
-            expanded = get_db().resolve_process(pid)
+            expanded = saved_processes.resolve_process(get_db(), pid)
         except ValueError as e:
             return None, json_error(str(e), 404)
         body = {**expanded, **body}
@@ -417,7 +417,7 @@ def create_pipeline_blueprint(
         if err is not None:
             return json_error(err)
         try:
-            existed = db.update_saved_process(process_id, **kwargs)
+            existed = saved_processes.update_saved_process(db, process_id, **kwargs)
         except ValueError as e:
             return json_error(str(e))
         if not existed:
@@ -427,7 +427,7 @@ def create_pipeline_blueprint(
     @blueprint.route("/api/processes/<int:process_id>", methods=["DELETE"])
     def api_delete_process(process_id):
         db = get_db()
-        if not db.delete_saved_process(process_id):
+        if not saved_processes.delete_saved_process(db, process_id):
             return json_error("process not found", 404)
         # Per-workspace default pointers are nulled inside the DB call. Clear
         # the app-wide default too if it pointed here (config-file I/O the DB
@@ -2126,7 +2126,7 @@ class _PipelineLaunch:
                 )
                 return json_error(f"process_id must be an integer, got {kind}")
             try:
-                expanded = self.db.resolve_process(process_id)
+                expanded = saved_processes.resolve_process(self.db, process_id)
             except ValueError as e:
                 return json_error(str(e), 404)
             # Expansion supplies *defaults*; explicitly-present body keys
