@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from services import dashboard_stats
+from services import dashboard_stats, photo_ingest, workspace_config
 
 
 def test_database_creates_tables(db):
@@ -104,7 +104,7 @@ def test_workspace_root_materializes_existing_path_descendants(db):
     root_id = db.add_folder("/photos/usa/2026", name="2026")
     # Historical DBs can have path-descendant folders without parent_id.
     child_id = db.add_folder("/photos/usa/2026/2026-05-01", name="2026-05-01")
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
     db.add_workspace_folder(ws_id, root_id)
@@ -200,8 +200,8 @@ def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db)
         name="2026-05-01",
         parent_id=root_id,
     )
-    db.add_photo(root_id, "root.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_id, "child.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, root_id, "root.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "child.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
     db.add_workspace_folder(ws_id, root_id)
@@ -218,12 +218,12 @@ def test_workspace_folder_roots_report_subtree_photo_counts(db):
     root_id = db.add_folder("/photos/usa", name="usa")
     child_a = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
     child_b = db.add_folder("/photos/usa/2025", name="2025", parent_id=root_id)
-    db.add_photo(child_a, "a1.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_a, "a2.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_b, "b1.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_a, "a1.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_a, "a2.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_b, "b1.jpg", ".jpg", 1000, 1.0)
     # A separate sibling root — its photos must not bleed into usa's count.
     other_root = db.add_folder("/photos/canada", name="canada")
-    db.add_photo(other_root, "c1.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, other_root, "c1.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
     db.add_workspace_folder(ws_id, root_id)
@@ -243,8 +243,8 @@ def test_workspace_root_count_is_scoped_to_its_workspace(db):
     db.set_active_workspace(None)
     root_id = db.add_folder("/photos/usa", name="usa")
     child_id = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
-    db.add_photo(child_id, "a.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_id, "b.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "a.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "b.jpg", ".jpg", 1000, 1.0)
 
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
@@ -268,7 +268,7 @@ def test_workspace_root_materializes_windows_style_descendants(db):
         r"C:\photos\usa\2026\2026-05-01",
         name="2026-05-01",
     )
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
     db.add_workspace_folder(ws_id, root_id)
@@ -289,8 +289,8 @@ def test_workspace_root_materialization_is_case_sensitive(db):
     root_id = db.add_folder("/photos/USA/2026", name="2026")
     child_id = db.add_folder("/photos/USA/2026/2026-05-01", name="2026-05-01")
     other_id = db.add_folder("/photos/usa/2026/2026-05-02", name="2026-05-02")
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(other_id, "wrong-case.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, other_id, "wrong-case.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
     db.add_workspace_folder(ws_id, root_id)
@@ -365,7 +365,7 @@ def test_remove_workspace_root_unlinks_descendants(db):
         name="2026-05-01",
         parent_id=root_id,
     )
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
 
     db.remove_workspace_folder_tree(ws_id, root_id)
 
@@ -396,7 +396,7 @@ def db_with_workspace(db):
     ws_id = db.create_workspace("Test WS")
     folder_id = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws_id, folder_id)
-    photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
     return db, ws_id, folder_id, photo_id
 
@@ -416,7 +416,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     db.set_active_workspace(ws2)
     folder2 = db.add_folder("/photos2", name="photos2")
     db.add_workspace_folder(ws2, folder2)
-    photo2 = db.add_photo(folder2, "bird2.jpg", ".jpg", 1000, 1.0)
+    photo2 = photo_ingest.add_photo(db, folder2, "bird2.jpg", ".jpg", 1000, 1.0)
     det_ids2 = db.detections.save(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
@@ -740,8 +740,8 @@ def test_get_photos_scoped_to_workspace(db):
     f2 = db.add_folder("/photos/usa", name="usa")
     db.add_workspace_folder(ws, f1)
     # f2 NOT linked to workspace
-    db.add_photo(f1, "lion.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(f2, "eagle.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws)
     photos = db.photos.list_page(per_page=100)
     assert len(photos) == 1
@@ -753,8 +753,8 @@ def test_count_photos_scoped_to_workspace(db):
     f1 = db.add_folder("/photos/kenya", name="kenya")
     f2 = db.add_folder("/photos/usa", name="usa")
     db.add_workspace_folder(ws, f1)
-    db.add_photo(f1, "lion.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(f2, "eagle.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws)
     assert db.photos.count() == 1
 
@@ -785,7 +785,7 @@ def test_count_keywords_scoped_by_workspace(db):
     ws_a = db.create_workspace("A")
     fid_a = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws_a, fid_a)
-    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k1 = db.add_keyword("Robin")
     k2 = db.add_keyword("Jay")
@@ -796,7 +796,7 @@ def test_count_keywords_scoped_by_workspace(db):
     ws_b = db.create_workspace("B")
     fid_b = db.add_folder("/photos/b", name="b")
     db.add_workspace_folder(ws_b, fid_b)
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k3)
@@ -821,7 +821,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     ws_a = db.create_workspace("A")
     fid_a = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws_a, fid_a)
-    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k1 = db.add_keyword("Robin")
     db.tag_photo(pid_a, k1)
@@ -829,7 +829,7 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     ws_b = db.create_workspace("B")
     fid_b = db.add_folder("/photos/b", name="b")
     db.add_workspace_folder(ws_b, fid_b)
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k2 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k2)
@@ -852,7 +852,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     ws_a = db.create_workspace("A")
     fid_a = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws_a, fid_a)
-    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k1 = db.add_keyword("Robin")
     k2 = db.add_keyword("Jay")
@@ -862,7 +862,7 @@ def test_keyword_tree_scoped_by_workspace(db):
     ws_b = db.create_workspace("B")
     fid_b = db.add_folder("/photos/b", name="b")
     db.add_workspace_folder(ws_b, fid_b)
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
     db.tag_photo(pid_b, k3)
@@ -897,8 +897,8 @@ def test_get_collection_photos_scoped_to_workspace_folders(db):
     f1 = db.add_folder("/photos/kenya", name="kenya")
     f2 = db.add_folder("/photos/usa", name="usa")
     db.add_workspace_folder(ws, f1)
-    p1 = db.add_photo(f1, "lion.jpg", ".jpg", 1000, 1.0)
-    p2 = db.add_photo(f2, "eagle.jpg", ".jpg", 1000, 1.0)
+    p1 = photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
+    p2 = photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.photo_review.set_rating(p1, 5)
     db.photo_review.set_rating(p2, 5)
     db.set_active_workspace(ws)
@@ -915,7 +915,7 @@ def test_get_workspace_active_labels_default_empty(db):
     """Workspace with no active_labels in config_overrides returns None."""
     ws = db.create_workspace("Fresh")
     db.set_active_workspace(ws)
-    assert db.get_workspace_active_labels() is None
+    assert workspace_config.get_workspace_active_labels(db) is None
 
 
 def test_set_and_get_workspace_active_labels(db):
@@ -923,16 +923,16 @@ def test_set_and_get_workspace_active_labels(db):
     ws = db.create_workspace("Labeled")
     db.set_active_workspace(ws)
     paths = ["/home/user/.vireo/labels/ca-birds.txt", "/home/user/.vireo/labels/ca-reptiles.txt"]
-    db.set_workspace_active_labels(paths)
-    assert db.get_workspace_active_labels() == paths
+    workspace_config.set_workspace_active_labels(db, paths)
+    assert workspace_config.get_workspace_active_labels(db) == paths
 
 
 def test_set_workspace_active_labels_preserves_other_overrides(db):
     """Setting active labels doesn't clobber other config_overrides."""
     ws = db.create_workspace("WithConfig", config_overrides={"threshold": 0.5})
     db.set_active_workspace(ws)
-    db.set_workspace_active_labels(["/path/to/labels.txt"])
-    result = db.get_workspace_active_labels()
+    workspace_config.set_workspace_active_labels(db, ["/path/to/labels.txt"])
+    result = workspace_config.get_workspace_active_labels(db)
     assert result == ["/path/to/labels.txt"]
     # Check threshold is still there
     overrides = json.loads(db.workspaces.get(ws)["config_overrides"])
@@ -944,13 +944,13 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     ws_a = db.create_workspace("A")
     fid_a = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws_a, fid_a)
-    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
     ws_b = db.create_workspace("B")
     fid_b = db.add_folder("/photos/b", name="b")
     db.add_workspace_folder(ws_b, fid_b)
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
     # Create case-variant duplicates via raw SQL (add_keyword dedupes)
@@ -1126,9 +1126,9 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1188,9 +1188,9 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1235,9 +1235,9 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1329,9 +1329,9 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_survivor = db.add_photo(folder_id=fid, filename="s.jpg", extension=".jpg",
+    pid_survivor = photo_ingest.add_photo(db, folder_id=fid, filename="s.jpg", extension=".jpg",
                                 file_size=100, file_mtime=1.0)
-    pid_legacy = db.add_photo(folder_id=fid, filename="l.jpg", extension=".jpg",
+    pid_legacy = photo_ingest.add_photo(db, folder_id=fid, filename="l.jpg", extension=".jpg",
                               file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1442,14 +1442,14 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     ws_a = db.create_workspace("A")
     fid_a = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws_a, fid_a)
-    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     # Workspace B owns a separate folder and has its own legacy keyword row
     # that is NOT part of workspace A's cleanup scope.
     ws_b = db.create_workspace("B")
     fid_b = db.add_folder("/photos/b", name="b")
     db.add_workspace_folder(ws_b, fid_b)
-    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
     # Two normalized-equal legacy rows in workspace A -- cleanup will merge
@@ -1572,9 +1572,9 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1617,9 +1617,9 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos/a", name="a")
     db.add_workspace_folder(ws, fid)
-    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1657,7 +1657,7 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1698,12 +1698,12 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid_species = db.add_photo(
-        folder_id=fid, filename="species.jpg", extension=".jpg",
+    pid_species = photo_ingest.add_photo(
+        db, folder_id=fid, filename="species.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    pid_plain = db.add_photo(
-        folder_id=fid, filename="plain.jpg", extension=".jpg",
+    pid_plain = photo_ingest.add_photo(
+        db, folder_id=fid, filename="plain.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     db.set_active_workspace(ws)
@@ -1744,7 +1744,7 @@ def test_merge_duplicate_keywords_reparents_children(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1789,9 +1789,9 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
-    pid2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1837,7 +1837,7 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1906,9 +1906,9 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     ws = db.create_workspace("A")
     fid = db.add_folder("/photos", name="photos")
     db.add_workspace_folder(ws, fid)
-    pid_general = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid_general = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                                file_size=100, file_mtime=1.0)
-    pid_genre = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid_genre = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
                              file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
 
@@ -1977,13 +1977,13 @@ def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")
     db.set_active_workspace(ws)
-    db.set_workspace_active_labels([])  # explicitly no labels
+    workspace_config.set_workspace_active_labels(db, [])  # explicitly no labels
 
-    result = db.get_workspace_active_labels()
+    result = workspace_config.get_workspace_active_labels(db)
     assert result == []  # should be empty list, not None
 
     # Simulate what _load_labels does: ws_labels is not None should be True
-    ws_labels = db.get_workspace_active_labels()
+    ws_labels = workspace_config.get_workspace_active_labels(db)
     assert ws_labels is not None  # must distinguish [] from None
 
 
@@ -1992,7 +1992,7 @@ def test_keyword_tree_includes_ancestors(db):
     ws = db.create_workspace("Hier")
     fid = db.add_folder("/photos/h", name="h")
     db.add_workspace_folder(ws, fid)
-    pid = db.add_photo(folder_id=fid, filename="h.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="h.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
 
     # Create hierarchy: Birds > Raptors > Red-tailed Hawk
@@ -2119,9 +2119,9 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
     db.add_workspace_folder(ws1, src_folder)
     db.add_workspace_folder(ws2, tgt_folder)
 
-    src_photo = db.add_photo(folder_id=src_folder, filename="src.jpg",
+    src_photo = photo_ingest.add_photo(db, folder_id=src_folder, filename="src.jpg",
                              extension=".jpg", file_size=100, file_mtime=1.0)
-    tgt_photo = db.add_photo(folder_id=tgt_folder, filename="tgt.jpg",
+    tgt_photo = photo_ingest.add_photo(db, folder_id=tgt_folder, filename="tgt.jpg",
                              extension=".jpg", file_size=100, file_mtime=2.0)
 
     db.set_active_workspace(ws1)
@@ -2186,7 +2186,7 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         name="2020",
         parent_id=archive_id,
     )
-    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, old_year_id, "old.jpg", ".jpg", 1000, 1.0)
 
     db.set_active_workspace(ws_id)
     db.add_workspace_folder(ws_id, year_id)
@@ -2217,7 +2217,7 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         parent_id=staged_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    photo_ingest.add_photo(db, staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
     staged_other_year_id = db.add_folder(
         "/staging/job/USA/2027",
         name="2027",
@@ -2230,7 +2230,7 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         parent_id=staged_other_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    photo_ingest.add_photo(db, staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
     db._new_images_cache.set(
         db._db_path,
         ws_id,
@@ -2329,7 +2329,7 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
         parent_id=staged_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    photo_ingest.add_photo(db, staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
 
     db._new_images_cache.set(
         db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
@@ -2371,7 +2371,7 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
         parent_id=staged_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    photo_ingest.add_photo(db, staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
     result = db.merge_staged_tree_into_archive(
         staged_year_id,
@@ -2430,7 +2430,7 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
         name="Trip",
         workspace_root=True,
     )
-    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+    photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
     result = db.merge_staged_tree_into_archive(
         staged_trip_id,
@@ -2518,7 +2518,7 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
         name="Trip",
         workspace_root=True,
     )
-    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+    photo_ingest.add_photo(db, staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
 
     result = db.merge_staged_tree_into_archive(
         staged_trip_id,
@@ -2594,7 +2594,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
         name="2020",
         parent_id=usa_id,
     )
-    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, old_year_id, "old.jpg", ".jpg", 1000, 1.0)
 
     db.set_active_workspace(ws_id)
     db.add_workspace_folder(ws_id, year_id)
@@ -2619,7 +2619,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
         parent_id=staged_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    photo_ingest.add_photo(db, staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
     staged_other_year_id = db.add_folder(
         "/staging/job/USA/2027",
         name="2027",
@@ -2632,7 +2632,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
         parent_id=staged_other_year_id,
         workspace_root=True,
     )
-    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    photo_ingest.add_photo(db, staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
     db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
 

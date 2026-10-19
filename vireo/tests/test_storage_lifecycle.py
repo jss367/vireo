@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
-from services import result_files, retained_cache
+from services import photo_ingest, result_files, retained_cache
 from services.grouping_history import record_grouping_edit
 from wait import wait_for_job_via_client
 
@@ -22,8 +22,8 @@ def _pipeline(path, ids):
 
 def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_path):
     folder = db.add_folder(str(tmp_path / "photos"))
-    photo = db.add_photo(folder, "bird.jpg", ".jpg", 12, 1)
-    keep = db.add_photo(folder, "keep.jpg", ".jpg", 13, 1)
+    photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 12, 1)
+    keep = photo_ingest.add_photo(db, folder, "keep.jpg", ".jpg", 13, 1)
     other = db.create_workspace("Other")
     db.add_workspace_folder(other, folder)
     for ws in (db.active_workspace_id, other):
@@ -44,7 +44,7 @@ def test_photo_delete_updates_every_workspace_and_invalidates_culling(db, tmp_pa
 
 def test_rollback_does_not_prune_shared_results(db, tmp_path):
     folder = db.add_folder(str(tmp_path / "photos"))
-    photo = db.add_photo(folder, "bird.jpg", ".jpg", 12, 1)
+    photo = photo_ingest.add_photo(db, folder, "bird.jpg", ".jpg", 12, 1)
     path = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
     _pipeline(path, [photo])
     original = path.read_bytes()
@@ -258,7 +258,7 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
     source = _payload((root / "offline" if problem == "cache-source" else tmp_path / "photos") / "bird.jpg")
     info = source.stat()
     folder = db.add_folder(str(source.parent))
-    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(root / "originals" / f"{photo}.display.jpg")
@@ -301,7 +301,7 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
     raw = _payload(tmp_path / "photos" / "bird.NEF")
     companion = _payload(raw.parent / "bird.jpg")
     folder = db.add_folder(str(raw.parent))
-    photo = db.add_photo(folder, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime)
+    photo = photo_ingest.add_photo(db, folder, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=?, companion_path=? WHERE id=?", (
         hashlib.sha256(raw.read_bytes()).hexdigest(), companion.name, photo,
     ))
@@ -436,7 +436,7 @@ def test_source_verification_preserves_change_time_with_windows_stat_semantics(d
     source = _payload(tmp_path / "source" / "bird.jpg")
     info = source.stat()
     folder = db.add_folder(str(source.parent))
-    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
@@ -477,7 +477,7 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     source = _payload(tmp_path / "source" / "bird.jpg")
     info = source.stat()
     folder = db.add_folder(str(source.parent))
-    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    photo = photo_ingest.add_photo(db, folder, source.name, ".jpg", info.st_size, info.st_mtime)
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")

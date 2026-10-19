@@ -2,6 +2,8 @@
 
 import logging
 
+from services import workspace_config
+
 log = logging.getLogger(__name__)
 
 
@@ -50,7 +52,7 @@ def classification_readiness(db):
                 load_merged_labels,
             )
 
-            ws_labels = db.get_workspace_active_labels()
+            ws_labels = workspace_config.get_workspace_active_labels(db)
             if ws_labels is not None:
                 saved_by_file = {
                     s["labels_file"]: s for s in get_saved_labels()

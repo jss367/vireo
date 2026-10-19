@@ -27,6 +27,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "vireo"))
+from services import photo_ingest
 
 # Hand-labeled ground truth — overwrite with your fixture's actual eye coord.
 # A ±5-px radius matches the plan's Milestone 11.5 acceptance bar.
@@ -84,8 +85,8 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
     img.save(folder_dir / "mammal.jpg")
     fid = db.add_folder(str(folder_dir), name="photos")
     db.add_workspace_folder(ws_id, fid)
-    pid = db.add_photo(
-        fid, "mammal.jpg", ".jpg", os.path.getsize(_FIXTURE_PATH), 1.0,
+    pid = photo_ingest.add_photo(
+        db, fid, "mammal.jpg", ".jpg", os.path.getsize(_FIXTURE_PATH), 1.0,
         timestamp="2026-04-16T10:00:00",
         width=img.width, height=img.height,
     )

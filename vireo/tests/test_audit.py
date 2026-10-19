@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanOptions
+from services import photo_ingest
 
 
 def test_check_drift_detects_xmp_change(tmp_path):
@@ -278,7 +279,7 @@ def test_remove_orphans(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/gone', name='gone')
-    pid = db.add_photo(folder_id=fid, filename='missing.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
 
     remove_orphans(db, [pid])
@@ -572,8 +573,8 @@ def test_verify_hashes_does_not_baseline_empty_files_back_to_empty_hash(tmp_path
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(root), name="photos")
-    db.add_photo(
-        folder_id=folder_id,
+    photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=empty_path.name,
         extension=empty_path.suffix.lower(),
         file_size=0,
@@ -715,8 +716,8 @@ def test_accept_current_hash_does_not_store_empty_sha_for_zero_byte_file(tmp_pat
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(root), name="photos")
-    pid = db.add_photo(
-        folder_id=folder_id,
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=path.name,
         extension=path.suffix.lower(),
         file_size=path.stat().st_size,
@@ -1016,8 +1017,8 @@ def test_remove_orphans_endpoint_unlinks_cached_thumbnail(
     source_folder = tmp_path / "source"
     source_folder.mkdir()
     fid = db.add_folder(str(source_folder), name="source")
-    pid = db.add_photo(
-        folder_id=fid, filename="missing.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="missing.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
     # Stage the cached thumbnail that will become orphaned by the

@@ -7,8 +7,8 @@ repository takes no workspace id. ``delete`` also clears any workspace's
 Callers reach it as ``db.processes`` (a fresh repository per access, see
 ``Database.processes``) for :meth:`list_all`, :meth:`get` and
 :meth:`create`; there are no forwarding wrappers on ``Database``.
-``Database.update_saved_process`` and ``Database.delete_saved_process`` stay
-on the façade: each checks the row exists through :meth:`get` before calling
+``saved_processes.update_saved_process`` and ``delete_saved_process``
+(``services/saved_processes.py``) each check the row exists through :meth:`get` before calling
 :meth:`update` / :meth:`delete`, so call those rather than the repository
 methods.
 """

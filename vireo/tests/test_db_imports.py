@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from db import Database
 from repositories.imports import ImportRepository
+from services import photo_ingest
 
 VIREO = Path(__file__).resolve().parents[1]
 
@@ -28,11 +29,11 @@ def catalog(db):
     """Two folders with a RAW+JPEG pair, a plain JPEG and a working copy."""
     archive = db.add_folder("/archive/2026", name="2026")
     other = db.add_folder("/other", name="other")
-    raw = db.add_photo(archive, "bird.cr3", ".cr3", 300, 1.0,
+    raw = photo_ingest.add_photo(db, archive, "bird.cr3", ".cr3", 300, 1.0,
                        timestamp="2026-01-01T10:00:00", file_hash="h-raw")
-    jpg = db.add_photo(archive, "fox.jpg", ".jpg", 100, 1.0,
+    jpg = photo_ingest.add_photo(db, archive, "fox.jpg", ".jpg", 100, 1.0,
                        timestamp="2026-01-01T11:00:00", file_hash="h-fox")
-    twin = db.add_photo(other, "fox-copy.jpg", ".jpg", 100, 1.0,
+    twin = photo_ingest.add_photo(db, other, "fox-copy.jpg", ".jpg", 100, 1.0,
                         timestamp="2026-01-02T11:00:00", file_hash="h-twin")
     db.conn.execute(
         "UPDATE photos SET companion_path = 'bird.jpg' WHERE id = ?", (raw,),
@@ -173,9 +174,9 @@ def test_catalog_identity_rows_list_photos_then_paired_companions(db, catalog):
 
 
 def test_missing_companion_identity_reads_skip_recorded_and_unusable(db, catalog):
-    jpg2 = db.add_photo(catalog["other"], "owl.cr3", ".cr3", 10, 1.0)
+    jpg2 = photo_ingest.add_photo(db, catalog["other"], "owl.cr3", ".cr3", 10, 1.0)
     gone = db.add_folder("/gone", name="gone")
-    lost = db.add_photo(gone, "lost.cr3", ".cr3", 10, 1.0)
+    lost = photo_ingest.add_photo(db, gone, "lost.cr3", ".cr3", 10, 1.0)
     db.conn.execute(
         "UPDATE photos SET companion_path = id || '.jpg' WHERE id IN (?, ?)",
         (jpg2, lost),

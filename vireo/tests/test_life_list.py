@@ -7,6 +7,7 @@ import os
 import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -36,13 +37,13 @@ def life_app(tmp_path, monkeypatch):
 
     # Cardinal: two keepers (p2 outscores p1) plus one rejected photo
     # that must not count.
-    p1 = db.add_photo(folder_id=fid, filename="card1.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="card1.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0,
                       timestamp="2024-01-15T10:00:00")
-    p2 = db.add_photo(folder_id=fid, filename="card2.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="card2.jpg", extension=".jpg",
                       file_size=1000, file_mtime=2.0,
                       timestamp="2024-03-10T09:00:00")
-    p_rej = db.add_photo(folder_id=fid, filename="card3.jpg", extension=".jpg",
+    p_rej = photo_ingest.add_photo(db, folder_id=fid, filename="card3.jpg", extension=".jpg",
                          file_size=1000, file_mtime=3.0,
                          timestamp="2024-04-01T08:00:00")
     db.conn.execute(
@@ -54,12 +55,12 @@ def life_app(tmp_path, monkeypatch):
 
     # Sparrow: earlier capture, keyword linked to a taxon. No
     # quality_score — unscored photos must still make the life list.
-    p3 = db.add_photo(folder_id=fid, filename="sparrow1.jpg", extension=".jpg",
+    p3 = photo_ingest.add_photo(db, folder_id=fid, filename="sparrow1.jpg", extension=".jpg",
                       file_size=1000, file_mtime=4.0,
                       timestamp="2023-06-01T07:00:00")
 
     # Untagged photo: must not appear anywhere.
-    db.add_photo(folder_id=fid, filename="empty.jpg", extension=".jpg",
+    photo_ingest.add_photo(db, folder_id=fid, filename="empty.jpg", extension=".jpg",
                  file_size=1000, file_mtime=5.0,
                  timestamp="2024-05-01T12:00:00")
 
@@ -105,8 +106,8 @@ def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
     photo_ids = []
     for i in range(count):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
+        pid = photo_ingest.add_photo(
+            db, folder_id=ids["folder"],
             filename=f"{prefix}-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -399,8 +400,8 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
 
     db.set_active_workspace(jan_ws)
     jan_fid = db.add_folder("/photos/january", name="january")
-    jan_pid = db.add_photo(
-        folder_id=jan_fid, filename="jan-cardinal.jpg", extension=".jpg",
+    jan_pid = photo_ingest.add_photo(
+        db, folder_id=jan_fid, filename="jan-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=10.0, timestamp="2024-01-10T09:00:00",
     )
     db.tag_photo(jan_pid, kid)
@@ -408,8 +409,8 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
 
     db.set_active_workspace(feb_ws)
     feb_fid = db.add_folder("/photos/february", name="february")
-    feb_pid = db.add_photo(
-        folder_id=feb_fid, filename="feb-cardinal.jpg", extension=".jpg",
+    feb_pid = photo_ingest.add_photo(
+        db, folder_id=feb_fid, filename="feb-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=20.0, timestamp="2024-02-10T09:00:00",
     )
     db.tag_photo(feb_pid, kid)
@@ -735,8 +736,8 @@ def _seed_higher_rank_accipiter(db, folder_id):
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (accipiter, keyword_id),
     )
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="accipiter.jpg",
         extension=".jpg",
         file_size=1000,
@@ -911,8 +912,8 @@ def _seed_robin_with_ancestor_keywords(db, folder_id):
     k_turdus = _linked("Turdus", turdus)
     k_turdidae = _linked("Turdidae", turdidae)
     k_aves = _linked("Aves", aves)
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename="robin.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1076,8 +1077,8 @@ def test_life_list_keeps_unrelated_higher_rank_identifications(life_app):
     db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (aves, k_aves))
     k_mam = db.add_keyword("Mammalia", kw_type="taxonomy")
     db.conn.execute("UPDATE keywords SET taxon_id = ? WHERE id = ?", (mammalia, k_mam))
-    pid = db.add_photo(
-        folder_id=ids["folder"], filename="mixed.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=ids["folder"], filename="mixed.jpg", extension=".jpg",
         file_size=1000, file_mtime=8.0, timestamp="2024-08-01T09:00:00",
     )
     db.tag_photo(pid, k_aves)
@@ -1247,8 +1248,8 @@ def test_life_list_export_rejects_invalid_column_selection(
 
 def test_life_list_export_csv_escapes_formula_leading_cells(life_app):
     app, db, ids = life_app
-    p_formula = db.add_photo(
-        folder_id=ids["folder"],
+    p_formula = photo_ingest.add_photo(
+        db, folder_id=ids["folder"],
         filename="@formula.jpg",
         extension=".jpg",
         file_size=1000,
@@ -1314,8 +1315,8 @@ def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
     app, db, ids = life_app
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
     for i in range(13):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
+        pid = photo_ingest.add_photo(
+            db, folder_id=ids["folder"],
             filename=f"card-hidden-scope-{i}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -1345,8 +1346,8 @@ def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
     other_folder = db.add_folder("/photos/2025", name="2025")
     for folder_id in (ids["folder"], other_folder):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename="DSC_0001.JPG",
             extension=".JPG",
             file_size=1000,
@@ -1419,13 +1420,13 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
     ).lastrowid
     db.conn.commit()
 
-    pid_hier = db.add_photo(
-        folder_id=fid, filename="verdin1.jpg", extension=".jpg",
+    pid_hier = photo_ingest.add_photo(
+        db, folder_id=fid, filename="verdin1.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
         timestamp="2024-01-05T09:00:00",
     )
-    pid_root = db.add_photo(
-        folder_id=fid, filename="verdin2.jpg", extension=".jpg",
+    pid_root = photo_ingest.add_photo(
+        db, folder_id=fid, filename="verdin2.jpg", extension=".jpg",
         file_size=100, file_mtime=2.0,
         timestamp="2024-02-10T09:00:00",
     )
@@ -1503,8 +1504,8 @@ def test_life_list_merges_apostrophe_variant_species_into_one_entry(life_app):
     assert curly_kw == ascii_kw
 
     for i, filename in enumerate(("say-ascii.jpg", "say-curly.jpg")):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
+        pid = photo_ingest.add_photo(
+            db, folder_id=ids["folder"],
             filename=filename,
             extension=".jpg",
             file_size=1000,
@@ -1550,8 +1551,8 @@ def test_life_list_numbering_places_okina_species_under_a(life_app):
     # alphabetical tie-breaker, isolating the behavior under test.
     for filename, kw in (("apapane1.jpg", apapane_kw),
                          ("hutton1.jpg", hutton_kw)):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
+        pid = photo_ingest.add_photo(
+            db, folder_id=ids["folder"],
             filename=filename,
             extension=".jpg",
             file_size=1000,

@@ -11,6 +11,7 @@ import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
 from db import Database
+from services import photo_ingest
 from services.photo_review import PhotoReviewService, flag_description, flag_note
 
 
@@ -48,8 +49,8 @@ def test_flag_description_reads_naturally_with_and_without_provenance():
 
 def test_record_edit_persists_provenance_and_list_recent_carries_it(db):
     fid = db.add_folder("/photos", name="photos")
-    a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
-    b = db.add_photo(fid, "b.jpg", ".jpg", 100, 2.0)
+    a = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
+    b = photo_ingest.add_photo(db, fid, "b.jpg", ".jpg", 100, 2.0)
 
     first = db.record_edit(
         "flag", "Set flag to flagged", "flagged",
@@ -74,7 +75,7 @@ def test_record_edit_persists_provenance_and_list_recent_carries_it(db):
 
 def test_flag_note_requires_a_live_edit_matching_the_current_flag_with_provenance(db):
     fid = db.add_folder("/photos", name="photos")
-    a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+    a = photo_ingest.add_photo(db, fid, "a.jpg", ".jpg", 100, 1.0)
     assert flag_note(db, a, "none") is None
     db.record_edit(
         "flag", "Set flag to rejected", "rejected",

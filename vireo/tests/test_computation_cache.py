@@ -5,7 +5,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from services import detection_store
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -28,6 +27,7 @@ from computation_cache import (  # noqa: E402
     validate_artifact,
     write_bundle,
 )
+from services import detection_store, photo_ingest
 
 PHOTO_HASH = "1" * 64
 RUNTIME = runtime_fingerprint({
@@ -375,8 +375,8 @@ def _database_with_photo(path, filename, file_hash=PHOTO_HASH):
     workspace_id = db.create_workspace("Photos")
     db._active_workspace_id = workspace_id
     db.add_workspace_folder(workspace_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id,
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=filename,
         extension=".jpg",
         file_size=100,
@@ -471,8 +471,8 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
     destination, folder_id, first_photo = _database_with_photo(
         tmp_path / "destination.db", "renamed.jpg",
     )
-    second_photo = destination.add_photo(
-        folder_id=folder_id,
+    second_photo = photo_ingest.add_photo(
+        destination, folder_id=folder_id,
         filename="copy.jpg",
         extension=".jpg",
         file_size=100,
@@ -799,8 +799,8 @@ def test_companion_backed_destination_photo_is_not_materialized(tmp_path):
     # Skip the auto-duplicate resolver (which would reject one of the
     # two rows) by setting the shared hash via UPDATE after insert —
     # the scanner path uses the same shape.
-    companion_photo_id = destination.add_photo(
-        folder_id=folder_id,
+    companion_photo_id = photo_ingest.add_photo(
+        destination, folder_id=folder_id,
         filename="raw-plus-jpeg.cr2",
         extension=".cr2",
         file_size=2048,
@@ -839,8 +839,8 @@ def test_working_copy_backed_destination_photo_is_not_materialized(tmp_path):
     destination, folder_id, plain_photo_id = _database_with_photo(
         tmp_path / "destination.db", "plain.jpg",
     )
-    working_copy_photo_id = destination.add_photo(
-        folder_id=folder_id,
+    working_copy_photo_id = photo_ingest.add_photo(
+        destination, folder_id=folder_id,
         filename="edited.jpg",
         extension=".jpg",
         file_size=2048,

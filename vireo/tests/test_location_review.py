@@ -2,6 +2,7 @@
 
 import pytest
 from location_review import time_review_groups
+from services import photo_ingest
 
 
 def photo(index, timestamp, lat=None, lng=None):
@@ -411,12 +412,12 @@ def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
     (archive / 'photo.NEF').write_bytes(b'archived')
     target_folder = db.add_folder(str(archive), name='archive')
     source_folder = db.add_folder(str(tmp_path / 'stage'), name='stage')
-    target = db.add_photo(
-        folder_id=target_folder, filename='photo.NEF', extension='.nef',
+    target = photo_ingest.add_photo(
+        db, folder_id=target_folder, filename='photo.NEF', extension='.nef',
         file_size=8, file_mtime=1, file_hash='same',
     )
-    source = db.add_photo(
-        folder_id=target_folder if merge_kind == 'raw_jpeg' else source_folder,
+    source = photo_ingest.add_photo(
+        db, folder_id=target_folder if merge_kind == 'raw_jpeg' else source_folder,
         filename='photo.jpg' if merge_kind == 'raw_jpeg' else 'photo.NEF',
         extension='.jpg' if merge_kind == 'raw_jpeg' else '.nef',
         file_size=8, file_mtime=1, file_hash='same',

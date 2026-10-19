@@ -1,6 +1,8 @@
 import os
 from types import SimpleNamespace
 
+from services import photo_ingest
+
 
 def _seed_working_copies(tmp_path, sizes):
     from db import Database
@@ -15,8 +17,8 @@ def _seed_working_copies(tmp_path, sizes):
     photo_ids = []
     for index, size in enumerate(sizes, 1):
         source_mtime = float(index * 10)
-        photo_id = db.add_photo(
-            folder_id=folder_id,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"photo-{index}.NEF",
             extension=".nef",
             file_size=10_000,
@@ -941,8 +943,8 @@ def test_eviction_reads_atime_as_recency_alongside_mtime(tmp_path):
         for i in range(2):
             src = tmp_path / "photos" / f"photo-{i}.jpg"
             src.write_bytes(b"x" * 100)
-            ids.append(db.add_photo(
-                folder_id, f"photo-{i}.jpg", ".jpg",
+            ids.append(photo_ingest.add_photo(
+                db, folder_id, f"photo-{i}.jpg", ".jpg",
                 file_size=100, file_mtime=src.stat().st_mtime,
                 width=100, height=100,
             ))

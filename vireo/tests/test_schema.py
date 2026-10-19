@@ -5,6 +5,7 @@ import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
 from db import Database
+from services import photo_ingest
 
 
 def test_ensure_schema_stamps_newest_version_on_fresh_db(tmp_path):
@@ -425,7 +426,7 @@ def test_version_15_catalog_gains_prediction_history_instances_without_changing_
     schema.ensure_schema(db_path)
     with Database(db_path, initialize_schema=False) as db:
         fid = db.add_folder('/photos', name='Photos')
-        pid = db.add_photo(fid, 'bird.jpg', '.jpg', 100, 1.0)
+        pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
         did = db.detections.save(pid, [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
         ], detector_model='test')[0]

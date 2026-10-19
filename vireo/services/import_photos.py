@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import path_guard
 from db import Database
+from services import saved_processes
 from services.imports import ImportFailure
 from services.local_folder import local_copy_scan_conflict, stage_pending_source_paths
 from services.local_workspace import stage_boundary_lock
@@ -568,7 +569,7 @@ class _ImportPhotosRequest:
     def validate_after_import_process(self) -> ImportFailure | None:
         # Skip the "process still exists" check ONLY when the parent has a
         # frozen snapshot for THIS exact process id — that snapshot will
-        # substitute for db.resolve_process() below. A retry that changed
+        # substitute for saved_processes.resolve_process() below. A retry that changed
         # the process id must still go through normal existence validation.
         parent_config = self.parent_config
         parent_has_snapshot_for_after_import = (
@@ -859,7 +860,7 @@ class _ImportPhotosRequest:
                 self.after_import_snapshot = reused_parent_snapshot
             else:
                 try:
-                    self.after_import_snapshot = self.db.resolve_process(after_import)
+                    self.after_import_snapshot = saved_processes.resolve_process(self.db, after_import)
                 except ValueError as e:
                     return ImportFailure(str(e), 404)
         return None

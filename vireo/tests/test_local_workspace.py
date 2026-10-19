@@ -8,6 +8,7 @@ import pytest
 import services.local_workspace as local_workspace
 from db import Database
 from repositories.folders import FolderRepository
+from services import photo_ingest
 from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
@@ -43,8 +44,8 @@ def local_workspace_env(tmp_path):
         parent_id=root_id,
         workspace_root=False,
     )
-    db.add_photo(
-        child_id,
+    photo_ingest.add_photo(
+        db, child_id,
         "bird.jpg",
         ".jpg",
         (child / "bird.jpg").stat().st_size,
@@ -1003,7 +1004,7 @@ def test_restore_merges_rows_created_at_source_paths_while_staged(local_workspac
     (env["child"] / "imported.jpg").write_bytes(b"imported")
     interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
     assert interloper_id != env["child_id"]
-    env["db"].add_photo(interloper_id, "imported.jpg", ".jpg", 8, 0.0)
+    photo_ingest.add_photo(env["db"], interloper_id, "imported.jpg", ".jpg", 8, 0.0)
 
     discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
@@ -1144,7 +1145,7 @@ def test_restore_catalog_is_atomic_across_merge_and_state_cleanup(local_workspac
     (env["child"] / "imported.jpg").write_bytes(b"imported")
     interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
     assert interloper_id != env["child_id"]
-    env["db"].add_photo(interloper_id, "imported.jpg", ".jpg", 8, 0.0)
+    photo_ingest.add_photo(env["db"], interloper_id, "imported.jpg", ".jpg", 8, 0.0)
 
     # Fail folders.relink_parents_by_path, which runs AFTER the self-heal merge
     # (and after every rebase). If folders.merge_into_existing had committed

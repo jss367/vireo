@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from app import create_app
 from db import Database
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -23,9 +24,9 @@ def scoped_app(tmp_path):
     os.makedirs(child)
     root_id = db.add_folder(str(root), name="photos")
     child_id = db.add_folder(str(child), name="day2", parent_id=root_id)
-    p_root = db.add_photo(root_id, "a.jpg", ".jpg", 1000, 1.0,
+    p_root = photo_ingest.add_photo(db, root_id, "a.jpg", ".jpg", 1000, 1.0,
                           timestamp="2026-01-01T10:00:00")
-    p_child = db.add_photo(child_id, "b.jpg", ".jpg", 1000, 1.0,
+    p_child = photo_ingest.add_photo(db, child_id, "b.jpg", ".jpg", 1000, 1.0,
                            timestamp="2026-01-01T11:00:00")
     coll_id = db.collections.add(
         "picked", json.dumps([{"field": "photo_ids", "value": [p_child]}]),
@@ -80,8 +81,8 @@ def test_folder_scope_includes_legacy_descendants_by_path(tmp_path):
     legacy_id = db.add_folder(
         str(legacy), name="orphan", parent_id=None, workspace_root=False,
     )
-    p_root = db.add_photo(root_id, "a.jpg", ".jpg", 1000, 1.0)
-    p_legacy = db.add_photo(legacy_id, "b.jpg", ".jpg", 1000, 1.0)
+    p_root = photo_ingest.add_photo(db, root_id, "a.jpg", ".jpg", 1000, 1.0)
+    p_legacy = photo_ingest.add_photo(db, legacy_id, "b.jpg", ".jpg", 1000, 1.0)
     db.close()
 
     thumb_dir = str(tmp_path / "thumbs")

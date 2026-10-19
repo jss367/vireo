@@ -212,7 +212,7 @@ def test_workspace_create_entry_points_and_navigation(live_server, page):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(f"{live_server['url']}/workspace")
-    page.locator('.content button[onclick*="vireoWorkspaceSwitcher.showCreate"]').click()
+    page.locator('#newWorkspaceBtn').click()
     expect(page.locator("#createWsModal")).to_have_class("modal-overlay open")
     page.locator("#createWsModal").get_by_role("button", name="Cancel").click()
     page.evaluate("handleNativeMenuCommand('new_workspace')")

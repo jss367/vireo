@@ -8,6 +8,7 @@ from testing.waits import synchronization_timeout
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def test_inat_submissions_table_exists(db):
 
 def test_record_inat_submission(db):
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 123456, "https://www.inaturalist.org/observations/123456")
     subs = db.inat.get_submissions([pid])
@@ -44,7 +45,7 @@ def test_get_inat_submissions_empty(db):
 
 def test_inat_submission_cascades_on_photo_delete(db):
     fid = db.add_folder('/photos', name='photos')
-    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 111, "https://www.inaturalist.org/observations/111")
     db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
@@ -283,7 +284,7 @@ def app_and_db(tmp_path):
     Image.new('RGB', (100, 100)).save(os.path.join(photo_dir, 'bird.jpg'))
 
     fid = d.add_folder(photo_dir, name='photos')
-    pid = d.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(d, folder_id=fid, filename='bird.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
 
     # Add a detection and prediction for the photo
@@ -735,7 +736,7 @@ def test_api_inat_export_partial_failure_fails_job_and_keeps_counts(
     from wait import wait_for_job_via_client
 
     fid = db.photos.get(pid)["folder_id"]
-    other = db.add_photo(folder_id=fid, filename="heron.jpg", extension=".jpg",
+    other = photo_ingest.add_photo(db, folder_id=fid, filename="heron.jpg", extension=".jpg",
                          file_size=1000, file_mtime=2.0)
     destination = str(tmp_path / "exports")
 
@@ -873,8 +874,8 @@ def _add_out_of_workspace_photo(db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     fid = db.add_folder(other_dir, name="other-photos")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename='outside.jpg',
         extension='.jpg',
         file_size=1000,

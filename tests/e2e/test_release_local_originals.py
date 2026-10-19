@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -15,7 +16,7 @@ def cached_photo(live_server, tmp_path):
     source = folder / "bird.jpg"
     Image.new("RGB", (100, 100), "green").save(source)
     folder_id = db.add_folder(str(folder), name="Release test photos")
-    pid = db.add_photo(folder_id, source.name, ".jpg", file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
+    pid = photo_ingest.add_photo(db, folder_id, source.name, ".jpg", file_size=source.stat().st_size, file_mtime=source.stat().st_mtime)
     thumb_dir = Path(live_server["app"].config["THUMB_CACHE_DIR"])
     Image.new("RGB", (100, 100), "green").save(thumb_dir / f"{pid}.jpg")
     base = thumb_dir.parent

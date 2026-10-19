@@ -29,6 +29,7 @@ from export import (
     sanitize_filename,
 )
 from PIL import Image
+from services import photo_ingest
 
 
 def test_resolve_template_original():
@@ -279,10 +280,10 @@ def export_env(tmp_path):
     img2 = Image.new("RGB", (1200, 900), color="blue")
     img2.save(str(src / "bird2.jpg"), "JPEG", quality=95)
 
-    p1 = db.add_photo(folder_id=fid, filename="bird1.jpg", extension=".jpg",
+    p1 = photo_ingest.add_photo(db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0,
                        timestamp="2024-06-15T14:30:22")
-    p2 = db.add_photo(folder_id=fid, filename="bird2.jpg", extension=".jpg",
+    p2 = photo_ingest.add_photo(db, folder_id=fid, filename="bird2.jpg", extension=".jpg",
                        file_size=2000, file_mtime=2.0,
                        timestamp="2024-06-16T09:00:00")
 
@@ -431,8 +432,8 @@ def test_export_photos_reports_every_original_folder(export_env):
     second_folder_id = env["db"].add_folder(
         str(second_src), name="Second Safari",
     )
-    third_photo_id = env["db"].add_photo(
-        folder_id=second_folder_id,
+    third_photo_id = photo_ingest.add_photo(
+        env["db"], folder_id=second_folder_id,
         filename="bird3.jpg",
         extension=".jpg",
         file_size=500,
@@ -462,8 +463,8 @@ def test_export_photos_written_destinations_skip_folders_whose_photos_failed(exp
     second_src = env["tmp_path"] / "second-src"
     second_src.mkdir()
     second_folder_id = env["db"].add_folder(str(second_src), name="Second Safari")
-    unreadable = env["db"].add_photo(
-        folder_id=second_folder_id, filename="gone.jpg", extension=".jpg",
+    unreadable = photo_ingest.add_photo(
+        env["db"], folder_id=second_folder_id, filename="gone.jpg", extension=".jpg",
         file_size=500, file_mtime=3.0, timestamp="2024-06-17T10:00:00",
     )
 
@@ -2285,16 +2286,16 @@ def test_preview_export_renames_verifies_colliding_directory_identities(
     db.set_active_workspace(workspace_id)
     first_folder = db.add_folder(str(first), name="First")
     second_folder = db.add_folder(str(second), name="Second")
-    first_photo = db.add_photo(
-        folder_id=first_folder,
+    first_photo = photo_ingest.add_photo(
+        db, folder_id=first_folder,
         filename="bird.jpg",
         extension=".jpg",
         file_size=1,
         file_mtime=1,
         timestamp="2024-01-01T00:00:00",
     )
-    second_photo = db.add_photo(
-        folder_id=second_folder,
+    second_photo = photo_ingest.add_photo(
+        db, folder_id=second_folder,
         filename="bird.jpg",
         extension=".jpg",
         file_size=1,
@@ -2457,8 +2458,8 @@ def test_preview_export_renames_skips_missing_source_before_sequence(
 ):
     """Missing photos do not shift sequence numbers used by real exports."""
     env = export_env
-    missing_id = env["db"].add_photo(
-        folder_id=env["fid"],
+    missing_id = photo_ingest.add_photo(
+        env["db"], folder_id=env["fid"],
         filename="missing.jpg",
         extension=".jpg",
         file_size=0,
@@ -3015,9 +3016,9 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
 
     fid_a = db.add_folder(str(src_a), name="A")
     fid_b = db.add_folder(str(src_b), name="B")
-    pid_a = db.add_photo(folder_id=fid_a, filename="IMG_0001.jpg", extension=".jpg",
+    pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="IMG_0001.jpg", extension=".jpg",
                          file_size=1, file_mtime=1.0)
-    pid_b = db.add_photo(folder_id=fid_b, filename="IMG_0001.jpg", extension=".jpg",
+    pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="IMG_0001.jpg", extension=".jpg",
                          file_size=1, file_mtime=1.0)
 
     # Developed outputs under <developed_dir>/<path_key>/<stem>.jpg — two
@@ -3101,9 +3102,9 @@ def test_export_developed_stem_match_is_case_sensitive(tmp_path):
     )
 
     fid = db.add_folder(str(src), name="Mixed")
-    pid_upper = db.add_photo(folder_id=fid, filename="Bird1.jpg", extension=".jpg",
+    pid_upper = photo_ingest.add_photo(db, folder_id=fid, filename="Bird1.jpg", extension=".jpg",
                              file_size=1, file_mtime=1.0)
-    pid_lower = db.add_photo(folder_id=fid, filename="bird1.jpg", extension=".jpg",
+    pid_lower = photo_ingest.add_photo(db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
                              file_size=1, file_mtime=2.0)
 
     # Developed outputs with matching cases. If the lookup lowercases the
@@ -3298,7 +3299,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
         str(src_old / "IMG_0001.jpg"), "JPEG", quality=95,
     )
     fid_old = db.add_folder(str(src_old), name="Old")
-    pid_old = db.add_photo(folder_id=fid_old, filename="IMG_0001.jpg", extension=".jpg",
+    pid_old = photo_ingest.add_photo(db, folder_id=fid_old, filename="IMG_0001.jpg", extension=".jpg",
                            file_size=1, file_mtime=1.0)
     # Yellow stale file under the OLD folder's path key — must not bleed
     # into the new folder's export.
@@ -3322,7 +3323,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
         str(src_new / "IMG_0001.jpg"), "JPEG", quality=95,
     )
     fid_new = db.add_folder(str(src_new), name="New")
-    pid_new = db.add_photo(folder_id=fid_new, filename="IMG_0001.jpg", extension=".jpg",
+    pid_new = photo_ingest.add_photo(db, folder_id=fid_new, filename="IMG_0001.jpg", extension=".jpg",
                            file_size=1, file_mtime=2.0)
 
     # The path-based key for the new folder must differ from the stale key.
@@ -3377,7 +3378,7 @@ def test_export_case_variant_developed_prefers_lowercase_extension(tmp_path):
         str(src / "bird1.jpg"), "JPEG", quality=95,
     )
     fid = db.add_folder(str(src), name="Src")
-    pid = db.add_photo(folder_id=fid, filename="bird1.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird1.jpg", extension=".jpg",
                         file_size=1, file_mtime=1.0)
 
     developed = src / "developed"

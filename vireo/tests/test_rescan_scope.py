@@ -9,6 +9,7 @@ import os
 
 import pytest
 from db import Database
+from services import photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -21,8 +22,8 @@ def _db_with_active_ws(tmp_path):
 
 def _add_photo_file(db, folder_dir, folder_id, name):
     (folder_dir / name).write_bytes(b"jpegbytes")
-    return db.add_photo(
-        folder_id=folder_id, filename=name, extension=".jpg",
+    return photo_ingest.add_photo(
+        db, folder_id=folder_id, filename=name, extension=".jpg",
         file_size=9, file_mtime=1.0,
     )
 

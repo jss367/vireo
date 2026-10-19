@@ -3,6 +3,7 @@
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -15,8 +16,8 @@ def field_photos(live_server, tmp_path):
     for index, name in enumerate(["kestrel-a.jpg", "kestrel-b.jpg"]):
         path = folder / name
         Image.new("RGB", (240, 160), (90 + index * 40, 110, 80)).save(path)
-        ids.append(db.add_photo(
-            folder_id=folder_id, filename=name, extension=".jpg",
+        ids.append(photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
             file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
             width=240, height=160,
         ))

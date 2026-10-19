@@ -1,4 +1,4 @@
-"""Tests for ``Database.bulk_resolve_by_folder``.
+"""Tests for ``duplicate_resolution.bulk_resolve_by_folder``.
 
 Backs the bulk-decide UI: when the user looks at a bucket of N duplicate
 groups all sharing the same {folderA, folderB} parent-dir set, clicking
@@ -11,11 +11,12 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
+from services import duplicate_resolution, photo_ingest
 
 
 def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
-    pid = db.add_photo(
-        folder_id=folder_id,
+    pid = photo_ingest.add_photo(
+        db, folder_id=folder_id,
         filename=filename,
         extension=os.path.splitext(filename)[1] or ".jpg",
         file_size=1000,
@@ -71,7 +72,7 @@ def test_bulk_resolve_single_hash_picks_photo_in_keep_folder(tmp_path):
     _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HBR1")  # make group unresolved
 
-    result = db.bulk_resolve_by_folder(["HBR1"], str(b_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HBR1"], str(b_dir))
 
     assert result["resolved"] == [
         {"file_hash": "HBR1", "winner_id": p_b, "loser_ids": [p_a]}
@@ -100,7 +101,7 @@ def test_bulk_resolve_multiple_hashes_share_keep_folder(tmp_path):
         _reset_flags(db, h)
         pairs.append((h, p_a, p_b))
 
-    result = db.bulk_resolve_by_folder(["H1", "H2", "H3"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H1", "H2", "H3"], str(a_dir))
 
     assert len(result["resolved"]) == 3
     assert result["skipped"] == []
@@ -137,7 +138,7 @@ def test_bulk_resolve_skips_hash_with_no_photo_in_keep_folder(tmp_path):
     _reset_flags(db, "H1")
     _reset_flags(db, "H2")
 
-    result = db.bulk_resolve_by_folder(["H1", "H2"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["H1", "H2"], str(a_dir))
 
     assert len(result["resolved"]) == 1
     assert result["resolved"][0]["file_hash"] == "H1"
@@ -158,7 +159,7 @@ def test_bulk_resolve_unknown_hash_skipped(tmp_path):
     a_dir.mkdir()
     db.add_folder(str(a_dir))
 
-    result = db.bulk_resolve_by_folder(["DOES_NOT_EXIST"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["DOES_NOT_EXIST"], str(a_dir))
 
     assert result["resolved"] == []
     assert result["skipped"] == [
@@ -177,7 +178,7 @@ def test_bulk_resolve_singleton_hash_skipped(tmp_path):
     _add(db, a_fid, "owl.jpg", file_hash="HSOLO")
     _reset_flags(db, "HSOLO")
 
-    result = db.bulk_resolve_by_folder(["HSOLO"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HSOLO"], str(a_dir))
 
     assert result["resolved"] == []
     assert result["skipped"] == [
@@ -207,7 +208,7 @@ def test_bulk_resolve_multiple_in_keep_folder_resolves_among_them(tmp_path):
     p_b = _add(db, b_fid, "owl.jpg", file_hash="HMULTI")
     _reset_flags(db, "HMULTI")
 
-    result = db.bulk_resolve_by_folder(["HMULTI"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HMULTI"], str(a_dir))
 
     assert len(result["resolved"]) == 1
     res = result["resolved"][0]
@@ -235,7 +236,7 @@ def test_bulk_resolve_merges_metadata_onto_forced_winner(tmp_path):
     _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HMERGE")
 
-    db.bulk_resolve_by_folder(["HMERGE"], str(a_dir))
+    duplicate_resolution.bulk_resolve_by_folder(db, ["HMERGE"], str(a_dir))
 
     row = db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?", (p_a,)
@@ -261,7 +262,7 @@ def test_bulk_resolve_skips_when_keep_folder_candidate_missing_on_disk(tmp_path)
     _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HGONE")
 
-    result = db.bulk_resolve_by_folder(["HGONE"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HGONE"], str(a_dir))
 
     assert result["resolved"] == []
     assert result["skipped"] == [
@@ -292,7 +293,7 @@ def test_bulk_resolve_normalizes_keep_folder_trailing_slash(tmp_path):
     _reset_flags(db, "HSLASH")
 
     # Caller passes the un-slashed form — the form the bucket UI derives.
-    result = db.bulk_resolve_by_folder(["HSLASH"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HSLASH"], str(a_dir))
 
     assert result["skipped"] == []
     assert result["resolved"] == [
@@ -318,7 +319,7 @@ def test_bulk_resolve_skips_when_all_keep_folder_candidates_missing(tmp_path):
     _touch(b_dir, "owl.jpg")
     _reset_flags(db, "HALLGONE")
 
-    result = db.bulk_resolve_by_folder(["HALLGONE"], str(a_dir))
+    result = duplicate_resolution.bulk_resolve_by_folder(db, ["HALLGONE"], str(a_dir))
 
     assert result["resolved"] == []
     assert result["skipped"] == [

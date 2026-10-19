@@ -18,6 +18,7 @@ import pytest
 from db import Database
 from image_edits import RecipeError
 from repositories.edits import EditsRepository
+from services import photo_ingest
 
 
 @contextlib.contextmanager
@@ -32,7 +33,7 @@ def _reader(db):
 
 
 def _photo(db, folder_id, name):
-    return db.add_photo(folder_id, name, ".jpg", 100, 1.0)
+    return photo_ingest.add_photo(db, folder_id, name, ".jpg", 100, 1.0)
 
 
 @pytest.fixture

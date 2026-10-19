@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from PIL import Image
+from services import photo_ingest
 
 
 def _touch_image(path):
@@ -112,7 +113,7 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
     fid = db.add_folder(str(root), name="shoot")
-    db.add_photo(folder_id=fid, filename="IMG.JPG", extension=".JPG",
+    photo_ingest.add_photo(db, folder_id=fid, filename="IMG.JPG", extension=".JPG",
                  file_size=1, file_mtime=0.0)
 
     client = app.test_client()

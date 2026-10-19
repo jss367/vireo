@@ -20,6 +20,7 @@ import textwrap
 
 import pytest
 from db import Database
+from services import photo_ingest
 
 
 def _visible(db, sql, params=()):
@@ -79,7 +80,7 @@ def case(tmp_path, monkeypatch):
 def lib(db, case):
     ws = db._active_workspace_id
     fid = db.add_folder("/kw", name="kw")
-    photos = [db.add_photo(fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
+    photos = [photo_ingest.add_photo(db, fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
     _taxon(db, 1, "Aves", "class")
     _taxon(db, 2, "Turdus", "genus", 1)
     _taxon(db, 3, "Turdus migratorius", "species", 2, "American Robin", inat_id=12727)
@@ -910,7 +911,7 @@ def test_get_all_keywords_counts(db, lib):
     """``photo_count`` is distinct workspace photos in the subtree; ``direct_photo_count`` is the keyword's own."""
     p0, p1, p2 = lib["p"][:3]
     other_fid = db.add_folder("/elsewhere", name="elsewhere")
-    hidden = db.add_photo(other_fid, "hidden.jpg", ".jpg", 99, 9.0)
+    hidden = photo_ingest.add_photo(db, other_fid, "hidden.jpg", ".jpg", 99, 9.0)
     db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (other_fid,))
     birds = db.add_keyword("Birds")
     herons = db.add_keyword("Herons", parent_id=birds)

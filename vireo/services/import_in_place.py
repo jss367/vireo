@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 from db import Database
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
+from services import saved_processes
 from services.imports import ImportFailure
 from services.local_folder import local_copy_scan_conflict, stage_pending_source_paths
 from services.local_workspace import stage_boundary_lock
@@ -324,7 +325,7 @@ def _explicit_after_import(
         after_import = body.get("after_import")
         # A restart carrying a frozen ``after_import_snapshot`` captured at
         # the parent import's enqueue time waives the "process still exists"
-        # check: the snapshot substitutes for ``db.resolve_process`` in
+        # check: the snapshot substitutes for ``saved_processes.resolve_process`` in
         # ``_admit_in_place_job``, so a Settings delete between the failed
         # run and the restart no longer strands the recovery (same pattern
         # as the archive-import recovery-retry path in ``import_photos.py``).
@@ -454,7 +455,7 @@ def _after_import_process_snapshot(
     after_import_snapshot = None
     if after_import is not None:
         try:
-            after_import_snapshot = db.resolve_process(after_import)
+            after_import_snapshot = saved_processes.resolve_process(db, after_import)
         except ValueError as e:
             return None, ImportFailure(str(e), 404)
     return after_import_snapshot, None

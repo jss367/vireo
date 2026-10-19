@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, stage_counts, subject_masks
+from services import detection_store, photo_ingest, stage_counts, subject_masks
 from testing.waits import synchronization_timeout
 
 
@@ -301,16 +301,16 @@ def test_browse_init_reports_focus_photo_index_in_requested_sort(app_and_db):
         folder for folder in db.folders.tree() if folder["name"] == "January"
     )
     target_id = db.photos.list_page(folder_id=january["id"])[0]["id"]
-    db.add_photo(
-        folder_id=january["id"],
+    photo_ingest.add_photo(
+        db, folder_id=january["id"],
         filename="aaa-before-target.jpg",
         extension=".jpg",
         file_size=1000,
         file_mtime=1,
         timestamp="2024-01-01T00:00:00",
     )
-    db.add_photo(
-        folder_id=january["id"],
+    photo_ingest.add_photo(
+        db, folder_id=january["id"],
         filename="zzz-after-target.jpg",
         extension=".jpg",
         file_size=1000,
@@ -401,8 +401,8 @@ def test_browse_init_focus_index_queries_rank_when_target_off_page(
     # Insert five photos earlier in the sort order so the baseline no
     # longer fits on a per_page=1 first page.
     for i in range(5):
-        db.add_photo(
-            folder_id=january["id"],
+        photo_ingest.add_photo(
+            db, folder_id=january["id"],
             filename=f"aaa-earlier-{i:02d}.jpg",
             extension=".jpg",
             file_size=1000,
@@ -821,8 +821,8 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     ).fetchone()["id"]
     pids = []
     for idx, sharp in enumerate([10, 80, 30], start=3069):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=f"DSC_{idx}.jpg",
             extension=".jpg",
             file_size=1000 + idx,
@@ -858,8 +858,8 @@ def test_api_photo_best_batch_capture_time_requires_real_timestamps(app_and_db):
     ).fetchone()["id"]
     pids = []
     for filename in ["alpha.jpg", "beta.jpg", "gamma.jpg"]:
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=filename,
             extension=".jpg",
             file_size=1000,
@@ -887,8 +887,8 @@ def test_api_photo_best_batch_ranks_capture_time_without_sequence(app_and_db):
     for idx, (filename, sharp) in enumerate(
         [("alpha.jpg", 10), ("beta.jpg", 90), ("gamma.jpg", 30)]
     ):
-        pid = db.add_photo(
-            folder_id=folder_id,
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id,
             filename=filename,
             extension=".jpg",
             file_size=1000,
@@ -1342,8 +1342,8 @@ def test_api_photos_companion_count_scoped_to_active_workspace(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     other_fid = db.add_folder('/other/photos', name='other')
-    other_pid = db.add_photo(
-        folder_id=other_fid, filename='foreign.jpg', extension='.jpg',
+    other_pid = photo_ingest.add_photo(
+        db, folder_id=other_fid, filename='foreign.jpg', extension='.jpg',
         file_size=10, file_mtime=1.0,
     )
     with db.conn:
@@ -7341,13 +7341,13 @@ def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid1 = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid1 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=os.path.getsize(src1), file_mtime=os.path.getmtime(src1),
         width=800, height=600,
     )
-    pid2 = db.add_photo(
-        folder_id=fid, filename="b.jpg", extension=".jpg",
+    pid2 = photo_ingest.add_photo(
+        db, folder_id=fid, filename="b.jpg", extension=".jpg",
         file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
         width=800, height=600,
     )
@@ -7379,7 +7379,7 @@ def test_reconcile_drops_ghost_rows_when_files_missing(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(tmp_path / "src"), name="src")
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=1, file_mtime=1.0)
 
     # Row exists in table but no file on disk — exactly the drift state
@@ -7407,7 +7407,7 @@ def test_reconcile_keeps_live_rows(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(tmp_path / "src"), name="src")
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=1, file_mtime=1.0)
 
     preview_file = preview_dir / f"{pid}_1920.jpg"
@@ -7446,7 +7446,7 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(tmp_path / "src"), name="src")
-    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=1, file_mtime=1.0)
 
     # Seed a ghost row: bytes claimed but no file behind it.
@@ -7571,8 +7571,8 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
         width=800, height=600,
     )
@@ -8128,8 +8128,8 @@ def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
         width=800, height=600,
     )
@@ -8207,8 +8207,8 @@ def test_legacy_sized_preview_files_are_backfilled_at_startup(tmp_path, monkeypa
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid_kept = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    pid_kept = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
         width=800, height=600,
     )
@@ -8267,8 +8267,8 @@ def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypat
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
         width=400, height=300,
     )
@@ -8355,14 +8355,14 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid_edited = db.add_photo(
-        folder_id=fid, filename="edited.jpg", extension=".jpg",
+    pid_edited = photo_ingest.add_photo(
+        db, folder_id=fid, filename="edited.jpg", extension=".jpg",
         file_size=os.path.getsize(src_edited),
         file_mtime=os.path.getmtime(src_edited),
         width=200, height=150,
     )
-    pid_plain = db.add_photo(
-        folder_id=fid, filename="plain.jpg", extension=".jpg",
+    pid_plain = photo_ingest.add_photo(
+        db, folder_id=fid, filename="plain.jpg", extension=".jpg",
         file_size=os.path.getsize(src_plain),
         file_mtime=os.path.getmtime(src_plain),
         width=200, height=150,
@@ -8469,8 +8469,8 @@ def test_edit_math_version_migration_leaves_version_on_failed_purge(
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    pid_edited = db.add_photo(
-        folder_id=fid, filename="edited.jpg", extension=".jpg",
+    pid_edited = photo_ingest.add_photo(
+        db, folder_id=fid, filename="edited.jpg", extension=".jpg",
         file_size=os.path.getsize(src_edited),
         file_mtime=os.path.getmtime(src_edited),
         width=200, height=150,
@@ -8532,8 +8532,8 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="edited.jpg", extension=".jpg",
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid, filename="edited.jpg", extension=".jpg",
         file_size=100, file_mtime=0.0, width=40, height=30,
     )
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
@@ -8640,8 +8640,8 @@ def test_edit_math_version_migration_scans_preview_dir_once(
 
     edited_pids = []
     for i in range(5):
-        pid = db.add_photo(
-            folder_id=fid, filename=f"edited_{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"edited_{i}.jpg", extension=".jpg",
             file_size=100, file_mtime=0.0, width=40, height=30,
         )
         db.set_photo_edit_recipe(
@@ -8873,8 +8873,8 @@ def test_storage_delete_files_chunks_large_thumb_id_list(
         src = photos_dir / f"p{i}.jpg"
         # Touch a tiny placeholder for add_photo's mtime/size; not loaded.
         src.write_bytes(b"\xff\xd8\xff\xe0")
-        pid = db.add_photo(
-            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
             file_size=os.path.getsize(src),
             file_mtime=os.path.getmtime(src),
             width=10, height=10,
@@ -9519,8 +9519,8 @@ def _add_out_of_workspace_photo(db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     fid = db.add_folder("/photos/other", name="other")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="outside.jpg",
         extension=".jpg",
         file_size=100,
@@ -9685,8 +9685,8 @@ def test_delete_photo_location_rejects_out_of_workspace_photo(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     fid = db.add_folder("/photos/other", name="other")
-    pid = db.add_photo(
-        folder_id=fid,
+    pid = photo_ingest.add_photo(
+        db, folder_id=fid,
         filename="outside.jpg",
         extension=".jpg",
         file_size=100,
@@ -11528,7 +11528,7 @@ def _add_other_workspace_photo(db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     fid = db.add_folder('/secret/other', name='secret-other')
-    pid = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg',
+    pid = photo_ingest.add_photo(db, folder_id=fid, filename='hidden.jpg', extension='.jpg',
                        file_size=10, file_mtime=1.0)
     db.set_active_workspace(default_ws)
     return pid
@@ -12003,8 +12003,8 @@ def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
-    photo_id = db.add_photo(
-        folder_id=fid, filename="test.jpg", extension=".jpg",
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src),
         file_mtime=os.path.getmtime(src),
         width=800, height=600,
@@ -12268,16 +12268,16 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     # Second photo with its own (different) mask; third with no mask at all.
     src2 = os.path.join(folder["path"], "second.jpg")
     PILImage.new("RGB", (800, 600), (90, 120, 60)).save(src2, "JPEG")
-    pid2 = db.add_photo(
-        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+    pid2 = photo_ingest.add_photo(
+        db, folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
         filename="second.jpg", extension=".jpg",
         file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
         width=800, height=600,
     )
     src3 = os.path.join(folder["path"], "third.jpg")
     PILImage.new("RGB", (800, 600), (10, 20, 30)).save(src3, "JPEG")
-    pid3 = db.add_photo(
-        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+    pid3 = photo_ingest.add_photo(
+        db, folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
         filename="third.jpg", extension=".jpg",
         file_size=os.path.getsize(src3), file_mtime=os.path.getmtime(src3),
         width=800, height=600,
@@ -12599,8 +12599,8 @@ def _seed_sortable_photos(db, count=12):
     folder = db.add_folder("/photos/sortable", name="sortable")
     ids = []
     for index in range(count):
-        photo_id = db.add_photo(
-            folder_id=folder,
+        photo_id = photo_ingest.add_photo(
+            db, folder_id=folder,
             filename=f"sortable-{index:02d}.jpg",
             extension=".jpg",
             file_size=1000 + index,
@@ -12782,8 +12782,8 @@ def test_api_photos_query_focus_holds_one_read_snapshot(app_and_db, monkeypatch)
         # Sorting ahead of everything pushes the target onto page 3.
         writer = Database(db_path)
         writer.set_active_workspace(ws_id)
-        inserted.append(writer.add_photo(
-            folder_id=folder,
+        inserted.append(photo_ingest.add_photo(
+            writer, folder_id=folder,
             filename="aaa-landed-mid-request.jpg",
             extension=".jpg",
             file_size=10,
@@ -13047,8 +13047,8 @@ def test_api_photos_query_offline_members_are_opt_in_and_read_only(app_and_db):
     client = app.test_client()
     available_before = db.photos.count()
     offline_folder = db.add_folder("/temporarily-offline", name="offline")
-    offline_id = db.add_photo(
-        folder_id=offline_folder,
+    offline_id = photo_ingest.add_photo(
+        db, folder_id=offline_folder,
         filename="offline.jpg",
         extension=".jpg",
         file_size=100,
@@ -13105,8 +13105,8 @@ def test_api_photos_query_offline_members_never_join_a_stack(app_and_db):
     online_a, online_b = listed[0]["id"], listed[1]["id"]
 
     offline_folder = db.add_folder("/temporarily-offline", name="offline")
-    offline_id = db.add_photo(
-        folder_id=offline_folder,
+    offline_id = photo_ingest.add_photo(
+        db, folder_id=offline_folder,
         filename="zz-offline.jpg",
         extension=".jpg",
         file_size=100,
@@ -14090,7 +14090,7 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
     ids = []
     rows = []
     for i in range(1200):
-        pid = db.add_photo(folder_id=fid, filename=f"bulk{i}.jpg", extension=".jpg",
+        pid = photo_ingest.add_photo(db, folder_id=fid, filename=f"bulk{i}.jpg", extension=".jpg",
                            file_size=10, file_mtime=1.0)
         ids.append(pid)
         rows.append(pid)
@@ -14134,8 +14134,8 @@ def test_api_photos_geo_selection_accounts_for_every_selected_photo(app_and_db):
     app, db = app_and_db
     photos = {p["filename"]: p["id"] for p in db.photos.list_page()}
     offline_folder = db.add_folder('/photos/offline', name='offline')
-    offline_pid = db.add_photo(
-        folder_id=offline_folder, filename='bird4.jpg', extension='.jpg',
+    offline_pid = photo_ingest.add_photo(
+        db, folder_id=offline_folder, filename='bird4.jpg', extension='.jpg',
         file_size=4000, file_mtime=4.0, timestamp='2024-07-01T09:00:00',
     )
     db.conn.execute(

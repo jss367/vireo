@@ -2,6 +2,7 @@ import os
 
 import pytest
 import staging_recovery
+from services import photo_ingest
 from staging_recovery import (
     delete_verified_staging,
     discover_orphaned_staging,
@@ -34,7 +35,7 @@ def _write(path, data=b"abc"):
 
 def _catalog_photo(db, folder_path, filename, size):
     folder_id = db.add_folder(str(folder_path), name=os.path.basename(str(folder_path)))
-    return db.add_photo(folder_id, filename, os.path.splitext(filename)[1], size, 1.0)
+    return photo_ingest.add_photo(db, folder_id, filename, os.path.splitext(filename)[1], size, 1.0)
 
 
 def test_orphaned_staging_verified_files_can_be_deleted(db, tmp_path):

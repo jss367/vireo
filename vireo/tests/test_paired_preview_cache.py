@@ -11,11 +11,12 @@ from preview_cache import (
     paired_preview_ready,
     reconcile_preview_cache,
 )
+from services import photo_ingest
 
 
 def seed(db, root, *, size=700_000):
     folder = db.add_folder(str(root / 'photos'))
-    pid = db.add_photo(folder, 'a.NEF', '.nef', file_size=1, file_mtime=1)
+    pid = photo_ingest.add_photo(db, folder, 'a.NEF', '.nef', file_size=1, file_mtime=1)
     ordinary = root / 'previews' / f'{pid}_1920.jpg'
     paired = ordinary.parent / 'paired' / f'{pid}_1920_jpeg_state.jpg'
     paired.parent.mkdir(parents=True, exist_ok=True)

@@ -12,12 +12,13 @@ import textwrap
 
 from db import Database
 from repositories.source_cleanup import SourceCleanupRepository
+from services import photo_ingest
 
 
 def test_folder_has_photos_sees_photos_in_any_workspace(db):
     empty = db.add_folder("/library/empty")
     full = db.add_folder("/library/full")
-    db.add_photo(full, "a.jpg", ".jpg", 10, 1.0)
+    photo_ingest.add_photo(db, full, "a.jpg", ".jpg", 10, 1.0)
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
 
@@ -70,7 +71,7 @@ def test_folder_paths_lists_every_folder(db):
 def test_retire_folder_drops_row_links_and_move_source_marker_without_committing(db):
     source = db.add_folder("/library/source")
     dest = db.add_folder("/library/dest")
-    pid = db.add_photo(dest, "a.jpg", ".jpg", 10, 1.0)
+    pid = photo_ingest.add_photo(db, dest, "a.jpg", ".jpg", 10, 1.0)
     db.conn.execute(
         "UPDATE photos SET last_move_source_folder_path = ? WHERE id = ?",
         ("/library/source", pid),

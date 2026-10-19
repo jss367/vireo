@@ -18,6 +18,7 @@ from classification_readiness import classification_readiness
 from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
+from services import workspace_config
 from services.hf_cache_lock import cache_access
 from web.background_jobs import make_background_job
 
@@ -605,7 +606,7 @@ def create_models_blueprint(
         db = get_db()
         saved = [summarize(meta) for meta in get_saved_labels()]
         saved_by_file = {s["labels_file"]: s for s in saved if s.get("labels_file")}
-        ws_labels = db.get_workspace_active_labels()
+        ws_labels = workspace_config.get_workspace_active_labels(db)
         if ws_labels is not None:
             # Resolve workspace labels to metadata
             active = []
@@ -662,7 +663,7 @@ def create_models_blueprint(
                 return json_error("labels_files or labels_file required")
             labels_files = [single]
         db = get_db()
-        db.set_workspace_active_labels(labels_files)
+        workspace_config.set_workspace_active_labels(db, labels_files)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/models/pipeline")
@@ -1005,7 +1006,7 @@ def create_models_blueprint(
             label_name = ", ".join(names)
         else:
             db = get_db()
-            ws_labels = db.get_workspace_active_labels()
+            ws_labels = workspace_config.get_workspace_active_labels(db)
             if ws_labels is not None:
                 saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
                 active_sets = [saved_by_file.get(p, {"labels_file": p}) for p in ws_labels if os.path.exists(p)]

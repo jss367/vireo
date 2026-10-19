@@ -3,6 +3,7 @@
 import json
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_resolved_scan(db, loser_count):
@@ -15,12 +16,12 @@ def _seed_resolved_scan(db, loser_count):
     proposals = []
     loser_ids = []
     for i in range(loser_count):
-        kept_id = db.add_photo(
-            folder_id=fid, filename=f"kept-{i}.jpg", extension=".jpg",
+        kept_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"kept-{i}.jpg", extension=".jpg",
             file_size=1000, file_mtime=100.0, file_hash=f"RESOLVED{i}",
         )
-        extra_id = db.add_photo(
-            folder_id=fid, filename=f"extra-{i}.jpg", extension=".jpg",
+        extra_id = photo_ingest.add_photo(
+            db, folder_id=fid, filename=f"extra-{i}.jpg", extension=".jpg",
             file_size=1000, file_mtime=100.0, file_hash=f"RESOLVED{i}",
         )
         loser_ids.append(extra_id)

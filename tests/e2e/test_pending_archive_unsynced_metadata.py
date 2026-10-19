@@ -7,6 +7,7 @@ to say so before the click, and offer the cheap ordering.
 """
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _staged_import(db, tmp_path, *, destination):
@@ -19,7 +20,7 @@ def _staged_import(db, tmp_path, *, destination):
     day_id = db.add_folder(str(day), name="12", link_to_workspace=False)
     db.add_workspace_folder(workspace_id, day_id, is_root=True)
     photo_ids = [
-        db.add_photo(day_id, name, ".jpg", 1024, 0)
+        photo_ingest.add_photo(db, day_id, name, ".jpg", 1024, 0)
         for name in ("keep.jpg", "also-keep.jpg")
     ]
     db.conn.execute(

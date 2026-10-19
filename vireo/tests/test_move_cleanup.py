@@ -5,6 +5,7 @@ import os
 
 import pytest
 from move_cleanup import cleanup_source, finish_source, review_source
+from services import photo_ingest
 from testing.waits import synchronization_timeout
 
 
@@ -98,7 +99,7 @@ def test_cleanup_refuses_cataloged_photos_in_another_workspace(cleanup_case):
     child = source / "child"
     child.mkdir()
     fid = db.add_folder(str(child), name="child")
-    db.add_photo(folder_id=fid, filename="keep.NEF", extension=".NEF", file_size=1, file_mtime=1)
+    photo_ingest.add_photo(db, folder_id=fid, filename="keep.NEF", extension=".NEF", file_size=1, file_mtime=1)
     with pytest.raises(ValueError, match="cataloged photos"):
         cleanup_source(db, str(source), review["review_token"], lambda paths: pytest.fail("Trash called"))
 
@@ -330,7 +331,7 @@ def test_case_alias_catalog_rows_are_protected(cleanup_case, monkeypatch, tracke
     db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (alias, folder_id))
     db.conn.commit()
     if tracked:
-        db.add_photo(folder_id=folder_id, filename="orphan.NEF", extension=".NEF", file_size=1, file_mtime=1)
+        photo_ingest.add_photo(db, folder_id=folder_id, filename="orphan.NEF", extension=".NEF", file_size=1, file_mtime=1)
     else:
         other = db.create_workspace("Alias workspace")
         db.add_workspace_folder(other, folder_id)
@@ -356,7 +357,7 @@ def test_auto_cleanup_keeps_replacement_directory(cleanup_case, monkeypatch):
     _, db, source, folder_id = cleanup_case
     (source / "orphan.xmp").unlink()
     (source / "photo.NEF").write_text("original")
-    db.add_photo(folder_id=folder_id, filename="photo.NEF", extension=".NEF",
+    photo_ingest.add_photo(db, folder_id=folder_id, filename="photo.NEF", extension=".NEF",
                  file_size=8, file_mtime=1, timestamp="2026-07-11T10:00:00")
     original_move = move.move_photos
 

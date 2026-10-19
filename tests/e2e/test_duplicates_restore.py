@@ -7,6 +7,7 @@ the most recent completed ``duplicate-scan`` row in ``job_history``.
 import json
 
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 def _seed_prior_scan(db, stale_group=False, only_stale=False):
@@ -22,7 +23,7 @@ def _seed_prior_scan(db, stale_group=False, only_stale=False):
     if not only_stale:
         fid = db.add_folder("/photos")
         ids = [
-            db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+            photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                          file_size=1000, file_mtime=100.0, file_hash="HFAKE")
             for name in ("a.jpg", "a (2).jpg")
         ]
@@ -87,7 +88,7 @@ def test_duplicates_page_says_when_duplicates_appeared_since_the_scan(
     _seed_prior_scan(db)
     fid = db.add_folder("/later")
     for name in ("c.jpg", "c (2).jpg"):
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=1000, file_mtime=100.0, file_hash="HLATER")
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HLATER'")
     db.conn.commit()
@@ -126,7 +127,7 @@ def test_duplicates_page_all_stale_still_a_group_asks_for_a_rescan(
     _seed_prior_scan(db, only_stale=True)
     fid = db.add_folder("/photos")
     for name in ("b.jpg", "b (2).jpg"):
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=1000, file_mtime=100.0, file_hash="HGONE")
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HGONE'")
     db.conn.commit()
@@ -168,7 +169,7 @@ def test_duplicates_page_empty_restore_names_duplicates_added_since(
     _seed_prior_scan(db, only_stale=True)
     fid = db.add_folder("/later")
     for name in ("c.jpg", "c (2).jpg"):
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=1000, file_mtime=100.0, file_hash="HLATER")
     db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HLATER'")
     db.conn.commit()
@@ -202,7 +203,7 @@ def test_duplicates_page_starting_new_scan_hides_banner(live_server, page):
 def _seed_catalog_cleanup(db):
     fid = db.add_folder("/photos/cleanup")
     ids = [
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=1000, file_mtime=100.0, file_hash="HCLEANUP")
         for name in ("kept.jpg", "extra.jpg")
     ]
@@ -242,7 +243,7 @@ def test_empty_file_cleanup_counts_additional_kept_copies(live_server, page):
     db = live_server["db"]
     fid = db.add_folder("/photos/empty")
     ids = [
-        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+        photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=0, file_mtime=100.0,
                      file_hash=hashlib.sha256(b"").hexdigest())
         for name in ("first.jpg", "second.jpg", "extra.jpg")

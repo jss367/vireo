@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
+from services import photo_ingest
 from services.local_folder import (
     LocalWorkspaceConflict,
     LocalWorkspaceError,
@@ -1909,8 +1910,8 @@ def test_workspace_status_counts_unanchored_descendant_session(tmp_path):
     child_id = db.add_folder(
         str(child), name="child", parent_id=parent_id, link_to_workspace=False
     )
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_id, "fox.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "fox.jpg", ".jpg", 1000, 1.0)
     db.add_workspace_folder(parent_ws, parent_id)
     db.add_workspace_folder(child_ws, child_id)
     try:
@@ -2061,8 +2062,8 @@ def test_ancestor_workspace_photo_count_survives_descendant_rebase(tmp_path):
     (child / "fox.jpg").write_bytes(b"original")
     parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
     child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
-    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
-    db.add_photo(child_id, "fox.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    photo_ingest.add_photo(db, child_id, "fox.jpg", ".jpg", 1000, 1.0)
     db.add_workspace_folder(parent_ws, parent_id)
     db.add_workspace_folder(child_ws, child_id)
     # get_workspace_folder_roots materializes descendants itself, so the
@@ -2128,7 +2129,7 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     # Materialize descendants so the parent workspace inherits the child row
     # the same way get_workspace_folders/materialize would have from the UI.
     setup._materialize_workspace_descendants(parent_ws)
-    photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
+    photo = photo_ingest.add_photo(setup, folder_id=child_id, filename="bird.jpg", extension=".jpg",
                             file_size=8, file_mtime=1)
     setup.photo_visibility.grant(parent_ws, [photo])
     setup.photo_visibility.grant(child_ws, [photo])
@@ -2254,7 +2255,7 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path, folder_lin
     setup.add_workspace_folder(parent_ws, parent_id)
     setup.add_workspace_folder(child_ws, child_id)
     setup._materialize_workspace_descendants(parent_ws)
-    photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
+    photo = photo_ingest.add_photo(setup, folder_id=child_id, filename="bird.jpg", extension=".jpg",
                             file_size=8, file_mtime=1)
     if not folder_linked:
         # A photo-only grant is omitted from moved_folder_ids, even though

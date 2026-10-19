@@ -19,8 +19,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Support both direct execution and test imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.benchmark_raw_previews import ROOT, corpus_entries, environment, provenance, summarize
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / 'vireo'))
+from services import photo_ingest  # noqa: E402
+
+from scripts.benchmark_raw_previews import ROOT, corpus_entries, environment, provenance, summarize  # noqa: E402
 
 SCHEMA = 1
 
@@ -115,7 +119,7 @@ def run_trial(spec):
                 path = Path(source['path'])
                 stat = path.stat()
                 folder = db.add_folder(str(path.parent))
-                photo = db.add_photo(folder_id=folder, filename=path.name, extension=path.suffix.lower(),
+                photo = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=path.suffix.lower(),
                                      file_size=stat.st_size, file_mtime=stat.st_mtime,
                                      width=source['source_dimensions'][0], height=source['source_dimensions'][1])
                 photos.append({**source, 'id': photo})

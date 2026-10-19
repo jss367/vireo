@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -17,7 +18,7 @@ def batch_photos(live_server, tmp_path):
     for index, exposure in enumerate([-.5, 1.2]):
         path = folder / f'field-bird-{index}.jpg'
         Image.new('RGB', (240, 160), (80 + index * 30, 110, 90)).save(path)
-        pid = db.add_photo(folder_id=folder_id, filename=path.name, extension='.jpg',
+        pid = photo_ingest.add_photo(db, folder_id=folder_id, filename=path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                            width=240, height=160)
         db.set_photo_edit_recipe(pid, {

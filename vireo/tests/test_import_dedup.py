@@ -19,6 +19,7 @@ from import_dedup import (
 from ingest import ingest
 from PIL import Image
 from PIL.ExifTags import Base as ExifBase
+from services import photo_ingest
 
 
 def _save_jpeg(path, *, exif_dt=None, color="red", size=(80, 80)):
@@ -453,8 +454,8 @@ def _seed_paired_catalog(tmp_path, count):
         _save_jpeg(jpeg, exif_dt=datetime(2024, 5, 1, 10, 0, i), color=(i, 0, 0))
         raw = library / f"IMG_{i:04d}.nef"
         raw.write_bytes(b"raw bytes %d" % i)
-        pid = db.add_photo(
-            folder_id=fid, filename=raw.name, extension=".nef",
+        pid = photo_ingest.add_photo(
+            db, folder_id=fid, filename=raw.name, extension=".nef",
             file_size=raw.stat().st_size, file_mtime=1,
         )
         db.conn.execute(

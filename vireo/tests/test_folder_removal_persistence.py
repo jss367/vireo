@@ -6,6 +6,7 @@ import pytest
 from db import Database
 from repositories.workspace_folders import WorkspaceFolderRepository
 from scanner import ScanOptions
+from services import photo_ingest
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ def test_exact_import_restores_only_the_selected_folder(shared_tree):
 
 def test_removing_shared_folder_preserves_other_workspaces_photos(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
-    photo = db.add_photo(folder_id=child, filename="bird.jpg", extension=".jpg",
+    photo = photo_ingest.add_photo(db, folder_id=child, filename="bird.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     assert db.delete_folder(missing) == {"deleted_photos": 0, "files": []}
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
