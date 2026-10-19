@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/sync-panel.d.ts",
+    "../types/page-hooks.d.ts",
+    "../vireo/static/sync-panel/state.js",
+    "../vireo/static/sync-panel/status.js",
+    "../vireo/static/sync-panel/run.js",
+    "../vireo/static/sync-panel/preview-load.js",
+    "../vireo/static/sync-panel/preview-render.js",
+    "../vireo/static/sync-panel/preview-actions.js",
+    "../vireo/static/sync-panel/lightbox-panel.js",
+    "../vireo/static/sync-panel/boot.js"
+  ]
+}
