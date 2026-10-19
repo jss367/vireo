@@ -7,8 +7,10 @@ caller pauses.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import multiprocessing
+import sys
 import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
@@ -196,10 +198,15 @@ class _FeatureHasher:
             # held so a replacement scan cannot claim the same
             # permits while old workers are still consuming CPU.
             for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:  # broad: the worker may already be gone; shutdown(wait=True) below reaps the rest
-                    log.debug("Could not terminate a feature worker", exc_info=True)
+                terminated = False
+                # broad: termination and its diagnostics must not prevent worker shutdown
+                with contextlib.suppress(Exception):
+                    try:
+                        proc.terminate()
+                        terminated = True
+                    finally:
+                        if not terminated and isinstance(sys.exception(), Exception):
+                            log.debug("Could not terminate a feature worker", exc_info=True)
             pool.shutdown(wait=True, cancel_futures=True)
         except BaseException:
             # broad: stops the workers on any exit, cancel and interrupt included, then re-raises.
@@ -213,10 +220,15 @@ class _FeatureHasher:
             # process-wide budget, and ``JobRunner.shutdown()``
             # could report completion while hashing continued.
             for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:  # broad: must not replace the in-flight exception
-                    log.debug("Could not terminate a feature worker", exc_info=True)
+                terminated = False
+                # broad: termination and its diagnostics must not prevent worker shutdown
+                with contextlib.suppress(Exception):
+                    try:
+                        proc.terminate()
+                        terminated = True
+                    finally:
+                        if not terminated and isinstance(sys.exception(), Exception):
+                            log.debug("Could not terminate a feature worker", exc_info=True)
             pool.shutdown(wait=True, cancel_futures=True)
             raise
         else:

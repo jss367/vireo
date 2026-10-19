@@ -7,10 +7,12 @@ copy while keeping the cache under its quota. The SQL lives in
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -650,21 +652,22 @@ class _WorkingCopyBatch:
         expected_w, expected_h = _scaled_dimensions(
             oriented_w, oriented_h, self.wc_max_size,
         )
-        try:
-            with Image.open(wc_abs) as _wc:
-                wc_w, wc_h = _wc.size
-        except Exception:
-            # broad: PIL raises a wide set on bad files.
-            # PIL couldn't open the file: corrupt / truncated /
-            # unsupported. Treat as a failed extraction so the
-            # companion fallback runs instead of caching an
-            # unreadable working copy.
-            log.info(
-                "RAW working-copy extraction for photo %s produced "
-                "an unreadable file %s; retrying from companion "
-                "JPEG %s",
-                row["id"], wc_abs, companion_path, exc_info=True,
-            )
+        dimensions_read = False
+        # broad: decoder and diagnostic failures must keep companion fallback available
+        with contextlib.suppress(Exception):
+            try:
+                with Image.open(wc_abs) as _wc:
+                    wc_w, wc_h = _wc.size
+                dimensions_read = True
+            finally:
+                if not dimensions_read and isinstance(sys.exception(), Exception):
+                    log.info(
+                        "RAW working-copy extraction for photo %s produced "
+                        "an unreadable file %s; retrying from companion "
+                        "JPEG %s",
+                        row["id"], wc_abs, companion_path, exc_info=True,
+                    )
+        if not dimensions_read:
             return False
         # Use a 1% relative tolerance (not the request paths' 1px slack):
         # libraw can emit the active image area a few pixels narrower than
