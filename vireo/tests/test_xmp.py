@@ -67,25 +67,23 @@ def missing_xmp(tmp_path):
     (write_edit_recipe, ('{"exposure":1}',)),
     (remove_keywords, ({"Bird"},)),
 ])
-@pytest.mark.parametrize("failure", ["serialize", "replace"])
+@pytest.mark.parametrize("failure", ["write", "replace"])
 def test_failed_sidecar_update_preserves_original(sample_xmp, monkeypatch, writer, args, failure):
-    from xml.etree import ElementTree
-
     import xmp.publish
 
     write_gps_location(sample_xmp, 30, 40)
     path = Path(sample_xmp)
     original = path.read_bytes()
 
-    def failed_serializer(write, *args, **kwargs):
-        write("<partial")
+    def failed_fsync(fd):
+        # The disk filled while the temporary file was being written.
         raise OSError(28, "disk full")
 
     def failed_replace(*args):
         raise OSError("replacement failed")
 
-    if failure == "serialize":
-        monkeypatch.setitem(ElementTree._serialize, "xml", failed_serializer)
+    if failure == "write":
+        monkeypatch.setattr(xmp.publish.os, "fsync", failed_fsync)
     else:
         monkeypatch.setattr(xmp.publish.os, "replace", failed_replace)
     with pytest.raises(OSError):

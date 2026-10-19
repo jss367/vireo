@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from xmp.markup import SidecarTree, parse_sidecar
 from xmp.namespaces import NS_RDF, NS_X, NS_XML
 from xmp.photo_scope import (
     _VIREO_PHOTO_NODE_ID,
@@ -31,7 +32,8 @@ class _SidecarDocument:
     Owns the parse state (``root``, ``tree``, whether the file existed and
     parsed cleanly), the ``dirty`` flag every edit sets when it changes the
     tree, the Descriptions new properties land on, and the single publish in
-    :meth:`commit`.
+    :meth:`commit`. ``tree`` is a ``SidecarTree``: it keeps the source's
+    prefixes, comments and xpacket wrapper so the publish writes them back.
     """
 
     def __init__(self, xmp_path):
@@ -54,7 +56,7 @@ class _SidecarDocument:
         try:
             # Parse directly instead of stat-then-open: one fewer network
             # round trip per sidecar on SMB/NFS.
-            tree = ET.parse(path)
+            tree = parse_sidecar(path)
         except FileNotFoundError:
             pass
         except ET.ParseError:
@@ -70,7 +72,7 @@ class _SidecarDocument:
             _register_document_uri(self.root, self.path)
             return
         self.root = ET.Element(f"{{{NS_X}}}xmpmeta")
-        self.tree = ET.ElementTree(self.root)
+        self.tree = SidecarTree(self.root)
         _register_document_uri(self.root, self.path)
 
     def readable(self):
