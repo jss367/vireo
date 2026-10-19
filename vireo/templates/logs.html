@@ -81,96 +81,24 @@ body {
 
 <div class="content">
   <div class="log-toolbar">
-    <select id="levelFilter" onchange="applyFilter()">
+    <select id="levelFilter">
       <option value="DEBUG">DEBUG+</option>
       <option value="INFO" selected>INFO+</option>
       <option value="WARNING">WARNING+</option>
       <option value="ERROR">ERROR+</option>
     </select>
     <div class="search-control log-search-control">
-      <input type="text" id="searchFilter" placeholder="Filter..." oninput="applyFilter()">
-      <button id="logSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('logSearch', 'match_case', applyFilter)" title="Match case">Aa</button>
-      <button id="logSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('logSearch', 'whole_word', applyFilter)" title="Match whole word">ab</button>
+      <input type="text" id="searchFilter" placeholder="Filter...">
+      <button id="logSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match case">Aa</button>
+      <button id="logSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match whole word">ab</button>
     </div>
     <label><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
-    <button onclick="clearLogs()">Clear</button>
+    <button id="logClearBtn" type="button">Clear</button>
     <span class="log-count" id="logCount">0 lines</span>
   </div>
   <div class="log-container" id="logContainer"></div>
 </div>
 
-<script>
-var logLines = [];
-var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
-
-/* Load recent logs first */
-document.addEventListener('DOMContentLoaded', () => safeFetch('/api/logs/recent?count=500', {}, { toast: false })
-  .then(function(logs) {
-    logs.forEach(function(l) { addLogLine(l); });
-    applyFilter();
-  })
-  .catch(function() {}));
-
-/* Connect to SSE stream */
-var source = new EventSource('/api/logs/stream');
-source.addEventListener('log', function(e) {
-  try {
-    var record = JSON.parse(e.data);
-    addLogLine(record);
-    applyFilter();
-  } catch(ex) { /* ignore malformed SSE data */ }
-});
-source.onerror = function() {
-  source.close();
-  showToast('Log stream disconnected', 'error');
-};
-/* Clean up SSE on page unload */
-window.addEventListener('beforeunload', function() { source.close(); });
-
-function addLogLine(record) {
-  var time = new Date(record.time * 1000);
-  var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  logLines.push(record);
-  var container = document.getElementById('logContainer');
-  var div = document.createElement('div');
-  div.className = 'log-line level-' + record.level;
-  div.dataset.level = record.level;
-  div.dataset.message = record.message || '';
-  div.innerHTML = '<span class="log-time">' + timeStr + '</span>' +
-    '<span class="log-level">' + record.level + '</span>' +
-    '<span class="log-logger">' + escapeHtml(record.logger || '') + '</span>' +
-    escapeHtml(record.message || '');
-  container.appendChild(div);
-
-  if (document.getElementById('autoScroll').checked) {
-    container.scrollTop = container.scrollHeight;
-  }
-  document.getElementById('logCount').textContent = logLines.length + ' lines';
-}
-
-function applyFilter() {
-  var minLevel = document.getElementById('levelFilter').value;
-  var search = document.getElementById('searchFilter').value.trim();
-  var searchOptions = VireoTextSearch.readOptions('logSearch');
-  var minOrder = LEVEL_ORDER[minLevel] || 0;
-  var lines = document.querySelectorAll('.log-line');
-  lines.forEach(function(el) {
-    var levelOk = (LEVEL_ORDER[el.dataset.level] || 0) >= minOrder;
-    var searchOk = !search || VireoTextSearch.matchesFields(
-      el.dataset.message || '',
-      search,
-      searchOptions
-    );
-    el.classList.toggle('filtered', !(levelOk && searchOk));
-  });
-}
-
-function clearLogs() {
-  logLines = [];
-  document.getElementById('logContainer').innerHTML = '';
-  document.getElementById('logCount').textContent = '0 lines';
-}
-
-</script>
+<script type="module" src="/static/logs/boot.js"></script>
 </body>
 </html>
