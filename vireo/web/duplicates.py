@@ -98,6 +98,9 @@ def create_duplicates_blueprint(
     keep_refusals = {
         "not found": (404, "That photo is no longer in the catalog."),
         "not a duplicate": (409, "That photo no longer has a duplicate copy."),
+        "sidecar keywords pending": (
+            409, "This group's sidecar keywords have not been imported yet. Retry after the scan recovers.",
+        ),
         "missing on disk": (
             409, "This copy's file is missing on disk, so it can't be the one you keep.",
         ),

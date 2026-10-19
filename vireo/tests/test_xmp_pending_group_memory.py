@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_xmp_keyword_snapshot.py")))
 
 
+class _TransactionOwner(SimpleNamespace):
+    @property
+    def in_transaction(self):
+        return self._memory_connection.in_transaction
+
+
 def _selected(module, name, namespace, cls=None):
     tree = ast.parse((ROOT / module).read_text(encoding="utf-8"))
     body = tree.body if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls).body
@@ -35,6 +41,7 @@ def _flow():
     ns, db, _reads, _imports = SUPPORT["_namespace"]()
     with contextlib.closing(sqlite3.connect(":memory:")) as conn:
         conn.row_factory = sqlite3.Row
+        db = _TransactionOwner(**vars(db), _memory_connection=conn)
         conn.executescript("""
             CREATE TABLE folders(id INTEGER PRIMARY KEY,path TEXT);
             INSERT INTO folders VALUES(17,'invented');
@@ -59,7 +66,7 @@ def _flow():
                    "_volume_offline": lambda p: False,"DEFERRED_PLAN": sentinel,
                    "__builtins__": {**vars(builtins), "__import__": imports}}
         repo = SimpleNamespace(conn=conn, _chunks=lambda values: [values])
-        for name in ("resolution_plan", "live_ids_for_hash"):
+        for name in ("_resolution_rows", "resolution_preflight", "resolution_plan", "live_ids_for_hash"):
             setattr(repo, name, MethodType(_selected("repositories/duplicates.py", name, repo_ns, "DuplicatesRepository"), repo))
         scan_ns = {}
         scanning = SimpleNamespace(conn=conn)
@@ -70,6 +77,9 @@ def _flow():
         db._commits_held = contextlib.nullcontext
         db._duplicates_repository = lambda: repo
         db.duplicates = repo
+        db.begin_immediate = lambda: conn.execute("BEGIN IMMEDIATE")
+        db.transaction = lambda: conn
+        db.rollback = conn.rollback
         trace = []
         def merge(winner, losers):
             trace.append(("merge", winner, tuple(losers)))

@@ -66,20 +66,25 @@ def apply_duplicate_resolution(db: Database, photo_ids: Iterable[int]) -> JsonDi
     """
     from repositories.duplicates import DEFERRED_PLAN
 
-    plan = db.duplicates.resolution_plan(photo_ids)
-    if plan is None:
-        return {"winner_id": None, "loser_ids": [], "rejected": 0}
-    if plan is DEFERRED_PLAN:
-        return {
-            "winner_id": None,
-            "loser_ids": [],
-            "rejected": 0,
-            "deferred": True,
-        }
-    winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
-
-    db._apply_winner_loser_merge(winner_id, loser_ids)
-
+    repo = db.duplicates
+    # This entry point owns its writer transaction. An outer transaction
+    # cannot safely run disk probes or be committed by the merge helper.
+    deferred = {"winner_id": None, "loser_ids": [], "rejected": 0, "deferred": True}
+    if db.in_transaction:
+        return deferred
+    ids = list(dict.fromkeys(photo_ids))
+    preflight = repo.resolution_preflight(ids)
+    db.begin_immediate()
+    with db.transaction():
+        plan = repo.resolution_plan(ids, preflight=preflight)
+        if plan is None:
+            db.rollback()
+            return {"winner_id": None, "loser_ids": [], "rejected": 0}
+        if plan is DEFERRED_PLAN:
+            db.rollback()
+            return deferred
+        winner_id, loser_ids = cast("tuple[int, list[int]]", plan)
+        db._apply_winner_loser_merge(winner_id, loser_ids)
     return {
         "winner_id": winner_id,
         "loser_ids": list(loser_ids),
