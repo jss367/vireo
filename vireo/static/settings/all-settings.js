@@ -7,6 +7,7 @@
 var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 // Successful writes retire only their own scope/workspace/key's warning.
 /** @type {Record<string,string>} */ var ALL_SETTINGS_WARNINGS = Object.create(null);
+/** @type {Record<string,number>} */ var ALL_SETTINGS_SAVE_GENERATIONS = Object.create(null);
 
 /** @param {string} scope */ function setSettingsScope(scope) {
   if (scope !== 'global' && scope !== 'workspace') return;
@@ -355,6 +356,7 @@ async function refreshAllSettingsValues() {
 /** @param {string} key @param {SettingsValue} value @param {string=} scope @param {boolean=} confirmedEviction */ async function saveSchemaSetting(key, value, scope, confirmedEviction) {
   if (!scope) scope = ALL_SETTINGS_SCOPE;
   var warningToken = settingWarningToken(key, scope);
+  var isCurrentSave = claimSettingSave(warningToken);
   var committed = false;
   setRowStatus(key, 'Saving…', false);
   try {
@@ -365,8 +367,10 @@ async function refreshAllSettingsValues() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!isCurrentSave()) return;
     if (!resp.ok) {
       var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      if (!isCurrentSave()) return;
       if (
         resp.status === 409 && !confirmedEviction &&
         err.code === 'working_copy_eviction_confirmation_required'
@@ -375,6 +379,7 @@ async function refreshAllSettingsValues() {
           return saveSchemaSetting(key, value, scope, true);
         }
         await refreshAllSettingsValues();
+        if (!isCurrentSave()) return;
         rerenderSettingRow(key);
         setRowStatus(key, 'Not changed', false);
         return;
@@ -384,8 +389,10 @@ async function refreshAllSettingsValues() {
     }
     committed = true;
     var saved = await resp.json();
+    if (!isCurrentSave()) return;
     showSettingSaveWarning(key, saved, warningToken);
     await refreshAllSettingsValues();
+    if (!isCurrentSave()) return;
     rerenderSettingRow(key);
     // The curated forms above this panel post full snapshots from their own
     // inputs. Repopulate those inputs from the server so a later curated
@@ -395,19 +402,20 @@ async function refreshAllSettingsValues() {
     // a freshly-saved override).
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    if (warningToken !== settingWarningToken(key)) return;
+    if (!isCurrentSave() || warningToken !== settingWarningToken(key)) return;
     if (restoreSettingSaveWarning(key)) return;
     setRowStatus(key, '✓ Saved', false);
     setTimeout(function() {
-      if (warningToken === settingWarningToken(key) && !ALL_SETTINGS_WARNINGS[warningToken]) setRowStatus(key, '', false);
+      if (isCurrentSave() && warningToken === settingWarningToken(key) && !ALL_SETTINGS_WARNINGS[warningToken]) setRowStatus(key, '', false);
     }, 1500);
   } catch (err) {
-    settingSaveRefreshFailed(key, warningToken, committed);
+    if (isCurrentSave()) settingSaveRefreshFailed(key, warningToken, committed);
   }
 }
 
 /** @param {string} key @param {boolean=} confirmedEviction */ async function resetSchemaSetting(key, confirmedEviction) {
   var warningToken = settingWarningToken(key);
+  var isCurrentSave = claimSettingSave(warningToken);
   var committed = false;
   setRowStatus(key, 'Resetting…', false);
   try {
@@ -428,8 +436,10 @@ async function refreshAllSettingsValues() {
         ? { _confirm_working_copy_eviction: true }
         : {}),
     });
+    if (!isCurrentSave()) return;
     if (!resp.ok) {
       var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      if (!isCurrentSave()) return;
       if (
         resp.status === 409 && !confirmedEviction &&
         err.code === 'working_copy_eviction_confirmation_required'
@@ -438,6 +448,7 @@ async function refreshAllSettingsValues() {
           return resetSchemaSetting(key, true);
         }
         await refreshAllSettingsValues();
+        if (!isCurrentSave()) return;
         rerenderSettingRow(key);
         setRowStatus(key, 'Not changed', false);
         return;
@@ -447,14 +458,16 @@ async function refreshAllSettingsValues() {
     }
     committed = true;
     var reset = await resp.json();
+    if (!isCurrentSave()) return;
     showSettingSaveWarning(key, reset, warningToken);
     await refreshAllSettingsValues();
+    if (!isCurrentSave()) return;
     rerenderSettingRow(key);
     if (scope === 'global') await loadConfig();
     else if (scope === 'workspace') await loadWsOverrides();
-    if (warningToken === settingWarningToken(key)) restoreSettingSaveWarning(key);
+    if (isCurrentSave() && warningToken === settingWarningToken(key)) restoreSettingSaveWarning(key);
   } catch (err) {
-    settingSaveRefreshFailed(key, warningToken, committed);
+    if (isCurrentSave()) settingSaveRefreshFailed(key, warningToken, committed);
   }
 }
 
@@ -474,6 +487,12 @@ async function refreshAllSettingsValues() {
 
 /** @param {string} key @param {string=} scope */ function settingWarningToken(key, scope = ALL_SETTINGS_SCOPE) {
   return JSON.stringify([scope, scope === 'workspace' ? ALL_SETTINGS_CACHE.values?.workspace_id : null, key]);
+}
+
+/** @param {string} token */ function claimSettingSave(token) {
+  var generation = (ALL_SETTINGS_SAVE_GENERATIONS[token] || 0) + 1;
+  ALL_SETTINGS_SAVE_GENERATIONS[token] = generation;
+  return function() { return ALL_SETTINGS_SAVE_GENERATIONS[token] === generation; };
 }
 
 /** @param {string} key @param {{warning?: string}} data @param {string=} token */ function rememberSettingSaveWarning(key, data, token = settingWarningToken(key)) {
@@ -545,6 +564,12 @@ async function refreshAllSettingsValues() {
   return message + '\n\n' + data.warning;
 }
 
+/** @param {{warning?: string}} data @param {() => boolean} isCurrentWarning */ function reportSettingsImported(data, isCurrentWarning) {
+  if (isCurrentWarning()) rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
+    settingWarningToken('write_location_keywords_to_xmp', 'global'));
+  alert(settingsImportedMessage(isCurrentWarning() ? data : {}));
+}
+
 /** @param {File} file */ async function importSettingsFile(file) {
   if (!file) return;
   if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
@@ -583,6 +608,7 @@ async function refreshAllSettingsValues() {
     clearTimeout(_saveTimer ?? undefined);
     _saveTimer = null;
   }
+  var isCurrentWarning = claimSettingSave(settingWarningToken('write_location_keywords_to_xmp', 'global'));
   _autosaveSuspended = true;
   await _cancelQueuedSaves('config');
   var imported = false;
@@ -621,10 +647,8 @@ async function refreshAllSettingsValues() {
       break;
     }
     // Successful HTTP status already marked the import committed.
-    rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
-      settingWarningToken('write_location_keywords_to_xmp', 'global'));
     // Report the committed import before any fallible UI refresh.
-    alert(settingsImportedMessage(data));
+    reportSettingsImported(data, isCurrentWarning);
     // The import is a successful write of the whole global config, so a
     // failure left over from an earlier autosave no longer describes what
     // is on disk.
