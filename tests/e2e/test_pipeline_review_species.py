@@ -2388,16 +2388,21 @@ def test_pipeline_review_banner_clears_when_its_inverse_succeeds(
     """
     _add_species_in_pipeline_review(live_server, page, "Yellow-breasted Chat")
     banner = page.get_by_test_id("pipeline-review-history-cache-stale")
-    _fail_pipeline_cache_refresh(monkeypatch)
 
-    with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
-        page.locator("#historyUndoBtn").click()
-    undo_body = undo.value.json()
-    assert undo_body["pipeline_cache_stale"] is True
-    expect(banner).to_be_visible()
+    # Scope the cache-refresh failure to its own context: a bare
+    # ``monkeypatch.undo()`` would also revert ``live_server``'s HOME,
+    # config, model, taxonomy, and disk-space patches, so the Redo and
+    # ``/api/pipeline/page-init`` requests below would read
+    # developer-machine state.
+    with monkeypatch.context() as patch:
+        _fail_pipeline_cache_refresh(patch)
+        with page.expect_response(lambda r: r.url.endswith("/api/undo")) as undo:
+            page.locator("#historyUndoBtn").click()
+        undo_body = undo.value.json()
+        assert undo_body["pipeline_cache_stale"] is True
+        expect(banner).to_be_visible()
 
-    # Restore the real refresh so the next Redo resyncs the cache.
-    monkeypatch.undo()
+    # Exiting the context restored the real refresh so the next Redo resyncs the cache.
     with page.expect_response(lambda r: r.url.endswith("/api/redo")) as redo:
         page.locator("#historyRedoBtn").click()
     redo_body = redo.value.json()
