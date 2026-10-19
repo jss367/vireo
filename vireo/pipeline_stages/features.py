@@ -135,7 +135,7 @@ def extract_masks_stage(
         # loop before that branch is reached.
         run.abort.set()
         masks.finish_cancelled()
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[extract_masks] Fatal: {e}")
         log.exception("Pipeline extract-masks stage failed")
         run.stages["extract_masks"]["status"] = "failed"
@@ -929,7 +929,7 @@ class _MaskPass:
                 if run.control.cancellation_requested():
                     raise
                 continue
-            except Exception:
+            except Exception:  # broad: per-photo boundary; one photo's failure is counted and the batch continues
                 self.em_failed += 1
                 log.warning("Mask extraction failed for photo %s", item.photo_id, exc_info=True)
                 # A failed write can leave this connection inside a
@@ -1480,7 +1480,7 @@ def eye_keypoints_stage(
         # up with the other stages' cancel outcomes.
         run.abort.set()
         eyes.finish_cancelled()
-    except Exception as e:
+    except Exception as e:  # broad: stage boundary; any failure is recorded as this stage's fatal error
         run.errors.append(f"[eye_keypoints] Fatal: {e}")
         log.exception("Pipeline eye-keypoints stage failed")
         run.stages["eye_keypoints"]["status"] = "failed"
@@ -1728,6 +1728,7 @@ class _EyeKeypointPass:
             self._finish_download_cancelled()
             return True
         except Exception as dl_err:
+            # broad: weight downloads fail in many network/HF ways.
             # Degrade an optional-stage weight-download failure to a
             # skipped stage; _skip_failed_download logs and records it.
             self._skip_failed_download(dl_err)
@@ -1790,7 +1791,7 @@ class _EyeKeypointPass:
         run = self.run
         log.warning(
             "Eye keypoints stage skipped — weight download "
-            "failed: %s", dl_err,
+            "failed: %s", dl_err, exc_info=dl_err,
         )
         # An optional stage that skipped: shown to the user, not a failure.
         run.note(f"[eye_keypoints] {dl_err}")
