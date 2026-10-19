@@ -662,7 +662,6 @@ def test_detect_subjects_returns_detection_map(tmp_path):
 
     mock_db = MagicMock()
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
-    mock_db.get_existing_detection_photo_ids.return_value = set()
     mock_db.detections.write_batch.return_value = [101]
 
     with patch("classify_job.detection.detect_animals", return_value=[fake_detection]), \
