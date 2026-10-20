@@ -377,6 +377,7 @@ export function buildExportPreflightRequest() {
   }
   return {
     photo_ids: activeIds,
+    metadata_fields: selectedExportMetadataFields(),
     destination: /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value.trim(),
     export_to_subfolder: /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked,
     subfolder_name: VireoExportPresets.subfolderName(),
@@ -391,7 +392,6 @@ export async function startExport() {
   var exportRequest = buildExportPreflightRequest();
   if (!exportRequest) return;
   exportRequest.quality = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('exportQuality')).value) || 92;
-  exportRequest.metadata_fields = selectedExportMetadataFields();
   exportRequest.reveal_after_export = /** @type {HTMLInputElement} */ (document.getElementById('exportRevealAfter')).checked;
 
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('exportSubmitBtn'));

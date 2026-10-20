@@ -49,6 +49,7 @@ caller owns the transaction, and no method here commits unless the
 
 import json
 
+import config as cfg
 from keyword_normalization import keyword_match_key
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
@@ -274,6 +275,7 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                               ON pr_rev.prediction_id = pr.id
                              AND pr_rev.workspace_id = sh.workspace_id
                              WHERE d.photo_id = sh.photo_id
+                               AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
                                AND pr.species IS NOT NULL
                                AND COALESCE(pr_rev.status, 'pending') != 'rejected'
                                AND pr.labels_fingerprint = (
@@ -301,6 +303,7 @@ class SpeciesCurationRepository:
         life_list_ancestor_suppression_clause,
         resolve_species_display_name,
         get_folder_subtree_ids,
+        get_effective_config,
     ):
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
@@ -312,11 +315,15 @@ class SpeciesCurationRepository:
         # Bound ``Database`` methods, kept under their façade names.
         self.resolve_species_display_name = resolve_species_display_name
         self.get_folder_subtree_ids = get_folder_subtree_ids
+        self.get_effective_config = get_effective_config
 
     @property
     def workspace_id(self):
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
+
+    def _detector_floor(self):
+        return self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
 
     def next_representative_order(self):
         row = self.conn.execute(
@@ -340,7 +347,8 @@ class SpeciesCurationRepository:
           * ``prediction_id`` / ``predicted_species`` /
             ``predicted_confidence`` — top-confidence non-rejected prediction
             across the photo's detections (NULL if no usable prediction
-            exists)
+            exists). Real detections use the workspace's detector floor;
+            full-image anchors remain eligible. Accepted keywords are unaffected.
 
         Photos with ``quality_score >= min_quality`` that are not
         user-rejected are returned. When ``min_quality <= 0`` (the default),
@@ -397,7 +405,7 @@ class SpeciesCurationRepository:
             photo_filter, photo_params, bp_filter, bp_params,
             tp_filter, tp_params, kw_filter, kw_params,
         ) = photo_filters
-        rows = self.conn.execute(
+        return self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       f.name AS folder_name, f.path AS folder_path,
@@ -448,7 +456,8 @@ class SpeciesCurationRepository:
                        LEFT JOIN prediction_review pr_rev
                          ON pr_rev.prediction_id = pr.id
                         AND pr_rev.workspace_id = ?
-                       WHERE pr.species IS NOT NULL
+                       WHERE (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                         AND pr.species IS NOT NULL
                          AND COALESCE(pr_rev.status, 'pending') != 'rejected'
                          AND pr.labels_fingerprint = (
                              SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -478,6 +487,7 @@ class SpeciesCurationRepository:
             (
                 *bp_params,
                 ws,
+                self._detector_floor(),
                 *tp_params,
                 *kw_params,
                 ws,
@@ -487,7 +497,6 @@ class SpeciesCurationRepository:
                 min_quality,
             ),
         ).fetchall()
-        return rows
 
     def get_life_list_candidates(self, species=None):
         """Return (photo x accepted-identification-keyword) life-list rows.
@@ -1203,6 +1212,7 @@ class SpeciesCurationRepository:
         if eligible_only:
             eligibility_joins = _HIGHLIGHT_ELIGIBILITY_JOINS
             eligibility_filter = _HIGHLIGHT_ELIGIBILITY_FILTER
+        eligibility_params = (self._detector_floor(),) if eligible_only else ()
         if species:
             rows = self.conn.execute(
                 f"""SELECT sh.species, sh.photo_id, sh.rank
@@ -1211,7 +1221,7 @@ class SpeciesCurationRepository:
                    WHERE sh.workspace_id = ? AND sh.species = ?
                    {eligibility_filter}
                    ORDER BY sh.rank, sh.created_at, sh.photo_id""",
-                (ws, species),
+                (ws, species, *eligibility_params),
             ).fetchall()
         else:
             rows = self.conn.execute(
@@ -1221,7 +1231,7 @@ class SpeciesCurationRepository:
                    WHERE sh.workspace_id = ?
                    {eligibility_filter}
                    ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
-                (ws,),
+                (ws, *eligibility_params),
             ).fetchall()
         result = {}
         for r in rows:
