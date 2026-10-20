@@ -25,7 +25,7 @@ export function renderSubject(card) {
   select.replaceChildren(new Option('Resolve subject automatically', ''));
   card.subject.candidates.slice().sort(function(a, b) { return a.box.x - b.box.x || a.box.y - b.box.y; }).forEach(function(candidate, index) {
     var name = candidate.predictions.slice(0, 2).map(function(p) { return p.species + ' (' + p.status + ')'; }).join(', ');
-    var position = 'left ' + Math.round(candidate.box.x * 100) + '%, top ' + Math.round(candidate.box.y * 100) + '%';
+    var position = 'detector ' + Math.round(candidate.detector_confidence * 100) + '% · left ' + Math.round(candidate.box.x * 100) + '%, top ' + Math.round(candidate.box.y * 100) + '%';
     select.add(new Option('Subject ' + (index + 1) + ' · ' + position + ' · ' + (name || 'Identity unknown'), String(candidate.detection_id)));
   });
   select.value = String(state.subjectOverrides[String(card.id)] || '');
@@ -39,6 +39,7 @@ export function renderSubject(card) {
   var messages = {
     ready: 'Selected subject has current analysis.',
     subject_analysis_missing: 'Selected subject needs analysis.',
+    subject_analysis_unavailable: 'Selected subject analysis is unavailable under the current scoring settings.',
     subject_identity_uncertain: 'Species is not confirmed on a specific subject. Choose the intended animal.',
     subject_identity_conflict: 'This subject has a conflicting species confirmation. Review its identity.',
     multiple_matching_subjects: 'Several subjects match this species. Choose the intended animal.',

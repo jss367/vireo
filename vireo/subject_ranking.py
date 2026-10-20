@@ -63,13 +63,15 @@ def requested_identity(resolver, name):
 def resolve_subject(db, photo_id, comparison):
     resolver = SpeciesResolver(db=db)
     target = requested_identity(resolver, comparison.requested_species) if comparison.requested_species else None
+    from focus_crop import valid_subject_box
     detections = retained(db, photo_id)
+    candidates_detections = [d for d in retained(db, photo_id, min_conf=0) if valid_subject_box(d)]
     predictions = db.subjects.visible_predictions(db.require_workspace_id(), photo_id, 0)
     candidates = []
-    for detection in detections:
+    for detection in candidates_detections:
         rows = [dict(p) for p in predictions if p["detection_id"] == detection["id"]]
         confirmed = {resolver.prediction(p).key for p in rows if p["status"] == "accepted"}
-        candidates.append({"detection_id": detection["id"], "box": {k: detection["box_" + k] for k in "xywh"},
+        candidates.append({"detection_id": detection["id"], "detector_confidence": detection["detector_confidence"], "box": {k: detection["box_" + k] for k in "xywh"},
                            "predictions": [{"species": resolver.prediction(p).display_name, "status": p["status"],
                                             "prediction_id": p["id"], "species_key": resolver.prediction(p).key,
                                             "confidence": p["confidence"], "classifier_model": p["classifier_model"],
@@ -78,7 +80,7 @@ def resolve_subject(db, photo_id, comparison):
     override = comparison.subject_overrides.get(photo_id)
     selected, state = None, "subject_identity_uncertain"
     if override is not None:
-        selected = next((d for d in detections if d["id"] == override), None)
+        selected = next((d for d in candidates_detections if d["id"] == override), None)
         if selected is None:
             raise ValueError(f"Detection {override} is not a retained animal in photo {photo_id}")
         candidate = next(c for c in candidates if c["detection_id"] == override)
@@ -87,16 +89,18 @@ def resolve_subject(db, photo_id, comparison):
         else:
             state = "selected"
     elif target:
-        matches = [c for c in candidates if c["confirmed_keys"] == [target.key]]
-        conflicts = any(target.key in c["confirmed_keys"] and len(c["confirmed_keys"]) > 1 for c in candidates)
+        retained_ids = {d["id"] for d in detections}
+        automatic = [candidate for candidate in candidates if candidate["detection_id"] in retained_ids]
+        matches = [c for c in automatic if c["confirmed_keys"] == [target.key]]
+        conflicts = any(target.key in c["confirmed_keys"] and len(c["confirmed_keys"]) > 1 for c in automatic)
         if conflicts:
             state = "subject_identity_conflict"
         elif len(matches) == 1:
-            selected = next(d for d in detections if d["id"] == matches[0]["detection_id"])
+            selected = next(d for d in candidates_detections if d["id"] == matches[0]["detection_id"])
             state = "confirmed"
         elif len(matches) > 1:
             state = "multiple_matching_subjects"
-    elif detections:
+    elif detections and valid_subject_box(detections[0]):
         selected, state = detections[0], "primary"
     if selected:
         confirmations = next(c["confirmed_keys"] for c in candidates if c["detection_id"] == selected["id"])
@@ -199,10 +203,8 @@ def comparison_frames(db, photos, comparison, effective_cfg):
             frame = {k: photo.get(k) for k in ("id", "filename", "width", "height", "flag", "rating")}
             frame.update(features)
             frame["subject_mask_available"] = bool(analysis["mask_png"])
-            frame["analysis_provenance"] = {
-                "detection": {"status": "complete", "current": True},
-                "segmentation": {"status": "complete", "current": True},
-            }
+            frame["analysis_provenance"] = {"detection": {"status": "complete", "current": True, "no_qualifying_subject": False},
+                                            "segmentation": {"status": "complete", "current": True}}
             card.update(sharpness=features["subject_tenengrad"], has_eye=features.get("eye_tenengrad") is not None)
             for k in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "crop_complete", "subject_size", "analysis", "eye_status"):
                 card[k] = features.get(k)
@@ -230,14 +232,15 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
     from best_batch import _best_batch_reasons
     from scoring import score_encounter
     cards, eligible = comparison_frames(db, photos, comparison, effective_cfg)
-    score_encounter({"photos": eligible}, config=effective_cfg)
+    by_id = {c["id"]: c for c in cards}
+    encounter = {"photos": eligible}
+    score_encounter(encounter, config=effective_cfg)
     _mark_unavailable_comparison_cards(cards, eligible)
     eligible = [p for p in eligible if p.get("selection_eligible")]
     if len(eligible) >= 2:
         eligible.sort(key=lambda p: (p.get("label") != "REJECT", p["quality_composite"], p["focus_score"]), reverse=True)
     else:
         eligible = []
-    by_id = {c["id"]: c for c in cards}
     best = next((p for p in eligible if p.get("label") != "REJECT"), None)
     for rank, photo in enumerate(eligible, 1):
         card = by_id[photo["id"]]
@@ -245,6 +248,7 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
         card.update(rank=rank, role=role, label=photo.get("label") or "REVIEW", quality=photo["quality_composite"],
                     quality_pct=round(photo["quality_composite"] * 100), focus=photo["focus_score"],
                     focus_basis="eye" if photo.get("eye_focus_score") is not None else "subject",
+                    focus_evidence=photo.get("focus_evidence"),
                     reject_reasons=photo.get("reject_reasons", []),
                     reasons=_best_batch_reasons(photo, eligible, is_best=photo is best))
     cards.sort(key=lambda c: (c["rank"] is None, c["rank"] or 0))
@@ -254,4 +258,5 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
             "alternate_ids": [c["id"] for c in cards if c["role"] == "alternate"],
             "suggested_reject_ids": [c["id"] for c in cards if c["role"] == "reject" and c["flag"] == "none"],
             "comparison": {"requested_species": comparison.requested_species, "subject_overrides": comparison.subject_overrides},
+            "focus_cohorts": encounter.get("focus_cohorts", {}),
             "scored": bool(eligible), "unscored_reason": None if eligible else "At least two selected subjects need current quality analysis"}
