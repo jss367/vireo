@@ -519,3 +519,32 @@ def test_selected_generation_provenance_and_unavailable_ranking_policy(compariso
     assert unavailable['quality'] is None and not unavailable['has_quality']
     assert unavailable['reasons'][0] == 'missing subject tenengrad'
     assert pids[2] not in [pack['best_photo_id'], *pack['alternate_ids'], *pack['suggested_reject_ids']]
+
+
+def test_weak_identity_conflicts_do_not_block_a_clean_retained_target(comparison_library):
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    target_id, weak_id = ids[pid]
+    db.predictions.add(weak_id, TARGET, .9, 'conflicting-model', status='accepted')
+    db.conn.execute('UPDATE detections SET detector_confidence=.052 WHERE id=?', (weak_id,))
+    db.commit()
+    selected, selection = resolve_subject(db, pid, SubjectComparison(TARGET))
+    assert selected is not None and selected['id'] == target_id
+    assert selection['selection'] == 'confirmed'
+    weak = next(candidate for candidate in selection['candidates'] if candidate['detection_id'] == weak_id)
+    assert weak['detector_confidence'] == .052 and len(weak['confirmed_keys']) == 2
+    explicit, explicit_selection = resolve_subject(db, pid, SubjectComparison(TARGET, {pid: weak_id}))
+    assert explicit is None and explicit_selection['selection'] == 'subject_identity_conflict'
+    import config as cfg
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    pack = _pack(app, pids, requested_species=TARGET)
+    card = next(card for card in pack['cards'] if card['id'] == pid)
+    assert card['evidence_status'] == 'ready' and card['rank'] is not None
+    assert card['subject']['detection_id'] == target_id
+    assert f'detection_id={target_id}' in card['focus_crop_url']
+    # Once it qualifies for automatic selection, the same conflicting identity blocks it.
+    db.conn.execute('UPDATE detections SET detector_confidence=.3 WHERE id=?', (weak_id,))
+    db.commit()
+    selected, selection = resolve_subject(db, pid, SubjectComparison(TARGET))
+    assert selected is None and selection['selection'] == 'subject_identity_conflict'
+    assert db.subjects.choice(pid)['detection_id'] == weak_id
