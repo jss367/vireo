@@ -122,6 +122,10 @@ Keyword intents are reconciled in every workspace containing the photo, so
 syncing a sibling workspace cannot replay an older opposite decision. Each
 queue retains an explicit final intent, with captured-write compensation and
 immutable-token cleanup handled by the normal pending-change helpers.
+An identity history entry superseded by a newer decision or candidate-tag
+change is retired after replay rolls back; the request returns 409 and the
+user reviews the next history action. Visibility loss and transient failures
+retain the entry for retry.
 
 Candidates and evidence are workspace review state in the catalog, like
 prediction review decisions; they are not written as confirmed species

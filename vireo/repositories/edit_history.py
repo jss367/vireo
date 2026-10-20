@@ -331,6 +331,7 @@ class EditHistoryRepository:
                 return
         self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry_id,))
 
+
     def action_and_new_value(self, entry_id: int) -> sqlite3.Row | None:
         """Row (``action_type``, ``new_value``) of one entry, or None."""
         return self.conn.execute(

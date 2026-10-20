@@ -10,6 +10,86 @@ from services import photo_ingest
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+@pytest.mark.parametrize('conflict', ['workspace', 'association'])
+def test_permanently_stale_identity_retires_without_replay_and_unblocks_history(app_and_db, direction, conflict):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    old_rating = db.photos.get(2)['rating'] or 0
+
+    def rating_edit():
+        db.photo_review.set_rating(2, 4)
+        return db.record_edit('rating', 'Independent rating', '4', [
+            {'photo_id': 2, 'old_value': str(old_rating), 'new_value': '4'},
+        ])
+
+    if direction == 'undo':
+        rating_id = rating_edit()
+    assert save(client, [1]).status_code == 200
+    stale_id = db.edit_history.latest_undoable()['id']
+    if direction == 'redo':
+        rating_id = rating_edit()
+        assert client.post('/api/undo').status_code == 200
+        assert client.post('/api/undo').status_code == 200
+    if conflict == 'workspace':
+        second = db.create_workspace('Superseding identity')
+        db.photo_visibility.grant(second, [1])
+        switch = _workspace_switcher(db)
+        switch(second)
+        groups = client.get('/api/identity-alternatives').get_json()['groups']
+        observed = groups[0]['group_id'] if groups else None
+        assert save(client, [1], group_id=observed, reason='Newer global evidence').status_code == 200
+        switch(first)
+    else:
+        kid = db.add_keyword(CANDIDATES[0], is_species=True)
+        db.tag_photo(1, kid)
+    before = db.identity_alternatives.for_photos(include_resolved=True)
+    tags = db.photo_species.get_species_for_photos([1])
+    pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+    response = client.post('/api/' + direction)
+    assert response.status_code == 409
+    assert 'history' in response.get_json()['error'].lower()
+    assert db.identity_alternatives.for_photos(include_resolved=True) == before
+    assert db.photo_species.get_species_for_photos([1]) == tags
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
+    next_entry = db.edit_history.latest_undoable() if direction == 'undo' else db.edit_history.oldest_redoable()
+    assert next_entry['id'] == rating_id
+    assert next_entry['id'] != stale_id
+    assert client.post('/api/' + direction).status_code == 200
+    assert db.photos.get(2)['rating'] == (old_rating if direction == 'undo' else 4)
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+@pytest.mark.parametrize('failure', ['conflict', 'database'])
+def test_transient_identity_history_failure_keeps_entry_for_retry(app_and_db, monkeypatch, direction, failure):
+    from services import identity_alternatives
+
+    app, db = app_and_db
+    client = app.test_client()
+    assert save(client, [1]).status_code == 200
+    entry_id = db.edit_history.latest_undoable()['id']
+    if direction == 'redo':
+        assert client.post('/api/undo').status_code == 200
+    before = db.identity_alternatives.for_photos(include_resolved=True)
+    pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+
+    def fail_replay(*args, **kwargs):
+        if failure == 'conflict':
+            raise identity_alternatives.IdentityHistoryConflict('Temporarily unavailable')
+        raise sqlite3.OperationalError('injected temporary database failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(identity_alternatives, 'replay_identity_edit', fail_replay)
+        response = client.post('/api/' + direction)
+    assert response.status_code == (409 if failure == 'conflict' else 500)
+    next_entry = db.edit_history.latest_undoable() if direction == 'undo' else db.edit_history.oldest_redoable()
+    assert next_entry['id'] == entry_id
+    assert db.identity_alternatives.for_photos(include_resolved=True) == before
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
+    assert client.post('/api/' + direction).status_code == 200
+
+
 @pytest.mark.parametrize('operation', ['save', 'resolve', 'resolve_retained'])
 @pytest.mark.parametrize('sync_started', [False, True])
 def test_shared_keyword_intents_follow_identity_history_and_real_sidecar_sync(
