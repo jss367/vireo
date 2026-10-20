@@ -473,7 +473,7 @@ def test_partial_selected_generation_stays_unranked_and_out_of_peer_scores(compa
     unavailable = next(card for card in pack["cards"] if card["id"] == pids[0])
     assert unavailable["label"] == "REVIEW" and unavailable["rank"] is None
     assert unavailable["quality"] is None and unavailable["has_quality"] is False
-    assert unavailable["evidence_status"] == "subject_analysis_incomplete"
+    assert unavailable["evidence_status"] == "subject_analysis_missing"
     assert unavailable["analysis_reasons"] == ["missing_subject_clip_low"]
     assert pids[0] not in pack["suggested_reject_ids"] + pack["alternate_ids"]
     assert [(card["id"], card["quality"]) for card in pack["cards"] if card["rank"]] == [

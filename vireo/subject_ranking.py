@@ -220,7 +220,7 @@ def _mark_unavailable_comparison_cards(cards, photos):
         reasons = photo.get("analysis_reasons", [])
         by_id[photo["id"]].update(
             label=photo["label"], has_quality=False, has_eye=False,
-            evidence_status="subject_analysis_incomplete",
+            evidence_status="subject_analysis_missing",
             analysis_status=photo["analysis_status"], analysis_reasons=reasons,
             reasons=["Subject analysis needs review: " + reason.replace("_", " ") for reason in reasons],
         )

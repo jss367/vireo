@@ -313,6 +313,7 @@ def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
         "crop_complete": photo.get("crop_complete"),
         "subject_size": photo.get("subject_size"),
         "reject_reasons": list(photo.get("reject_reasons") or []),
+        "selection_eligible": photo.get("selection_eligible", False),
         "analysis_status": photo.get("analysis_status"),
         "analysis_reasons": photo.get("analysis_reasons", []),
         "flag": photo.get("flag") or "none",
