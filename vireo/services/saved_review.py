@@ -36,6 +36,12 @@ def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
     photos = {p["id"]: p for p in current}
     encounters = _current_groups(data, photos)
     _, scored = run_triage(encounters, config=effective.get("pipeline", {}))
+    # Cohorts are derived from current measurements, unlike saved grouping edits.
+    for saved, current_group in zip(data.get("encounters", []), encounters, strict=True):
+        if "focus_cohorts" in current_group:
+            saved["focus_cohorts"] = current_group["focus_cohorts"]
+        else:
+            saved.pop("focus_cohorts", None)
     scored_by_id = {p["id"]: p for p in scored}
     # Preserve saved review annotations, but replace every live input and
     # derived score (including explicit nulls) so stale measurements cannot win.

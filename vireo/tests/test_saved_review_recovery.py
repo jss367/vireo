@@ -65,17 +65,23 @@ def test_reopening_reloads_analysis_and_current_decisions_without_writes(db, tmp
     before = list(db.conn.iterdump())
     result = load_results(str(tmp_path), db.active_workspace_id, db=db)
     rows = {p["id"]: p for p in result["photos"]}
-    assert [rows[pid]["label"] for pid in ids] == ["REVIEW", "KEEP", "REJECT", "KEEP"]
+    assert [rows[pid]["label"] for pid in ids[:3]] == ["REVIEW", "KEEP", "REJECT"]
+    # Ranking may retain a complete frame for manual review when absolute
+    # usability has not been validated; recovery must still load its measurements.
+    assert rows[ids[3]]["label"] in {"KEEP", "REVIEW"}
+    assert rows[ids[3]]["analysis_status"] == "complete"
+    assert rows[ids[3]]["quality_composite"] is not None
     assert rows[ids[1]]["flag"] == "flagged" and rows[ids[1]]["rating"] == 5
     assert rows[ids[0]]["analysis_reasons"] == ["detection_not_run"]
     assert all(rows[ids[0]][key] is None for key in SCORE_FIELDS)
     assert rows[ids[0]]["reject_reasons"] == []
     assert not rows[ids[0]].get("rarity_protected")
     assert all(p["review_confirmed"] for p in result["photos"])
-    assert result["encounters"] == old["encounters"]
-    assert result["summary"]["keep_count"] == 2
+    assert [{key: group[key] for key in original} for group, original in
+            zip(result["encounters"], old["encounters"], strict=True)] == old["encounters"]
+    assert result["summary"]["keep_count"] == 1 + (rows[ids[3]]["label"] == "KEEP")
     assert result["summary"]["reject_count"] == 1
-    assert result["summary"]["review_count"] == 1
+    assert result["summary"]["review_count"] == 1 + (rows[ids[3]]["label"] == "REVIEW")
     assert list(db.conn.iterdump()) == before
     persisted = (tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json").read_bytes()
     assert load_results(str(tmp_path), db.active_workspace_id, db=db) == result
@@ -108,7 +114,7 @@ def test_species_only_saved_review_does_not_acquire_quality_suggestions(db, tmp_
 def test_historic_reason_is_not_relabelled_without_current_evidence(db, tmp_path, monkeypatch, state):
     pid = _photo(db, tmp_path)
     save_results_raw(_old_review([pid]), str(tmp_path), db.active_workspace_id)
-    current = complete_photo(pid, subject_tenengrad=0., bg_tenengrad=0.)
+    current = complete_photo(pid, crop_complete=0.)
     if state != "complete":
         current["analysis_provenance"]["segmentation"] = {
             "status": "complete" if state == "stale" else state, "current": state != "stale",
@@ -117,7 +123,7 @@ def test_historic_reason_is_not_relabelled_without_current_evidence(db, tmp_path
     row = load_results(str(tmp_path), db.active_workspace_id, db=db)["photos"][0]
     if state == "complete":
         assert row["label"] == "REJECT"
-        assert any(r.startswith("out_of_focus") for r in row["reject_reasons"])
+        assert any(r.startswith("crop_incomplete") for r in row["reject_reasons"])
         assert row["analysis_status"] == "complete"
     else:
         assert row["label"] == "REVIEW"
