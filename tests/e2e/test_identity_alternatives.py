@@ -38,6 +38,8 @@ def test_save_reload_edit_resolve_and_undo(live_server, page):
     page.locator('#identityEvidence').fill('An audio recording or expert review')
     page.locator('#identitySave').click()
     expect(group).to_contain_text('An audio recording or expert review')
+    expect(group.get_by_role('button', name='Resolve as Tropical Kingbird', exact=True)).to_be_disabled()
+    group.get_by_role('button', name='Select all frames to resolve', exact=True).click()
     group.get_by_role('button', name='Resolve as Tropical Kingbird', exact=True).click()
     expect(group).to_have_count(0)
     assert 'Tropical Kingbird' in db.photo_species.get_species_for_photos(ids)[ids[0]]
@@ -47,6 +49,29 @@ def test_save_reload_edit_resolve_and_undo(live_server, page):
     expect(group).to_have_count(1)
     assert db.photo_species.get_species_for_photos(ids) == before_species
     assert db.photos.get(ids[0])['flag'] == 'rejected'
+
+
+def test_resolve_selected_frames_leaves_others_unresolved(live_server, page):
+    ids = open_panel(live_server, page)
+    page.locator('#identitySave').click()
+    group = page.locator('#identityAlternativesGroups article')
+    expect(group).to_have_count(1)
+    group.get_by_label('Photos to resolve').select_option(str(ids[0]))
+    expect(group).to_contain_text('1 of 2 photos selected to resolve')
+    with page.expect_request('**/api/identity-alternatives/resolve') as request:
+        group.get_by_role('button', name='Resolve as Tropical Kingbird', exact=True).click()
+    assert request.value.post_data_json['photo_ids'] == [ids[0]]
+    expect(group).to_have_count(1)
+    expect(group).to_contain_text('1 photos.')
+    db = live_server['db']
+    assert db.identity_alternatives.photo_ids() == {ids[1]}
+    assert 'Tropical Kingbird' in db.photo_species.get_species_for_photos(ids)[ids[0]]
+    assert ids[1] not in db.photo_species.get_species_for_photos(ids)
+    page.reload()
+    page.locator('#identityAlternativesPanel > summary').click()
+    expect(group).to_have_count(1)
+    expect(group.get_by_label('Photos to resolve').locator('option')).to_have_count(1)
+    expect(group.get_by_role('button', name='Resolve as Tropical Kingbird', exact=True)).to_be_disabled()
 
 
 def test_failed_save_keeps_evidence_and_can_retry(live_server, page):

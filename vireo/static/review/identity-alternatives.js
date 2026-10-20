@@ -69,6 +69,46 @@
     el.addEventListener('click', action);
     return el;
   }
+  /** @param {HTMLElement} article @param {IdentityGroup} group */
+  function resolutionControls(article, group) {
+    var label = document.createElement('label');
+    label.textContent = 'Photos to resolve';
+    var selection = document.createElement('select');
+    selection.multiple = true;
+    selection.size = Math.min(6, group.photo_ids.length);
+    selection.disabled = busy;
+    group.photo_ids.forEach(function(id) {
+      var option = document.createElement('option');
+      option.value = String(id);
+      option.textContent = 'Photo ' + id;
+      selection.appendChild(option);
+    });
+    label.appendChild(selection);
+    article.appendChild(label);
+    var count = document.createElement('p');
+    count.setAttribute('aria-live', 'polite');
+    var actions = group.candidates.map(function(name) {
+      var action = button('Resolve as ' + name, function() {
+        var ids = Array.from(selection.selectedOptions).map(function(option) { return Number(option.value); });
+        if (ids.length) write('/api/identity-alternatives/resolve', {group_id: group.group_id, photo_ids: ids, species: name});
+      });
+      return action;
+    });
+    function update() {
+      var selected = selection.selectedOptions.length;
+      count.textContent = selected + ' of ' + group.photo_ids.length + ' photos selected to resolve. Other frames remain unresolved.';
+      actions.forEach(function(action) { action.disabled = busy || selected === 0; });
+    }
+    selection.addEventListener('change', update);
+    article.appendChild(button('Select all frames to resolve', function() {
+      if (busy) return;
+      Array.from(selection.options).forEach(function(option) { option.selected = true; });
+      update();
+    }));
+    article.appendChild(count);
+    actions.forEach(function(action) { article.appendChild(action); });
+    update();
+  }
   function render() {
     var root = element('identityAlternativesGroups');
     root.replaceChildren();
@@ -93,11 +133,7 @@
       });
       article.appendChild(members);
       article.appendChild(button('Edit alternatives and evidence', function() { editGroup(group); }));
-      group.candidates.forEach(function(name) {
-        article.appendChild(button('Resolve as ' + name, function() {
-          write('/api/identity-alternatives/resolve', {group_id: group.group_id, photo_ids: group.photo_ids, species: name});
-        }));
-      });
+      resolutionControls(article, group);
       root.appendChild(article);
     });
   }

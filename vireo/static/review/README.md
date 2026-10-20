@@ -98,8 +98,11 @@ the user explicitly selects the frames before saving.
 `POST /api/identity-alternatives` creates a group. Updating an existing group
 also sends its observed `group_id`; stale membership returns 409. Resolving
 through `POST /api/identity-alternatives/resolve` sends that group ID, a
-`photo_ids` subset, and one candidate `species`. Both writes use the shared
-decision lock and regroup lock. The catalog's `identity_alternatives` edit
+`photo_ids` subset, and one candidate `species`. Each group's resolution chooser starts with
+no frames selected; candidate buttons become available after selecting frames.
+The explicit Select all frames to resolve button includes the whole group.
+Unselected frames retain their alternatives and evidence in unresolved review.
+Both writes use the shared decision lock and regroup lock. The catalog's `identity_alternatives` edit
 history action replays the uncertainty and candidate-keyword delta together,
 including XMP keyword intents and original association provenance. Other
 confirmed species and flags are outside that delta.

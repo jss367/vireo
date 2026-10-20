@@ -109,6 +109,14 @@ def test_partial_resolution_keeps_other_frames_unresolved(app_and_db):
     group = current_group(client)
     assert resolve(client, group, photo_ids=[1]).status_code == 200
     assert current_group(client)['photo_ids'] == [2, 3]
+    assert current_group(client)['group_id'] == group['group_id']
+    assert current_group(client)['missing_evidence'] == group['missing_evidence']
+    assert db.photo_species.get_species_for_photos([1, 2, 3]) == {1: [CANDIDATES[0]]}
+    assert client.post('/api/undo').status_code == 200
+    assert current_group(client) == group
+    assert db.photo_species.get_species_for_photos([1, 2, 3]) == {}
+    assert client.post('/api/redo').status_code == 200
+    assert current_group(client)['photo_ids'] == [2, 3]
     assert db.photo_species.get_species_for_photos([1, 2, 3]) == {1: [CANDIDATES[0]]}
 
 
