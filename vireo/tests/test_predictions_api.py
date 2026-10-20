@@ -81,6 +81,44 @@ def test_list_predictions_filter_by_status(app_and_db):
     assert data[0]['species'] == 'House Sparrow'
 
 
+def test_prediction_lists_honor_detector_floor_and_current_labels(app_and_db):
+    """Review and Compare agree on live detections and full-image fallback."""
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+    db.workspaces.update(db.require_workspace_id(), config_overrides={"detector_confidence": 0.8})
+    detections = {}
+    for name, confidence, model in [
+        ("high", 0.9, "md-high"),
+        ("low", 0.3, "md-low"),
+        ("full", 0.0, "full-image"),
+    ]:
+        detections[name] = db.detections.save(pid, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+            "confidence": confidence, "category": "animal",
+        }], detector_model=model)[0]
+    for name, species, confidence, fingerprint in [
+        ("high", "Stale Species", 0.99, "old"),
+        ("high", "Current Species", 0.6, "new"),
+        ("low", "Hidden Species", 0.95, "new"),
+        ("full", "Full Image Species", 0.8, "new"),
+    ]:
+        db.predictions.add(detections[name], species, confidence, "test-model",
+                           labels_fingerprint=fingerprint)
+    db.conn.execute("UPDATE predictions SET created_at = '2026-01-01'")
+    db.commit()
+    cid = db.collections.add("All photos", "[]")
+    client = app.test_client()
+    expected = {"Current Species", "Full Image Species"}
+    for query in ("", f"?photo_ids={pid}", f"?collection_id={cid}"):
+        response = client.get(f"/api/predictions{query}")
+        assert response.status_code == 200
+        assert {p["species"] for p in response.get_json()["predictions"]} == expected
+    response = client.get(f"/api/predictions/compare?collection_id={cid}&photo_id={pid}")
+    assert response.status_code == 200
+    assert {p["species"] for photo in response.get_json()["photos"]
+            for predictions in photo["predictions"].values() for p in predictions} == expected
+
+
 def test_accept_prediction(app_and_db):
     """POST accept marks prediction as accepted and adds species keyword to photo."""
     app, db = app_and_db
