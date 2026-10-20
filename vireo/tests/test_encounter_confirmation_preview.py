@@ -268,3 +268,51 @@ def test_v1_species_confirmation_alias_preserves_undo_contract(app_and_db):
     assert all('Eared Grebe' in names for names in db.photo_species.get_species_for_photos(ids).values())
     assert client.post('/api/undo').status_code == 200
     assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+
+
+@pytest.mark.parametrize(('change', 'source_id', 'inat_id'), [
+    ('source_identity', 800001, 800001),
+    ('missing_source_identity', None, 800001),
+    ('removed_source_identity', 800002, 800001),
+    ('inat_identity', None, 800001),
+    ('missing_inat_identity', None, None),
+    ('removed_inat_identity', None, 800001),
+    ('scientific_identity', None, None),
+])
+def test_preview_binds_attached_species_source_identity(app_and_db, change, source_id, inat_id):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    keyword = db.keywords.top_level_species_keyword('Western Grebe')['id']
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank) VALUES (900001, ?, 'Aechmophorus occidentalis', 'species')",
+        (inat_id,),
+    )
+    db.conn.execute('UPDATE keywords SET taxon_id=900001, source_taxon_id=? WHERE id=?', (source_id, keyword))
+    db.commit()
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    before_names = db.photo_species.get_species_for_photos(ids)
+    before_identities = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    preview = request_preview(client, body)
+    if change in ('source_identity', 'missing_source_identity'):
+        db.conn.execute('UPDATE keywords SET source_taxon_id=800002 WHERE id=?', (keyword,))
+    elif change == 'removed_source_identity':
+        db.conn.execute('UPDATE keywords SET source_taxon_id=NULL WHERE id=?', (keyword,))
+    elif change in ('inat_identity', 'missing_inat_identity'):
+        db.conn.execute('UPDATE taxa SET inat_id=800002 WHERE id=900001')
+    elif change == 'removed_inat_identity':
+        db.conn.execute('UPDATE taxa SET inat_id=NULL WHERE id=900001')
+    else:
+        db.conn.execute("UPDATE taxa SET name='Aechmophorus clarkii' WHERE id=900001")
+    db.commit()
+    assert db.photo_species.get_species_for_photos(ids) == before_names
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) != before_identities
+    before_cache = json.load(open(path))
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    before_keywords = db.conn.execute('SELECT COUNT(*) FROM keywords').fetchone()[0]
+    response = apply(client, body, preview)
+    assert response.status_code == 409, response.get_json()
+    assert db.photo_species.get_species_for_photos(ids) == before_names
+    assert json.load(open(path)) == before_cache
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history
+    assert db.conn.execute('SELECT COUNT(*) FROM keywords').fetchone()[0] == before_keywords

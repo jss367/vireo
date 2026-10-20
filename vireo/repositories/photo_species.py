@@ -57,6 +57,8 @@ class PhotoSpeciesRepository:
         Do not flatten subjects into a single winning species. Include review
         statuses, even rejected alternatives, so a preview never hides a second
         subject or silently treats a model suggestion as a human confirmation.
+        Attached species include source and resolved taxon identity, including
+        NULLs, so an identity change cannot silently reuse an approved preview.
         """
         result = []
         ws = self.workspace_id
@@ -68,8 +70,13 @@ class PhotoSpeciesRepository:
             ).fetchall()
             by_id = {r["id"]: dict(r, subjects=[], keywords=[]) for r in photos}
             keyword_rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id, pk.source
+                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                           k.is_species, k.taxon_id, k.source_taxon_id, pk.source,
+                           t.id AS resolved_taxon_id, t.inat_id AS taxon_inat_id,
+                           t.name AS taxon_scientific_name, t.common_name AS taxon_common_name,
+                           t.rank AS taxon_rank, t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
                     FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
+                    LEFT JOIN taxa t ON t.id=k.taxon_id
                     WHERE pk.photo_id IN ({marks}) AND (k.is_species=1 OR k.type='taxonomy')
                     ORDER BY pk.photo_id, k.id""", list(chunk),
             ).fetchall()
