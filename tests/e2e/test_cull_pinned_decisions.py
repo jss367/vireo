@@ -67,8 +67,17 @@ def _nudge_scoring_slider(page, reflow_results):
         lambda route: route.fulfill(json=reflow_results),
     )
     page.click("#cullSettingsBtn")
-    page.locator("#slRejectComposite").focus()
-    page.keyboard.press("ArrowRight")
+    expect(page.locator("#slRejectFocus")).to_be_disabled()
+    expect(page.locator("#slRejectFocus").locator("..")).to_contain_text("Relative focus (inactive)")
+    composite = page.locator("#slRejectComposite")
+    previous = int(composite.input_value())
+    composite.focus()
+    with page.expect_request("**/api/pipeline/reflow") as reflow:
+        page.keyboard.press("ArrowRight")
+    config = reflow.value.post_data_json["config"]
+    assert "reject_focus" not in config
+    assert "w_focus" not in config  # Keep the workspace's active relative-focus weight.
+    assert config["reject_composite"] == (previous + 1) / 100
 
 
 def test_manual_decision_survives_recompute(live_server, page):

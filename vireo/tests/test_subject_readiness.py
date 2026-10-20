@@ -239,9 +239,10 @@ def test_measured_zero_is_quality_evidence_not_unavailable_analysis():
     run_triage([{"photos": [photo]}])
     assert photo["analysis_status"] == "complete"
     assert photo["selection_eligible"] is True
-    assert photo["label"] == "REJECT"
+    assert photo["label"] == "KEEP"
     assert photo["focus_score"] == 0.
-    assert any(reason.startswith("out_of_focus") for reason in photo["reject_reasons"])
+    assert photo["reject_reasons"] == []
+    assert photo["focus_evidence"]["absolute_status"] == "not_validated"
 
 
 def test_current_selected_subject_can_supply_in_memory_mask():
@@ -249,4 +250,5 @@ def test_current_selected_subject_can_supply_in_memory_mask():
     run_triage([{"photos": [photo]}])
     assert photo["analysis_status"] == "complete"
     assert photo["selection_eligible"] is True
-    assert any(reason.startswith("out_of_focus") for reason in photo["reject_reasons"])
+    assert photo["reject_reasons"] == []
+    assert photo["focus_evidence"]["absolute_status"] == "not_validated"

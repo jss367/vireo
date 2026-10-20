@@ -1605,8 +1605,8 @@ input[type="range"]::-moz-range-thumb {
           <span class="slider-val" id="valRejectCrop">0.60</span>
         </div>
         <div class="slider-row">
-          <span class="slider-label" title="Min subject sharpness rank within the encounter">Focus</span>
-          <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" oninput="onScoringChange(this)">
+          <span class="slider-label" title="Inactive: relative focus ranks cannot establish absolute defocus">Relative focus (inactive)</span>
+          <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" disabled oninput="onScoringChange(this)">
           <span class="slider-val" id="valRejectFocus">0.35</span>
         </div>
         <div class="slider-row">

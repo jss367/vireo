@@ -430,13 +430,8 @@ def test_compare_shortcut_round_trips_through_config_api(tmp_path, monkeypatch):
     assert loaded["keyboard_shortcuts"]["browse"]["compare"] == "shift+c"
 
 
-def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
-    """A reject_eye_focus value from effective config reaches score_encounter.
-
-    End-to-end: config.json → cfg.load() → db.get_effective_config() → dict
-    passed as score_encounter(config=...). Sets the threshold high enough
-    that a sharp eye still gets rejected, proving the value took effect.
-    """
+def test_legacy_eye_reject_threshold_cannot_make_relative_focus_an_absolute_verdict(tmp_path, monkeypatch):
+    """Legacy config loads without converting relative eye rank into defocus."""
     import json as _json
 
     import config as cfg
@@ -456,7 +451,7 @@ def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
 
     photo = {
         "subject_tenengrad": 50000,
-        "eye_tenengrad": 50000,  # "sharp" eye — yet rule still fires at 0.99
+        "eye_tenengrad": 50000,  # A raw measurement, not calibrated sharpness.
         "bg_tenengrad": 50,
         "subject_clip_high": 0.0,
         "subject_clip_low": 0.0,
@@ -477,12 +472,11 @@ def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
     assert photo["selection_eligible"] is True
     assert photo["eye_focus_score"] == 0.5
 
-    assert any(
-        "eye_soft" in r for r in photo.get("reject_reasons", [])
-    ), (
-        "reject_eye_focus from config.json was not applied by score_encounter; "
-        f"reasons={photo.get('reject_reasons')}"
-    )
+    assert pipeline_cfg["reject_eye_focus"] == 0.99
+    assert photo["focus_evidence"]["basis"] == "eye"
+    assert photo["focus_evidence"]["measurement"] == 50000
+    assert photo["focus_evidence"]["absolute_status"] == "not_validated"
+    assert photo["reject_reasons"] == []
 
 
 def test_miss_defaults_present():

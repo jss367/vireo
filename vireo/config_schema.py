@@ -540,8 +540,8 @@ SCHEMA = {
     "pipeline.reject_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
-        "label": "Reject: focus",
-        "desc": "Reject threshold for focus failure.",
+        "label": "Relative focus rejection (inactive)",
+        "desc": "Legacy setting retained for compatibility; relative focus cannot establish absolute defocus.",
     },
     "pipeline.reject_clip_high": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
@@ -619,8 +619,8 @@ SCHEMA = {
     "pipeline.miss_oof_ratio": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
-        "label": "Miss: out-of-focus ratio",
-        "desc": "Out-of-focus area ratio threshold.",
+        "label": "Focus review: subject/background gradient ratio",
+        "desc": "Uncalibrated Tenengrad ratio for review candidates; does not establish absolute defocus.",
     },
     "pipeline.miss_classifier_override_conf": {
         "type": "float", "min": 0.0, "max": 1.01, "step": 0.01,
@@ -681,8 +681,8 @@ SCHEMA = {
     "pipeline.reject_eye_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
-        "label": "Reject: eye focus",
-        "desc": "Reject threshold for eye out-of-focus.",
+        "label": "Relative eye rejection (inactive)",
+        "desc": "Legacy setting retained for compatibility; eye percentile cannot establish absolute defocus.",
     },
     "pipeline.burst_time_gap": {
         "type": "float", "min": 0.0, "max": 600.0, "step": 0.5,

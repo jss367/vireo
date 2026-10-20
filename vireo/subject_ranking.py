@@ -257,6 +257,6 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
             "best_filename": best["filename"] if best else None, "best_reasons": by_id[best["id"]]["reasons"] if best else [],
             "alternate_ids": [c["id"] for c in cards if c["role"] == "alternate"],
             "suggested_reject_ids": [c["id"] for c in cards if c["role"] == "reject" and c["flag"] == "none"],
-            "comparison": {"requested_species": comparison.requested_species, "subject_overrides": comparison.subject_overrides},
             "focus_cohorts": encounter.get("focus_cohorts", {}),
+            "comparison": {"requested_species": comparison.requested_species, "subject_overrides": comparison.subject_overrides},
             "scored": bool(eligible), "unscored_reason": None if eligible else "At least two selected subjects need current quality analysis"}

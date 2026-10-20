@@ -373,6 +373,8 @@ async function main() {
     'findPhotoInResults', 'findEncounterForPhoto',
     'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
     'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'openInspect',
+    'buildQualityEvidenceHtml', 'buildRelativeFocusHtml', 'buildFocusCohortHtml',
+    'describeReviewRejectReason',
   ]) vm.runInContext(fn(review, name), filmstripCtx);
   // Capture the panel's rendered HTML by swapping getElementById to catch
   // the write.
@@ -383,6 +385,7 @@ async function main() {
     return null;
   };
   filmstripCtx.openInspect(1);
+  assert(panelHtml.includes('Absolute sharpness: unvalidated.'), 'inspector renders real quality evidence');
   const filmstrip = panelHtml.match(/<div class="context-filmstrip">[^]*?<\/div>/);
   assert(filmstrip, 'filmstrip markup rendered');
   assert(filmstrip[0].includes('openInspect(1)'));

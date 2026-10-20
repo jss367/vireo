@@ -30,9 +30,8 @@ DEFAULTS = {
     "reject_focus": 0.35,
     "reject_clip_high": 0.30,  # subject highlight clipping fraction
     "reject_composite": 0.40,
-    # Eye-focus reject: fires when an eye is confidently localized but its
-    # windowed sharpness ranks poorly. Catches "sharp body, soft eye" frames
-    # that would otherwise pass subject-level focus checks.
+    # Legacy settings retained for config compatibility. Relative eye/subject
+    # ranks cannot establish absolute defocus and no longer trigger rejection.
     "reject_eye_focus": 0.35,
 }
 
@@ -297,20 +296,29 @@ def hard_reject_reasons(photo, q_score, config=None):
     if cc is not None and cc < cfg["reject_crop_complete"]:
         reasons.append(f"crop_incomplete ({cc:.2f} < {cfg['reject_crop_complete']})")
 
-    # Rule 3: Subject badly out of focus
-    # Use the focus score relative to encounter — if we don't have encounter
-    # context here, skip this rule (it's checked at triage time with encounter)
-
     # Rule 4: Subject highlight clipping
     clip_h = photo.get("subject_clip_high")
     if clip_h is not None and clip_h > cfg["reject_clip_high"]:
         reasons.append(f"highlight_clipping ({clip_h:.2f} > {cfg['reject_clip_high']})")
 
-    # Rule 5: Composite score floor
-    if q_score < cfg["reject_composite"]:
-        reasons.append(f"low_quality ({q_score:.3f} < {cfg['reject_composite']})")
+    # Focus contributes to ordering, never to automatic rejection. Substitute
+    # the neutral midpoint only for this counterfactual floor check; it is not
+    # a measurement or an absolute sharpness estimate. Ignore stale rounded
+    # composite/percentile values by recomputing from the available components.
+    floor_score = _rejection_floor_score(photo, cfg)
+    if floor_score is not None and floor_score < cfg["reject_composite"]:
+        reasons.append(f"low_quality_without_focus ({floor_score:.3f} < {cfg['reject_composite']})")
 
     return reasons
+
+
+def _rejection_floor_score(photo, cfg):
+    """Evaluate the quality floor independently of group-relative focus."""
+    components = (("exposure_score", "w_exposure"), ("composition_score", "w_composition"),
+                  ("area_score", "w_area"), ("noise_score", "w_noise"))
+    if any(photo.get(key) is None for key, _ in components):
+        return None
+    return cfg["w_focus"] * 0.5 + sum(photo[key] * cfg[weight] for key, weight in components)
 
 
 def _normalize_scoring_config(config):
@@ -360,46 +368,31 @@ def score_encounter(encounter, config=None):
     photos = [p for p in encounter["photos"] if mark_analysis_readiness(p)]
 
     # Compute per-encounter normalization data
-    enc_tenegrads = [p.get("subject_tenengrad", 0) or 0 for p in photos]
     enc_bg_tenegrads = [p.get("bg_tenengrad", 0) or 0 for p in photos]
     enc_bg_seps = [p.get("bg_separation", 0) or 0 for p in photos]
     enc_noise = [p.get("noise_estimate") for p in photos]
-    # Eye cohort: photos with a populated eye_tenengrad form their own
-    # ranking group so body-based photos don't skew the eye percentile
-    # (Option A from the design doc). A body-only photo compares against
-    # its peers' subject_tenengrad; an eye photo compares against its
-    # peers' eye_tenengrad. Skipped entirely when eye detection is
-    # disabled so stale eye_tenengrad values from prior runs don't
-    # influence scoring after the user turns the feature off.
     eye_enabled = cfg.get("eye_detect_enabled", False)
-    enc_eye_tenegrads = [
-        p["eye_tenengrad"] for p in photos
-        if p.get("eye_tenengrad") is not None
-    ] if eye_enabled else []
-
-    # Body cohort: photos that will fall back to subject_tenengrad scoring.
-    # In mixed encounters (some photos have eye signal, some don't), body-only
-    # photos must rank against body-only peers, otherwise eye-capable frames
-    # dilute the percentile and change out_of_focus decisions for photos that
-    # never saw the eye stage. Falls back to the full cohort when there are no
-    # body-only photos (every photo has an eye signal) so we never pass an
-    # empty comparison list into subject_focus_score.
-    if eye_enabled and enc_eye_tenegrads:
-        enc_body_tenegrads = [
-            p.get("subject_tenengrad", 0) or 0
-            for p in photos
-            if p.get("eye_tenengrad") is None
-        ]
-        if not enc_body_tenegrads:
-            enc_body_tenegrads = enc_tenegrads
-    else:
-        enc_body_tenegrads = enc_tenegrads
+    cohorts = {"eye": [], "subject": []}
+    for photo in photos:
+        basis = "eye" if eye_enabled and _eye_measurement(photo) is not None else "subject"
+        cohorts[basis].append(photo)
+    encounter["focus_cohorts"] = {
+        basis: {"scope": "encounter", "basis": basis, "size": len(peers),
+                "photo_ids": [p["id"] for p in peers if p.get("id") is not None],
+                "unidentified_count": sum(p.get("id") is None for p in peers)}
+        for basis, peers in cohorts.items()
+    }
+    enc_eye_tenegrads = [_eye_measurement(p) for p in cohorts["eye"]]
+    enc_body_tenegrads = [p["subject_tenengrad"] for p in cohorts["subject"]]
 
     for photo in photos:
         _score_photo(
             photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
             enc_bg_seps, enc_bg_tenegrads, enc_noise,
         )
+        basis = "eye" if eye_enabled and _eye_measurement(photo) is not None else "subject"
+        values = enc_eye_tenegrads if basis == "eye" else enc_body_tenegrads
+        _record_focus_evidence(photo, basis, values)
 
     return encounter
 
@@ -407,7 +400,8 @@ def score_encounter(encounter, config=None):
 def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
                  enc_bg_seps, enc_bg_tenegrads, enc_noise):
     """Score one encounter photo against its peers and record its reject reasons."""
-    eye_t = photo.get("eye_tenengrad") if eye_enabled else None
+    photo.pop("eye_focus_score", None)
+    eye_t = _eye_measurement(photo) if eye_enabled else None
     if eye_t is not None and enc_eye_tenegrads:
         # Eye-based focus: pure percentile rank within the eye cohort.
         # The subject-vs-bg ratio term from subject_focus_score does not
@@ -456,28 +450,33 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
     photo["noise_score"] = round(n, 4)
     photo["quality_composite"] = q
 
-    # Check focus reject using encounter percentile
-    reasons = hard_reject_reasons(photo, q, config=cfg)
-    has_mask = bool(photo.get("mask_path") or photo.get("subject_mask_available"))
-    if f < cfg.get("reject_focus", 0.35) and has_mask:
-        reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
+    photo["reject_reasons"] = hard_reject_reasons(photo, q, config=cfg)
+    photo["label"] = explicit_decision(photo) or ("REJECT" if photo["reject_reasons"] else None)
 
-    # Eye-soft reject: catches "sharp body, soft eye" frames. Only fires
-    # when we have a confidently-localized eye — a null eye_tenengrad
-    # means the pipeline stage's gates didn't all pass, and we fall back
-    # to out_of_focus on subject_tenengrad (already handled above).
-    # Also skipped when eye detection is disabled so stale eye_tenengrad
-    # values from prior runs can't reject photos after the user toggles
-    # the feature off.
-    if (
-        eye_enabled
-        and photo.get("eye_tenengrad") is not None
-        and f < cfg.get("reject_eye_focus", 0.35)
-        and has_mask
-    ):
-        reasons.append(
-            f"eye_soft (E={f:.3f} < {cfg['reject_eye_focus']})"
-        )
 
-    photo["reject_reasons"] = reasons
-    photo["label"] = explicit_decision(photo) or ("REJECT" if reasons else None)
+def _eye_measurement(photo):
+    """An invalid optional eye measurement falls back to subject scoring."""
+    value = photo.get("eye_tenengrad")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return value
+    return None
+
+
+def _record_focus_evidence(photo, basis, values):
+    """Explain the relative score without claiming calibrated absolute focus.
+
+    Cohort membership is stored once on the encounter under focus_cohorts;
+    cohort_key refers to that map. Peers have eligible current subject analysis
+    and the same measurement basis, including this photo. Flags never exclude
+    a measured peer. The scope is the encounter, not the visible review burst.
+    """
+    raw = photo["eye_tenengrad"] if basis == "eye" else photo["subject_tenengrad"]
+    photo["focus_evidence"] = {
+        "basis": basis, "measurement": raw, "measurement_name": "Tenengrad",
+        "background_measurement": photo["bg_tenengrad"] if basis == "subject" else None,
+        "percentile": _percentile_rank(raw, values),
+        "relative_score": photo["focus_score"],
+        "method": "eye_percentile" if basis == "eye" else "subject_percentile_background_ratio",
+        "cohort_key": basis, "cohort_size": len(values), "cohort_scope": "encounter",
+        "absolute_status": "not_validated",
+    }
