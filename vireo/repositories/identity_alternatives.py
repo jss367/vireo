@@ -1,7 +1,7 @@
-"""Workspace review state for alternative identities, never species keywords.
+"""Catalog-wide alternative identities, filtered by workspace visibility.
 
-Only unresolved rows live here. Confirmation deletes a row; the ordinary edit
-history stores its before-state for undo. A shared group_id keeps a batch of
+Resolved revision markers remain hidden from review lists so history can detect
+newer decisions even when a photo was resolved to the same species again. A shared group_id keeps a batch of
 frames together without asserting that every candidate occurs in a frame.
 """
 
@@ -47,13 +47,13 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
     if not old_name or not new_name or old_name == new_name:
         return
     revisions = {}
-    for row in conn.execute('SELECT workspace_id, photo_id, group_id, candidates FROM photo_identity_alternatives').fetchall():
+    for row in conn.execute('SELECT photo_id, group_id, candidates FROM photo_identity_alternatives').fetchall():
         candidates = _renamed_candidates(json.loads(row['candidates']), old_name, new_name)
         if candidates is not None:
             conn.execute(
-                'UPDATE photo_identity_alternatives SET candidates=?, group_id=? WHERE workspace_id=? AND photo_id=?',
+                'UPDATE photo_identity_alternatives SET candidates=?, group_id=? WHERE photo_id=?',
                 (json.dumps(candidates), revisions.setdefault(row['group_id'], uuid.uuid4().hex),
-                 row['workspace_id'], row['photo_id']),
+                 row['photo_id']),
             )
     rows = conn.execute(
         'SELECT i.id, i.old_value, i.new_value FROM edit_history_items i '
@@ -87,24 +87,26 @@ class IdentityAlternativesRepository:
         self._workspace_id = workspace_id
         self._lookup_taxon_id = lookup_taxon_id
 
-    def for_photos(self, photo_ids: Collection[int] | None = None) -> dict[int, dict[str, Any]]:
+    def for_photos(self, photo_ids: Collection[int] | None = None, *, include_resolved: bool = False) -> dict[int, dict[str, Any]]:
         """Visible unresolved photos in this workspace, optionally restricted."""
         ws = self._workspace_id()
         result = {}
         batches = chunked(list(dict.fromkeys(photo_ids))) if photo_ids is not None else [None]
         for ids in batches:
-            clause = "" if ids is None else f" AND a.photo_id IN ({','.join('?' for _ in ids)})"
+            clause = "" if include_resolved else " AND a.status='unresolved'"
+            if ids is not None:
+                clause += f" AND a.photo_id IN ({','.join('?' for _ in ids)})"
             rows = self.conn.execute(
                 "SELECT a.* FROM photo_identity_alternatives a "
-                "JOIN photo_workspace_visibility v ON v.photo_id=a.photo_id AND v.workspace_id=a.workspace_id "
-                "WHERE a.workspace_id=?" + clause + " ORDER BY a.photo_id",
+                "JOIN photo_workspace_visibility v ON v.photo_id=a.photo_id AND v.workspace_id=? "
+                "WHERE 1=1" + clause + " ORDER BY a.photo_id",
                 [ws, *(ids or [])],
             )
             for row in rows:
                 result[row['photo_id']] = {
                     'group_id': row['group_id'], 'candidates': json.loads(row['candidates']),
                     'reason': row['reason'], 'missing_evidence': row['missing_evidence'],
-                    'status': 'unresolved',
+                    'status': row['status'],
                 }
         return result
 
@@ -113,19 +115,18 @@ class IdentityAlternativesRepository:
 
     def set_state(self, photo_id: int, state: dict[str, Any] | None) -> None:
         """Write without committing; the decision/history transaction owns it."""
-        ws = self._workspace_id()
         if state is None:
             self.conn.execute(
-                'DELETE FROM photo_identity_alternatives WHERE workspace_id=? AND photo_id=?', (ws, photo_id),
+                'DELETE FROM photo_identity_alternatives WHERE photo_id=?', (photo_id,),
             )
         else:
             self.conn.execute(
                 'INSERT INTO photo_identity_alternatives '
-                '(workspace_id, photo_id, group_id, candidates, reason, missing_evidence) VALUES (?, ?, ?, ?, ?, ?) '
-                'ON CONFLICT(workspace_id, photo_id) DO UPDATE SET group_id=excluded.group_id, '
-                'candidates=excluded.candidates, reason=excluded.reason, missing_evidence=excluded.missing_evidence',
-                (ws, photo_id, state['group_id'], json.dumps(state['candidates']),
-                 state['reason'], state['missing_evidence']),
+                '(photo_id, group_id, candidates, reason, missing_evidence, status) VALUES (?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(photo_id) DO UPDATE SET group_id=excluded.group_id, '
+                'candidates=excluded.candidates, reason=excluded.reason, missing_evidence=excluded.missing_evidence, status=excluded.status',
+                (photo_id, state['group_id'], json.dumps(state['candidates']),
+                 state['reason'], state['missing_evidence'], state.get('status', 'unresolved')),
             )
 
     def _candidate_identities(self, candidates: Collection[str]) -> set[str]:

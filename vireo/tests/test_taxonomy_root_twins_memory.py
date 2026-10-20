@@ -47,7 +47,7 @@ def setup():
     conn.executescript("""CREATE TABLE taxa(id INTEGER PRIMARY KEY, inat_id INTEGER, name TEXT, common_name TEXT, rank TEXT);
  CREATE TABLE taxa_common_names(taxon_id INTEGER,name TEXT);
  CREATE TABLE keywords(id INTEGER PRIMARY KEY,name TEXT,parent_id INTEGER REFERENCES keywords(id),type TEXT DEFAULT 'general',is_species INTEGER DEFAULT 0,taxon_id INTEGER REFERENCES taxa(id),source_taxon_id INTEGER,place_id TEXT,latitude REAL,longitude REAL,UNIQUE(name,parent_id));
- CREATE TABLE photo_identity_alternatives(workspace_id INTEGER,photo_id INTEGER,group_id TEXT,candidates TEXT);
+ CREATE TABLE photo_identity_alternatives(photo_id INTEGER,group_id TEXT,candidates TEXT);
  CREATE TABLE photo_keywords(photo_id INTEGER,keyword_id INTEGER REFERENCES keywords(id),source TEXT,PRIMARY KEY(photo_id,keyword_id));
  CREATE TABLE keyword_import_aliases(path_key TEXT PRIMARY KEY,path_json TEXT,keyword_id INTEGER REFERENCES keywords(id) ON DELETE CASCADE);
  CREATE TABLE pending_changes(id INTEGER PRIMARY KEY,photo_id INTEGER,workspace_id INTEGER,change_type TEXT,value TEXT);

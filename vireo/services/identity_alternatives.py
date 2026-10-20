@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class IdentityHistoryConflict(RuntimeError):
+    """A newer catalog identity decision superseded this history action."""
+
+
+def _check_replay_state(db: Database, photo_id: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+    current = db.identity_alternatives.for_photos([photo_id], include_resolved=True).get(photo_id)
+    names = [name for data in (before, after) if data['identity']
+             and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
+    links = db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, [])
+    expected_links = {link['keyword_id']: link['source'] for link in before['links']}
+    actual_links = {link['keyword_id']: link['source'] for link in links}
+    if current != before['identity'] or actual_links != expected_links:
+        raise IdentityHistoryConflict(
+            'This identification was changed elsewhere. Reload the photo and review its current identity before editing history.'
+        )
+
+
 def normalize_candidates(value: object, *, minimum: int = 2) -> list[str]:
     if not isinstance(value, list) or not minimum <= len(value) <= 20:
         raise ValueError(f'Provide between {minimum} and 20 alternative species names')
@@ -58,6 +75,7 @@ def _snapshot(identity: dict[str, Any] | None, links: list[dict[str, Any]]) -> s
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:
     """Apply a recorded delta in either direction, including sidecar intents."""
     before, after = json.loads(previous), json.loads(replacement)
+    _check_replay_state(db, photo_id, before, after)
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
@@ -77,9 +95,15 @@ def save_alternatives(
     db: Database, photo_ids: Sequence[int], candidates: list[str], reason: str, missing_evidence: str,
 ) -> int:
     """Replace candidate confirmations with one unresolved group, atomically."""
-    states = db.identity_alternatives.for_photos(photo_ids)
-    names = candidates + [name for state in states.values() for name in state['candidates']]
-    links = db.identity_alternatives.candidate_links(photo_ids, names)
+    states = db.identity_alternatives.for_photos(photo_ids, include_resolved=True)
+    prior_groups: dict[tuple[str, ...], list[int]] = {}
+    for pid in photo_ids:
+        prior = states.get(pid, {})
+        previous = tuple(prior.get('candidates', [])) if prior.get('status') == 'unresolved' else ()
+        prior_groups.setdefault(previous, []).append(pid)
+    links = {}
+    for previous, ids in prior_groups.items():
+        links.update(db.identity_alternatives.candidate_links(ids, [*candidates, *previous]))
     state = {
         'group_id': uuid.uuid4().hex, 'status': 'unresolved', 'candidates': candidates,
         'reason': reason, 'missing_evidence': missing_evidence,
@@ -116,7 +140,8 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
         # redundant root; every other candidate association is removed.
         equivalents = target_links.get(pid) or [{'keyword_id': kid, 'source': 'manual'}]
         old = _snapshot(states[pid], links)
-        new = _snapshot(None, equivalents)
+        resolved = {**states[pid], 'group_id': uuid.uuid4().hex, 'status': 'resolved'}
+        new = _snapshot(resolved, equivalents)
         replay_identity_edit(db, pid, old, new)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(

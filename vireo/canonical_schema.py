@@ -143,18 +143,17 @@ def create_current_flag_attribution(conn):
 
 
 def create_identity_alternatives(conn):
-    """Review uncertainty is separate from confirmed taxonomy associations."""
+    """Catalog-wide uncertainty follows the same identity scope as species tags."""
     conn.execute("""CREATE TABLE IF NOT EXISTS photo_identity_alternatives (
-        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
         group_id TEXT NOT NULL,
         candidates TEXT NOT NULL,
         reason TEXT NOT NULL,
         missing_evidence TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (workspace_id, photo_id)
+        status TEXT NOT NULL DEFAULT 'unresolved' CHECK (status IN ('unresolved', 'resolved'))
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_alternatives_group "
-                 "ON photo_identity_alternatives(workspace_id, group_id)")
+                 "ON photo_identity_alternatives(group_id)")
 
 
 def create_subject_ranking_analysis(conn):

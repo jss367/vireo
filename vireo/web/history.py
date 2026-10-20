@@ -193,12 +193,13 @@ def create_history_blueprint(
             return None
 
         from services.grouping_history import GroupingHistoryConflict
+        from services.identity_alternatives import IdentityHistoryConflict
 
         try:
             early = prediction_decisions.under_prediction_decision_lock(
                 db, _apply, json_error=json_error,
             )
-        except GroupingHistoryConflict as exc:
+        except (GroupingHistoryConflict, IdentityHistoryConflict) as exc:
             return json_error(str(exc), 409)
         if early is not None:
             return early
@@ -242,12 +243,13 @@ def create_history_blueprint(
             return None
 
         from services.grouping_history import GroupingHistoryConflict
+        from services.identity_alternatives import IdentityHistoryConflict
 
         try:
             early = prediction_decisions.under_prediction_decision_lock(
                 db, _apply, json_error=json_error,
             )
-        except GroupingHistoryConflict as exc:
+        except (GroupingHistoryConflict, IdentityHistoryConflict) as exc:
             return json_error(str(exc), 409)
         if early is not None:
             return early

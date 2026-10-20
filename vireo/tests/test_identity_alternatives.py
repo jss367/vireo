@@ -328,6 +328,112 @@ def test_candidate_matching_respects_explicit_source_identity_over_local_claim(a
     assert db.photo_species.get_species_for_photos([1]) == before
 
 
+def _workspace_switcher(db):
+    sequence = 0
+
+    def switch(workspace):
+        nonlocal sequence
+        sequence += 1
+        db.workspaces.update(workspace, last_opened_at=f'2099-01-01T00:00:{sequence:02}')
+        db.set_active_workspace(workspace)
+    return switch
+
+
+def test_global_identity_resolution_and_history_are_shared_but_visibility_filtered(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared review')
+    db.photo_visibility.grant(second, [2])
+    switch = _workspace_switcher(db)
+    switch(first)
+    db.photo_review.set_flag(1, 'rejected')
+    db.photo_review.set_flag(2, 'flagged')
+    assert save(client, [1, 2]).status_code == 200
+    original = current_group(client)
+    switch(second)
+    group = current_group(client)
+    assert group['photo_ids'] == [2]
+    assert group['group_id'] == original['group_id']
+    assert resolve(client, group, photo_ids=[1, 2]).status_code == 404
+    assert resolve(client, group).status_code == 200
+    assert not db.identity_alternatives.photo_ids()
+    assert client.post('/api/undo').status_code == 200
+    assert current_group(client)['group_id'] == original['group_id']
+    assert client.post('/api/redo').status_code == 200
+    switch(first)
+    assert current_group(client)['photo_ids'] == [1]
+    assert resolve(client, original, photo_ids=[2]).status_code == 409
+    before = db.identity_alternatives.for_photos(include_resolved=True)
+    tags = db.photo_species.get_species_for_photos([1, 2])
+    # The first item would undo successfully; the conflicting second item
+    # must roll back the whole batch, including history markers and intents.
+    latest = db.edit_history.latest_undoable()['id']
+    response = client.post('/api/undo')
+    assert response.status_code == 409
+    assert 'changed elsewhere' in response.get_json()['error']
+    assert db.identity_alternatives.for_photos(include_resolved=True) == before
+    assert db.photo_species.get_species_for_photos([1, 2]) == tags
+    assert db.edit_history.latest_undoable()['id'] == latest
+    assert db.photos.get(1)['flag'] == 'rejected'
+    assert db.photos.get(2)['flag'] == 'flagged'
+
+
+def test_newer_same_species_resolution_blocks_older_undo_across_workspaces(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared review')
+    db.photo_visibility.grant(second, [1])
+    switch = _workspace_switcher(db)
+    switch(first)
+    assert save(client, [1]).status_code == 200
+    assert resolve(client, current_group(client)).status_code == 200
+    first_revision = db.identity_alternatives.for_photos(include_resolved=True)[1]['group_id']
+    switch(second)
+    assert save(client, [1]).status_code == 200
+    assert resolve(client, current_group(client)).status_code == 200
+    latest_state = db.identity_alternatives.for_photos(include_resolved=True)
+    assert latest_state[1]['group_id'] != first_revision
+    assert not db.identity_alternatives.photo_ids()
+    switch(first)
+    assert client.post('/api/undo').status_code == 409
+    assert db.identity_alternatives.for_photos(include_resolved=True) == latest_state
+    assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[0]]}
+
+
+def test_newer_global_resolution_blocks_older_redo_from_another_workspace(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared review')
+    db.photo_visibility.grant(second, [1])
+    switch = _workspace_switcher(db)
+    switch(first)
+    assert save(client, [1]).status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    switch(second)
+    assert save(client, [1]).status_code == 200
+    assert resolve(client, current_group(client)).status_code == 200
+    latest_state = db.identity_alternatives.for_photos(include_resolved=True)
+    switch(first)
+    assert client.post('/api/redo').status_code == 409
+    assert db.identity_alternatives.for_photos(include_resolved=True) == latest_state
+    assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[0]]}
+
+
+def test_history_rejects_superseded_candidate_associations_without_changing_identity(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    assert save(client, [1]).status_code == 200
+    before = current_group(client)
+    confirmed = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.tag_photo(1, confirmed)
+    assert client.post('/api/undo').status_code == 409
+    assert current_group(client) == before
+    assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[0]]}
+
+
 def save(client, ids, **changes):
     workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={
@@ -490,7 +596,7 @@ def test_candidate_hierarchy_delimiter_error_explains_the_restriction(app_and_db
     assert not db.edit_history.latest_undoable()
 
 
-def test_groups_are_durable_and_workspace_scoped(app_and_db, tmp_path):
+def test_groups_are_durable_and_filtered_by_workspace_visibility(app_and_db, tmp_path):
     from db import Database
     app, db = app_and_db
     client = app.test_client()
@@ -500,6 +606,8 @@ def test_groups_are_durable_and_workspace_scoped(app_and_db, tmp_path):
         other_ws = reopened.create_workspace('Other')
         reopened.set_active_workspace(other_ws)
         assert reopened.identity_alternatives.photo_ids() == set()
+        reopened.photo_visibility.grant(other_ws, [1])
+        assert reopened.identity_alternatives.photo_ids() == {1}
 
 
 def test_failure_partway_through_batch_rolls_back_tags_state_and_history(app_and_db, monkeypatch):
