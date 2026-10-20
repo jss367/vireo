@@ -1669,8 +1669,22 @@ def load_results(cache_dir, workspace_id, db=None):
     Returns:
         dict or None if no cache exists
     """
-    path = _results_cache_path(cache_dir, workspace_id)
-    data = _load_results_json(path)
+    if db is not None:
+        if db.require_workspace_id() != workspace_id:
+            raise ValueError("Saved review workspace does not match the active workspace")
+        from pipeline_locks import acquire_workspace_regroup
+        from services.saved_review import refresh_saved_suggestions
+        # Structural edits use this same lock: do not overwrite a detach or
+        # confirmation that lands while current evidence is being loaded.
+        with acquire_workspace_regroup(workspace_id):
+            data = load_results_raw(cache_dir, workspace_id)
+            if data is not None:
+                previous = json.dumps(data)
+                refresh_saved_suggestions(db, data)
+                if json.dumps(data) != previous:
+                    save_results_raw(data, cache_dir, workspace_id)
+    else:
+        data = load_results_raw(cache_dir, workspace_id)
     if data is None:
         return None
     if db is not None:
