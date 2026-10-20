@@ -217,7 +217,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   }
 
   // Date, dimensions, file size (always from photo fields)
-  if (photo.timestamp) summary += 'Date: ' + photo.timestamp + '<br>';
+  if (photo.timestamp) summary += 'Date: ' + escapeHtml(window.VireoTime.captureDateTime(photo.timestamp, true)) + '<br>';
   if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
   if (photo.file_size) {
     var sz = photo.file_size;

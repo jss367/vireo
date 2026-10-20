@@ -6,9 +6,7 @@
 
 /** @param {string|null|undefined} value */ function formatDateTime(value) {
   if (!value) return 'Date unavailable';
-  var parsed = new Date(value);
-  if (isNaN(parsed.getTime())) return String(value).replace('T', ' ').slice(0, 16);
-  return parsed.toLocaleString([], {
+  return window.VireoTime.captureDateTime(value, false, {
     month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
   });
 }

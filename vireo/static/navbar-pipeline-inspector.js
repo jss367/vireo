@@ -214,7 +214,7 @@ function renderPipeline(data, photoId) {
     '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
     '<div class="pipeline-stat"><b>' + escapeHtml(data.filename) + '</b></div>' +
     (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
-    (data.timestamp ? '<div class="pipeline-stat">' + data.timestamp + '</div>' : '') +
+    (data.timestamp ? '<div class="pipeline-stat">' + escapeHtml(window.VireoTime.captureDateTime(data.timestamp, true)) + '</div>' : '') +
     '</div>';
 
   // Step 2: Detection

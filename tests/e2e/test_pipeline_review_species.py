@@ -3,6 +3,7 @@ import os
 import re
 from urllib.parse import urlsplit
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -335,9 +336,11 @@ def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
     expect(species_name).to_have_text('Yellow-breasted Chat')
 
 
+@pytest.mark.parametrize("time_format", ["12h", "24h"])
 def test_pipeline_review_encounter_time_range_includes_capture_date(
-    live_server, page
+    live_server, page, time_format
 ):
+    page.request.post(live_server["url"] + "/api/config", data={"time_format": time_format})
     photo_ids = live_server["data"]["photos"][1:3]
     _write_predictionless_pipeline_cache(live_server, photo_ids)
 
@@ -359,7 +362,8 @@ def test_pipeline_review_encounter_time_range_includes_capture_date(
 
     same_day = page.locator(
         ".encounter-meta > span",
-        has_text="Aug 15, 2026 · 10:12:03–10:15:47",
+        has_text=("Aug 15, 2026 · 10:12:03 AM–10:15:47 AM" if time_format == "12h"
+                  else "Aug 15, 2026 · 10:12:03–10:15:47"),
     )
     expect(same_day).to_have_count(2)  # Top header and repeated bottom bar.
 
@@ -374,7 +378,8 @@ def test_pipeline_review_encounter_time_range_includes_capture_date(
     )
     across_days = page.locator(
         ".encounter-meta > span",
-        has_text="Aug 15, 2026 23:59:52 – Aug 16, 2026 00:01:14",
+        has_text=("Aug 15, 2026 11:59:52 PM – Aug 16, 2026 12:01:14 AM" if time_format == "12h"
+                  else "Aug 15, 2026 23:59:52 – Aug 16, 2026 00:01:14"),
     )
     expect(across_days).to_have_count(2)
 

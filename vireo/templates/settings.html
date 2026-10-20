@@ -1212,6 +1212,17 @@
       </div>
       <div id="themePicker" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
     </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        <label for="cfgTimeFormat">Time format</label>
+        <small>Choose how times are displayed throughout the app. System default follows your device or browser locale.</small>
+      </div>
+      <select id="cfgTimeFormat" onchange="saveConfig()">
+        <option value="system">System default</option>
+        <option value="12h">12-hour (3:45 PM)</option>
+        <option value="24h">24-hour (15:45)</option>
+      </select>
+    </div>
   </div>
 
   <!-- Advanced -->

@@ -77,7 +77,7 @@
 
   // Meta: started, elapsed, overall %
   html += '<div class="job-detail-meta">';
-  html += '<span>Started: ' + new Date(job.started_at).toLocaleTimeString() + '</span>';
+  html += '<span>Started: ' + window.VireoTime.time(new Date(job.started_at)) + '</span>';
   html += '<span>Elapsed: ' + elapsed + '</span>';
   var collectionText = jobCollectionText(job);
   if (collectionText) {
@@ -283,7 +283,7 @@
   }
   if (job.result?.last_progress_at) {
     parts.push('Last progress was recorded at ' +
-      new Date(job.result?.last_progress_at).toLocaleString() + '.');
+      window.VireoTime.dateTime(new Date(job.result?.last_progress_at)) + '.');
   } else {
     parts.push('No progress was recorded before the restart.');
   }

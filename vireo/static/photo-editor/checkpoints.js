@@ -50,7 +50,7 @@ async function afterHistoryChange() {
   if (!value) return '';
   var d = new Date(value + 'Z');
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString([], {
+  return window.VireoTime.dateTime(d, {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
   });
 }

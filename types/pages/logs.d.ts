@@ -1,3 +1,4 @@
+/// <reference path="../time.d.ts" />
 // The Logs page (vireo/static/logs/): the log records it renders and the
 // shared globals its shared.js reads.
 interface LogRecord {time: number; level: string; logger?: string; message?: string}

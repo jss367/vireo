@@ -360,7 +360,7 @@
 /** @param {JobsTakeover} takeover */ function importTakeoverNote(takeover) {
   var when = takeover.byStartedAt ? new Date(takeover.byStartedAt) : null;
   var which = when && !isNaN(when.getTime())
-    ? 'the import started ' + when.toLocaleString()
+    ? 'the import started ' + window.VireoTime.dateTime(when)
     : 'a later import';
   var resuming = takeover.parentInterrupted;
   var lead = (resuming ? 'Already resumed by ' : 'Already retried by ') + which;

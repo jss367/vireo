@@ -1,3 +1,4 @@
+/// <reference path="time.d.ts" />
 // The page hooks a page registers with Vireo.registerPageHooks (see
 // vireo/static/vireo-page-hooks.js) for the shared navbar and lightbox to call.
 // Every hook is optional: shared code asks for one with Vireo.pageHook(name)

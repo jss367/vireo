@@ -83,8 +83,8 @@ function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */
       return '';
     case 'capture_date':
       if (p.timestamp) {
-        var d = p.timestamp.replace('T', ' ').substring(0, 16);
-        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(p.timestamp) + '">' + d + '</span>';
+        var d = window.VireoTime.captureDateTime(p.timestamp);
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(window.VireoTime.captureDateTime(p.timestamp, true)) + '">' + escapeHtml(d) + '</span>';
       }
       return '';
     case 'extension':

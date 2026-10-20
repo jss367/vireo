@@ -15,6 +15,7 @@
     "../vireo/static/map-status.js",
     "../vireo/static/vireo-api.js",
     "../vireo/static/vireo-utils.js",
+    "../vireo/static/vireo-time.js",
     "../vireo/static/vireo-page-hooks.js",
     "../vireo/static/keymap.js",
     "../vireo/static/vireo-search.js",

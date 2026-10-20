@@ -8,7 +8,7 @@ async function loadRetainedStorage() {
     retainedStorageData = data;
     if (data.maintenance) {
       /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus')).textContent = 'Latest storage maintenance: ' +
-        data.maintenance.status + ' · ' + new Date(data.maintenance.finished_at || data.maintenance.started_at).toLocaleString() +
+        data.maintenance.status + ' · ' + window.VireoTime.dateTime(new Date(data.maintenance.finished_at || data.maintenance.started_at)) +
         (data.maintenance.summary ? ' · ' + data.maintenance.summary : '');
     }
     panel.replaceChildren();

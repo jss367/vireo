@@ -23,7 +23,7 @@
   function browseCompareMeta(photo) {
     var parts = [];
     if (photo.width && photo.height) parts.push(photo.width + ' × ' + photo.height);
-    if (photo.timestamp) parts.push(photo.timestamp.replace('T', ' ').substring(0, 16));
+    if (photo.timestamp) parts.push(window.VireoTime.captureDateTime(photo.timestamp));
     if (photo.rating != null && photo.rating > 0) parts.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
     if (photo.sharpness != null) parts.push('sharpness ' + Math.round(photo.sharpness));
     if (photo.flag && photo.flag !== 'none') parts.push(photo.flag);

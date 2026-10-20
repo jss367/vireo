@@ -1,3 +1,4 @@
+/// <reference path="../time.d.ts" />
 // Jobs endpoint payloads and external helpers loaded by the shared navbar.
 interface JobsProgress {
   current?: number; total?: number; phase_current?: number; phase_total?: number;

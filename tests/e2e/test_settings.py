@@ -5,6 +5,34 @@ import pytest
 from playwright.sync_api import expect
 
 
+def test_time_format_saves_and_applies_to_photo_cards(live_server, page):
+    url = live_server["url"]
+    page.request.post(url + "/api/config", data={"browse_card_fields": ["filename", "capture_date"]})
+    photo_id = live_server["data"]["photos"][0]
+
+    for value, expected in [("12h", "2024-03-10 08:00 AM"), ("24h", "2024-03-10 08:00")]:
+        page.goto(url + "/settings")
+        clock = page.get_by_label("Time format", exact=True)
+        expect(clock).to_be_enabled()
+        # Wait for the asynchronous form population before making an edit.
+        expect(page.locator("body")).to_have_attribute("data-settings-ready", "true")
+        with page.expect_response(lambda response: response.url.endswith("/api/config")
+                                 and response.request.method == "POST") as saved:
+            clock.select_option(value)
+        assert saved.value.ok
+        expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
+        page.reload()
+        expect(page.get_by_label("Time format", exact=True)).to_have_value(value)
+        page.goto(url + "/browse")
+        expect(page.locator(f'.grid-card[data-id="{photo_id}"] .grid-card-info')).to_contain_text(expected)
+
+    # Reset through the schema editor, then verify the curated control follows it.
+    response = page.request.delete(url + "/api/settings/global/time_format")
+    assert response.ok
+    page.goto(url + "/settings")
+    expect(page.get_by_label("Time format", exact=True)).to_have_value("system")
+
+
 def test_settings_links_to_storage_page(live_server, page):
     """Settings makes the dedicated storage page discoverable."""
     url = live_server["url"]

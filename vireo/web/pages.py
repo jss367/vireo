@@ -133,12 +133,15 @@ def create_pages_blueprint(get_db):
         from move import rsync_install_guidance
 
         labels = _file_manager_labels()
-        preview_max_size = get_db().get_effective_config(cfg.load()).get("preview_max_size")
+        config = cfg.load()
+        preview_max_size = get_db().get_effective_config(config).get("preview_max_size")
         return Response(
             "window.VIREO_CONFIG_DEFAULTS = "
             + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
             + ";\nwindow.VIREO_FULL_PREVIEW_MAX_SIZE = "
             + json.dumps(1920 if preview_max_size is None else preview_max_size)
+            + ";\nwindow.VIREO_TIME_FORMAT = "
+            + json.dumps(config.get("time_format", "system"))
             + ";\nwindow.VIREO_PLATFORM = "
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_RSYNC_INSTALL = "
