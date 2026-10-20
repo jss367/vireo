@@ -451,3 +451,33 @@ def test_new_analysis_insert_and_pruning_roll_back_together(comparison_library):
     db.rollback()
     assert db.subjects.ranking_analysis(did, "second") is None
     assert db.subjects.ranking_analysis(did, "first")["mask_png"] == b"first"
+
+
+def test_partial_selected_generation_stays_unranked_and_out_of_peer_scores(comparison_library, monkeypatch):
+    import config as cfg
+    import subject_ranking
+
+    app, db, pids, _ = comparison_library
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    reference = _pack(app, pids[1:], requested_species=TARGET)
+    cached_analysis = subject_ranking.cached_analysis
+
+    def partial_analysis(reader, photo, detection, effective_cfg):
+        key, analysis = cached_analysis(reader, photo, detection, effective_cfg)
+        if photo["id"] == pids[0] and analysis:
+            analysis = {**analysis, "features": {**analysis["features"], "subject_clip_low": None}}
+        return key, analysis
+
+    monkeypatch.setattr(subject_ranking, "cached_analysis", partial_analysis)
+    pack = _pack(app, pids, requested_species=TARGET)
+    unavailable = next(card for card in pack["cards"] if card["id"] == pids[0])
+    assert unavailable["label"] == "REVIEW" and unavailable["rank"] is None
+    assert unavailable["quality"] is None and unavailable["has_quality"] is False
+    assert unavailable["evidence_status"] == "subject_analysis_missing"
+    assert unavailable["analysis_reasons"] == ["missing_subject_clip_low"]
+    assert pids[0] not in pack["suggested_reject_ids"] + pack["alternate_ids"]
+    assert [(card["id"], card["quality"]) for card in pack["cards"] if card["rank"]] == [
+        (card["id"], card["quality"]) for card in reference["cards"]]
+    # A single complete subject still cannot satisfy comparison's two-subject minimum.
+    too_few = _pack(app, pids[:2], requested_species=TARGET)
+    assert too_few["scored"] is False and too_few["best_photo_id"] is None

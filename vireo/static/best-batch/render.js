@@ -6,7 +6,7 @@ import { renderSubject } from './subjects.js';
 import { byId, state } from './state.js';
 import { escapeAttr, escapeHtml } from './shared.js';
 import {
-  focusImageStyle, hasEyeKeypoint, previewUrl, roleLabel, scoreText, thumbnailUrl,
+  focusImageStyle, hasEyeKeypoint, previewUrl, rankLabel, scoreText, thumbnailUrl,
 } from './helpers.js';
 
 /** @param {string} message */
@@ -48,7 +48,7 @@ export function inspectPhoto(photoId) {
 
   var role = byId('inspectRole');
   role.className = 'role ' + (card.role || '');
-  role.textContent = (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role);
+  role.textContent = rankLabel(card);
   byId('inspectName').textContent = card.filename || '';
   byId('inspectScore').textContent = scoreText(card);
   byId('inspectReasons').innerHTML = (card.reasons || []).map(function(reason) {
@@ -70,7 +70,7 @@ function focusCardHtml(card) {
       (hasEye ? '<span class="crosshair"></span>' : '') +
     '</div>' +
     '<div class="focus-meta">' +
-      '<div class="role ' + escapeAttr(card.role || '') + '">' + (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role) + '</div>' +
+      '<div class="role ' + escapeAttr(card.role || '') + '">' + escapeHtml(rankLabel(card)) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
     '</div>' +
@@ -83,7 +83,7 @@ function rankCardHtml(card) {
   return '<div class="rank-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<img src="' + thumbnailUrl(card) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
     '<div class="rank-meta">' +
-      '<div class="role ' + escapeAttr(card.role || '') + '">' + (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role) + '</div>' +
+      '<div class="role ' + escapeAttr(card.role || '') + '">' + escapeHtml(rankLabel(card)) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
       '<div class="score">' + escapeHtml(reasons) + '</div>' +

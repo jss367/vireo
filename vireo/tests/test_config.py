@@ -465,9 +465,17 @@ def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
         "bg_separation": 10.0,
         "subject_size": 0.15,
         "mask_path": "/masks/1.png",
+        "analysis_provenance": {
+            "detection": {"status": "complete", "current": True},
+            "segmentation": {"status": "complete", "current": True},
+        },
     }
     enc = {"photos": [photo]}
     score_encounter(enc, config=pipeline_cfg)
+
+    assert photo["analysis_status"] == "complete"
+    assert photo["selection_eligible"] is True
+    assert photo["eye_focus_score"] == 0.5
 
     assert any(
         "eye_soft" in r for r in photo.get("reject_reasons", [])

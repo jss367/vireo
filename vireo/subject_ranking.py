@@ -199,6 +199,10 @@ def comparison_frames(db, photos, comparison, effective_cfg):
             frame = {k: photo.get(k) for k in ("id", "filename", "width", "height", "flag", "rating")}
             frame.update(features)
             frame["subject_mask_available"] = bool(analysis["mask_png"])
+            frame["analysis_provenance"] = {
+                "detection": {"status": "complete", "current": True},
+                "segmentation": {"status": "complete", "current": True},
+            }
             card.update(sharpness=features["subject_tenengrad"], has_eye=features.get("eye_tenengrad") is not None)
             for k in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "crop_complete", "subject_size", "analysis", "eye_status"):
                 card[k] = features.get(k)
@@ -207,12 +211,29 @@ def comparison_frames(db, photos, comparison, effective_cfg):
     return frames, eligible
 
 
+def _mark_unavailable_comparison_cards(cards, photos):
+    """An existing generation can still lack required quality measurements."""
+    by_id = {card["id"]: card for card in cards}
+    for photo in photos:
+        if photo.get("selection_eligible"):
+            continue
+        reasons = photo.get("analysis_reasons", [])
+        by_id[photo["id"]].update(
+            label=photo["label"], has_quality=False, has_eye=False,
+            evidence_status="subject_analysis_missing",
+            analysis_status=photo["analysis_status"], analysis_reasons=reasons,
+            reasons=["Subject analysis needs review: " + reason.replace("_", " ") for reason in reasons],
+        )
+
+
 def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cfg):
     from best_batch import _best_batch_reasons
     from scoring import score_encounter
     cards, eligible = comparison_frames(db, photos, comparison, effective_cfg)
+    score_encounter({"photos": eligible}, config=effective_cfg)
+    _mark_unavailable_comparison_cards(cards, eligible)
+    eligible = [p for p in eligible if p.get("selection_eligible")]
     if len(eligible) >= 2:
-        score_encounter({"photos": eligible}, config=effective_cfg)
         eligible.sort(key=lambda p: (p.get("label") != "REJECT", p["quality_composite"], p["focus_score"]), reverse=True)
     else:
         eligible = []

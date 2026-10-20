@@ -271,16 +271,25 @@ def open_library(path):
     conn.execute("BEGIN")
     # New production loaders use source identities. Overlay legacy tables with
     # connection-local views rather than migrating the photographer's library.
-    for table in ("predictions", "keywords"):
+    for table, optional in {
+        "predictions": ("source_taxon_id",),
+        "keywords": ("source_taxon_id",),
+        "photos": ("companion_path", "active_mask_variant", "quality_input_recipe"),
+        "detector_runs": ("input_fingerprint",),
+    }.items():
         columns = {r["name"] for r in conn.execute(f"PRAGMA main.table_info({table})")}
-        if columns and "source_taxon_id" not in columns:
-            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT *, NULL AS source_taxon_id FROM main.{table}")
+        missing = [column for column in optional if column not in columns]
+        if columns and missing:
+            projection = ", ".join(f"NULL AS {column}" for column in missing)
+            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT *, {projection} FROM main.{table}")
     # Subject analysis was added after older evaluation catalogs were captured.
     # Empty TEMP views preserve their confidence ordering and absent suggestions,
     # while current catalogs retain their real analysis and manual choices.
     for table, columns in {
         "detection_subjects": ("detection_id", "crop", "quality_score", "exposure_ev"),
         "photo_subject_choices": ("photo_id", "detection_id"),
+        "photo_masks": ("photo_id", "variant", "path", "detector_model",
+                        "prompt_x", "prompt_y", "prompt_w", "prompt_h"),
     }.items():
         if not conn.execute(f"PRAGMA main.table_info({table})").fetchone():
             projection = ", ".join(f"NULL AS {column}" for column in columns)
