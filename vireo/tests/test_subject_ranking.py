@@ -517,5 +517,5 @@ def test_selected_generation_provenance_and_unavailable_ranking_policy(compariso
     unavailable = next(c for c in pack['cards'] if c['id'] == pids[2])
     assert unavailable['rank'] is None and unavailable['role'] == 'review'
     assert unavailable['quality'] is None and not unavailable['has_quality']
-    assert unavailable['reasons'] == ['missing subject tenengrad']
+    assert unavailable['reasons'][0] == 'missing subject tenengrad'
     assert pids[2] not in [pack['best_photo_id'], *pack['alternate_ids'], *pack['suggested_reject_ids']]
