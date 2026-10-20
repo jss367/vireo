@@ -121,15 +121,17 @@ class PhotoSpeciesRepository:
         return result
 
     def confirmation_homonym_evidence(self, names: Collection[str]) -> list[dict[str, Any]]:
-        """Snapshot only linked species sharing the decision's canonical names.
+        """Snapshot matching linked homonyms and unlinked root candidates.
 
         Add equivalence and previous-species removal consult these catalog-wide
-        homonyms even when none is attached to a reviewed photo. Use the same
-        normalization as those guards; unrelated catalog edits stay irrelevant.
+        homonyms even when none is attached to a reviewed photo. Previous-species
+        resolution also prefers unlinked roots over attached hierarchy leaves.
+        Use the guards' normalization; unrelated and unlinked nested rows stay
+        outside this catalog-wide read set.
         """
         keys = {keyword_match_key(name) for name in names}
         ids = [row["id"] for row in self.conn.execute(
-            "SELECT id, name FROM keywords WHERE taxon_id IS NOT NULL "
+            "SELECT id, name FROM keywords WHERE (taxon_id IS NOT NULL OR parent_id IS NULL) "
             "AND (is_species=1 OR type='taxonomy') ORDER BY id",
         ) if keyword_match_key(row["name"]) in keys]
         result = []

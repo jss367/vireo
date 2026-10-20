@@ -977,3 +977,70 @@ def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app
     assert db.photo_species.get_species_for_photos(ids[1:], include_identities=True) == before
     assert [db.photos.get(pid)['flag'] for pid in ids] == flags
     assert json.load(open(path))['encounters'][1] == before_cache['encounters'][1]
+
+
+@pytest.mark.parametrize('linked', [False, True])
+@pytest.mark.parametrize('change', ['create', 'delete', 'source_relink', 'taxon_relink'])
+def test_preview_revalidates_unlinked_previous_species_root_candidates(app_and_db, linked, change):
+    app, db = app_and_db
+    ids, path = seed(app, db)
+    db.conn.execute("INSERT INTO taxa (id, inat_id, name, rank) VALUES (900001, 800001, 'Root candidate robin', 'species')")
+    parent = db.add_keyword('Previous species guide')
+    leaf = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Previous Robin', ?, 1, 'taxonomy', ?)",
+        (parent, 900001 if linked else None),
+    ).lastrowid
+    for pid in ids:
+        db.tag_photo(pid, leaf)
+    root = None
+    if change != 'create':
+        root = db.conn.execute("INSERT INTO keywords (name, is_species, type) VALUES ('Previous Robin', 1, 'taxonomy')").lastrowid
+    db.commit()
+    cached = json.load(open(path))
+    cached['encounters'][0].update(confirmed_species='Previous Robin', confirmed_species_list=['Previous Robin'], species_confirmed=True)
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    body = {'species': 'Eared Grebe', 'previous_species': 'Previous Robin', 'photo_ids': ids}
+    client = app.test_client()
+    preview = request_preview(client, body)
+    expected = [] if linked and change != 'create' else ['Previous Robin']
+    assert all(row['removals'] == expected for row in preview['photos'])
+    if change == 'create':
+        db.conn.execute("INSERT INTO keywords (name, is_species, type) VALUES ('Previous Robin', 1, 'taxonomy')")
+    elif change == 'delete':
+        db.conn.execute('DELETE FROM keywords WHERE id=?', (root,))
+    elif change == 'source_relink':
+        db.conn.execute('UPDATE keywords SET source_taxon_id=800002 WHERE id=?', (root,))
+    else:
+        db.conn.execute('UPDATE keywords SET taxon_id=900001 WHERE id=?', (root,))
+    db.commit()
+    before_cache = json.load(open(path))
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table}')]
+              for table in ('photos', 'keywords', 'photo_keywords', 'edit_history', 'pending_changes')}
+    assert apply(client, body, preview).status_code == 409
+    assert json.load(open(path)) == before_cache
+    for table, rows in before.items():
+        assert [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table}')] == rows
+
+
+@pytest.mark.parametrize('candidate', ['unrelated_root', 'unlinked_nested', 'general_root'])
+def test_previous_species_root_snapshot_excludes_irrelevant_candidates(app_and_db, candidate):
+    app, db = app_and_db
+    ids, _ = seed(app, db, 'Western Grebe')
+    body = {'species': 'Eared Grebe', 'previous_species': 'Western Grebe', 'photo_ids': ids}
+    client = app.test_client()
+    preview = request_preview(client, body)
+    parent = db.add_keyword('Unrelated candidate guide')
+    if candidate == 'unrelated_root':
+        values = ('Unrelated Robin', None, 1, 'taxonomy')
+    elif candidate == 'unlinked_nested':
+        values = ('Western Grebe', parent, 1, 'taxonomy')
+    else:
+        values = ('Western Grebe', None, 0, 'general')
+    kid = db.conn.execute('INSERT INTO keywords (name, parent_id, is_species, type) VALUES (?, ?, ?, ?)', values).lastrowid
+    db.commit()
+    untouched = tuple(db.conn.execute('SELECT * FROM keywords WHERE id=?', (kid,)).fetchone())
+    assert request_preview(client, body)['preview_token'] == preview['preview_token']
+    assert apply(client, body, preview).status_code == 200
+    assert tuple(db.conn.execute('SELECT * FROM keywords WHERE id=?', (kid,)).fetchone()) == untouched
+    assert all(names == ['Eared Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
