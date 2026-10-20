@@ -92,16 +92,16 @@ def analyze_comparison(ctx, job, photo_ids, comparison, effective_cfg):
             ctx.checkpoint(job)
             photo = db.photos.get(photo_id, verify_workspace=True)
             job["progress"]["current_file"] = photo["filename"] if photo else str(photo_id)
-            detection, selection = resolve_subject(db, photo_id, comparison) if photo else (None, {})
-            if not detection:
-                result["unresolved"].append({"photo_id": photo_id, "reason": selection.get("selection", "photo_unavailable")})
-            else:
-                try:
+            try:
+                detection, selection = resolve_subject(db, photo_id, comparison) if photo else (None, {})
+                if not detection:
+                    result["unresolved"].append({"photo_id": photo_id, "reason": selection.get("selection", "photo_unavailable")})
+                else:
                     changed = analyze_detection(db, photo, detection, effective_cfg, lambda: ctx.checkpoint(job))
                     result["analyzed" if changed else "cached"] += 1
-                except (OSError, ValueError, RuntimeError) as exc:
-                    logging.getLogger(__name__).exception("Subject analysis failed for photo %s", photo_id)
-                    result["errors"].append({"photo_id": photo_id, "error": str(exc)})
+            except (OSError, ValueError, RuntimeError) as exc:
+                logging.getLogger(__name__).exception("Subject analysis failed for photo %s", photo_id)
+                result["errors"].append({"photo_id": photo_id, "error": str(exc)})
             job["progress"]["current"] = index + 1
         return result
     finally:

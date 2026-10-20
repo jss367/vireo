@@ -378,3 +378,31 @@ def test_subject_only_comparisons_report_conflicting_confirmations(comparison_li
     assert card["rank"] is None and card["quality"] is None
     assert card["eye_tenengrad"] is None
     assert card["subject"]["requested_species_key"] is None
+
+
+def test_background_analysis_continues_after_selected_detection_disappears(comparison_library, monkeypatch):
+    app, _, pids, ids = comparison_library
+    import subject_analysis
+
+    from vireo.tests.wait import wait_for_job_via_client
+    original = subject_analysis.resolve_subject
+    removed = False
+    def remove_before_resolving(db, photo_id, comparison):
+        nonlocal removed
+        if photo_id == pids[0] and not removed:
+            # Request validation already succeeded; the worker's selection is now stale.
+            detection_store.delete_detections_by_ids(db, [ids[photo_id][0]])
+            db.commit()
+            removed = True
+        return original(db, photo_id, comparison)
+    monkeypatch.setattr(subject_analysis, "resolve_subject", remove_before_resolving)
+    launched = _pack(app, pids, requested_species=TARGET,
+                    subject_overrides={str(pids[0]): ids[pids[0]][0]}, analyze=True)
+    job = wait_for_job_via_client(app.test_client(), launched["job_id"], wait_for_history=True)
+    assert job["status"] == "completed"
+    assert job["result"]["analyzed"] == 2
+    assert job["result"]["unresolved"] == []
+    assert len(job["result"]["errors"]) == 1
+    assert job["result"]["errors"][0]["photo_id"] == pids[0]
+    assert "not a retained animal" in job["result"]["errors"][0]["error"]
+    assert job["progress"]["current"] == len(pids)
