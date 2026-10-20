@@ -1037,7 +1037,8 @@ class _SpeciesConfirmation:
             return
         if self.preview_scope:
             from services.encounter_confirmation import apply_scope
-            apply_scope(self.db, cached, self.target_enc, self.photo_ids, split=self.split)
+            apply_scope(self.db, cached, self.target_enc, self.photo_ids,
+                        split=self.split, preferred_order=self.new_species_list)
         elif self.burst_index is not None:
             self._apply_burst_override()
         else:

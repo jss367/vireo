@@ -70,25 +70,35 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
             "split": bool(body.get("split")), "previous_species_choices": edit.current_species_list}
 
 
-def _refresh_group(db: Database, results: JsonDict, enc: JsonDict, *, membership_changed: bool) -> None:
+def _refresh_group(
+    db: Database, results: JsonDict, enc: JsonDict, *, membership_changed: bool,
+    selected: set[int], preferred_order: list[str],
+) -> None:
     """Derive labels from all members after a subset edit, preserving extra taxa."""
     from pipeline import derive_burst_override, rebuild_species_predictions
-    from pipeline_results import compute_time_range, rebuild_encounter_species_label
+    from pipeline_results import (
+        burst_species_list,
+        compute_time_range,
+        encounter_confirmed_species_list,
+        rebuild_encounter_species_label,
+    )
 
     ids = enc["photo_ids"]
     # Identities (not just display names) so linked homonyms — two different
     # taxa the user kept under the same spelling — do not collapse into one
     # shared species when derive_burst_override compares frames.
     actual = db.photo_species.get_species_for_photos(ids, include_identities=True)
-    def override(photo_ids: list[int]) -> JsonDict | None:
+    bursts = enc.get("bursts") or []
+    previous_orders = [burst_species_list(enc, burst) for burst in bursts]
+    def override(photo_ids: list[int], previous_order: list[str]) -> JsonDict | None:
         return derive_burst_override([
             {
                 "confirmed_species_list": [entry["name"] for entry in actual.get(pid, [])],
                 "confirmed_species_identities": actual.get(pid, []),
             }
             for pid in photo_ids
-        ])
-    common = override(ids) or {}
+        ], preferred_order=preferred_order if selected.intersection(photo_ids) else previous_order)
+    common = override(ids, encounter_confirmed_species_list(enc)) or {}
     enc["confirmed_species_list"] = common.get("species_list", [])
     enc["confirmed_species"] = common.get("species")
     enc["species_confirmed"] = bool(common.get("confirmed"))
@@ -107,19 +117,35 @@ def _refresh_group(db: Database, results: JsonDict, enc: JsonDict, *, membership
     if membership_changed:
         enc.pop("focus_cohorts", None)
     enc.pop("trace", None)
-    for burst in enc.get("bursts") or []:
-        burst["species_override"] = override(burst["photo_ids"])
+    for burst, previous_order in zip(bursts, previous_orders, strict=True):
+        burst["species_override"] = override(burst["photo_ids"], previous_order)
         burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
         if "species" in burst:
             burst["species"] = rebuild_encounter_species_label(results, burst["photo_ids"])
 
 
-def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], *, split: bool) -> None:
-    """Optionally separate exactly the selected frames; never infer splits from disagreement."""
+def _split_insert_before(results: JsonDict, original: list[int], detached: list[int], remaining: list[int]) -> bool:
+    """Use strict complete timestamp order, otherwise preserve first appearance."""
     from pipeline_results import compute_time_range
 
+    photos = {p["id"]: p for p in results.get("photos", [])}
+    if all(photos.get(pid, {}).get("timestamp") for pid in original):
+        detached_range = compute_time_range(photos, detached)
+        remaining_range = compute_time_range(photos, remaining)
+        if detached_range[1] is not None and remaining_range[0] is not None and detached_range[1] < remaining_range[0]:
+            return True
+        if remaining_range[1] is not None and detached_range[0] is not None and remaining_range[1] < detached_range[0]:
+            return False
+    return original[0] in detached
+
+
+def apply_scope(
+    db: Database, results: JsonDict, enc: JsonDict, ids: list[int], *, split: bool, preferred_order: list[str],
+) -> None:
+    """Optionally separate exactly the selected frames; never infer splits from disagreement."""
     selected = set(ids)
     if split:
+        original = list(enc["photo_ids"])
         detached = copy.deepcopy(enc)
         detached["photo_ids"] = [pid for pid in enc["photo_ids"] if pid in selected]
         enc["photo_ids"] = [pid for pid in enc["photo_ids"] if pid not in selected]
@@ -136,21 +162,10 @@ def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], 
                     bursts.append(child)
             group["bursts"] = bursts
         index = results["encounters"].index(enc)
-        # Place the detached group chronologically: a leading transition split
-        # (first frame or leading range) ends earlier than the remainder, so
-        # inserting it after would make Pipeline Review's default (array)
-        # ordering read the transition backwards.
-        photos_by_id = {p["id"]: p for p in results.get("photos", [])}
-        detached_range = compute_time_range(photos_by_id, detached["photo_ids"])
-        remaining_range = compute_time_range(photos_by_id, enc["photo_ids"])
-        insert_before = (
-            detached_range[1] is not None
-            and remaining_range[0] is not None
-            and detached_range[1] < remaining_range[0]
-        )
+        insert_before = _split_insert_before(results, original, detached["photo_ids"], enc["photo_ids"])
         results["encounters"].insert(index if insert_before else index + 1, detached)
-        _refresh_group(db, results, detached, membership_changed=True)
-    _refresh_group(db, results, enc, membership_changed=split)
+        _refresh_group(db, results, detached, membership_changed=True, selected=selected, preferred_order=preferred_order)
+    _refresh_group(db, results, enc, membership_changed=split, selected=selected, preferred_order=preferred_order)
     summary = results.setdefault("summary", {})
     summary["encounter_count"] = len(results["encounters"])
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in results["encounters"])
