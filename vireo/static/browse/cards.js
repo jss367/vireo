@@ -2,7 +2,7 @@
    browse/README.md). */
 import { state } from './state.js';
 import {
-  VireoColorLabels, _vireoPairSource, escapeAttr, escapeHtml, vireoPhotoHasOrientationEdit,
+  VireoColorLabels, VireoTime, _vireoPairSource, escapeAttr, escapeHtml, vireoPhotoHasOrientationEdit,
   vireoPhotoIsRawJpegPair, vireoRememberPhotoEditRecipe, vireoRememberPhotoPair,
   vireoThumbnailUrl,
 } from './shared.js';
@@ -83,8 +83,8 @@ function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */
       return '';
     case 'capture_date':
       if (p.timestamp) {
-        var d = window.VireoTime.captureDateTime(p.timestamp);
-        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(window.VireoTime.captureDateTime(p.timestamp, true)) + '">' + escapeHtml(d) + '</span>';
+        var d = VireoTime.captureDateTime(p.timestamp);
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(VireoTime.captureDateTime(p.timestamp, true)) + '">' + escapeHtml(d) + '</span>';
       }
       return '';
     case 'extension':

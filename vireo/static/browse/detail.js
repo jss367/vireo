@@ -2,7 +2,7 @@
    browse/README.md). */
 import { searchLaneSeq, state } from './state.js';
 import {
-  VireoFilter, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
+  VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
   vireoRememberPhotoEditRecipe, vireoRememberPhotoPair, vireoThumbnailUrl,
   vireoUpdatePairSourceControls,
 } from './shared.js';
@@ -217,7 +217,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   }
 
   // Date, dimensions, file size (always from photo fields)
-  if (photo.timestamp) summary += 'Date: ' + escapeHtml(window.VireoTime.captureDateTime(photo.timestamp, true)) + '<br>';
+  if (photo.timestamp) summary += 'Date: ' + escapeHtml(VireoTime.captureDateTime(photo.timestamp, true)) + '<br>';
   if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
   if (photo.file_size) {
     var sz = photo.file_size;

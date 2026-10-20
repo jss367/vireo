@@ -49,6 +49,7 @@ function forwardIfPresent(name) {
 export const escapeHtml = window.escapeHtml;
 export const escapeAttr = window.escapeAttr;
 export const VireoViewPreferences = window.VireoViewPreferences;
+export const VireoTime = window.VireoTime;
 export const isTauri = forward('isTauri');
 export const pickDirectory = forward('pickDirectory');
 
