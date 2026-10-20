@@ -5,6 +5,7 @@
     "../types/page-hooks.d.ts",
     "../vireo/static/pipeline-review/boot.js",
     "../vireo/static/pipeline-review/context-menu.js",
+    "../vireo/static/pipeline-review/coverage.js",
     "../vireo/static/pipeline-review/events.js",
     "../vireo/static/pipeline-review/flags.js",
     "../vireo/static/pipeline-review/group-changes.js",

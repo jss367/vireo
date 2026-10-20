@@ -196,7 +196,7 @@
    "table",
    "collections",
    "collections",
-   "CREATE TABLE collections (\n                id           INTEGER PRIMARY KEY,\n                name         TEXT,\n                rules        TEXT,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                visual_json  TEXT\n            )"
+   "CREATE TABLE collections (\n                id           INTEGER PRIMARY KEY,\n                name         TEXT,\n                rules        TEXT,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                visual_json  TEXT,\n                original_import_count INTEGER,\n                import_recorded_at TEXT\n            )"
   ],
   [
    "table",

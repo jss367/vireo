@@ -1,4 +1,11 @@
 // Pipeline Review page data and the shared helpers supplied by the navbar.
+interface ReviewCollectionCoverage {
+  snapshot_at: string;
+  original_import: {count: number | null; recorded_at: string | null};
+  current_membership: {catalog_count: number; online_folder_count: number; offline_folder_count: number};
+  original_files: {known_missing_count: number | null; checked_at: string | null; definition: string};
+  review: {denominator: number; prediction_decision_count: number; with_species_count: number; without_species_count: number; unresolved_identity_count: number | null; denominator_definition: string; decision_definition: string; identification_definition: string; inspection_definition: string; unresolved_definition: string};
+}
 type ReviewPrediction = [string, number, string?, string?];
 interface ReviewSpeciesModel {model?: string; confidence: number; photo_count?: number;}
 interface ReviewSpeciesRow {species_key?: string; species: string; models: ReviewSpeciesModel[]; count?: number; avg_confidence?: number;}

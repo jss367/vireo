@@ -190,6 +190,20 @@
 }
 
 /* Filter bar */
+.collection-coverage {
+  display: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.collection-coverage details { max-width: 85ch; }
 .filter-bar {
   display: flex;
   flex-wrap: wrap;
@@ -1805,6 +1819,16 @@ input[type="range"]::-moz-range-thumb {
       <a href="/pipeline">Open Process</a>
     </div>
 
+    <div id="collectionCoverage" class="collection-coverage" role="status">
+      <div id="collectionCoverageCounts"></div>
+      <div id="collectionCoverageReview"></div>
+      <details>
+        <summary>What these counts mean</summary>
+        <div id="collectionCoverageDefinitions"></div>
+        <button type="button" id="refreshCollectionCoverage">Refresh counts</button>
+      </details>
+    </div>
+
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
       <div class="summary-group" aria-label="Inventory counts">
@@ -1889,7 +1913,7 @@ input[type="range"]::-moz-range-thumb {
       <div class="scope-filter-wrap" title="Choose which photos are included in this review view">
         <label for="reviewScopeSelect">Scope:</label>
         <select id="reviewScopeSelect" onchange="onReviewScopeModeChange(this.value)" data-testid="pipeline-review-scope">
-          <option value="cache" title="Every photo in the saved review">All reviewed photos</option>
+          <option value="cache" title="Every photo included in the saved results; inclusion does not prove inspection">Saved review results</option>
           <option value="folder" title="The saved review, limited to one folder and its subfolders">Folder</option>
           <option value="collection" title="The saved review, limited to one collection">Collection</option>
           <option value="workspace" title="Regroup every workspace photo without saving. View-only.">Whole workspace (regrouped)</option>
@@ -2099,6 +2123,7 @@ input[type="range"]::-moz-range-thumb {
 <script defer src="/static/pipeline-review/photo-actions.js"></script>
 <script defer src="/static/pipeline-review/lightbox-integration.js"></script>
 <script defer src="/static/pipeline-review/events.js"></script>
+<script defer src="/static/pipeline-review/coverage.js"></script>
 <script defer src="/static/pipeline-review/boot.js"></script>
 </body>
 </html>

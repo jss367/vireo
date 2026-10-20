@@ -117,11 +117,26 @@ class CollectionRepository:
         (``{prompt, strength}`` JSON) when the saved expression has one, so
         save → reopen reproduces the same result set instead of silently
         dropping to metadata-only.
+
+        Ordinary collections and historical imports have unknown import size.
         """
+        return self._insert(name, rules_json, visual_json, None)
+
+    def add_import(self, name, photo_ids):
+        """Record original admission independently of later rule edits/pruning."""
+        ids = list(dict.fromkeys(photo_ids))
+        return self._insert(
+            name, json.dumps([{"field": "photo_ids", "value": ids}]), None, len(ids),
+        )
+
+    def _insert(self, name, rules_json, visual_json, original_import_count):
+        """Commit a collection and its import snapshot atomically."""
         cur = self.conn.execute(
-            "INSERT INTO collections (name, rules, workspace_id, visual_json) "
-            "VALUES (?, ?, ?, ?)",
-            (name, rules_json, self.workspace_id, visual_json),
+            "INSERT INTO collections (name, rules, workspace_id, visual_json, "
+            "original_import_count, import_recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') END)",
+            (name, rules_json, self.workspace_id, visual_json,
+             original_import_count, original_import_count),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -153,6 +168,14 @@ class CollectionRepository:
         """
         return self.conn.execute(
             "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
+            (collection_id, self.workspace_id),
+        ).fetchone()
+
+    def import_provenance(self, collection_id):
+        """Original import snapshot, never inferred from current membership."""
+        return self.conn.execute(
+            "SELECT name, original_import_count, import_recorded_at FROM collections "
             "WHERE id = ? AND workspace_id = ?",
             (collection_id, self.workspace_id),
         ).fetchone()
@@ -515,6 +538,34 @@ class CollectionRepository:
             "available": available,
             "offline": max(0, total - available),
         }
+
+    def count_prediction_decision_photos(self, collection_id, auto_match_marker, statuses):
+        """Photos with an explicit decided prediction in this workspace.
+
+        This measures recorded decisions, not inspection or completed identity
+        review. Other predictions on the same photo may still be pending.
+        """
+        parts = self._build_collection_query(collection_id, include_offline_folders=True)
+        if parts is None:
+            return 0
+        folder_join, join_clause, where, params = parts
+        placeholders = ",".join("?" for _ in statuses)
+        # The decision predicate must apply to every branch of an any-rule tree.
+        if where:
+            where = f"WHERE ({where.removeprefix('WHERE ')})"
+        return self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) FROM photos p
+                {folder_join} {join_clause} {where}
+                {'AND' if where else 'WHERE'} EXISTS (
+                    SELECT 1 FROM detections d
+                    JOIN predictions pr ON pr.detection_id = d.id
+                    JOIN prediction_review r ON r.prediction_id = pr.id
+                    WHERE d.photo_id = p.id AND r.workspace_id = ?
+                      AND r.status IN ({placeholders})
+                      AND COALESCE(r.individual, '') != ?
+                )""",
+            [*params, self.workspace_id, *statuses, auto_match_marker],
+        ).fetchone()[0]
 
     def count_photos_for_rules(
         self,

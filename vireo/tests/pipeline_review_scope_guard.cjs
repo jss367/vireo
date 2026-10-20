@@ -349,7 +349,7 @@ async function deletedPhotoLeavesTheFolderScope() {
   listeners['lightbox:photodeleted']({detail: {photoId: IN_SCOPE}});
   assert.deepEqual(Array.from(run(ctx, 'reviewScopePhotoIds')), [99]);
   assert.equal(run(ctx, 'reviewScopeTotal'), 1);
-  assert.equal(element('reviewScopeStatus').textContent, '0 of 1 reviewed');
+  assert.equal(element('reviewScopeStatus').textContent, '0 of 1 in saved results');
 }
 
 function speciesSearchHidesEncountersWithOnlyOutOfScopeEvidence() {

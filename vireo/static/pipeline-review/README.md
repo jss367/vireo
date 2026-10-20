@@ -11,6 +11,7 @@ hooks, and binds events after every definition is available.
 | `state.js` | Shared results, scope, filters, and persisted view preferences |
 | `view-controls.js` | Sidebar, sorting, search, filters, and display controls |
 | `summary.js` | Review totals and the focused encounter algorithm trace |
+| `coverage.js` | Stable import provenance, current membership and defined review coverage |
 | `species-conflicts.js` | Species identity comparison, evidence, and warnings |
 | `results.js` | Encounter grid reconciliation and photo cards |
 | `tuning.js` | Scoring/grouping controls, defaults, reflow, and regrouping |

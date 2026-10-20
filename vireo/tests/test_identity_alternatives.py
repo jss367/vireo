@@ -349,6 +349,27 @@ def test_shared_cache_failure_still_attempts_other_workspaces_after_commit(app_a
     assert db.identity_alternatives.photo_ids() == {1}
 
 
+def test_collection_coverage_counts_real_unresolved_state_with_unrelated_confirmed_species(app_and_db):
+    import json
+
+    from services.collection_coverage import collection_coverage
+    app, db = app_and_db
+    client = app.test_client()
+    other = db.add_keyword('Great Egret', is_species=True)
+    db.tag_photo(1, other)
+    collection = db.collections.add('Photos to inspect', json.dumps([{'field': 'photo_ids', 'value': [1, 2]}]))
+    assert save(client, [1, 3]).status_code == 200
+    review = collection_coverage(db, collection, {})['review']
+    assert review['denominator'] == 2
+    assert review['unresolved_identity_count'] == 1
+    assert review['with_species_count'] == 1
+    assert review['without_species_count'] == 1
+    assert resolve(client, current_group(client), photo_ids=[1]).status_code == 200
+    assert collection_coverage(db, collection, {})['review']['unresolved_identity_count'] == 0
+    assert client.post('/api/undo').status_code == 200
+    assert collection_coverage(db, collection, {})['review']['unresolved_identity_count'] == 1
+
+
 @pytest.mark.parametrize('operation', ['create', 'resolve'])
 def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_db, tmp_path, monkeypatch, operation):
     from db import Database
