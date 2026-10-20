@@ -77,14 +77,20 @@ hierarchies are independent of the species keyword selection. IPTC text is UTF-8
 ## Export results
 
 When metadata is selected, `metadata_summary` counts provenance and unavailable
-reasons by field, for **successfully written outputs only**. For example:
+reasons by field, for **successfully written outputs only**. Species keywords,
+rating, and camera are catalog-only categories reported as `catalog` when the
+value is present and as `unavailable:no_<kind>` when the selected category has
+nothing to write. For example:
 
 ```json
 {
   "capture_timestamp": {"catalog": 1},
   "capture_offset": {"source_exif": 1},
   "location_coordinates": {"catalog_exif": 1},
-  "location_city": {"unavailable:untyped_or_missing": 1}
+  "location_city": {"unavailable:untyped_or_missing": 1},
+  "species_keywords": {"catalog": 1},
+  "rating": {"catalog": 1},
+  "camera": {"catalog": 1}
 }
 ```
 

@@ -72,6 +72,17 @@ def test_matching_xmp_can_supply_missing_offset_with_accurate_provenance():
     assert report["capture_offset"] == "source_xmp"
 
 
+def test_source_subsecond_beyond_microseconds_matches_truncated_catalog():
+    """The scanner truncates fractions beyond six digits, so a source
+    `.1234567` must not be read as a changed time against the catalog's
+    `.123456` written from the same capture."""
+    report = {}
+    metadata = _source(SubSecTimeOriginal="1234567")
+    parts = resolve_capture("2026-10-17T09:27:50.123456", metadata, report)
+    assert parts[5] == "-07:00"
+    assert report["capture_offset"] == "source_exif"
+
+
 @pytest.mark.parametrize("timestamp", ["2026-02-30T09:27:50", "2026-10-17T29:27:50", "2026-10-17T09:27:50+03:99"])
 def test_invalid_catalog_time_is_not_exported(timestamp):
     assert timestamp_parts(timestamp) == (None,) * 6
@@ -148,3 +159,19 @@ def test_conflicting_source_place_labels_are_unavailable():
                                 source_metadata={"XMP": {"City": "City"}, "IPTC": {"City": "Other City"}}, report=report)
     assert not any(":City=" in arg for arg in args)
     assert report["location_city"] == "unavailable:untyped_or_missing"
+
+
+@pytest.mark.parametrize(("selected", "camera", "species", "rating", "expected"), [
+    (["species"], {}, ["Bird"], None, {"species_keywords": "catalog"}),
+    (["species"], {}, [], None, {"species_keywords": "unavailable:no_species"}),
+    (["rating"], {}, [], 5, {"rating": "catalog"}),
+    (["rating"], {}, [], None, {"rating": "unavailable:no_rating"}),
+    (["camera"], {"camera_make": "Nikon"}, [], None, {"camera": "catalog"}),
+    (["camera"], {}, [], None, {"camera": "unavailable:no_camera_data"}),
+])
+def test_catalog_only_categories_report_presence_or_unavailability(selected, camera, species, rating, expected):
+    """Selected species/rating/camera report provenance even without multi-source precedence."""
+    report = {}
+    export_metadata_args(selected, {"rating": rating}, species, camera, source_metadata=None, report=report)
+    for key, value in expected.items():
+        assert report.get(key) == value

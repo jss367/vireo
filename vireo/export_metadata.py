@@ -60,8 +60,11 @@ def valid_offset(value):
 
 
 def capture_key(parts):
-    """Compare wall times including fractional precision (24 == 240000)."""
-    return parts[2], (parts[4] or "").rstrip("0")
+    """Compare wall times at scanner microsecond precision (24 == 240000)."""
+    # The scanner truncates fractions beyond six digits; comparing at that
+    # precision keeps a source `.1234567` from being read as a changed time
+    # against a catalog `.123456` written from the same capture.
+    return parts[2], (parts[4] or "")[:6].rstrip("0")
 
 
 def source_capture(metadata):
@@ -254,19 +257,27 @@ def export_metadata_args(fields, photo, species, camera_data, location_data=None
     report = report if report is not None else {}
     args = []
     if "species" in selected:
+        report["species_keywords"] = "catalog" if species else "unavailable:no_species"
         for index, name in enumerate(species):
             for tag in ("XMP-dc:Subject", "IPTC:Keywords"):
                 args.append(assignment(tag + ("+" if index else ""), name))
     args.extend(capture_args(selected, photo, metadata, report))
-    if "rating" in selected and photo_value(photo, "rating") is not None:
-        args.append(assignment("XMP-xmp:Rating", int(photo_value(photo, "rating"))))
+    if "rating" in selected:
+        rating = photo_value(photo, "rating")
+        report["rating"] = "catalog" if rating is not None else "unavailable:no_rating"
+        if rating is not None:
+            args.append(assignment("XMP-xmp:Rating", int(rating)))
     if "location" in selected:
         args.extend(location_args(photo, location_data, metadata, report))
     if "camera" in selected:
         tags = {"Make": "camera_make", "Model": "camera_model", "LensModel": "lens",
                 "FocalLength": "focal_length", "FNumber": "aperture", "ExposureTime": "shutter_speed", "ISO": "iso"}
-        args.extend(assignment("EXIF:" + tag, camera_data[key]) for tag, key in tags.items()
-                    if camera_data.get(key) not in (None, ""))
+        camera_written = False
+        for tag, key in tags.items():
+            if camera_data.get(key) not in (None, ""):
+                args.append(assignment("EXIF:" + tag, camera_data[key]))
+                camera_written = True
+        report["camera"] = "catalog" if camera_written else "unavailable:no_camera_data"
     if any(arg.startswith("-IPTC:") for arg in args):
         args.append("-IPTC:CodedCharacterSet=UTF8")
     return args
