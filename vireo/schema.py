@@ -229,7 +229,7 @@ MIGRATIONS = (
     ),
     Migration(21, "pending_sidecar_import", _add_xmp_import_pending),
     Migration(22, "subject_ranking_analysis", create_subject_ranking_analysis),
-    Migration(24, "identity_alternatives", create_identity_alternatives),
+    Migration(23, "identity_alternatives", create_identity_alternatives),
 )
 
 
