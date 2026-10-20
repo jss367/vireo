@@ -32,5 +32,6 @@ registerPipelineReviewLightboxBrowseHook();
 bindPipelineReviewOrganizationKeyboard();
 bindPipelineReviewContextMenu();
 bindPipelineReviewPhotoEvents();
+bindCollectionCoverage();
 
 initPipelineReviewPage();

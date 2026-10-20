@@ -255,6 +255,7 @@ function reviewScopeSelectionId() {
 }
 
 function updateReviewScopeControls() {
+  refreshCollectionCoverage();
   var scopeSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeSelect'));
   var folderSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeFolderSelect'));
   var collectionSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeCollectionSelect'));
@@ -286,7 +287,7 @@ function updateReviewScopeStatusFromResults(data) {
     var total = reviewScopeTotal || 0;
     setReviewScopeStatus(reviewed === total
       ? reviewed + ' photo' + (reviewed === 1 ? '' : 's')
-      : reviewed + ' of ' + total + ' reviewed');
+      : reviewed + ' of ' + total + ' in saved results');
     return;
   }
   var n = data && data.summary ? data.summary.total_photos : null;
@@ -458,6 +459,7 @@ function scopedCacheInfoFor(data) {
 // view and back, and a later save-cache from that stale view would
 // overwrite the newer saved review on disk.
 function refreshLatestScopeSnapshotIfCurrent() {
+  refreshCollectionCoverage();
   if (isScopedReviewView()) return;
   if (!pipelineResults) return;
   cachedPipelineResults = cloneReviewData(pipelineResults);

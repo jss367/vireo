@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -426,7 +426,9 @@ class CanonicalSchema:
                 name         TEXT,
                 rules        TEXT,
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                visual_json  TEXT
+                visual_json  TEXT,
+                original_import_count INTEGER,
+                import_recorded_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pending_archives (

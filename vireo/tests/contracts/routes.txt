@@ -32,6 +32,7 @@ GET          /api/card-cleanup/<scan_job_id>/manifest
 GET          /api/classify/config
 GET          /api/classify/readiness
 GET          /api/collections
+GET          /api/collections/<int:collection_id>/coverage
 GET          /api/collections/<int:collection_id>/photo-ids
 GET          /api/collections/<int:collection_id>/photos
 GET          /api/color-label-descriptions

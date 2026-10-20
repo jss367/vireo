@@ -202,6 +202,15 @@ def _add_xmp_import_pending(conn):
         conn.execute("ALTER TABLE photos ADD COLUMN xmp_import_pending INTEGER NOT NULL DEFAULT 0")
 
 
+def _add_collection_import_provenance(conn):
+    """Historical totals cannot be inferred from mutable collection rules."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(collections)")}
+    for name, definition in (("original_import_count", "INTEGER"),
+                             ("import_recorded_at", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE collections ADD COLUMN {name} {definition}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -228,6 +237,7 @@ MIGRATIONS = (
     ),
     Migration(21, "pending_sidecar_import", _add_xmp_import_pending),
     Migration(22, "subject_ranking_analysis", create_subject_ranking_analysis),
+    Migration(23, "collection_import_provenance", _add_collection_import_provenance),
 )
 
 

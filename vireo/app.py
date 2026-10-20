@@ -2084,7 +2084,9 @@ def _register_browse_blueprints(app, w):
     app.register_blueprint(create_encounters_blueprint(_get_db, json_error, db_path))
     # Registered before the /api/v1 alias loop, which aliases two of
     # these endpoints by their ``collections.``-qualified names.
-    app.register_blueprint(create_collections_blueprint(_get_db, json_error))
+    app.register_blueprint(create_collections_blueprint(
+        _get_db, json_error, missing_originals_payload=w.missing_originals.payload,
+    ))
     app.register_blueprint(create_dashboard_blueprint(_get_db, json_error))
 
 
