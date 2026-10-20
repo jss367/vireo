@@ -57,7 +57,7 @@ def create_identity_alternatives_blueprint(get_db, json_error, db_path):
                     species = identities.uncertainty_text(body.get('species'), 'species', required=True)
                     entry_id = identities.resolve_alternatives(db, ids, species)
                 else:
-                    candidates = identities.normalize_candidates(body.get('candidates'))
+                    candidates = identities.normalize_candidates(body.get('candidates'), minimum=1 if observed else 2)
                     reason = identities.uncertainty_text(body.get('reason'), 'reason', required=True)
                     evidence = identities.uncertainty_text(body.get('missing_evidence', ''), 'missing_evidence')
                     entry_id = identities.save_alternatives(db, ids, candidates, reason, evidence)

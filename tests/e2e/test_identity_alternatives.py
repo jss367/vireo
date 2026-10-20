@@ -102,3 +102,32 @@ def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page)
     expect(page.locator('#identitySave')).to_be_disabled()
     assert db.identity_alternatives.photo_ids() == set()
     assert db.photo_species.get_species_for_photos(ids) == before
+
+
+def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(live_server, page):
+    ids = open_panel(live_server, page)
+    db = live_server['db']
+    before_species = db.photo_species.get_species_for_photos(ids)
+    source = db.add_keyword('Tropical Kingbird', is_species=True)
+    survivor = db.add_keyword("Couch's Kingbird", is_species=True)
+    target_name = db.keywords.name_of(survivor)
+    page.locator('#identitySave').click()
+    group = page.locator('#identityAlternativesGroups article')
+    expect(group).to_have_count(1)
+    db._merge_keyword_into(source, survivor)
+    db.commit()
+    page.reload()
+    page.locator('#identityAlternativesPanel > summary').click()
+    expect(group).to_contain_text(target_name + " — unresolved")
+    expect(group).to_contain_text('One candidate remains; identification still needs explicit confirmation.')
+    assert db.photo_species.get_species_for_photos(ids) == before_species
+    group.get_by_role('button', name='Edit alternatives and evidence').click()
+    page.locator('#identityEvidence').fill('Expert review still needed')
+    page.locator('#identitySave').click()
+    expect(group).to_contain_text('Expert review still needed')
+    assert db.photo_species.get_species_for_photos(ids) == before_species
+    group.get_by_role('button', name='Select all frames to resolve', exact=True).click()
+    group.get_by_role('button', name="Resolve as " + target_name, exact=True).click()
+    expect(group).to_have_count(0)
+    species = db.photo_species.get_species_for_photos(ids)
+    assert all(set(species[pid]) == {*before_species.get(pid, []), target_name} for pid in ids)

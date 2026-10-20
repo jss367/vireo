@@ -56,6 +56,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 from keyword_normalization import normalize_keyword_display
+from repositories.identity_alternatives import retarget_candidate_names
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
@@ -320,7 +321,6 @@ class KeywordTreeRepository:
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         if previous is not None and (previous['is_species'] or previous['type'] == 'taxonomy'):
-            from repositories.identity_alternatives import retarget_candidate_names
             retarget_candidate_names(self.conn, previous['name'], updates['name'])
         self.conn.commit()
 
@@ -364,7 +364,6 @@ class KeywordTreeRepository:
             return
         current = self.rename_state(keyword_id)
         if current is not None and (current['is_species'] or current['type'] == 'taxonomy'):
-            from repositories.identity_alternatives import retarget_candidate_names
             retarget_candidate_names(self.conn, old_name, new_name)
         tag_rows = self.conn.execute(
             """SELECT DISTINCT pk.photo_id, wf.workspace_id

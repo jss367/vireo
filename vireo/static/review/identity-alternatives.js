@@ -120,7 +120,8 @@
       heading.textContent = group.candidates.join(' or ') + ' — unresolved';
       article.appendChild(heading);
       var note = document.createElement('p');
-      note.textContent = group.photo_ids.length + ' photos. ' + group.reason +
+      note.textContent = group.photo_ids.length + ' photos. ' +
+        (group.candidates.length === 1 ? 'One candidate remains; identification still needs explicit confirmation. ' : '') + group.reason +
         (group.missing_evidence ? ' Missing evidence: ' + group.missing_evidence : '');
       article.appendChild(note);
       var members = document.createElement('details');

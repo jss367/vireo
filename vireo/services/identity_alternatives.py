@@ -26,9 +26,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def normalize_candidates(value: object) -> list[str]:
-    if not isinstance(value, list) or not 2 <= len(value) <= 20:
-        raise ValueError('Provide between 2 and 20 alternative species names')
+def normalize_candidates(value: object, *, minimum: int = 2) -> list[str]:
+    if not isinstance(value, list) or not minimum <= len(value) <= 20:
+        raise ValueError(f'Provide between {minimum} and 20 alternative species names')
     names = []
     seen = set()
     for item in value:

@@ -1,5 +1,6 @@
 """Alternative identities are review evidence, not multiple confirmed species."""
 
+import json
 import sqlite3
 
 import pytest
@@ -106,6 +107,100 @@ def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db, 
     ).fetchone()[0] == 'manual'
     assert client.post('/api/redo').status_code == 200
     assert db.photo_species.get_species_for_photos([1]) == {}
+
+
+@pytest.mark.parametrize('source_name', [CANDIDATES[0], 'tropical KINGBIRD'])
+@pytest.mark.parametrize('maintenance', ['merge', 'rename'])
+@pytest.mark.parametrize('collapse', [False, True])
+def test_keyword_maintenance_retargets_empty_link_groups_and_both_history_states(app_and_db, maintenance, collapse, source_name):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(source_name, is_species=True)
+    target_name = CANDIDATES[1] if collapse else 'Surviving Kingbird'
+    db.photo_review.set_flag(1, 'rejected')
+    assert save(client, [1]).status_code == 200
+    group = current_group(client)
+    assert save(client, [1], group_id=group['group_id'], reason='Still awaiting a call').status_code == 200
+    if maintenance == 'merge':
+        survivor = db.add_keyword(target_name, is_species=True)
+        db._merge_keyword_into(source, survivor)
+        db.commit()
+    else:
+        assert client.put(f'/api/keywords/{source}', json={'name': target_name}).status_code == 200
+    expected = [target_name] if collapse else [target_name, CANDIDATES[1]]
+    assert current_group(client)['candidates'] == expected
+    assert db.photo_species.get_species_for_photos([1]) == {}
+    assert db.identity_alternatives.photo_ids() == {1}
+    assert client.post('/api/undo').status_code == 200
+    assert current_group(client)['candidates'] == expected
+    assert current_group(client)['reason'] == group['reason']
+    assert current_group(client)['missing_evidence'] == group['missing_evidence']
+    assert client.post('/api/redo').status_code == 200
+    assert current_group(client)['candidates'] == expected
+    # A collapsed group can still update evidence without confirming it.
+    group = current_group(client)
+    assert save(client, [1], group_id=group['group_id'], candidates=expected).status_code == 200
+    assert not db.photo_species.get_species_for_photos([1])
+    assert resolve(client, current_group(client), species=target_name).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [target_name]}
+    assert db.conn.execute('SELECT id FROM keywords WHERE name=? COLLATE NOCASE', (CANDIDATES[0],)).fetchone() is None
+    assert db.photos.get(1)['flag'] == 'rejected'
+    rows = db.conn.execute(
+        "SELECT i.old_value, i.new_value FROM edit_history_items i "
+        "JOIN edit_history e ON e.id=i.edit_id WHERE e.action_type='identity_alternatives'",
+    )
+    for row in rows:
+        for payload in row:
+            identity = json.loads(payload)['identity']
+            if identity:
+                assert identity['candidates'] == expected
+
+
+@pytest.mark.parametrize('maintenance', ['merge', 'rename', 'normalize'])
+def test_keyword_maintenance_retargets_resolved_history_before_undo(app_and_db, maintenance):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], is_species=True)
+    assert save(client, [1]).status_code == 200
+    assert resolve(client, current_group(client)).status_code == 200
+    target_name = 'Surviving Kingbird'
+    if maintenance == 'merge':
+        survivor = db.add_keyword(target_name, is_species=True)
+        db._merge_keyword_into(source, survivor)
+    elif maintenance == 'rename':
+        db.update_keyword(source, name=target_name)
+    else:
+        # Internal canonicalization and collision renames share this hook.
+        db._rename_keyword_dependents(source, CANDIDATES[0], target_name)
+        db.keyword_tree.apply_update(source, {'name': target_name})
+    db.commit()
+    assert client.post('/api/undo').status_code == 200
+    group = current_group(client)
+    assert group['candidates'] == [target_name, CANDIDATES[1]]
+    assert not db.photo_species.get_species_for_photos([1])
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [target_name]}
+
+
+@pytest.mark.parametrize('maintenance', ['merge', 'rename', 'dependents'])
+def test_non_species_keyword_maintenance_leaves_same_named_alternatives_unchanged(app_and_db, maintenance):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], kw_type='individual')
+    assert save(client, [1]).status_code == 200
+    before = current_group(client)
+    if maintenance == 'merge':
+        survivor = db.add_keyword('An individual bird', kw_type='individual')
+        db._merge_keyword_into(source, survivor)
+    elif maintenance == 'rename':
+        db.update_keyword(source, name='An individual bird')
+    else:
+        db._rename_keyword_dependents(source, CANDIDATES[0], 'An individual bird')
+    db.commit()
+    assert current_group(client) == before
+    assert client.post('/api/undo').status_code == 200
+    assert client.post('/api/redo').status_code == 200
+    assert current_group(client) == before
 
 
 def save(client, ids, **changes):
