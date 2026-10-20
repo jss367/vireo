@@ -114,8 +114,13 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     page.locator('#identitySave').click()
     group = page.locator('#identityAlternativesGroups article')
     expect(group).to_have_count(1)
+    group.get_by_role('button', name='Edit alternatives and evidence').click()
     db._merge_keyword_into(source, survivor)
     db.commit()
+    with page.expect_response(lambda response: response.url.endswith('/api/identity-alternatives') and response.request.method == 'POST') as response:
+        page.locator('#identitySave').click()
+    assert response.value.status == 409
+    expect(page.locator('#identityAlternativesStatus')).to_contain_text('Could not confirm the save')
     page.reload()
     page.locator('#identityAlternativesPanel > summary').click()
     expect(group).to_contain_text(target_name + " — unresolved")

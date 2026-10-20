@@ -7,6 +7,7 @@ frames together without asserting that every candidate occurs in a frame.
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Callable, Collection
 from typing import Any
 
@@ -39,15 +40,19 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
     Candidate names are evidence independent of attached keyword links, so
     an empty links array must not prevent this rewrite. Caller commits.
     A pair converging to one name stays unresolved until explicitly resolved.
+    Rotate each affected group revision consistently so pre-maintenance forms
+    cannot save retired candidates back into the group.
     """
     if not old_name or not new_name or old_name == new_name:
         return
-    for row in conn.execute('SELECT workspace_id, photo_id, candidates FROM photo_identity_alternatives').fetchall():
+    revisions = {}
+    for row in conn.execute('SELECT workspace_id, photo_id, group_id, candidates FROM photo_identity_alternatives').fetchall():
         candidates = _renamed_candidates(json.loads(row['candidates']), old_name, new_name)
         if candidates is not None:
             conn.execute(
-                'UPDATE photo_identity_alternatives SET candidates=? WHERE workspace_id=? AND photo_id=?',
-                (json.dumps(candidates), row['workspace_id'], row['photo_id']),
+                'UPDATE photo_identity_alternatives SET candidates=?, group_id=? WHERE workspace_id=? AND photo_id=?',
+                (json.dumps(candidates), revisions.setdefault(row['group_id'], uuid.uuid4().hex),
+                 row['workspace_id'], row['photo_id']),
             )
     rows = conn.execute(
         'SELECT i.id, i.old_value, i.new_value FROM edit_history_items i '
@@ -65,6 +70,7 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
             candidates = _renamed_candidates(identity.get('candidates'), old_name, new_name)
             if candidates is not None:
                 identity['candidates'] = candidates
+                identity['group_id'] = revisions.setdefault(identity['group_id'], uuid.uuid4().hex)
                 conn.execute(
                     f'UPDATE edit_history_items SET {column}=? WHERE id=?',
                     (json.dumps(data, sort_keys=True), row['id']),

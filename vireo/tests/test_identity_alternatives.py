@@ -203,6 +203,39 @@ def test_non_species_keyword_maintenance_leaves_same_named_alternatives_unchange
     assert current_group(client) == before
 
 
+@pytest.mark.parametrize('maintenance', ['merge', 'rename'])
+def test_keyword_maintenance_rejects_stale_forms_and_preserves_batch_revision_on_undo(app_and_db, maintenance):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], is_species=True)
+    assert save(client, [1, 2, 3]).status_code == 200
+    before = current_group(client)
+    assert resolve(client, before, photo_ids=[1]).status_code == 200
+    target_name = 'Surviving Kingbird'
+    if maintenance == 'merge':
+        survivor = db.add_keyword(target_name, is_species=True)
+        db._merge_keyword_into(source, survivor)
+    else:
+        db.update_keyword(source, name=target_name)
+    db.commit()
+    current = current_group(client)
+    assert current['photo_ids'] == [2, 3]
+    assert current['group_id'] != before['group_id']
+    assert save(client, [2, 3], group_id=before['group_id']).status_code == 409
+    assert resolve(client, before, photo_ids=[2, 3]).status_code == 409
+    assert current_group(client) == current
+    assert client.post('/api/undo').status_code == 200
+    restored = current_group(client)
+    assert restored['photo_ids'] == [1, 2, 3]
+    assert restored['group_id'] == current['group_id']
+    assert restored['candidates'] == [target_name, CANDIDATES[1]]
+    assert restored['reason'] == before['reason']
+    assert restored['missing_evidence'] == before['missing_evidence']
+    assert client.post('/api/redo').status_code == 200
+    assert current_group(client) == current
+    assert db.photo_species.get_species_for_photos([1, 2, 3]) == {1: [target_name]}
+
+
 def save(client, ids, **changes):
     workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={
