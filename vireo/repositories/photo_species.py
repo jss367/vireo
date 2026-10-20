@@ -51,6 +51,24 @@ class PhotoSpeciesRepository:
         # under its module name so the moved bodies read ``self._chunks``.
         self._chunks = chunks
 
+    def confirmation_species_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
+        """Attached species provenance read by confirmation-summary refreshes."""
+        result = []
+        for chunk in self._chunks(photo_ids):
+            marks = ",".join("?" for _ in chunk)
+            result.extend(dict(row) for row in self.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                           k.is_species, k.taxon_id, k.source_taxon_id, pk.source,
+                           t.id AS resolved_taxon_id, t.inat_id AS taxon_inat_id,
+                           t.name AS taxon_scientific_name, t.common_name AS taxon_common_name,
+                           t.rank AS taxon_rank, t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
+                    FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
+                    LEFT JOIN taxa t ON t.id=k.taxon_id
+                    WHERE pk.photo_id IN ({marks}) AND (k.is_species=1 OR k.type='taxonomy')
+                    ORDER BY pk.photo_id, k.id""", list(chunk),
+            ))
+        return result
+
     def confirmation_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
         """Current photo membership and every subject's workspace-visible evidence.
 
@@ -69,19 +87,8 @@ class PhotoSpeciesRepository:
                 list(chunk),
             ).fetchall()
             by_id = {r["id"]: dict(r, subjects=[], keywords=[]) for r in photos}
-            keyword_rows = self.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
-                           k.is_species, k.taxon_id, k.source_taxon_id, pk.source,
-                           t.id AS resolved_taxon_id, t.inat_id AS taxon_inat_id,
-                           t.name AS taxon_scientific_name, t.common_name AS taxon_common_name,
-                           t.rank AS taxon_rank, t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
-                    FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
-                    LEFT JOIN taxa t ON t.id=k.taxon_id
-                    WHERE pk.photo_id IN ({marks}) AND (k.is_species=1 OR k.type='taxonomy')
-                    ORDER BY pk.photo_id, k.id""", list(chunk),
-            ).fetchall()
-            for keyword in keyword_rows:
-                by_id[keyword["photo_id"]]["keywords"].append(dict(keyword))
+            for keyword in self.confirmation_species_evidence(chunk):
+                by_id[keyword["photo_id"]]["keywords"].append(keyword)
             subjects = {}
             rows = self.conn.execute(
                 f"""SELECT d.photo_id, d.id AS detection_id, d.box_x, d.box_y,

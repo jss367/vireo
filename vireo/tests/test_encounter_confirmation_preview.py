@@ -872,3 +872,108 @@ def test_preferred_primary_order_does_not_merge_shared_name_taxon_homonyms(app_a
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before
     assert client.post('/api/redo').status_code == 200
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == after
+
+
+def sibling_burst_setup(app, db):
+    ids, path = seed(app, db, 'Western Grebe')
+    cached = json.load(open(path))
+    original = cached['encounters'][0]
+    original.update(photo_ids=ids[:2], photo_count=2, burst_count=2)
+    original['bursts'] = [{'photo_ids': ids[:1]}, {'photo_ids': ids[1:2]}]
+    unrelated = copy.deepcopy(original)
+    unrelated.update(photo_ids=ids[2:], photo_count=1, burst_count=1, bursts=[{'photo_ids': ids[2:]}])
+    cached['encounters'].append(unrelated)
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    body = {'species': 'Eared Grebe', 'photo_ids': ids[:1], 'burst_index': 0, 'add': True}
+    return ids, path, body
+
+
+@pytest.mark.parametrize('change', ['add', 'remove', 'relink', 'source_identity', 'taxon_identity', 'rank', 'root_name'])
+def test_burst_preview_binds_live_sibling_species_read_by_encounter_refresh(app_and_db, change):
+    app, db = app_and_db
+    ids, path, body = sibling_burst_setup(app, db)
+    extra = db.add_keyword('Herring Gull', is_species=True)
+    db.conn.executemany('INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)', [
+        (900001, 800001, 'Sibling alpha', 'species'), (900002, 800002, 'Sibling beta', 'species'),
+    ])
+    parent = db.add_keyword('Sibling guide')
+    sibling = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Sibling Robin', ?, 1, 'taxonomy', 900001)",
+        (parent,),
+    ).lastrowid
+    root = db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type, taxon_id) VALUES ('Canonical Sibling', 1, 'taxonomy', 900001)",
+    ).lastrowid
+    db.tag_photo(ids[1], sibling)
+    db.commit()
+    client = app.test_client()
+    preview = request_preview(client, body)
+    assert [row['id'] for row in preview['photos']] == ids[:1]
+    if change == 'add':
+        db.tag_photo(ids[1], extra)
+    elif change == 'remove':
+        western = db.conn.execute("SELECT id FROM keywords WHERE name='Western Grebe'").fetchone()[0]
+        db.untag_photo(ids[1], western)
+    elif change == 'relink':
+        db.conn.execute('UPDATE keywords SET taxon_id=900002 WHERE id=?', (sibling,))
+    elif change == 'source_identity':
+        db.conn.execute('UPDATE keywords SET source_taxon_id=800003 WHERE id=?', (sibling,))
+    elif change == 'taxon_identity':
+        db.conn.execute('UPDATE taxa SET inat_id=800003 WHERE id=900001')
+    elif change == 'rank':
+        db.conn.execute("UPDATE taxa SET rank='genus' WHERE id=900001")
+    else:
+        db.conn.execute("UPDATE keywords SET name='Renamed Canonical Sibling' WHERE id=?", (root,))
+    db.commit()
+    assert request_preview(client, body)['photos'] == preview['photos']
+    before_cache = json.load(open(path))
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table}')]
+              for table in ('photos', 'keywords', 'photo_keywords', 'edit_history', 'pending_changes')}
+    assert apply(client, body, preview).status_code == 409
+    assert json.load(open(path)) == before_cache
+    for table, rows in before.items():
+        assert [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table}')] == rows
+
+
+@pytest.mark.parametrize('change', ['outside_species', 'outside_cache', 'outside_identity', 'sibling_flag', 'sibling_prediction', 'sibling_general_tag'])
+def test_burst_preview_ignores_live_changes_outside_species_refresh_read_set(app_and_db, change):
+    app, db = app_and_db
+    ids, path, body = sibling_burst_setup(app, db)
+    extra = db.add_keyword('Herring Gull', is_species=True)
+    if change == 'outside_identity':
+        db.conn.execute("INSERT INTO taxa (id, inat_id, name, rank) VALUES (900003, 800003, 'Unrelated bird', 'species')")
+        outside = db.conn.execute(
+            "INSERT INTO keywords (name, is_species, type, taxon_id) VALUES ('Unrelated bird', 1, 'taxonomy', 900003)",
+        ).lastrowid
+        db.tag_photo(ids[2], outside)
+        db.commit()
+    client = app.test_client()
+    preview = request_preview(client, body)
+    if change in ('outside_species', 'outside_cache'):
+        db.tag_photo(ids[2], extra)
+        if change == 'outside_cache':
+            cached = json.load(open(path))
+            cached['encounters'][1]['confirmed_species_list'] = ['Western Grebe', 'Herring Gull']
+            with open(path, 'w') as handle:
+                json.dump(cached, handle)
+    elif change == 'outside_identity':
+        db.conn.execute('UPDATE taxa SET inat_id=800004 WHERE id=900003')
+    elif change == 'sibling_flag':
+        db.photo_review.set_flag(ids[1], 'flagged')
+    elif change == 'sibling_prediction':
+        did = db.detections.save(ids[1], [{'box': {'x': .1, 'y': .1, 'w': .2, 'h': .3},
+                                          'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+        db.predictions.add(detection_id=did, species='Herring Gull', confidence=.9, model='test')
+    else:
+        db.tag_photo(ids[1], db.add_keyword('Favorite location'))
+    db.commit()
+    before_cache = json.load(open(path))
+    before = db.photo_species.get_species_for_photos(ids[1:], include_identities=True)
+    flags = [db.photos.get(pid)['flag'] for pid in ids]
+    assert request_preview(client, body)['preview_token'] == preview['preview_token']
+    response = apply(client, body, preview)
+    assert response.status_code == 200, response.get_json()
+    assert db.photo_species.get_species_for_photos(ids[1:], include_identities=True) == before
+    assert [db.photos.get(pid)['flag'] for pid in ids] == flags
+    assert json.load(open(path))['encounters'][1] == before_cache['encounters'][1]

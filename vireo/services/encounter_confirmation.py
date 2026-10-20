@@ -56,6 +56,13 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         "add": edit.add_mode, "remove": edit.remove_mode,
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
         "target": target_state,
+        # Burst edits refresh the entire encounter, including sibling bursts.
+        # Bind their live species inputs without expanding the visible matrix
+        # or invalidating on unrelated sibling flags/classifier measurements.
+        "refresh_species": {
+            "keywords": db.photo_species.confirmation_species_evidence(edit.target_enc["photo_ids"]),
+            "identities": db.photo_species.get_species_for_photos(edit.target_enc["photo_ids"], include_identities=True),
+        },
         "homonyms": db.photo_species.confirmation_homonym_evidence([
             name for name in (target["name"] if target else edit.species, edit.previous_species) if name
         ]),

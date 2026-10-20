@@ -202,6 +202,9 @@ Apply by sending the same request without `preview`, with the returned
 a fresh preview. The server rechecks the encounter, all source photos' keywords
 and provenance, subject boxes, classifier output and decisions while holding the
 writer lock. Stale previews return HTTP 409 without species changes.
+The token also binds live species identities and provenance for every encounter
+member whose summaries will refresh, including sibling bursts outside the
+displayed source-photo matrix. Unrelated encounters remain outside that scope.
 
 Use `add: true` to preserve existing species. To replace one explicitly named
 species, omit `add` and send `previous_species`; unrelated species are retained.
