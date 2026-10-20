@@ -2,13 +2,14 @@
 // lightbox, review the burst, Flag Best, and Flag Best + Reject Rest.
 // ES module.
 
-import { state } from './state.js';
+import { byId, state } from './state.js';
 import { hasLightbox, openLightbox, showToast } from './shared.js';
 import { fetchJson, seedIdFromRequest, selectedIdsFromStorage } from './helpers.js';
 import { renderBatch, setStatus } from './render.js';
 
 export async function loadBatch() {
-  var ids = selectedIdsFromStorage();
+  var sequence = ++state.requestSequence;
+  var ids = state.photoIds.length ? state.photoIds : selectedIdsFromStorage();
   var seedId = seedIdFromRequest(ids);
   if (!seedId) {
     setStatus('Go back to Browse and select at least one photo first.');
@@ -21,21 +22,34 @@ export async function loadBatch() {
       window.sessionStorage.removeItem('vireo.bestBatchSeedId');
     } catch (e) {}
   }
+  var species = /** @type {HTMLInputElement} */ (byId('requestedSpecies')).value.trim();
+  var comparison = state.comparisonActive ? {compare_subjects: true, requested_species: species || undefined,
+    subject_overrides: state.subjectOverrides} : {};
+  setStatus('Loading comparison evidence...');
   try {
     /** @type {BestBatchResponse} */
     var data;
     if (ids.length >= 2) {
-      data = await fetchJson('/api/photos/best-batch', {
+      data = await fetchJson(state.comparisonActive ? '/api/photos/burst-evidence' : '/api/photos/best-batch', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({photo_ids: ids}),
+        body: JSON.stringify({photo_ids: ids, ...comparison}),
       });
       data.scope_method = data.scope_method || 'selected_photos';
     } else {
-      data = await fetchJson('/api/photos/' + seedId + '/best-batch');
+      var params = new URLSearchParams();
+      if (state.comparisonActive) {
+        params.set('compare_subjects', 'true');
+        if (species) params.set('requested_species', species);
+        params.set('subject_overrides', JSON.stringify(state.subjectOverrides));
+      }
+      data = await fetchJson('/api/photos/' + seedId + (state.comparisonActive ? '/burst-evidence?' + params : '/best-batch'));
     }
+    if (sequence !== state.requestSequence) return;
+    state.photoIds = data.photo_ids || [];
     renderBatch(data);
   } catch (e) {
+    if (sequence !== state.requestSequence) return;
     setStatus(e instanceof Error && e.message ? e.message : 'Could not rank this batch.');
   }
 }
@@ -53,7 +67,7 @@ export function openInspectedLightbox() {
 
 export function openReviewBurst() {
   var data = state.bestBatchData;
-  if (!data || !data.photo_ids || data.photo_ids.length < 2) return;
+  if (!data || data.comparison || !data.photo_ids || data.photo_ids.length < 2) return;
   try {
     window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(data.photo_ids));
   } catch (e) {

@@ -100,6 +100,19 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 10px;
 }
+.focus-grid.comparison {
+  grid-template-columns: repeat(auto-fill, minmax(210px, 260px));
+}
+#requestedSpecies, #subjectChoices {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font: inherit;
+  padding: 6px 8px;
+}
+#subjectChoices { width: 100%; margin: 8px 0; }
+#subjectEvidenceStatus { line-height: 1.5; }
 .focus-card {
   border: 1px solid var(--border-primary);
   background: var(--bg-secondary);
@@ -116,6 +129,12 @@ body {
   aspect-ratio: 1;
   background-color: #050505;
   overflow: hidden;
+}
+.focus-crop.native img {
+  position: static;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .focus-crop img {
   display: block;
@@ -306,6 +325,13 @@ body {
     </div>
   </div>
 
+  <div class="best-actions" style="justify-content:flex-start; margin-bottom:14px;">
+    <label>Species to compare <input id="requestedSpecies" type="text" placeholder="Optional species name" maxlength="300"></label>
+    <button class="best-btn" id="compareSubjectsBtn" type="button">Compare subjects</button>
+    <button class="best-btn" id="analyzeSubjectsBtn" type="button" disabled>Analyze selected subjects</button>
+    <span id="comparisonStatus" class="section-note" role="status"></span>
+  </div>
+  <p id="comparisonNotice" class="section-note" role="status" hidden></p>
   <div id="bestStatus" class="status">Loading batch...</div>
   <div id="bestContent" style="display:none;">
     <section class="focus-section">
@@ -328,6 +354,11 @@ body {
       </div>
 
       <div>
+        <section id="subjectPanel" hidden>
+          <label>Subject for this comparison <select id="subjectChoices"></select></label>
+          <img id="chosenSubjectImg" alt="Selected subject detail" style="max-width:100%;max-height:400px;object-fit:contain;">
+          <p id="subjectEvidenceStatus" class="section-note"></p>
+        </section>
         <div class="section-head">
           <div class="section-title">Ranked Frames</div>
         </div>
