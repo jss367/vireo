@@ -408,6 +408,7 @@ def build_evidence_pack(
             _attach_evidence(card, evidence_rows.get(card["id"]), focus_size)
 
     coverage = coverage_counts(pack["cards"])
+    coverage["photos"] = len(photo_ids)
     pack["coverage"] = coverage
     pack["ambiguity"] = assess_ambiguity(
         pack["cards"], coverage,
