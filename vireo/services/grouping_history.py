@@ -536,6 +536,11 @@ def restore_grouping_edit(db: Database, entry: HistoryEntry, *, undo: bool) -> I
         restored["summary"] = _restored_summary(
             current.get("summary"), restored["encounters"],
         )
+        flags = {item["photo_id"]: item["old_value" if undo else "new_value"]
+                 for item in change.get("flag_items", [])}
+        for photo in restored.get("photos", []):
+            if photo["id"] in flags:
+                photo["flag"] = flags[photo["id"]]
         save_results_raw(restored, cache_dir, db.require_workspace_id())
         try:
             yield
@@ -558,7 +563,8 @@ def apply_grouping_photo_edit(
 ) -> None:
     """Replay the photo half of a grouping action without releasing its transaction."""
     payload = json.loads(entry["new_value"])
-    for item in payload.get("flag_items", []):
+    flag_items = payload.get("flag_items", []) if (payload.get("photo_edit") or {}).get("action_type") != "flag" else []
+    for item in flag_items:
         value = item["old_value" if undo else "new_value"]
         db.photo_review.set_flag(item["photo_id"], value, _commit=False)
         db.queue_flag_change_if_enabled(item["photo_id"], value, _commit=False)

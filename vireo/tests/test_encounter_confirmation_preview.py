@@ -253,11 +253,12 @@ def test_preview_binds_inferred_taxon_when_target_keyword_has_not_been_created(a
     assert db.keywords.species_confirmation_target('Eared Grebe')['keyword'] is None
 
 
-def test_v1_species_confirmation_alias_preserves_undo_contract(app_and_db):
+@pytest.mark.parametrize('combined', [False, True])
+def test_v1_species_confirmation_alias_preserves_undo_contract(app_and_db, combined):
     app, db = app_and_db
     ids, _ = seed(app, db, 'Western Grebe')
     client = app.test_client()
-    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    body = combined_request(ids) if combined else {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
     headers = {'X-Vireo-Token': 'test-token-123'}
     preview = client.post('/api/v1/encounters/species', json={**body, 'preview': True}, headers=headers)
     assert preview.status_code == 200, preview.get_json()
@@ -265,9 +266,14 @@ def test_v1_species_confirmation_alias_preserves_undo_contract(app_and_db):
         **body, 'preview_token': preview.get_json()['preview_token'],
     }, headers=headers)
     assert result.status_code == 200, result.get_json()
-    assert all('Eared Grebe' in names for names in db.photo_species.get_species_for_photos(ids).values())
+    names = db.photo_species.get_species_for_photos(ids)
+    assert all('Eared Grebe' in names[pid] for pid in body['photo_ids'])
+    if combined:
+        assert db.photos.get(ids[0])['flag'] == 'flagged'
+        assert db.photos.get(ids[1])['flag'] == 'rejected'
     assert client.post('/api/undo').status_code == 200
     assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
 
 
 @pytest.mark.parametrize(('change', 'source_id', 'inat_id'), [
@@ -344,11 +350,16 @@ def test_combined_species_flags_split_and_removal_share_one_undo(app_and_db):
     assert [enc['photo_ids'] for enc in after['encounters']] == [ids[:1], ids[1:]]
     assert [burst['photo_ids'] for burst in after['encounters'][1]['bursts']] == [ids[1:2], ids[2:]]
     assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history + 1
-    assert client.post('/api/undo').status_code == 200
+    undone = client.post('/api/undo')
+    assert undone.status_code == 200
+    assert undone.get_json()['flags_changed'] is True
+    assert all(photo['flag'] == 'none' for photo in json.load(open(path))['photos'])
     assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
     assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
     assert json.load(open(path))['encounters'] == before['encounters']
-    assert client.post('/api/redo').status_code == 200
+    redone = client.post('/api/redo')
+    assert redone.status_code == 200
+    assert redone.get_json()['flags_changed'] is True
     assert db.photos.get(ids[0])['flag'] == 'flagged'
     assert db.photos.get(ids[1])['flag'] == 'rejected'
     assert 'Eared Grebe' in db.photo_species.get_species_for_photos(ids)[ids[0]]
@@ -457,3 +468,50 @@ def test_combined_apply_supports_legacy_raw_bursts(app_and_db):
     assert [enc['photo_ids'] for enc in response.get_json()['encounters']] == [ids[:1], ids[1:]]
     assert client.post('/api/undo').status_code == 200
     assert json.load(open(path))['encounters'] == cached['encounters']
+
+
+def test_combined_already_confirmed_species_keeps_flags_in_one_undo(app_and_db):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    client = app.test_client()
+    body = combined_request(ids)
+    body.update(species='Western Grebe', split=False)
+    before = json.load(open(path))
+    count = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    assert apply(client, body, request_preview(client, body)).status_code == 200
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == count + 1
+    response = client.post('/api/undo')
+    assert response.status_code == 200
+    assert response.get_json()['flags_changed'] is True
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert all(photo['flag'] == 'none' for photo in json.load(open(path))['photos'])
+    assert json.load(open(path))['encounters'] == before['encounters']
+    assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+    assert client.post('/api/redo').status_code == 200
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[1])['flag'] == 'rejected'
+
+
+def test_stale_combined_history_retains_species_and_flags_after_retirement(app_and_db):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    client = app.test_client()
+    body = combined_request(ids)
+    assert apply(client, body, request_preview(client, body)).status_code == 200
+    newer = json.load(open(path))
+    newer['encounters'][0]['bursts'].append({'photo_ids': []})
+    with open(path, 'w') as handle:
+        json.dump(newer, handle)
+    # Retire the obsolete structure while keeping both kinds of photo edits.
+    assert client.post('/api/undo').status_code == 409
+    response = client.post('/api/undo')
+    assert response.status_code == 200
+    assert response.get_json()['flags_changed'] is True
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+    assert json.load(open(path))['encounters'] == newer['encounters']
+    assert client.post('/api/redo').status_code == 200
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[1])['flag'] == 'rejected'
+    assert 'Eared Grebe' in db.photo_species.get_species_for_photos(ids)[ids[0]]
+    assert json.load(open(path))['encounters'] == newer['encounters']

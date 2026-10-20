@@ -89,3 +89,11 @@ membership, keyword identity/provenance, subject or prediction decision blocks
 the apply. Scoped confirmations rebuild labels from every actual group member,
 so selected frames cannot accidentally confirm the rest. Species and optional
 membership changes share one durable undo entry.
+
+When both Group Review checkboxes are selected, the preview carries the complete
+staged pick/reject/removal plan. Apply sends one species request that validates
+the plan and preview together, writes both halves under the same workspace and
+database locks, saves the cache once, and records one Undo entry. Cancellation
+saves nothing; failure at any write, history, cache save or commit stage rolls
+back both species and cull decisions. The flags-only endpoint remains available
+for culling without a species edit.

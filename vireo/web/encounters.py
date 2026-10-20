@@ -1080,10 +1080,10 @@ class _SpeciesConfirmation:
             pid: {"flag": self.db.photos.get(pid)["flag"] or "none"}
             for key in ("picks", "rejects", "candidates") for pid in self.group_plan[key]
         }
-        change = {"before": self.before_cached["encounters"], "after": self.cached["encounters"], "label_edit": True}
+        change = {"before": self.before_cached["encounters"], "after": self.cached["encounters"],
+                  "label_edit": True, "flag_items": flag_items}
         if self.photo_edit_id is not None:
             change["photo_edit"] = dict(self.db.edit_history.action_and_new_value(self.photo_edit_id))
-            change["flag_items"] = flag_items
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
         elif flag_items or change["before"] != change["after"]:
             if flag_items:

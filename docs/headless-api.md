@@ -211,6 +211,15 @@ changes membership. Species and membership changes share one Undo step, and
 flags are preserved. Legacy requests without a preview token retain their
 established API behavior; the Process Review UI always previews its decisions.
 
+For a combined cached Group Review apply, include `group_changes` in both
+preview and apply. It contains `picks`, `rejects`, `candidates`, `removed`,
+`encounter_index`, `burst_index`, and `expected_burst_photo_ids`. The four
+decision lists must partition that exact cached burst; selected species photos
+must exclude removed frames. The preview token binds these decisions and the
+whole burst's live evidence. Apply performs species, flags, removals and optional
+transition splitting in one transaction and one Undo action; `group_photos`
+reports the resulting flags. A failure saves neither half.
+
 ### Comparing a requested species or chosen subjects
 
 Best Batch and burst-evidence GET/POST requests accept `requested_species` (a

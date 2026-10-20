@@ -282,9 +282,9 @@ def test_apply_and_close_is_single_flight_while_request_is_pending(live_server, 
 
     page.route("**/api/pipeline/group/apply", delay_apply)
     _open_burst_modal(page, live_server)
-    page.locator("#grmConfirmSpeciesChk").uncheck()  # This case exercises flags only.
 
     page.keyboard.press("x")
+    page.locator("#grmConfirmSpeciesChk").uncheck()  # This case exercises flags only.
     expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
 
     with page.expect_response("**/api/pipeline/group/apply"):

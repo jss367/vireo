@@ -165,6 +165,5 @@ def apply_group_changes(db: Database, cached: JsonDict, group: JsonDict) -> list
         if photo["id"] in flag_by_id:
             flag = flag_by_id[photo["id"]]
             photo["flag"] = flag
-            photo["label"] = {"flagged": "KEEP", "rejected": "REJECT", "none": "REVIEW"}[flag]
     refresh_serialized_summary(cached)
     return items
