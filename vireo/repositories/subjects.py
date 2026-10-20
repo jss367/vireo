@@ -103,11 +103,19 @@ class SubjectsRepository:
     def save_ranking_analysis(
         self, detection_id: int, source_key: str, features: Mapping[str, Any], mask_png: bytes,
     ) -> None:
-        """Publish once; a removed detection cannot receive late inference results."""
+        """Publish one immutable generation and prune its superseded cache rows.
+
+        Caller commits the insert and prune together. Contexts with different
+        settings may need reanalysis; old URLs already fail key validation.
+        """
         self.conn.execute(
             "INSERT OR IGNORE INTO subject_ranking_analysis(detection_id, source_key, features, mask_png) "
             "SELECT id, ?, ?, ? FROM detections WHERE id=?",
             (source_key, json.dumps(features, allow_nan=False), mask_png, detection_id),
+        )
+        self.conn.execute(
+            "DELETE FROM subject_ranking_analysis WHERE detection_id=? AND source_key!=?",
+            (detection_id, source_key),
         )
 
     # -- primary projection -----------------------------------------------------

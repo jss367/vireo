@@ -423,3 +423,31 @@ def test_previously_returned_media_rejects_a_new_identity_conflict(comparison_li
         response = client.get(url)
         assert response.status_code == 404
         assert "identity is unresolved" in response.get_json()["error"]
+
+
+
+def test_publishing_a_new_analysis_prunes_only_that_detections_old_generations(comparison_library):
+    _, db, pids, ids = comparison_library
+    did, other = ids[pids[0]]
+    db.subjects.save_ranking_analysis(other, "other-subject", {"eye_x": .8}, b"other")
+    for index in range(5):
+        key = f"generation-{index}"
+        db.subjects.save_ranking_analysis(did, key, {"eye_x": index / 10}, b"latest")
+        db.commit()
+        assert db.conn.execute("SELECT COUNT(*) FROM subject_ranking_analysis WHERE detection_id=?", (did,)).fetchone()[0] == 1
+        assert db.subjects.ranking_analysis(did, key)["features"]["eye_x"] == index / 10
+        if index:
+            assert db.subjects.ranking_analysis(did, f"generation-{index - 1}") is None
+    assert db.subjects.ranking_analysis(other, "other-subject")["mask_png"] == b"other"
+
+
+def test_new_analysis_insert_and_pruning_roll_back_together(comparison_library):
+    _, db, pids, ids = comparison_library
+    did = ids[pids[0]][0]
+    db.subjects.save_ranking_analysis(did, "first", {"eye_x": .2}, b"first")
+    db.commit()
+    db.subjects.save_ranking_analysis(did, "second", {"eye_x": .8}, b"second")
+    assert db.subjects.ranking_analysis(did, "first") is None
+    db.rollback()
+    assert db.subjects.ranking_analysis(did, "second") is None
+    assert db.subjects.ranking_analysis(did, "first")["mask_png"] == b"first"

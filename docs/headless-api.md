@@ -224,8 +224,11 @@ poll `/api/jobs/<job_id>`, then fetch the comparison again. Job results report
 Analysis uses original-derived images capped at 1024 pixels on the longest
 edge, SAM masks, and the existing mask-gated eye policy when enabled and its
 model is available. Each card reports the actual analysis dimensions and eye
-availability. A missing original remains retryable. No flags, ratings, edit
-recipes, or primary-subject choices are written by comparison analysis.
+availability. A missing original remains retryable. The cache retains only the
+latest published analysis generation per detection, pruning superseded masks in
+the same transaction. Switching to another analysis context can require
+reanalysis. No flags, ratings, edit recipes, or primary-subject choices are
+written by comparison analysis.
 
 Subject focus and mask URLs carry `detection_id` and `analysis_key`; consumers
 should use the returned URLs together. Their responses refuse stale or foreign
