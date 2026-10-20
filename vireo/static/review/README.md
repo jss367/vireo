@@ -193,3 +193,11 @@ the existing writer lock; a stale change returns 409 and the user must refresh
 before choosing again. Every filter/catalog reload invalidates in-flight
 inspection responses. Response epochs also prevent a late crop from replacing
 the current photo.
+
+
+Archive collision reconciliation carries alternative candidates, evidence,
+revision markers and identity undo/redo items onto the surviving photo before
+removing the duplicate row. Identical batch snapshots collapse to one item.
+Conflicting identity revisions, species confirmations or snapshots stop catalog
+reconciliation with an explicit error and roll back its photo changes; neither
+row's evidence is silently chosen or discarded. Review both rows before retrying.

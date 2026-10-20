@@ -83,6 +83,7 @@ PROVENANCE_FOLD_SYMBOLS = {
 # ``_absorb_into_canonical_place`` helper).
 _PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
+    ("repositories/identity_alternatives.py", "remap_identity_for_photo_merge"): "identity collision carries candidate stamps through the shared fold",
     (_PROVENANCE_MODULE, "tag"): "re-tag folds against the row already there",
     (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
     (_PROVENANCE_MODULE, "_absorb_into_canonical_place"): "place link repoints rows onto canonical",

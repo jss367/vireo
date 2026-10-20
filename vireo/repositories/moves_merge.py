@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
+from repositories.identity_alternatives import remap_identity_for_photo_merge
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import (
     keep_photo_visible_across_folder_change,
@@ -1819,6 +1820,7 @@ class _StagedTreeMerge:
 
     def _carry_staged_state_to_survivor(
             self, pid, survivor_id, survivor_off_staging):
+        remap_identity_for_photo_merge(self.conn, pid, survivor_id, self.KEYWORD_SOURCE_CONFLICT_SQL)
         # A queued ``location`` change stores its
         # coordinates only in the deleted photo's
         # ``photo_keywords`` link to a
@@ -1844,6 +1846,9 @@ class _StagedTreeMerge:
         # rows that actually survive.
         self.reconcile_keyword_edits(
             pid, survivor_id)
+        # Queued edits must not turn the carried uncertainty into a
+        # confirmation (or remove a resolved confirmation) during the fold.
+        remap_identity_for_photo_merge(self.conn, pid, survivor_id, self.KEYWORD_SOURCE_CONFLICT_SQL)
         # ``photos.rating`` / ``photos.flag`` live
         # outside the queue row, so they have to
         # travel with it or the survivor's catalog
@@ -1963,6 +1968,7 @@ class _StagedTreeMerge:
         # helper resolves that by queue chronology,
         # identically in the collision→staged
         # branch above.
+        remap_identity_for_photo_merge(self.conn, collision["id"], pid, self.KEYWORD_SOURCE_CONFLICT_SQL)
         self.move_location_state(
             collision["id"], pid)
         # Same reconciliation as the branch above,
@@ -1972,6 +1978,7 @@ class _StagedTreeMerge:
         # puts them on one photo.
         self.reconcile_keyword_edits(
             collision["id"], pid)
+        remap_identity_for_photo_merge(self.conn, collision["id"], pid, self.KEYWORD_SOURCE_CONFLICT_SQL)
         # Same carry-over of the catalog columns the
         # queue row does not hold.
         self.transfer_review_state(

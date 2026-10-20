@@ -78,6 +78,91 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
                 )
 
 
+def remap_identity_for_photo_merge(
+    conn: sqlite3.Connection, losing_id: int, survivor_id: int, KEYWORD_SOURCE_CONFLICT_SQL: str,
+) -> None:
+    """Preserve decisions and replay snapshots before a collision deletes a row.
+
+    Matching decisions (including revision) can collapse. Distinct decisions
+    cannot be ordered reliably: group ids are random and history may have been
+    pruned. Refuse that collision atomically instead of discarding evidence or
+    replacing a confirmation. Likewise, differing existing species associations
+    require review when either row carries an identity decision. Caller commits.
+    """
+    states = {r['photo_id']: dict(r) for r in conn.execute(
+        'SELECT * FROM photo_identity_alternatives WHERE photo_id IN (?, ?)',
+        (losing_id, survivor_id),
+    )}
+    if not states:
+        _remap_identity_history(conn, losing_id, survivor_id)
+        return
+    old, new = states.get(losing_id), states.get(survivor_id)
+    if old and new and {k: v for k, v in old.items() if k != 'photo_id'} != {
+        k: v for k, v in new.items() if k != 'photo_id'
+    }:
+        raise ValueError('Photo collision has conflicting identity decisions; review both photos before archiving')
+    links = {}
+    for pid in (losing_id, survivor_id):
+        links[pid] = {r['keyword_id']: r['source'] for r in conn.execute(
+            'SELECT pk.keyword_id, pk.source FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
+            "WHERE pk.photo_id=? AND (k.is_species=1 OR k.type='taxonomy')", (pid,),
+        )}
+    # An empty, undecided row can inherit a decision. Existing confirmations
+    # must never be replaced by the other row's uncertainty or provenance.
+    if ((new and links[losing_id] and links[losing_id] != links[survivor_id])
+            or (old and links[survivor_id] and links[losing_id] != links[survivor_id])):
+        raise ValueError('Photo collision has conflicting species confirmations; review both photos before archiving')
+    expected = links[losing_id] if old else links[survivor_id]
+    decision = old or new
+    assert decision is not None  # states contains one of these two photo ids
+    candidates = json.loads(decision['candidates'])
+    _check_merge_identity_intents(conn, losing_id, survivor_id, expected, candidates)
+    _remap_identity_history(conn, losing_id, survivor_id)
+    if old:
+        if not new:
+            conn.execute('UPDATE photo_identity_alternatives SET photo_id=? WHERE photo_id=?',
+                         (survivor_id, losing_id))
+        for kid, source in links[losing_id].items():
+            conn.execute('INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) '
+                         + KEYWORD_SOURCE_CONFLICT_SQL, (survivor_id, kid, source))
+
+
+def _check_merge_identity_intents(
+    conn: sqlite3.Connection, losing_id: int, survivor_id: int,
+    expected: dict[int, str | None], candidates: list[str],
+) -> None:
+    """Refuse queued species writes inconsistent with the retained decision."""
+    species = {r['id']: keyword_match_key(r['name']) for r in conn.execute(
+        "SELECT id, name FROM keywords WHERE is_species=1 OR type='taxonomy'",
+    )}
+    present = {species[kid] for kid in expected if kid in species}
+    relevant = set(species.values()) | {keyword_match_key(name) for name in candidates}
+    for row in conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id IN (?, ?) "
+        "AND change_type IN ('keyword_add', 'keyword_remove')", (losing_id, survivor_id),
+    ):
+        key = keyword_match_key((row['value'] or '').rsplit('|', 1)[-1])
+        if key in relevant and ((row['change_type'] == 'keyword_add') != (key in present)):
+            raise ValueError('Photo collision has conflicting species edits; review both photos before archiving')
+
+
+def _remap_identity_history(conn: sqlite3.Connection, losing_id: int, survivor_id: int) -> None:
+    """Deduplicate identical batch items; refuse ambiguous replay of one photo."""
+    rows = conn.execute(
+        'SELECT i.* FROM edit_history_items i JOIN edit_history e ON e.id=i.edit_id '
+        "WHERE e.action_type='identity_alternatives' AND i.photo_id=?", (losing_id,),
+    ).fetchall()
+    for row in rows:
+        twins = conn.execute('SELECT * FROM edit_history_items WHERE edit_id=? AND photo_id=?',
+                             (row['edit_id'], survivor_id)).fetchall()
+        if any((t['old_value'], t['new_value']) != (row['old_value'], row['new_value']) for t in twins):
+            raise ValueError('Photo collision has conflicting identity history; review both photos before archiving')
+        if twins:
+            conn.execute('DELETE FROM edit_history_items WHERE id=?', (row['id'],))
+        else:
+            conn.execute('UPDATE edit_history_items SET photo_id=? WHERE id=?', (survivor_id, row['id']))
+
+
 class IdentityAlternativesRepository:
     def __init__(
         self, conn: sqlite3.Connection, workspace_id: Callable[[], int], *,
