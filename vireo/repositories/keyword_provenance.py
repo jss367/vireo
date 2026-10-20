@@ -448,19 +448,25 @@ def _retarget_identity_history(conn, src_id, dst_id, preexisting, source_max):
         if not any(link['keyword_id'] == src_id for link in links):
             continue
         owns_survivor = any(link['keyword_id'] == dst_id for link in links)
+        protect_survivor = row['photo_id'] in preexisting and not owns_survivor
+        if protect_survivor:
+            # Retirement preserves the association's actual post-merge stamp.
+            # A removed historical source must not upgrade an independent tag;
+            # a source still attached now participates in the real merge fold.
+            destination = conn.execute(
+                'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                (row['photo_id'], dst_id),
+            ).fetchone()
+            source = conn.execute(
+                'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                (row['photo_id'], src_id),
+            ).fetchone()
+            protected_source = source_max(destination[0], source[0] if source else None)
         for data in (before, after):
             _rewrite_identity_links(data, src_id, dst_id, source_max)
-            if row['photo_id'] in preexisting and not owns_survivor:
-                # A survivor already recorded in this edit belongs to its delta,
-                # including when the edit was undone before the keyword merge.
-                # Keeping an independent dst in both snapshots removes only that tag delta;
-                # undo/redo must still restore the uncertainty/evidence state.
-                source = conn.execute(
-                    'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
-                    (row['photo_id'], dst_id),
-                ).fetchone()[0]
-                data['links'].append({'keyword_id': dst_id, 'source': source})
-                _rewrite_identity_links(data, src_id, dst_id, source_max)
+            if protect_survivor:
+                data['links'] = [link for link in data['links'] if link['keyword_id'] != dst_id]
+                data['links'].append({'keyword_id': dst_id, 'source': protected_source})
         conn.execute(
             'UPDATE edit_history_items SET old_value=?, new_value=? WHERE id=?',
             (json.dumps(before, sort_keys=True), json.dumps(after, sort_keys=True), row['id']),

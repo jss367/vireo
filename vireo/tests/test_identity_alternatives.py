@@ -44,21 +44,23 @@ def test_keyword_names_follow_live_and_empty_link_identity_history(app_and_db, o
     assert db.photo_species.get_species_for_photos([1]) == {1: [target_name]}
 
 
+@pytest.mark.parametrize('source_stamp,survivor_stamp', [('accept', 'manual'), ('manual', 'accept')])
 @pytest.mark.parametrize('merge_after_undo', [False, True])
 @pytest.mark.parametrize('operation', ['save', 'resolve'])
 @pytest.mark.parametrize('preexisting_survivor', [False, True])
 def test_keyword_merge_retargets_identity_history_without_removing_existing_survivor(
-    app_and_db, operation, preexisting_survivor, merge_after_undo,
+    app_and_db, operation, preexisting_survivor, merge_after_undo, source_stamp, survivor_stamp,
 ):
+    from db import keyword_source_max
     app, db = app_and_db
     client = app.test_client()
     db.photo_review.set_flag(1, 'rejected')
     source = db.add_keyword(CANDIDATES[0], is_species=True)
     survivor = db.add_keyword('Surviving Kingbird', is_species=True)
     if preexisting_survivor:
-        db.tag_photo(1, survivor)
+        db.tag_photo(1, survivor, source=survivor_stamp)
     if operation == 'save':
-        db.tag_photo(1, source, source='accept')
+        db.tag_photo(1, source, source=source_stamp)
     assert save(client, [1]).status_code == 200
     if operation == 'resolve':
         assert resolve(client, current_group(client)).status_code == 200
@@ -77,7 +79,10 @@ def test_keyword_merge_retargets_identity_history_without_removing_existing_surv
         stamp = db.conn.execute(
             'SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (survivor,),
         ).fetchone()[0]
-        assert stamp == ('manual' if preexisting_survivor else 'accept')
+        expected_stamp = survivor_stamp if preexisting_survivor and not merge_after_undo else keyword_source_max(
+            source_stamp, survivor_stamp if preexisting_survivor else None,
+        )
+        assert stamp == expected_stamp
     assert client.post('/api/redo').status_code == 200
     expected = ['Surviving Kingbird'] if operation == 'resolve' or preexisting_survivor else []
     assert db.photo_species.get_species_for_photos([1]).get(1, []) == expected
