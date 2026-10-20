@@ -1679,9 +1679,9 @@ def load_results(cache_dir, workspace_id, db=None):
         with acquire_workspace_regroup(workspace_id):
             data = load_results_raw(cache_dir, workspace_id)
             if data is not None:
-                previous = json.dumps(data)
+                previous = json.dumps(data, sort_keys=True)
                 refresh_saved_suggestions(db, data)
-                if json.dumps(data) != previous:
+                if json.dumps(data, sort_keys=True) != previous:
                     save_results_raw(data, cache_dir, workspace_id)
     else:
         data = load_results_raw(cache_dir, workspace_id)
