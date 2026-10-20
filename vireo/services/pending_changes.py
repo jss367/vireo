@@ -121,6 +121,13 @@ def claim_pending_changes_for_sync(
     return db.pending_changes.claim_for_sync(changes)
 
 
+def mark_sync_started(
+    db: Database, photo_id: int, workspace_id: int, change_type: str, value: str,
+) -> None:
+    """Retain captured-write repair status inside the caller's transaction."""
+    db.pending_changes.mark_sync_started(photo_id, workspace_id, change_type, value)
+
+
 def remove_pending_change_token(db: Database, change_token: str | None) -> int:
     """Delete a single pending change by immutable token. Returns rows removed."""
     if not change_token:

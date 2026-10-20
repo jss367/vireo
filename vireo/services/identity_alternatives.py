@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from db import keyword_source_max
 from keyword_normalization import keyword_match_key, normalize_keyword_display
-from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from services.pending_changes import mark_sync_started, queue_keyword_add, queue_keyword_remove
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -75,21 +75,25 @@ def _snapshot(identity: dict[str, Any] | None, links: list[dict[str, Any]]) -> s
 
 def _queue_shared_keyword(
     db: Database, photo_id: int, name: str, *, present: bool, may_have_written: bool = False,
+    flat_only: bool = False,
 ) -> None:
     """Every workspace sync must converge the shared sidecar to this decision."""
     workspaces = {db.require_workspace_id()}
     workspaces.update(row['id'] for row in db.photo_visibility.affected_workspaces([photo_id]))
     queue = queue_keyword_add if present else queue_keyword_remove
-    kind = 'keyword_add' if present else 'keyword_remove'
+    kind = 'keyword_add' if present else ('keyword_remove_flat' if flat_only else 'keyword_remove')
     for workspace_id in sorted(workspaces):
         # Keep captured-write compensation and token protection in the normal
         # cancellation path, then retain the explicit desired state even if an
         # unclaimed opposite was cancelled. A sibling sync may run first and
         # its sidecar may already contain that older value.
-        queue(db, photo_id, name, workspace_id=workspace_id, _commit=False)
+        # The global retirement above already cancels opposing intents. A
+        # flat-only removal must not briefly queue a full hierarchy removal.
+        if not flat_only:
+            queue(db, photo_id, name, workspace_id=workspace_id, _commit=False)
         db.queue_change(photo_id, kind, name, workspace_id=workspace_id, _commit=False)
         if may_have_written or db.pending_changes.keyword_sidecar_alias(photo_id, workspace_id, name):
-            db.pending_changes.mark_sync_started(photo_id, workspace_id, kind, name)
+            mark_sync_started(db, photo_id, workspace_id, kind, name)
 
 
 def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) -> None:
@@ -108,6 +112,7 @@ def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) ->
     may_have_written = any(row['sync_started'] for row in removed)
     current = {keyword_match_key(row['name']): row['name']
                for row in db.photo_keywords.get_for_photos([photo_id]).get(photo_id, [])}
+    ancestors = {keyword_match_key(name) for name in db.pending_changes.retained_keyword_ancestor_names(photo_id)}
     # Retained aliases are real confirmations, while an obsolete queued alias
     # absent from the catalog needs removal rather than a second confirmation.
     for link in db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, []):
@@ -116,7 +121,7 @@ def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) ->
             affected[keyword_match_key(name)] = name
     for key, name in affected.items():
         _queue_shared_keyword(db, photo_id, current.get(key, name), present=key in current,
-                              may_have_written=may_have_written)
+                              may_have_written=may_have_written, flat_only=key not in current and key in ancestors)
 
 
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:

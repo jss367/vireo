@@ -428,6 +428,17 @@ class SyncRepository:
             "('keyword_add', 'keyword_remove', 'keyword_remove_flat') ORDER BY id", (photo_id,),
         ).fetchall()
 
+    def retained_keyword_ancestor_names(self, photo_id: int) -> set[str]:
+        """Ancestor labels needed by still-attached keyword hierarchies."""
+        return {row['name'] for row in self.conn.execute(
+            "WITH RECURSIVE ancestors(id, name, parent_id) AS ("
+            "SELECT p.id, p.name, p.parent_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id=pk.keyword_id JOIN keywords p ON p.id=k.parent_id "
+            "WHERE pk.photo_id=? UNION "
+            "SELECT p.id, p.name, p.parent_id FROM keywords p JOIN ancestors a ON p.id=a.parent_id"
+            ") SELECT name FROM ancestors", (photo_id,),
+        )}
+
     def retire_keyword_intents(self, photo_id: int, values: Collection[str]) -> list[sqlite3.Row]:
         """Retire selected spellings globally; caller retains captured-write repair work.
 
