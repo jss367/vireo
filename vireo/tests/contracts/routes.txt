@@ -434,6 +434,7 @@ POST         /api/sync/location-writes
 POST         /api/system/install-exiftool
 POST         /api/undo
 POST         /api/v1/batch/flag
+POST         /api/v1/encounters/species
 POST         /api/v1/photos/<int:photo_id>/flag
 POST         /api/v1/photos/burst-evidence
 POST         /api/v1/shutdown

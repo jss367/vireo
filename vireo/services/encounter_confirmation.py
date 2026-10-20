@@ -68,10 +68,17 @@ def _refresh_group(db: Database, results: JsonDict, enc: JsonDict) -> None:
     from pipeline_results import compute_time_range, rebuild_encounter_species_label
 
     ids = enc["photo_ids"]
-    actual = db.photo_species.get_species_for_photos(ids)
+    # Identities (not just display names) so linked homonyms — two different
+    # taxa the user kept under the same spelling — do not collapse into one
+    # shared species when derive_burst_override compares frames.
+    actual = db.photo_species.get_species_for_photos(ids, include_identities=True)
     def override(photo_ids: list[int]) -> JsonDict | None:
         return derive_burst_override([
-            {"confirmed_species_list": actual.get(pid, [])} for pid in photo_ids
+            {
+                "confirmed_species_list": [entry["name"] for entry in actual.get(pid, [])],
+                "confirmed_species_identities": actual.get(pid, []),
+            }
+            for pid in photo_ids
         ])
     common = override(ids) or {}
     enc["confirmed_species_list"] = common.get("species_list", [])
@@ -90,6 +97,8 @@ def _refresh_group(db: Database, results: JsonDict, enc: JsonDict) -> None:
 
 def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], *, split: bool) -> None:
     """Optionally separate exactly the selected frames; never infer splits from disagreement."""
+    from pipeline_results import compute_time_range
+
     selected = set(ids)
     if split:
         detached = copy.deepcopy(enc)
@@ -105,7 +114,19 @@ def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], 
                     bursts.append(child)
             group["bursts"] = bursts
         index = results["encounters"].index(enc)
-        results["encounters"].insert(index + 1, detached)
+        # Place the detached group chronologically: a leading transition split
+        # (first frame or leading range) ends earlier than the remainder, so
+        # inserting it after would make Pipeline Review's default (array)
+        # ordering read the transition backwards.
+        photos_by_id = {p["id"]: p for p in results.get("photos", [])}
+        detached_range = compute_time_range(photos_by_id, detached["photo_ids"])
+        remaining_range = compute_time_range(photos_by_id, enc["photo_ids"])
+        insert_before = (
+            detached_range[1] is not None
+            and remaining_range[0] is not None
+            and detached_range[1] < remaining_range[0]
+        )
+        results["encounters"].insert(index if insert_before else index + 1, detached)
         _refresh_group(db, results, detached)
     _refresh_group(db, results, enc)
     summary = results.setdefault("summary", {})
