@@ -79,7 +79,10 @@ def resolve_subject(db, photo_id, comparison):
             state = "selected"
     elif target:
         matches = [c for c in candidates if c["confirmed_keys"] == [target.key]]
-        if len(matches) == 1:
+        conflicts = any(target.key in c["confirmed_keys"] and len(c["confirmed_keys"]) > 1 for c in candidates)
+        if conflicts:
+            state = "subject_identity_conflict"
+        elif len(matches) == 1:
             selected = next(d for d in detections if d["id"] == matches[0]["detection_id"])
             state = "confirmed"
         elif len(matches) > 1:

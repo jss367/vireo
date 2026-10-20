@@ -319,3 +319,24 @@ def test_focus_refuses_source_replaced_while_decoding(comparison_library, monkey
     response = app.test_client().get(card["focus_crop_mask_url"])
     assert response.status_code == 404
     assert "stale" in response.get_json()["error"]
+
+
+@pytest.mark.parametrize("clean_candidate", [False, True])
+def test_mixed_species_confirmations_block_automatic_subject_selection(comparison_library, clean_candidate):
+    app, db, pids, ids = comparison_library
+    # The right bird carries conflicting accepted identities, one of them the target.
+    db.predictions.add(ids[pids[0]][1], TARGET, .9, "conflicting-model", status="accepted")
+    if not clean_candidate:
+        row = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (ids[pids[0]][0],)).fetchone()
+        db.update_prediction_status(row["id"], "pending")
+    pack = _pack(app, pids, requested_species=TARGET)
+    card = next(c for c in pack["cards"] if c["id"] == pids[0])
+    assert card["evidence_status"] == "subject_identity_conflict"
+    assert card["subject"]["detection_id"] is None
+    assert card["rank"] is None and card["quality"] is None
+    assert card["id"] not in pack["suggested_reject_ids"]
+    assert "subject_identity_conflict" in {r["code"] for r in pack["ambiguity"]["reasons"]}
+    # An explicit choice of the non-conflicting subject still resolves the intended animal.
+    selected = _pack(app, pids, requested_species=TARGET, subject_overrides={str(pids[0]): ids[pids[0]][0]})
+    card = next(c for c in selected["cards"] if c["id"] == pids[0])
+    assert card["subject"]["detection_id"] == ids[pids[0]][0]
