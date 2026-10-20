@@ -159,6 +159,63 @@ def normalize_metadata_fields(fields):
     return normalized
 
 
+def export_metadata_selection(fields):
+    """Describe the explicit selection, including an intentional empty one."""
+    fields = normalize_metadata_fields(fields)
+    labels = {
+        "species": "Species keywords", "capture_date": "Capture date",
+        "capture_time": "Capture time", "rating": "Rating",
+        "location": "Location (GPS)", "camera": "Camera & exposure",
+    }
+    return {
+        "requested_fields": fields,
+        "metadata_free": not fields,
+        "description": (
+            ", ".join(labels[field] for field in fields)
+            if fields else "None selected — metadata-free export"
+        ),
+    }
+
+
+class _ExportMetadataReport:
+    """Count photo/category outcomes independently of image creation.
+
+    A category is available when at least one assignment can be generated.
+    Missing values within a category (e.g. an unknown lens) are never invented.
+    Unreached photos remain not_attempted, including render failures/cancellation.
+    """
+
+    def __init__(self, fields, photo_count):
+        self.summary = export_metadata_selection(fields)
+        self.summary["categories"] = {
+            field: {"requested": photo_count, "unavailable": 0, "written": 0,
+                    "failed": 0, "not_attempted": photo_count}
+            for field in fields
+        }
+        self.pending = {}
+
+    def prepare(self, path, photo, species, camera, location):
+        fields = self.summary["requested_fields"]
+        # Generate the complete command first, including combined date/time tags.
+        args = _export_metadata_args(fields, photo, species, camera, location)
+        available = []
+        for field in fields:
+            if _export_metadata_args([field], photo, species, camera, location):
+                available.append(field)
+            else:
+                counts = self.summary["categories"][field]
+                counts["unavailable"] += 1
+                counts["not_attempted"] -= 1
+        self.pending[path] = available
+        return args
+
+    def finish(self, path, success):
+        for field in self.pending.pop(path, []):
+            counts = self.summary["categories"][field]
+            counts["written" if success else "failed"] += 1
+            counts["not_attempted"] -= 1
+
+
 DEFAULT_EXPORT_SUBFOLDER = "exported"
 
 MAX_EXPORT_SUBFOLDER_LEN = 120
@@ -722,6 +779,7 @@ class _PhotoExportBatch:
         self.exported_files = [] if collect_files else None
         self.errors = []
         self.metadata_jobs = []
+        self.metadata_report = _ExportMetadataReport(self.metadata_fields, len(self.photo_ids))
         self.resolved_destinations = []
         self.resolved_destination_set = set()
         # Destinations that received at least one finished file. A destination is
@@ -851,8 +909,8 @@ class _PhotoExportBatch:
                 img.close()
             if self.metadata_fields:
                 try:
-                    metadata_args = _export_metadata_args(
-                        self.metadata_fields,
+                    metadata_args = self.metadata_report.prepare(
+                        out_path,
                         photo,
                         species_list,
                         self.camera_data_map.get(pid, {}),
@@ -887,6 +945,7 @@ class _PhotoExportBatch:
 
     def _record_success(self, out_path, photo_destination):
         """Count an output that does not need a deferred metadata write."""
+        self.metadata_report.finish(out_path, True)
         self.exported += 1
         self.written_destination_set.add(photo_destination)
         if self.exported_files is not None:
@@ -905,6 +964,8 @@ class _PhotoExportBatch:
             self.exported += metadata_exported
             self.errors.extend(metadata_errors)
             success_set = set(metadata_success_paths)
+            for path, _filename, _args in self.metadata_jobs:
+                self.metadata_report.finish(path, path in success_set)
             self.written_destination_set.update(
                 self.metadata_job_destinations[path] for path in success_set
                 if path in self.metadata_job_destinations
@@ -948,6 +1009,7 @@ class _PhotoExportBatch:
             ],
             "destination_mode": "custom" if self.destination else "original",
             "subfolder": self.subfolder,
+            "metadata": self.metadata_report.summary,
         }
         if self.exported_files is not None:
             result["files"] = self.exported_files

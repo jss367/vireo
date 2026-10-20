@@ -1341,6 +1341,8 @@ def test_job_export_preflight_reports_numbered_collision_name(
 
     assert resp.status_code == 200
     assert resp.get_json() == {
+        "metadata": {"requested_fields": [], "metadata_free": True,
+                     "description": "None selected — metadata-free export"},
         "rename_count": 1,
         "renames": [{
             "photo_id": photo["id"],
@@ -14149,3 +14151,30 @@ def test_import_in_place_collection_is_case_sensitive_on_case_sensitive_fs(
 
     assert _collect_in_place(db, os.path.join(base, "Photos", "Trip")) == ids["Photos"]
     assert _collect_in_place(db, os.path.join(base, "photos", "trip")) == ids["photos"]
+
+
+@pytest.mark.parametrize('fields', [[], ['location', 'species', 'location']])
+def test_export_preflight_reports_explicit_metadata_selection(app_and_db, fields):
+    app, db = app_and_db
+    photo_id = db.conn.execute('SELECT id FROM photos LIMIT 1').fetchone()['id']
+    response = app.test_client().post('/api/jobs/export/preflight', json={
+        'photo_ids': [photo_id], 'metadata_fields': fields,
+    })
+    assert response.status_code == 200
+    metadata = response.get_json()['metadata']
+    assert metadata['requested_fields'] == list(dict.fromkeys(fields))
+    assert metadata['metadata_free'] == (not fields)
+    if fields:
+        assert metadata['description'] == 'Location (GPS), Species keywords'
+    else:
+        assert 'None selected' in metadata['description']
+
+
+def test_export_preflight_rejects_unknown_metadata_fields(app_and_db):
+    app, db = app_and_db
+    photo_id = db.conn.execute('SELECT id FROM photos LIMIT 1').fetchone()['id']
+    response = app.test_client().post('/api/jobs/export/preflight', json={
+        'photo_ids': [photo_id], 'metadata_fields': ['invented'],
+    })
+    assert response.status_code == 400
+    assert 'metadata_fields' in response.get_json()['error']

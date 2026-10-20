@@ -215,7 +215,7 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/export/preflight", methods=["POST"])
     def api_job_export_preflight():
-        """Preview collision renames before starting a photo export."""
+        """Preview filenames, destinations and the explicit metadata selection."""
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
         destination = body.get("destination", "")
@@ -243,6 +243,7 @@ def create_export_blueprint(
         try:
             from export import (
                 ExportPreflightError,
+                export_metadata_selection,
                 normalize_max_size,
                 normalize_output_format,
                 normalize_subfolder_name,
@@ -250,6 +251,7 @@ def create_export_blueprint(
             )
             output_format = normalize_output_format(output_format)["extension"]
             max_size = normalize_max_size(max_size)
+            metadata = export_metadata_selection(body.get("metadata_fields"))
             subfolder_name = (
                 normalize_subfolder_name(body.get("subfolder_name"))
                 if export_to_subfolder else None
@@ -296,6 +298,7 @@ def create_export_blueprint(
             "truncated": len(renames) > 20,
             "destination_folder_count": len(destination_folders),
             "destination_folders": destination_folders[:20],
+            "metadata": metadata,
         })
 
     @blueprint.route("/api/jobs/export", methods=["POST"])

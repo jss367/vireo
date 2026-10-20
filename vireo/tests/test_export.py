@@ -634,6 +634,14 @@ def test_export_photos_embeds_only_selected_metadata(export_env, monkeypatch):
         os.path.join(env["dest"], "bird2.jpg"),
     ]
     assert len(metadata_write_calls) == 1
+    categories = result['metadata']['categories']
+    assert categories['capture_date'] == {
+        'requested': 2, 'written': 2, 'unavailable': 0, 'failed': 0, 'not_attempted': 0,
+    }
+    assert categories['species']['written'] == 1
+    assert categories['species']['unavailable'] == 1
+    assert categories['camera']['written'] == 1
+    assert categories['camera']['unavailable'] == 1
     output = os.path.join(env["dest"], "bird1.jpg")
     metadata = extract_metadata([output])[output]
     assert metadata["XMP"]["Subject"] == [
@@ -685,6 +693,7 @@ def test_export_photos_location_metadata_is_opt_in(export_env):
     assert metadata["EXIF"]["GPSLatitude"] == pytest.approx(33.86)
     assert metadata["EXIF"]["GPSLongitude"] == pytest.approx(117.25)
     assert metadata["Composite"]["GPSPosition"] == "-33.86 -117.25"
+    assert result['metadata']['categories']['location']['written'] == 1
 
 
 def test_export_photos_uses_assigned_keyword_location(export_env):
@@ -3861,6 +3870,10 @@ def test_cancelled_export_discards_derivatives_awaiting_metadata(export_env, mon
     assert result["exported"] == 0
     assert result["files"] == []
     assert not list(Path(env["dest"]).glob("*.jpg"))
+    assert result["metadata"]["categories"]["capture_date"] == {
+        "requested": 2, "written": 0, "unavailable": 0,
+        "failed": 1, "not_attempted": 1,
+    }
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -4003,3 +4016,63 @@ def test_export_does_not_report_renames_when_failed_cleanup_leaves_file(export_e
     assert result["renames"] == []
     assert (occupied.parent / "bird1_2.jpg").exists()
     assert occupied.read_bytes() == b"existing"
+
+
+def test_metadata_free_export_reports_explicit_empty_selection(export_env, monkeypatch):
+    monkeypatch.setattr(export_mod, '_write_export_metadata_batch',
+                        lambda *a, **k: pytest.fail('metadata-free export must not write metadata'))
+    env = export_env
+    result = export_photos(env['db'], env['vireo_dir'], [env['p1']], env['dest'],
+                           {'metadata_fields': []})
+    assert result['exported'] == 1
+    assert result['metadata'] == {
+        'requested_fields': [], 'metadata_free': True, 'categories': {},
+        'description': 'None selected — metadata-free export',
+    }
+
+
+def test_selected_unavailable_metadata_is_not_reported_as_written(export_env, monkeypatch):
+    monkeypatch.setattr(export_mod, '_write_export_metadata_batch',
+                        lambda *a, **k: pytest.fail('no source metadata to write'))
+    env = export_env
+    result = export_photos(env['db'], env['vireo_dir'], [env['p2']], env['dest'],
+                           {'metadata_fields': ['species', 'location', 'camera']})
+    assert result['exported'] == 1
+    assert not result['metadata']['metadata_free']
+    for counts in result['metadata']['categories'].values():
+        assert counts == {'requested': 1, 'written': 0, 'unavailable': 1,
+                          'failed': 0, 'not_attempted': 0}
+
+
+def test_metadata_report_tracks_partial_batch_write_failure(export_env, monkeypatch):
+    def partial_write(jobs, **kwargs):
+        failed_path, failed_name, _ = jobs[1]
+        os.unlink(failed_path)
+        return 1, [f'{failed_name}: metadata write failed'], [jobs[0][0]]
+    monkeypatch.setattr(export_mod, '_write_export_metadata_batch', partial_write)
+    env = export_env
+    result = export_photos(env['db'], env['vireo_dir'], [env['p1'], env['p2']], env['dest'],
+                           {'metadata_fields': ['capture_date', 'species', 'location']})
+    assert result['exported'] == 1
+    assert len(result['errors']) == 1
+    assert result['metadata']['categories'] == {
+        'capture_date': {'requested': 2, 'written': 1, 'unavailable': 0,
+                         'failed': 1, 'not_attempted': 0},
+        'species': {'requested': 2, 'written': 1, 'unavailable': 1,
+                    'failed': 0, 'not_attempted': 0},
+        'location': {'requested': 2, 'written': 0, 'unavailable': 2,
+                     'failed': 0, 'not_attempted': 0},
+    }
+
+
+def test_metadata_report_does_not_count_render_failure_as_write_failure(export_env, monkeypatch):
+    def fail_render(*args, **kwargs):
+        raise OSError('render failed')
+    monkeypatch.setattr(export_mod, 'load_export_image', fail_render)
+    env = export_env
+    result = export_photos(env['db'], env['vireo_dir'], [env['p1']], env['dest'],
+                           {'metadata_fields': ['capture_date']})
+    assert result['exported'] == 0
+    assert result['metadata']['categories']['capture_date'] == {
+        'requested': 1, 'written': 0, 'unavailable': 0, 'failed': 0, 'not_attempted': 1,
+    }

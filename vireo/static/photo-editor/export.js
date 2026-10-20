@@ -234,6 +234,7 @@ function selectedExportMetadataFields() {
   }
   return {
     photo_ids: [editorState.photoId],
+    metadata_fields: selectedExportMetadataFields(),
     destination: /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value.trim(),
     export_to_subfolder: /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked,
     subfolder_name: VireoExportPresets.subfolderName(),
@@ -262,7 +263,6 @@ async function startExport() {
   }
   var exportRequest = buildExportPreflightRequest(); if (!exportRequest) return;
   exportRequest.quality = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('exportQuality')).value, 10) || 92;
-  exportRequest.metadata_fields = selectedExportMetadataFields();
   exportRequest.reveal_after_export = /** @type {HTMLInputElement} */ (document.getElementById('exportRevealAfter')).checked;
   button.disabled = true;
   button.textContent = 'Checking filename…';
