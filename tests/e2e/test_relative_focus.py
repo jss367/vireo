@@ -34,6 +34,16 @@ def test_focus_evidence_is_visible_in_group_and_legacy_inspectors(live_server, p
         enc["bursts"] = []  # openInspect falls back to the flat-cache inspector.
         cache["photos"][0]["reject_reasons"] = ["out_of_focus (F=.125 < .35)"]
     path.write_text(json.dumps(cache))
+    # Exercise presentation of a fixed evidence response. Saved-result recovery
+    # independently refreshes derived scores from the catalog and must not be
+    # expected to preserve these synthetic cached measurements.
+    def evidence_response(route):
+        response = route.fetch()
+        data = response.json()
+        data["results"] = cache
+        route.fulfill(response=response, json=data)
+
+    page.route("**/api/pipeline/page-init", evidence_response)
     page.goto(f"{live_server['url']}/pipeline/review")
     expect(page.locator(".photo-card").first).to_be_visible()
     page.evaluate("id => openInspect(id)", ids[0])
