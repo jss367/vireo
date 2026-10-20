@@ -159,7 +159,10 @@ def create_history_blueprint(
     def _history_flags_changed(db, entry):
         action = entry["action_type"]
         if action == "pipeline_grouping":
-            action = (json.loads(entry["new_value"]).get("photo_edit") or {}).get("action_type")
+            payload = json.loads(entry["new_value"])
+            if payload.get("flag_items"):
+                return True
+            action = (payload.get("photo_edit") or {}).get("action_type")
         if action != "flag":
             return False
         return db.edit_history.has_changed_items(entry["id"])

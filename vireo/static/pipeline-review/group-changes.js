@@ -399,10 +399,10 @@ function grmRemoveFromGroup(photoIds) {
 /* --- Apply & Close --- */
 
 // Confirm species for the burst. Pipeline bursts go through the same endpoint
-// the grid uses (persists confirmation + auto-detach). Browse-selection ad-hoc
+// the grid uses (preview + explicit confirmation). Browse-selection ad-hoc
 // sets have no encounter, so just tag the keyword on all members.
-/** @param {string} species @param {number[]} memberIds */
-async function grmConfirmSpeciesCall(species, memberIds) {
+/** @param {string} species @param {number[]} memberIds @param {ReviewGroupChanges} [groupChanges] */
+async function grmConfirmSpeciesCall(species, memberIds, groupChanges) {
   if (!species || memberIds.length === 0) return;
   if (grmState.source === 'browse-selection') {
     // Browse selections are ad-hoc and have no persisted encounter/burst to
@@ -415,15 +415,54 @@ async function grmConfirmSpeciesCall(species, memberIds) {
     });
     return;
   }
+  /** @type {ReviewSpeciesEdit} */ var initial = {species: species, photo_ids: memberIds};
+  if (grmState.burstIdx != null) initial.burst_index = grmState.burstIdx;
+  if (groupChanges) initial.group_changes = groupChanges;
+  var reviewed = await reviewEncounterSpecies(initial);
+  if (!reviewed) return false;
   var resp = await safeFetch('/api/encounters/species', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ species: species, photo_ids: memberIds, burst_index: grmState.burstIdx }),
+    body: JSON.stringify(reviewed),
   });
   // Adopt authoritative structure (mirrors confirmSpecies()).
   if (resp && resp.encounters) {
     currentReviewResults().encounters = resp.encounters;
     if (resp.summary) currentReviewResults().summary = resp.summary;
   }
+  return resp;
+}
+
+/** @param {ReviewGroupChecks} checks @param {string} species @param {number} sessionId @returns {Promise<ReviewGroupApplyResponse | false | undefined>} */
+async function grmPrepareSpeciesApply(checks, species, sessionId) {
+  if (!checks.species) return;
+  var burstExists = grmState.source === 'browse-selection' ||
+    currentReviewResults().encounters[grmState.encIdx ?? -1]?.bursts?.[grmState.burstIdx ?? -1];
+  if (!burstExists) return;
+  var members = grmSpeciesMemberItems(checks).map(function(photo) { return photo.id; });
+  if (!members.length) return;
+  var group = checks.flags && grmState.source !== 'browse-selection' ? grmGroupApplyBody(sessionId) : undefined;
+  var response = await grmConfirmSpeciesCall(species, members, group);
+  if (response === false) return false;
+  if (group && response) {
+    if (!response.group_photos) throw new Error('Group Review response is missing its saved cull decisions');
+    return {photos: response.group_photos, encounters: response.encounters, summary: response.summary};
+  }
+}
+
+/** @param {number} sessionId @returns {ReviewGroupChanges} */
+function grmGroupApplyBody(sessionId) {
+  var burst = currentReviewResults().encounters[grmState.encIdx ?? -1]?.bursts?.[grmState.burstIdx ?? -1];
+  return {
+    picks: Array.from(grmState.picks), rejects: Array.from(grmState.rejects),
+    candidates: grmState.items.filter(function(photo) {
+      return !grmState.picks.has(photo.id) && !grmState.rejects.has(photo.id) && !grmState.removed.has(photo.id);
+    }).map(photo => photo.id),
+    removed: grmState.source === 'browse-selection' ? [] : Array.from(grmState.removed).filter(function(id) {
+      return grmState.appliedRemovalSessionId !== sessionId || !(grmState.appliedRemovalIds || []).includes(id);
+    }),
+    encounter_index: grmState.encIdx, burst_index: grmState.burstIdx,
+    expected_burst_photo_ids: grmState.source === 'browse-selection' ? [] : burst?.photo_ids || [],
+  };
 }
 
 async function grmApply() {
@@ -485,40 +524,20 @@ async function grmApply() {
       });
     }
 
+    // Combined species/cull decisions use one revalidated server transaction.
+    var combinedResponse = await grmPrepareSpeciesApply(checks, species, applySessionId);
+    if (combinedResponse === false) return false;
+    if (!sessionIsActive()) return false;
+
     // --- Flags side (picks/rejects/candidates + removed→detach) ---
     // Only committed when the "Apply picks/rejects" box is checked. Removals are
     // part of "cull changes", so the removed→detach block is gated here too.
     if (checks.flags) {
-      var picksArr = Array.from(grmState.picks);
-      var rejectsArr = Array.from(grmState.rejects);
-      var candidatesArr = grmState.items
-        .filter(function(p) {
-          return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id) && !grmState.removed.has(p.id);
-        })
-        .map(function(p) { return p.id; });
-
-      // Persist flags to the database first. If this fails we abort so the local
-      // pipeline cache and the DB can't drift apart — the prior fire-and-forget
-      // save-cache + no-DB-write was the bug behind this whole change.
-      /** @type {ReviewGroupApplyResponse | undefined} */ var applyResp;
-      var sourceBurst = ((currentReviewResults().encounters[grmState.encIdx ?? -1] || {}).bursts || [])[grmState.burstIdx ?? -1];
+      /** @type {ReviewGroupApplyResponse | undefined} */ var applyResp = combinedResponse;
       try {
-        applyResp = await safeFetch('/api/pipeline/group/apply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            picks: picksArr,
-            rejects: rejectsArr,
-            candidates: candidatesArr,
-            removed: grmState.source === 'browse-selection' ? [] : Array.from(grmState.removed).filter(function(pid) {
-              return grmState.appliedRemovalSessionId !== applySessionId ||
-                !(grmState.appliedRemovalIds || []).includes(pid);
-            }),
-            encounter_index: grmState.encIdx,
-            burst_index: grmState.burstIdx,
-            expected_burst_photo_ids: grmState.source === 'browse-selection' ? [] :
-              (Array.isArray(sourceBurst) ? sourceBurst : sourceBurst?.photo_ids || []),
-          }),
+        if (!applyResp) applyResp = await safeFetch('/api/pipeline/group/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(grmGroupApplyBody(applySessionId)),
         });
       } catch (e) {
         console.error('Pipeline group apply failed:', e);
@@ -614,35 +633,6 @@ async function grmApply() {
     }
   }
 
-  // Group Apply has already saved flags and removals from its canonical cache.
-  // Species confirmation below reads that committed structure.
-
-  // --- Species side ---
-  // Server-owned now: tag all remaining (non-removed) burst frames + mark the
-  // burst confirmed via the unified endpoint. Removed photos are excluded so
-  // they aren't tagged. Skip when the burst no longer exists (emptied by the
-  // detach above) or has no members left.
-    if (checks.species) {
-      var burstExists = grmState.source === 'browse-selection' ||
-        (currentReviewResults().encounters[grmState.encIdx ?? -1] &&
-         requireReviewValue(currentReviewResults().encounters[grmState.encIdx ?? -1]).bursts &&
-         requireReviewValue(currentReviewResults().encounters[grmState.encIdx ?? -1]).bursts[grmState.burstIdx ?? -1]);
-      if (burstExists) {
-        // Post-apply burst members carry the species. Uses the same rule as the
-        // label/tooltip (grmSpeciesMemberItems): a removed photo is excluded only
-        // when its removal actually committed (checks.flags); otherwise it stays a
-        // member and gets tagged.
-        var memberIds = grmSpeciesMemberItems(checks).map(function(p) { return p.id; });
-        // A species-call failure intentionally throws out of grmApply *before*
-        // close, leaving the modal open so the user can retry. Any flags were
-        // already committed idempotently above, so a retry re-runs only the
-        // species side. No try/catch — propagating the throw is the desired
-        // "keep modal open" behavior.
-        if (memberIds.length) await grmConfirmSpeciesCall(species, memberIds);
-        if (!sessionIsActive()) return false;
-      }
-    }
-
     // Browse-selection is a one-shot handoff: drop it on close regardless of
     // which side was committed, so a reload degrades to normal review instead
     // of reopening a burst whose edits already landed. (Idempotent with the
@@ -677,6 +667,7 @@ function bindGroupReviewKeyboard() {
     /* --- Keyboard handling --- */
 
     document.addEventListener('keydown', function(e) {
+      if (document.getElementById('speciesConfirmationPreview')) return;
       if (!/** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')) return;
       // The shared lightbox stacks over Group Review and owns its own key handling.
       // Its handler consumes arrows and P/X but not Space/Delete/Backspace, so those

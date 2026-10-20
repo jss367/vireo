@@ -51,6 +51,103 @@ class PhotoSpeciesRepository:
         # under its module name so the moved bodies read ``self._chunks``.
         self._chunks = chunks
 
+    def confirmation_species_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
+        """Attached species provenance read by confirmation-summary refreshes."""
+        result = []
+        for chunk in self._chunks(photo_ids):
+            marks = ",".join("?" for _ in chunk)
+            result.extend(dict(row) for row in self.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type,
+                           k.is_species, k.taxon_id, k.source_taxon_id, pk.source,
+                           t.id AS resolved_taxon_id, t.inat_id AS taxon_inat_id,
+                           t.name AS taxon_scientific_name, t.common_name AS taxon_common_name,
+                           t.rank AS taxon_rank, t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
+                    FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
+                    LEFT JOIN taxa t ON t.id=k.taxon_id
+                    WHERE pk.photo_id IN ({marks}) AND (k.is_species=1 OR k.type='taxonomy')
+                    ORDER BY pk.photo_id, k.id""", list(chunk),
+            ))
+        return result
+
+    def confirmation_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
+        """Current photo membership and every subject's workspace-visible evidence.
+
+        Do not flatten subjects into a single winning species. Include review
+        statuses, even rejected alternatives, so a preview never hides a second
+        subject or silently treats a model suggestion as a human confirmation.
+        Attached species include source and resolved taxon identity, including
+        NULLs, so an identity change cannot silently reuse an approved preview.
+        """
+        result = []
+        ws = self.workspace_id
+        for chunk in self._chunks(photo_ids):
+            marks = ",".join("?" for _ in chunk)
+            photos = self.conn.execute(
+                f"SELECT id, filename, timestamp, flag FROM photos WHERE id IN ({marks})",
+                list(chunk),
+            ).fetchall()
+            by_id = {r["id"]: dict(r, subjects=[], keywords=[]) for r in photos}
+            for keyword in self.confirmation_species_evidence(chunk):
+                by_id[keyword["photo_id"]]["keywords"].append(keyword)
+            subjects = {}
+            rows = self.conn.execute(
+                f"""SELECT d.photo_id, d.id AS detection_id, d.box_x, d.box_y,
+                           d.box_w, d.box_h, d.detector_confidence, d.detector_model, d.category,
+                           p.id AS prediction_id, p.species, p.confidence,
+                           p.classifier_model, p.labels_fingerprint,
+                           COALESCE(r.status, 'pending') AS status
+                    FROM detections d LEFT JOIN predictions p ON p.detection_id=d.id
+                    LEFT JOIN prediction_review r ON r.prediction_id=p.id AND r.workspace_id=?
+                    WHERE d.photo_id IN ({marks})
+                    ORDER BY d.photo_id, d.id, p.confidence DESC, p.id""",
+                [ws, *chunk],
+            ).fetchall()
+            for row in rows:
+                did = row["detection_id"]
+                if did not in subjects:
+                    subject = {k: row[k] for k in (
+                        "detection_id", "box_x", "box_y", "box_w", "box_h", "detector_confidence",
+                        "detector_model", "category",
+                    )}
+                    subject["predictions"] = []
+                    subjects[did] = subject
+                    by_id[row["photo_id"]]["subjects"].append(subject)
+                if row["prediction_id"] is not None:
+                    subjects[did]["predictions"].append({k: row[k] for k in (
+                        "prediction_id", "species", "confidence", "classifier_model",
+                        "labels_fingerprint", "status",
+                    )})
+            result.extend(by_id.values())
+        return result
+
+    def confirmation_homonym_evidence(self, names: Collection[str]) -> list[dict[str, Any]]:
+        """Snapshot matching linked homonyms and unlinked root candidates.
+
+        Add equivalence and previous-species removal consult these catalog-wide
+        homonyms even when none is attached to a reviewed photo. Previous-species
+        resolution also prefers unlinked roots over attached hierarchy leaves.
+        Use the guards' normalization; unrelated and unlinked nested rows stay
+        outside this catalog-wide read set.
+        """
+        keys = {keyword_match_key(name) for name in names}
+        ids = [row["id"] for row in self.conn.execute(
+            "SELECT id, name FROM keywords WHERE (taxon_id IS NOT NULL OR parent_id IS NULL) "
+            "AND (is_species=1 OR type='taxonomy') ORDER BY id",
+        ) if keyword_match_key(row["name"]) in keys]
+        result = []
+        for chunk in self._chunks(ids):
+            marks = ",".join("?" for _ in chunk)
+            result.extend(dict(row) for row in self.conn.execute(
+                f"""SELECT k.id, k.name, k.parent_id, k.type, k.is_species,
+                           k.taxon_id, k.source_taxon_id, t.id AS resolved_taxon_id,
+                           t.inat_id AS taxon_inat_id, t.name AS taxon_scientific_name,
+                           t.common_name AS taxon_common_name, t.rank AS taxon_rank,
+                           t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
+                    FROM keywords k LEFT JOIN taxa t ON t.id=k.taxon_id
+                    WHERE k.id IN ({marks}) ORDER BY k.id""", chunk,
+            ))
+        return result
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""

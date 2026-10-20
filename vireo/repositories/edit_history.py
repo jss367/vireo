@@ -287,12 +287,16 @@ class EditHistoryRepository:
             "SELECT action_type, new_value, description FROM edit_history WHERE id = ?", (entry_id,),
         ).fetchone()
         if row and row['action_type'] == 'pipeline_grouping':
-            photo_edit = json.loads(row['new_value']).get('photo_edit')
+            change = json.loads(row['new_value'])
+            photo_edit = change.get('photo_edit')
             if photo_edit:
                 # A recompute invalidates structure, not the recorded photo edit.
+                remaining = {'photo_edit': photo_edit, 'photo_only': True}
+                if change.get('flag_items'):
+                    remaining['flag_items'] = change['flag_items']
                 self.conn.execute(
                     "UPDATE edit_history SET new_value = ?, description = ? WHERE id = ?",
-                    (json.dumps({'photo_edit': photo_edit, 'photo_only': True}),
+                    (json.dumps(remaining),
                      "Photo changes from: " + row["description"], entry_id),
                 )
                 # The stale snapshot is never restored again; drop its blob.

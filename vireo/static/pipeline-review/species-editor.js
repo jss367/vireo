@@ -334,13 +334,30 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   } else {
     photoIds = enc.photo_ids;
   }
-  var pendingKey = speciesConfirmPhotoKey(photoIds);
+  photoIds = photoIdsInReviewScope(photoIds);
+  if (!photoIds.length) return;
+  /** @type {ReviewSpeciesEdit} */ var initial = {species: speciesName, photo_ids: photoIds};
+  if (burstIdx != null) initial.burst_index = burstIdx;
+  var previewKey = speciesConfirmPhotoKey(photoIds);
+  if (speciesConfirmInFlight[previewKey]) return;
+  speciesConfirmInFlight[previewKey] = true;
+  rerenderSpeciesWidgets(encIdx, burstIdx);
+  var body;
+  try { body = await reviewEncounterSpecies(initial); }
+  finally { delete speciesConfirmInFlight[previewKey]; rerenderSpeciesWidgets(encIdx, burstIdx); }
+  if (!body) return;
+  return applyReviewedSpecies(body, encIdx, burstIdx);
+}
+
+/** @param {ReviewSpeciesEdit} body @param {number} encIdx @param {number | null | undefined} burstIdx */
+async function applyReviewedSpecies(body, encIdx, burstIdx) {
+  if (isScopedReviewView() || currentReviewResults().source === 'browse-selection') return;
+  var enc = requireReviewValue(currentReviewResults().encounters[encIdx]);
+  var speciesName = body.species;
+  var pendingKey = speciesConfirmPhotoKey(body.photo_ids);
   if (speciesConfirmInFlight[pendingKey]) return;
   speciesConfirmInFlight[pendingKey] = true;
   rerenderSpeciesWidgets(encIdx, burstIdx);
-
-  /** @type {{species: string; photo_ids: number[]; burst_index?: number}} */ var body = { species: speciesName, photo_ids: photoIds };
-  if (burstIdx != null) body.burst_index = burstIdx;
 
   var previousStructure = encounterStructureSignature(currentReviewResults().encounters);
 

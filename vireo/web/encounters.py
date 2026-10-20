@@ -73,7 +73,10 @@ def create_encounters_blueprint(get_db, json_error, db_path):
     def _confirm_encounter_species(db):
         """Confirm species while holding the grouping and database writer locks."""
         body = request.get_json(silent=True) or {}
-        species = body.get("species", "").strip()
+        species = body.get("species", "")
+        if not isinstance(species, str):
+            return json_error("species must be a string")
+        species = species.strip()
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
         add_mode = bool(body.get("add"))
@@ -97,7 +100,6 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         error = _photo_ids_error(db, photo_ids, json_error)
         if error is not None:
             return error
-        low_confidence_photo_ids = _low_confidence_photo_ids(db, photo_ids)
         from pipeline import load_results_raw, save_results_raw
 
         confirmation = _SpeciesConfirmation(
@@ -112,12 +114,24 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         if error is not None:
             return error
         confirmation.read_current_species()
+        if body.get("preview") or "preview_token" in body:
+            # A mixed encounter may have no common cached species. The reviewer
+            # may still explicitly replace a species carried by selected frames.
+            actual = db.photo_species.get_species_for_photos(photo_ids)
+            for names in actual.values():
+                for name in names:
+                    if name not in confirmation.current_species_list:
+                        confirmation.current_species_list.append(name)
         error = confirmation.resolve_previous_species(requested_previous)
         if error is not None:
             return error
 
         ws_id = db.require_workspace_id()
         confirmation.resolve_old_species_rows()
+        error = _review_preview(db, confirmation, body, json_error)
+        if error is not None:
+            return error
+        low_confidence_photo_ids = _low_confidence_photo_ids(db, photo_ids)
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -156,8 +170,58 @@ def create_encounters_blueprint(get_db, json_error, db_path):
     return blueprint
 
 
+def _review_preview(db, confirmation, body, json_error):
+    """Preview and revalidate a deliberate, exact subset before any writes."""
+    if not body.get("preview") and "preview_token" not in body:
+        if "group_changes" in body:
+            return json_error("Combined Group Review changes require a species preview", 409)
+        return None  # Existing API clients retain their established contract.
+    from services.encounter_confirmation import preview
+
+    source = body.get("source_photo_ids", confirmation.photo_ids)
+    if (not isinstance(source, list) or not source
+            or any(type(pid) is not int for pid in source)
+            or len(set(source)) != len(source)
+            or not set(confirmation.photo_ids) <= set(source)):
+        return json_error("source_photo_ids must contain the selected photo_ids exactly once")
+    error = _photo_ids_error(db, source, json_error)
+    if error is not None:
+        return error
+    enc = confirmation.target_enc
+    if enc is None or not set(source) <= set(enc["photo_ids"]):
+        return json_error("Photo membership changed. Reload the review and preview again.", 409)
+    if confirmation.burst_index is not None:
+        burst = enc["bursts"][confirmation.burst_index]
+        if not set(source) <= set(burst["photo_ids"]):
+            return json_error("Burst membership changed. Preview again.", 409)
+    if body.get("split") and set(confirmation.photo_ids) == set(enc["photo_ids"]):
+        return json_error("Select fewer than all encounter photos to separate a transition")
+    if confirmation.is_replacement and confirmation.old_kid_row is not None:
+        key = keyword_match_key(confirmation.previous_species)
+        confirmation._collect_old_rows(key, _HomonymConflicts(db, key))
+    from services.review_group_changes import InvalidGroupChanges, validate_group_changes
+    try:
+        confirmation.group_plan = validate_group_changes(db, confirmation.cached, enc, body)
+    except InvalidGroupChanges as exc:
+        return json_error(str(exc), 409)
+    result = preview(db, confirmation, body)
+    if body.get("preview"):
+        return jsonify(result)
+    if body.get("preview_token") != result["preview_token"]:
+        return json_error("Photos, species or review choices changed. Preview again before applying.", 409)
+    # The removal loop collects its rows again inside the write phase.
+    confirmation.old_rows_by_photo = {}
+    confirmation.preview_scope = True
+    confirmation.split = bool(body.get("split"))
+    return None
+
+
 def _photo_ids_error(db, photo_ids, json_error):
     """The error response for unknown or out-of-workspace photo_ids, else None."""
+    if (not isinstance(photo_ids, list) or not photo_ids
+            or any(type(pid) is not int for pid in photo_ids)
+            or len(set(photo_ids)) != len(photo_ids)):
+        return json_error("photo_ids must be a nonempty list of unique integers")
     # Validate all photo_ids exist before mutating.
     found_ids = db.photos.existing_ids(photo_ids)
     missing = [pid for pid in photo_ids if pid not in found_ids]
@@ -282,6 +346,10 @@ class _SpeciesConfirmation:
         self.cache_dir = cache_dir
         self.save_results_raw = save_results_raw
 
+        self.group_plan = None
+        self.group_photo_states = None
+        self.preview_scope = False
+        self.split = False
         self.cached = None
         self.before_cached = None
         self.cache_saved = False
@@ -327,6 +395,9 @@ class _SpeciesConfirmation:
         )
         self.before_cached = copy.deepcopy(self.cached)
         if self.cached:
+            for enc in self.cached.get("encounters", []):
+                enc["bursts"] = [{"photo_ids": burst} if isinstance(burst, list) else burst
+                                 for burst in enc.get("bursts", [])]
             photo_id_set = set(self.photo_ids)
             for enc_idx, enc in enumerate(self.cached.get("encounters", [])):
                 enc_ids = set(enc.get("photo_ids", []))
@@ -349,6 +420,8 @@ class _SpeciesConfirmation:
         burst_index = self.burst_index
         if burst_index is None:
             return None
+        if type(burst_index) is not int:
+            return self.json_error("burst_index must be an integer")
         target_enc = self.target_enc
         bursts = target_enc.get("bursts") if target_enc else None
         if not bursts or not (0 <= burst_index < len(bursts)):
@@ -888,6 +961,8 @@ class _SpeciesConfirmation:
 
     def record_cache_only_confirmation(self):
         """Give a confirmation that only changes the cache its history entry."""
+        if self.preview_scope:
+            return
         cache_only_write = (
             not (self.is_replacement and self.had_old)
             and not self.newly_tagged
@@ -952,20 +1027,30 @@ class _SpeciesConfirmation:
         Apply the pipeline-cache mutation and persist inside the same
         transaction so a failed ``save_results_raw`` rolls back the
         species/keyword edits that would otherwise leave undo pointing
-        at a change that never landed on disk. ``burst_index`` was
-        validated above, so the branch here is unambiguous: burst-
-        scoped requests only touch the burst override, encounter-
-        scoped requests only touch the encounter.
+        at a change that never landed on disk. Legacy requests use the
+        validated burst/encounter scope. Previewed requests derive all
+        affected summaries after staged removals establish final membership.
         """
         cached = self.cached
         if not (cached and self.target_enc is not None):
             return
-        if self.burst_index is not None:
+        flag_items = []
+        if self.group_plan is not None:
+            from services.review_group_changes import apply_group_changes
+            # Derive shared species only after removals establish final bursts.
+            flag_items = apply_group_changes(self.db, cached, self.group_plan)
+        if self.preview_scope:
+            from services.encounter_confirmation import apply_scope
+            apply_scope(self.db, cached, self.target_enc, self.photo_ids,
+                        split=self.split, preferred_order=self.new_species_list)
+        elif self.burst_index is not None:
             self._apply_burst_override()
         else:
             self._apply_encounter_species()
         before_cached = self.before_cached
-        if (
+        if self.group_plan is not None:
+            self._apply_combined_group(flag_items)
+        elif (
             self.photo_edit_id is not None
             and before_cached["encounters"] != cached["encounters"]
         ):
@@ -979,8 +1064,34 @@ class _SpeciesConfirmation:
             }
             from services.grouping_history import convert_to_grouping_edit
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
-        self.save_results_raw(cached, self.cache_dir, self.db.active_workspace_id)
+        if (self.group_plan is None and self.preview_scope and self.photo_edit_id is None
+                and before_cached["encounters"] != cached["encounters"]):
+            from services.grouping_history import record_grouping_edit
+            record_grouping_edit(self.db, self.cache_description + f"{len(self.photo_ids)} photos", {
+                "before": before_cached["encounters"], "after": cached["encounters"],
+            })
+        # An atomic replacement may land before a late save error is raised.
+        # Restore the prior snapshot on every attempted write, not just returns.
         self.cache_saved = True
+        self.save_results_raw(cached, self.cache_dir, self.db.active_workspace_id)
+
+    def _apply_combined_group(self, flag_items):
+        """Record the completed species/cull decision as one history entry."""
+        from services.grouping_history import convert_to_grouping_edit, record_grouping_edit
+
+        self.group_photo_states = {
+            pid: {"flag": self.db.photos.get(pid)["flag"] or "none"}
+            for key in ("picks", "rejects", "candidates") for pid in self.group_plan[key]
+        }
+        change = {"before": self.before_cached["encounters"], "after": self.cached["encounters"],
+                  "label_edit": True, "flag_items": flag_items}
+        if self.photo_edit_id is not None:
+            change["photo_edit"] = dict(self.db.edit_history.action_and_new_value(self.photo_edit_id))
+            convert_to_grouping_edit(self.db, self.photo_edit_id, change)
+        elif flag_items or change["before"] != change["after"]:
+            if flag_items:
+                change["photo_edit"] = {"action_type": "flag", "new_value": "pipeline_group_apply"}
+            record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
 
     def _apply_burst_override(self):
         self.target_enc["bursts"][self.burst_index]["species_override"] = (
@@ -1066,6 +1177,8 @@ class _SpeciesConfirmation:
             # confirmations no longer skip submitted photos.
             "skipped_photo_ids": [],
         }
+        if self.group_photo_states is not None:
+            response["group_photos"] = self.group_photo_states
         if self.cached:
             response["encounters"] = self.cached.get("encounters", [])
             response["summary"] = self.cached.get("summary", {})

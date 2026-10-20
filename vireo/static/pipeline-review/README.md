@@ -19,6 +19,7 @@ hooks, and binds events after every definition is available.
 | `scope.js` | Saved review, folder/collection filters, regrouped views, and read-only guards |
 | `loading.js` | Initialization, empty states, readiness, and Browse handoff |
 | `species-editor.js` | Species menus, search, confirmation, and history hooks |
+| `species-preview.js` | Live photo/species matrix, subject outlines, frame selection, explicit add/replace and transition split |
 | `group-session.js` | Group Review state, opening, seeding, closing, and detaching |
 | `group-render.js` | Group Review cards, subject selection, and loupe selection |
 | `group-changes.js` | Staged decisions, zone moves, keyboard actions, and apply |
@@ -73,3 +74,26 @@ in the template's explicit order. Required snapshot and indexed-member reads use
 `currentReviewResults()` / `requireReviewValue()` from `state.js`, including reads
 inside deferred callbacks. Tests that extract a single page function must load
 these two small invariant helpers as well.
+
+Species confirmations from the grid and Group Review first open the same
+native dialog. Add is the default, preserving confirmed species on other
+subjects. Replace names only the species the reviewer intends to remove.
+The per-photo matrix uses current catalog keywords and preserves subject IDs;
+latest stored label sets are visible and superseded sets stay in a separate
+collapsed history disclosure. Evidence below the workspace detector threshold
+is marked explicitly. A frame range or individual checkboxes narrows the write;
+only the explicit transition checkbox separates frames into another encounter.
+The server previews additions/removals without writes, then revalidates its
+returned token under the grouping and decision locks on Apply. A changed
+membership, keyword identity/provenance, subject or prediction decision blocks
+the apply. Scoped confirmations rebuild labels from every actual group member,
+so selected frames cannot accidentally confirm the rest. Species and optional
+membership changes share one durable undo entry.
+
+When both Group Review checkboxes are selected, the preview carries the complete
+staged pick/reject/removal plan. Apply sends one species request that validates
+the plan and preview together, writes both halves under the same workspace and
+database locks, saves the cache once, and records one Undo entry. Cancellation
+saves nothing; failure at any write, history, cache save or commit stage rolls
+back both species and cull decisions. The flags-only endpoint remains available
+for culling without a species edit.

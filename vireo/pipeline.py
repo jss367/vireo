@@ -1041,12 +1041,23 @@ def _make_summary(encounters, all_photos):
 
 
 def _confirmed_species_entries(photo):
+    """Keep every identity represented by a confirmed display name."""
     from keyword_normalization import keyword_match_key
     from pipeline_results import photo_confirmed_species_list
 
-    identities = {entry["name"]: entry["key"] for entry in photo.get("confirmed_species_identities") or []}
-    return [(name, identities.get(name, "name:" + keyword_match_key(name)))
-            for name in photo_confirmed_species_list(photo)]
+    identities = defaultdict(list)
+    for entry in photo.get("confirmed_species_identities") or []:
+        if entry["key"] not in identities[entry["name"]]:
+            identities[entry["name"]].append(entry["key"])
+    entries = []
+    seen = set()
+    for name in photo_confirmed_species_list(photo):
+        if name not in identities:
+            entries.append((name, "name:" + keyword_match_key(name)))
+        elif name not in seen:
+            entries.extend((name, key) for key in identities[name])
+        seen.add(name)
+    return entries
 
 
 def _photo_species_keysets(photos):
@@ -1061,6 +1072,30 @@ def _shared_confirmed_species(photos):
         return []
     common = set.intersection(*({key for _, key in entries} for entries in tagged))
     return [name for name, key in tagged[0] if key in common]
+
+
+def _ordered_shared_species(shared: list[str], preferred_order: list[str], *, has_identities: bool) -> list[str]:
+    """Place preferred names first without dropping same-name identities."""
+    from keyword_normalization import keyword_match_key
+    from pipeline_results import species_key_set
+
+    if not has_identities:
+        # Keep the legacy name-only normalization, including duplicate names.
+        shared_keys = species_key_set(shared)
+        first = [name for name in preferred_order if name and species_key_set([name]) <= shared_keys]
+        first_keys = species_key_set(first)
+        return first + [name for name in shared if not species_key_set([name]) <= first_keys]
+    remaining = list(shared)
+    first = []
+    for name in preferred_order:
+        if not name:
+            continue
+        match = next((i for i, current in enumerate(remaining)
+                      if keyword_match_key(current) == keyword_match_key(name)), None)
+        if match is not None:
+            first.append(name)
+            remaining.pop(match)
+    return first + remaining
 
 
 def derive_burst_override(photos, preferred_order=None):
@@ -1082,7 +1117,6 @@ def derive_burst_override(photos, preferred_order=None):
         build_species_override,
         empty_species_override,
         photo_confirmed_species_list,
-        species_key_set,
     )
 
     if not photos:
@@ -1090,10 +1124,9 @@ def derive_burst_override(photos, preferred_order=None):
     if _photos_uniformly_confirmed(photos):
         shared = _shared_confirmed_species(photos)
         if preferred_order:
-            shared_keys = species_key_set(shared)
-            first = [s for s in preferred_order if s and species_key_set([s]) <= shared_keys]
-            first_keys = species_key_set(first)
-            shared = first + [s for s in shared if not species_key_set([s]) <= first_keys]
+            shared = _ordered_shared_species(
+                shared, preferred_order, has_identities=any(p.get("confirmed_species_identities") for p in photos),
+            )
         return build_species_override(shared)
     if all(photo_confirmed_species_list(p) for p in photos):
         return empty_species_override()

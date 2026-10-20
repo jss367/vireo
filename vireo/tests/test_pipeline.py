@@ -3905,6 +3905,72 @@ def test_derive_burst_override_sentinels_and_inherit():
     assert derive_burst_override([]) is None
 
 
+@pytest.mark.parametrize('reverse_identities', [False, True])
+@pytest.mark.parametrize('reverse_photos', [False, True])
+@pytest.mark.parametrize('extra', [False, True])
+def test_derive_burst_override_retains_shared_taxon_among_duplicate_names(reverse_identities, reverse_photos, extra):
+    from pipeline import derive_burst_override
+
+    identities = [{'name': 'Robin', 'key': 'taxon:1'}, {'name': 'Robin', 'key': 'taxon:2'}]
+    if reverse_identities:
+        identities.reverse()
+    photos = [_species_photo(1, ['Robin', 'Robin']), _species_photo(2, ['Robin'])]
+    photos[0]['confirmed_species_identities'] = identities
+    photos[1]['confirmed_species_identities'] = [{'name': 'Robin', 'key': 'taxon:1'}]
+    if extra:
+        for photo in photos:
+            photo['confirmed_species_list'].append('Teal')
+            photo['confirmed_species_identities'].append({'name': 'Teal', 'key': 'taxon:3'})
+    if reverse_photos:
+        photos.reverse()
+    expected = ['Teal', 'Robin'] if extra else ['Robin']
+    assert derive_burst_override(photos, preferred_order=['Teal']) == {
+        'species': expected[0], 'species_list': expected, 'confirmed': True,
+    }
+
+
+@pytest.mark.parametrize('preferred', [None, ['Robin'], ['Teal', 'Robin']])
+def test_derive_burst_override_preserves_two_shared_homonyms_with_preferred_order(preferred):
+    from pipeline import derive_burst_override
+
+    identities = [{'name': 'Robin', 'key': 'taxon:1'}, {'name': 'Robin', 'key': 'taxon:2'},
+                  {'name': 'Teal', 'key': 'taxon:3'}]
+    photos = [_species_photo(1, ['Robin', 'Robin', 'Teal']), _species_photo(2, ['Robin', 'Robin', 'Teal'])]
+    photos[0]['confirmed_species_identities'] = identities
+    photos[1]['confirmed_species_identities'] = list(reversed(identities))
+    expected = ['Teal', 'Robin', 'Robin'] if preferred and preferred[0] == 'Teal' else ['Robin', 'Robin', 'Teal']
+    assert derive_burst_override(photos, preferred_order=preferred) == {
+        'species': expected[0], 'species_list': expected, 'confirmed': True,
+    }
+
+
+@pytest.mark.parametrize(('preferred', 'expected'), [
+    (None, ['robin', 'Teal']), (['Teal'], ['Teal', 'robin']), (['ROBIN'], ['ROBIN', 'Teal']),
+])
+def test_derive_burst_override_keeps_legacy_name_only_case_and_order(preferred, expected):
+    from pipeline import derive_burst_override
+
+    photos = [_species_photo(1, ['robin', 'Teal']), _species_photo(2, ['Robin', 'Teal'])]
+    photos[1]['confirmed_species_identities'] = []
+    assert derive_burst_override(photos, preferred_order=preferred) == {
+        'species': expected[0], 'species_list': expected, 'confirmed': True,
+    }
+
+
+@pytest.mark.parametrize(('names', 'preferred', 'expected'), [
+    (['Robin', 'Robin', 'Teal'], None, ['Robin', 'Robin', 'Teal']),
+    (['Robin', 'Robin', 'Teal'], ['Robin'], ['Robin', 'Teal']),
+    (['Robin', 'Teal'], ['Robin', 'Robin'], ['Robin', 'Robin', 'Teal']),
+])
+def test_derive_burst_override_preserves_legacy_duplicate_name_behavior(names, preferred, expected):
+    from pipeline import derive_burst_override
+
+    photos = [_species_photo(1, names), _species_photo(2, ['Robin', 'Teal'])]
+    assert derive_burst_override(photos, preferred_order=preferred) == {
+        'species': expected[0], 'species_list': expected, 'confirmed': True,
+    }
+
+
 def test_auto_detach_does_not_promote_candidate_override_to_confirmed_species():
     """A detach-time candidate ({"species": guess, "confirmed": False}, no
     list) is a classifier hint; detaching that burst for a new species must

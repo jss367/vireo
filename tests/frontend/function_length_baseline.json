@@ -58,7 +58,7 @@
   "vireo/static/pipeline-rapid-review/apply.js:applyCurrent": 315,
   "vireo/static/pipeline-review/events.js:bindPipelineReviewPhotoEvents": 186,
   "vireo/static/pipeline-review/events.js:bindPipelineReviewPhotoEvents.@call:[[\"member\",[\"identifier\",\"document\"],[\"property\",\"Identifier\",\"addEventListener\"],false],\"lightbox:photodeleted\"]": 119,
-  "vireo/static/pipeline-review/group-changes.js:grmApply": 246,
+  "vireo/static/pipeline-review/group-changes.js:grmApply": 197,
   "vireo/static/pipeline-review/group-session.js:openGroupReview": 194,
   "vireo/static/pipeline-review/inspection.js:openInspect": 104,
   "vireo/static/pipeline-review/results.js:renderResults": 228,

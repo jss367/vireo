@@ -22,6 +22,7 @@
     "../vireo/static/pipeline-review/scope.js",
     "../vireo/static/pipeline-review/species-conflicts.js",
     "../vireo/static/pipeline-review/species-editor.js",
+    "../vireo/static/pipeline-review/species-preview.js",
     "../vireo/static/pipeline-review/state.js",
     "../vireo/static/pipeline-review/summary.js",
     "../vireo/static/pipeline-review/tuning.js",

@@ -63,7 +63,7 @@ declare function safeFetch(url: '/api/collections', init: RequestInit & {method:
 
 interface ReviewSearchOptions {matchCase: boolean; wholeWord: boolean;}
 interface ReviewFolderNode {total: number; folder: ReviewFolder; children: ReviewFolderNode[];}
-interface ReviewSpeciesResponse {ok?: boolean; encounters?: ReviewEncounter[]; summary?: ReviewSummary; low_confidence_photo_ids?: number[];}
+interface ReviewSpeciesResponse {group_photos?: Record<string, ReviewDbPhoto>; photos?: ReviewSpeciesPreviewPhoto[]; preview_token?: string; previous_species_choices?: string[]; photo_count?: number; ok?: boolean; encounters?: ReviewEncounter[]; summary?: ReviewSummary; low_confidence_photo_ids?: number[];}
 declare function safeFetch(url: '/api/encounters/species', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewSpeciesResponse>;
 
 interface ReviewGroupApplyResponse {photos?: Record<string,ReviewDbPhoto>; encounters?: ReviewEncounter[]; summary?: ReviewSummary; [key: string]: unknown;}
@@ -72,3 +72,8 @@ declare function safeFetch(url: '/api/pipeline/group/apply', init?: RequestInit,
 declare function safeFetch(url: `/api/pipeline/scope-photos?${string}`, init?: RequestInit, options?: {toast?: boolean}): Promise<{photo_ids?: number[]}>;
 // The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
 declare var Vireo: VireoPageHookRegistry;
+
+interface ReviewSpeciesEdit {group_changes?: ReviewGroupChanges; species: string; photo_ids: number[]; source_photo_ids?: number[]; burst_index?: number; add?: boolean; previous_species?: string; split?: boolean; preview_token?: string;}
+interface ReviewSpeciesPreviewPhoto {id: number; filename: string; timestamp?: string | null; flag?: string | null; selected: boolean; existing_species: string[]; additions: string[]; removals: string[]; subjects: {detection_id: number; detector_model: string; detector_confidence: number | null; below_threshold: boolean; box_x: number | null; box_y: number | null; box_w: number | null; box_h: number | null; predictions: {species: string | null; confidence: number | null; classifier_model: string; labels_fingerprint: string; status: string; historical: boolean}[]}[];}
+
+interface ReviewGroupChanges {picks: number[]; rejects: number[]; candidates: number[]; removed: number[]; encounter_index: number | null; burst_index: number | null; expected_burst_photo_ids: number[];}

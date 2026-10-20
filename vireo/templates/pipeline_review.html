@@ -1574,6 +1574,26 @@ input[type="range"]::-moz-range-thumb {
   padding: 12px 16px;
   border-top: 1px solid var(--border-primary);
 }
+#speciesConfirmationPreview { max-width: 96vw; width: 1250px; max-height: 94vh; margin: auto; padding: 20px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 14px; }
+#speciesConfirmationPreview::backdrop { background: rgba(0,0,0,.65); }
+#speciesConfirmationPreview h2 { font-size: 20px; margin-bottom: 10px; }
+#speciesConfirmationPreview p { margin: 10px 0; }
+#speciesConfirmationPreview select, #speciesConfirmationPreview input[type=number] { padding: 4px; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px; }
+#speciesConfirmationPreview input[type=number] { width: 70px; }
+.species-preview-summary { font-weight: 600; }
+.species-preview-matrix { max-height: 50vh; overflow: auto; }
+.species-preview-matrix table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.species-preview-matrix td, .species-preview-matrix th { padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border-primary); overflow-wrap: anywhere; }
+.species-preview-matrix th { position: sticky; top: 0; z-index: 1; background: var(--bg-secondary); }
+.species-preview-matrix th:first-child { width: 6%; }
+.species-preview-matrix th:nth-child(2) { width: 19%; }
+.species-preview-matrix th:nth-child(3) { width: 21%; }
+.species-preview-matrix th:nth-child(4) { width: 34%; }
+.species-preview-matrix th:last-child { width: 20%; }
+.species-preview-matrix details { margin-bottom: 10px; }
+.species-preview-subject { display: block; position: relative; width: 120px; margin: 5px 0; }
+.species-preview-subject img { display: block; width: 120px; }
+.species-preview-subject > span { position: absolute; border: 2px solid #ffcc00; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -2068,6 +2088,7 @@ input[type="range"]::-moz-range-thumb {
 <script defer src="/static/pipeline-review/scope.js"></script>
 <script defer src="/static/pipeline-review/loading.js"></script>
 <script defer src="/static/pipeline-review/species-editor.js"></script>
+<script defer src="/static/pipeline-review/species-preview.js"></script>
 <script defer src="/static/pipeline-review/group-session.js"></script>
 <script defer src="/static/pipeline-review/group-render.js"></script>
 <script defer src="/static/pipeline-review/group-changes.js"></script>

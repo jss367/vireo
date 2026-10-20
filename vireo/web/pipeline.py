@@ -25,11 +25,8 @@ from photo_payload import (
     render_key_for_recipe,
 )
 from pipeline_results import (
-    build_species_override,
     burst_species_list,
-    candidate_species_override,
     compute_time_range,
-    empty_species_override,
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
@@ -43,6 +40,7 @@ from services.pipeline_launch import (
     apply_no_model_auto_skip,
     resolve_remote_archive_target,
 )
+from services.review_group_changes import detach_review_photo
 from web.request_args import coerce_collection_id, reject_visual_collection
 
 log = logging.getLogger(__name__)
@@ -1273,90 +1271,6 @@ def create_pipeline_blueprint(
 
         save_grouping_edit(db, before, results, "Photo detached from burst")
         return jsonify({"ok": True, "encounters": encounters, "summary": results["summary"]})
-
-    def detach_review_photo(results, enc_idx, burst_idx, photo_id):
-        """Apply a validated photo removal to a canonical pipeline snapshot."""
-        from pipeline import rebuild_species_predictions
-
-        encounters = results["encounters"]
-        enc = encounters[enc_idx]
-        bursts = enc["bursts"]
-        burst = bursts[burst_idx]
-        if isinstance(burst, list):
-            burst = {"photo_ids": burst}
-            bursts[burst_idx] = burst
-        source_override = burst.get("species_override") or {}
-
-        # Remove photo from burst
-        burst["photo_ids"].remove(photo_id)
-
-        if len(burst["photo_ids"]) == 0:
-            # Last photo — remove the empty burst
-            bursts.pop(burst_idx)
-        else:
-            # Recalculate source burst predictions without the removed photo
-            burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
-
-        # Create new single-photo burst in the same encounter
-        new_burst_predictions = rebuild_species_predictions(results, [photo_id])
-        new_burst_species = rebuild_encounter_species_label(results, [photo_id])
-        source_list = (
-            source_override.get("species_list")
-            if isinstance(source_override, dict) else None
-        )
-        source_has_authoritative_list = isinstance(source_list, list)
-        source_legacy_confirmed = bool(
-            source_override.get("confirmed") and source_override.get("species")
-        )
-        if source_has_authoritative_list or source_legacy_confirmed:
-            # Copy the source burst's authoritative set — including the
-            # explicit-empty sentinel a remove leaves behind AND the
-            # mixed-but-edited shape ({confirmed: False, species_list: [A]})
-            # a set edit leaves on a still-mixed burst. Every array-valued
-            # species_list is authoritative (burst_species_list), so a null
-            # override on the split-off photo would let it inherit the
-            # encounter's stale baseline and resurrect a species this edit
-            # already dropped.
-            copied_list = burst_species_list({}, burst)
-            if copied_list:
-                # Preserve the source's confirmed flag: True for a genuinely
-                # confirmed burst, False for a mixed-but-edited baseline.
-                new_burst_override = build_species_override(
-                    copied_list,
-                    confirmed=bool(source_override.get("confirmed")),
-                )
-            else:
-                new_burst_override = empty_species_override()
-        elif enc.get("confirmed_species"):
-            # Inherit the encounter's prior confirmed species by leaving the
-            # override empty. Also covers the mixed/partial state where
-            # species_confirmed is False but confirmed_species records the
-            # dominant prior species (pipeline.py builds encounter payloads
-            # this way for encounters whose photos disagree on confirmed
-            # species). A classifier-guess override here would mask that
-            # prior tag: the confirm endpoint reads species_override.species
-            # without inspecting the confirmed flag, so a later burst confirm
-            # would target the guess as previous_species instead of the real
-            # prior species and leave both keywords on the photo.
-            new_burst_override = None
-        else:
-            new_burst_override = candidate_species_override(new_burst_species)
-        new_burst = {
-            "photo_ids": [photo_id],
-            "species_predictions": new_burst_predictions,
-            "species_override": new_burst_override,
-        }
-        bursts.append(new_burst)
-        enc["burst_count"] = len(bursts)
-        # Recalculate encounter-level predictions
-        enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
-        # Encounter composition didn't change but burst structure did; trace
-        # is pair-level only, so it remains valid. No trace mutation needed.
-
-        # Update summary
-        results["summary"]["burst_count"] = sum(
-            e.get("burst_count", 0) for e in encounters
-        )
 
     def sync_review_photo_flags(db, results, photo_ids):
         """Refresh cached review labels from the authoritative database flags."""
