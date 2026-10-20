@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Collection
 from typing import Any
 
+from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key
 from sql_chunks import chunked
 
@@ -127,26 +128,41 @@ class IdentityAlternativesRepository:
                  state['reason'], state['missing_evidence']),
             )
 
+    def _candidate_identities(self, candidates: Collection[str]) -> set[str]:
+        """Resolve named candidates with the catalog's authoritative source precedence."""
+        names = {keyword_match_key(name) for name in candidates}
+        identities, linked_names = set(), set()
+        for row in self.conn.execute(
+            f"SELECT k.name, {identity_sql('k')} AS identity FROM keywords k "
+            "WHERE k.is_species=1 OR k.type='taxonomy'",
+        ):
+            key = keyword_match_key(row['name'])
+            if key in names and not row['identity'].startswith('keyword:'):
+                identities.add(row['identity'])
+                linked_names.add(key)
+        # A common name may exist only in the taxonomy. An explicitly linked
+        # keyword above owns its identity even if a name lookup would disagree.
+        for name in candidates:
+            if keyword_match_key(name) in linked_names:
+                continue
+            taxon = self._lookup_taxon_id(name, prefer_species=True, species_only=True)
+            if taxon is not None:
+                row = self.conn.execute('SELECT inat_id FROM taxa WHERE id=?', (taxon,)).fetchone()
+                identities.add(f'inat:{row["inat_id"]}' if row and row['inat_id'] is not None else f'taxon:{taxon}')
+        return identities
+
     def candidate_links(self, photo_ids: Collection[int], candidates: Collection[str]) -> dict[int, list[dict[str, Any]]]:
         """Existing species associations matching alternatives, with provenance.
 
-        Match linked aliases by taxon as well as normalized display spelling.
+        Match normalized names and authoritative local/source taxon identities.
         Unrelated species in a genuine mixed-species frame are left alone.
         """
         names = {keyword_match_key(name) for name in candidates}
-        # A candidate need not have a keyword row yet: its common name may
-        # exist only in the taxonomy while the photo carries another alias.
-        taxa = {
-            taxon_id for name in candidates
-            if (taxon_id := self._lookup_taxon_id(name, species_only=True)) is not None
-        }
-        for row in self.conn.execute('SELECT name, taxon_id FROM keywords WHERE is_species=1 OR type=\'taxonomy\''):
-            if keyword_match_key(row['name']) in names and row['taxon_id'] is not None:
-                taxa.add(row['taxon_id'])
+        identities = self._candidate_identities(candidates)
         result = {}
         for ids in chunked(list(photo_ids)):
             rows = self.conn.execute(
-                'SELECT pk.photo_id, pk.keyword_id, pk.source, k.name, k.taxon_id '
+                f"SELECT pk.photo_id, pk.keyword_id, pk.source, k.name, {identity_sql('k')} AS identity "
                 'FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
                 'LEFT JOIN taxa t ON t.id=k.taxon_id '
                 f"WHERE pk.photo_id IN ({','.join('?' for _ in ids)}) "
@@ -154,7 +170,7 @@ class IdentityAlternativesRepository:
                 'ORDER BY pk.keyword_id', ids,
             )
             for row in rows:
-                if keyword_match_key(row['name']) in names or row['taxon_id'] in taxa:
+                if keyword_match_key(row['name']) in names or row['identity'] in identities:
                     result.setdefault(row['photo_id'], []).append({
                         'keyword_id': row['keyword_id'], 'source': row['source'],
                     })

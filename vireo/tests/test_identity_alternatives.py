@@ -236,6 +236,98 @@ def test_keyword_maintenance_rejects_stale_forms_and_preserves_batch_revision_on
     assert db.photo_species.get_species_for_photos([1, 2, 3]) == {1: [target_name]}
 
 
+@pytest.mark.parametrize('candidate', ['Tropical Kingbird', 'yellow KINGBIRD'])
+def test_taxonomy_candidate_without_keyword_removes_confirmed_scientific_alias(app_and_db, tmp_path, candidate):
+    from pipeline import load_results_raw, save_results_raw
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.executemany(
+        'INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (?, ?, ?, ?, ?)',
+        [(101, 501, 'Tyrannus melancholicus', 'Tropical Kingbird', 'species'),
+         (102, 502, 'Invented genus', 'Yellow Kingbird', 'genus')],
+    )
+    db.conn.execute('INSERT INTO taxa_common_names (taxon_id, name) VALUES (?, ?)', (101, 'Yellow Kingbird'))
+    source = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    unrelated = db.add_keyword('Great Egret', is_species=True)
+    db.tag_photo(1, source, source='accept')
+    db.tag_photo(1, unrelated)
+    db.photo_review.set_flag(1, 'rejected')
+    source_name = db.keywords.name_of(source)
+    other_name = db.keywords.name_of(unrelated)
+    assert not db.conn.execute('SELECT id FROM keywords WHERE name=? COLLATE NOCASE', (candidate,)).fetchone()
+    save_results_raw({
+        'photos': [{'id': 1, 'confirmed_species': source_name,
+                    'confirmed_species_list': [source_name, other_name]}],
+        'encounters': [],
+    }, str(tmp_path), db.active_workspace_id)
+    assert save(client, [1], candidates=[candidate, CANDIDATES[1]]).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [other_name]}
+    assert load_results_raw(str(tmp_path), db.active_workspace_id)['photos'][0]['confirmed_species_list'] == [other_name]
+    assert client.post('/api/undo').status_code == 200
+    assert set(db.photo_species.get_species_for_photos([1])[1]) == {source_name, other_name}
+    assert db.conn.execute(
+        'SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (source,),
+    ).fetchone()[0] == 'accept'
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [other_name]}
+    assert db.photos.get(1)['flag'] == 'rejected'
+
+
+@pytest.mark.parametrize('local_taxon', [False, True])
+def test_candidate_matching_bridges_source_only_aliases_and_local_taxa(app_and_db, local_taxon):
+    app, db = app_and_db
+    client = app.test_client()
+    first_parent = db.add_keyword('Common names')
+    second_parent = db.add_keyword('Scientific names')
+    source_id = 999999999
+    common = db.add_keyword('Tropical Kingbird', parent_id=first_parent, is_species=True, source_taxon_id=source_id)
+    scientific = db.add_keyword('Tyrannus melancholicus', parent_id=second_parent, is_species=True, source_taxon_id=source_id)
+    assert db.conn.execute('SELECT taxon_id FROM keywords WHERE id=?', (scientific,)).fetchone()[0] is None
+    if local_taxon:
+        db.conn.execute(
+            'INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (?, ?, ?, ?, ?)',
+            (101, source_id, 'Tyrannus melancholicus', 'Tropical Kingbird', 'species'),
+        )
+        # A newly downloaded taxonomy can resolve the plain common candidate
+        # before the older source-only associations have been locally relinked.
+        candidate = 'Tropical Kingbird'
+    else:
+        candidate = db.keywords.name_of(common)
+    db.tag_photo(1, scientific, source='accept')
+    assert save(client, [1], candidates=[candidate, CANDIDATES[1]]).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {}
+    assert client.post('/api/undo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [db.keywords.name_of(scientific)]}
+    assert db.conn.execute(
+        'SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (scientific,),
+    ).fetchone()[0] == 'accept'
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {}
+
+
+@pytest.mark.parametrize('conflicting_source', ['candidate', 'attached'])
+def test_candidate_matching_respects_explicit_source_identity_over_local_claim(app_and_db, conflicting_source):
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (101, 111, 'Tyrannus melancholicus', 'Tropical Kingbird', 'species')",
+    )
+    candidate = db.add_keyword(CANDIDATES[0], is_species=True)
+    alias = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    conflicting = candidate if conflicting_source == 'candidate' else alias
+    # Preserve a source's explicit claim even when a stale common-name lookup
+    # linked the same keyword to a different locally downloaded taxon.
+    db.conn.execute('UPDATE keywords SET source_taxon_id=222 WHERE id=?', (conflicting,))
+    db.tag_photo(1, alias)
+    before = db.photo_species.get_species_for_photos([1])
+    assert save(client, [1]).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == before
+    assert client.post('/api/undo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == before
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == before
+
+
 def save(client, ids, **changes):
     workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={
