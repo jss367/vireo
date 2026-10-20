@@ -56,6 +56,9 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         "add": edit.add_mode, "remove": edit.remove_mode,
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
         "target": target_state,
+        "homonyms": db.photo_species.confirmation_homonym_evidence([
+            name for name in (target["name"] if target else edit.species, edit.previous_species) if name
+        ]),
         "group_changes": edit.group_plan,
         "group_evidence": db.photo_species.confirmation_evidence(edit.group_plan["expected_burst_photo_ids"])
         if edit.group_plan is not None else None,

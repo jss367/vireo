@@ -113,6 +113,32 @@ class PhotoSpeciesRepository:
             result.extend(by_id.values())
         return result
 
+    def confirmation_homonym_evidence(self, names: Collection[str]) -> list[dict[str, Any]]:
+        """Snapshot only linked species sharing the decision's canonical names.
+
+        Add equivalence and previous-species removal consult these catalog-wide
+        homonyms even when none is attached to a reviewed photo. Use the same
+        normalization as those guards; unrelated catalog edits stay irrelevant.
+        """
+        keys = {keyword_match_key(name) for name in names}
+        ids = [row["id"] for row in self.conn.execute(
+            "SELECT id, name FROM keywords WHERE taxon_id IS NOT NULL "
+            "AND (is_species=1 OR type='taxonomy') ORDER BY id",
+        ) if keyword_match_key(row["name"]) in keys]
+        result = []
+        for chunk in self._chunks(ids):
+            marks = ",".join("?" for _ in chunk)
+            result.extend(dict(row) for row in self.conn.execute(
+                f"""SELECT k.id, k.name, k.parent_id, k.type, k.is_species,
+                           k.taxon_id, k.source_taxon_id, t.id AS resolved_taxon_id,
+                           t.inat_id AS taxon_inat_id, t.name AS taxon_scientific_name,
+                           t.common_name AS taxon_common_name, t.rank AS taxon_rank,
+                           t.parent_id AS taxon_parent_id, t.kingdom AS taxon_kingdom
+                    FROM keywords k LEFT JOIN taxa t ON t.id=k.taxon_id
+                    WHERE k.id IN ({marks}) ORDER BY k.id""", chunk,
+            ))
+        return result
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""

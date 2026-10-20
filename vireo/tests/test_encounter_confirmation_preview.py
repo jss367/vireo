@@ -515,3 +515,94 @@ def test_stale_combined_history_retains_species_and_flags_after_retirement(app_a
     assert db.photos.get(ids[1])['flag'] == 'rejected'
     assert 'Eared Grebe' in db.photo_species.get_species_for_photos(ids)[ids[0]]
     assert json.load(open(path))['encounters'] == newer['encounters']
+
+
+def homonym_preview_setup(app, db, mode):
+    ids, path = seed(app, db)
+    db.conn.executemany('INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (?, ?, ?, ?, ?)', [
+        (900001, 800001, 'Preview alpha', 'Preview Robin', 'species'),
+        (900002, 800002, 'Preview beta', 'Other Preview Robin', 'species'),
+    ])
+    root = db.add_keyword('Preview Robin', is_species=True)
+    db.conn.execute('UPDATE keywords SET taxon_id=NULL, source_taxon_id=NULL WHERE id=?', (root,))
+    parent = db.add_keyword('Preview field guide')
+    leaf = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) VALUES ('Preview Robin', ?, 1, 'taxonomy')",
+        (parent,),
+    ).lastrowid
+    parent = db.add_keyword('Unattached preview guide')
+    homonym = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Preview Robin', ?, 1, 'taxonomy', 900002)",
+        (parent,),
+    ).lastrowid
+    for pid in ids:
+        db.tag_photo(pid, leaf)
+        if mode != 'add':
+            db.tag_photo(pid, root)
+    db.commit()
+    body = {'species': 'Preview Robin', 'photo_ids': ids}
+    if mode == 'add':
+        body['add'] = True
+    elif mode == 'remove':
+        body['remove'] = True
+    else:
+        body.update(species='New Preview Species', previous_species='Preview Robin')
+    return ids, path, homonym, body
+
+
+@pytest.mark.parametrize('mode', ['add', 'remove', 'replace'])
+@pytest.mark.parametrize('change', ['relink', 'source_identity', 'taxon_identity'])
+def test_preview_binds_unattached_canonical_homonym_identity(app_and_db, mode, change):
+    app, db = app_and_db
+    ids, path, homonym, body = homonym_preview_setup(app, db, mode)
+    client = app.test_client()
+    preview = request_preview(client, body)
+    if change == 'relink':
+        db.conn.execute('UPDATE keywords SET taxon_id=900001 WHERE id=?', (homonym,))
+    elif change == 'source_identity':
+        db.conn.execute('UPDATE keywords SET source_taxon_id=800003 WHERE id=?', (homonym,))
+    else:
+        db.conn.execute('UPDATE taxa SET inat_id=800003 WHERE id=900002')
+    db.commit()
+    # The reviewed photo rows are unchanged: this is catalog-wide evidence.
+    assert request_preview(client, body)['photos'] == preview['photos']
+    before = json.load(open(path))
+    before_keywords = [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')]
+    before_history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history')]
+    before_pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
+    assert apply(client, body, preview).status_code == 409
+    assert json.load(open(path)) == before
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')] == before_keywords
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history')] == before_history
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')] == before_pending
+
+
+@pytest.mark.parametrize('mode', ['add', 'remove', 'replace'])
+@pytest.mark.parametrize('change', ['rename', 'relink', 'taxon_identity', 'rename_into_match'])
+def test_preview_homonym_snapshot_excludes_unrelated_catalog_edits(app_and_db, mode, change):
+    app, db = app_and_db
+    _, _, _, body = homonym_preview_setup(app, db, mode)
+    db.conn.execute("INSERT INTO taxa (id, inat_id, name, rank) VALUES (900003, 800003, 'Unrelated bird', 'species')")
+    unrelated = db.conn.execute(
+        "INSERT INTO keywords (name, is_species, type, taxon_id) VALUES ('Unrelated bird', 1, 'taxonomy', 900003)",
+    ).lastrowid
+    db.commit()
+    client = app.test_client()
+    preview = request_preview(client, body)
+    if change == 'rename':
+        db.conn.execute("UPDATE keywords SET name='Different unrelated bird' WHERE id=?", (unrelated,))
+    elif change == 'relink':
+        db.conn.execute('UPDATE keywords SET taxon_id=900002 WHERE id=?', (unrelated,))
+    elif change == 'taxon_identity':
+        db.conn.execute('UPDATE taxa SET inat_id=800004 WHERE id=900003')
+    else:
+        # Edge quotes, whitespace and ASCII casing use the guards' exact key.
+        db.conn.execute("UPDATE keywords SET name=' ‘PREVIEW ROBIN’ ' WHERE id=?", (unrelated,))
+    db.commit()
+    current = request_preview(client, body)
+    if change == 'rename_into_match':
+        assert current['preview_token'] != preview['preview_token']
+        assert apply(client, body, preview).status_code == 409
+    else:
+        assert current['preview_token'] == preview['preview_token']
+        assert apply(client, body, preview).status_code == 200
