@@ -27,19 +27,24 @@ log = logging.getLogger(__name__)
 
 
 class IdentityHistoryConflict(RuntimeError):
-    """A newer catalog identity decision superseded this history action."""
+    """Identity history cannot currently replay; a later retry may be safe."""
+
+
+class IdentityHistoryStale(IdentityHistoryConflict):
+    """A newer catalog decision or association permanently superseded this edit."""
 
 
 def _check_replay_state(db: Database, photo_id: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+    if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
+        raise IdentityHistoryConflict('This photo is no longer visible in the reviewed workspace. Restore access before retrying history.')
     current = db.identity_alternatives.for_photos([photo_id], include_resolved=True).get(photo_id)
     names = [name for data in (before, after) if data['identity']
              and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
     links = db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, [])
     expected_links = {link['keyword_id']: link['source'] for link in before['links']}
     actual_links = {link['keyword_id']: link['source'] for link in links}
-    if (photo_id not in db.photo_visibility.visible_photo_ids([photo_id])
-            or current != before['identity'] or actual_links != expected_links):
-        raise IdentityHistoryConflict(
+    if current != before['identity'] or actual_links != expected_links:
+        raise IdentityHistoryStale(
             'This identification was changed elsewhere. Reload the photo and review its current identity before editing history.'
         )
 

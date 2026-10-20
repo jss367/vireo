@@ -5250,9 +5250,7 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            with self._commits_held():
-                self._apply_undo(entry, items)
-                history.mark_undone(entry['id'])
+            self._replay_photo_edit_history(entry, items, undo=True)
         return entry
 
     def redo_last_undo(self):
@@ -5303,10 +5301,29 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            with self._commits_held():
-                self._apply_redo(entry, items)
-                history.mark_redone(entry['id'])
+            self._replay_photo_edit_history(entry, items, undo=False)
         return entry
+
+    def _replay_photo_edit_history(self, entry, items, *, undo):
+        """Roll back rejected identity batches before retiring stale history."""
+        from services.identity_alternatives import IdentityHistoryStale
+
+        history = self._edit_history_repository()
+        try:
+            with self._commits_held():
+                if undo:
+                    self._apply_undo(entry, items)
+                    history.mark_undone(entry['id'])
+                else:
+                    self._apply_redo(entry, items)
+                    history.mark_redone(entry['id'])
+        except IdentityHistoryStale:
+            history.retire_stale_identity_entry(entry['id'])
+            history.commit()
+            raise IdentityHistoryStale(
+                'This identification was changed elsewhere. The superseded history entry was retired; '
+                'history has been refreshed. Review the next action before trying again.'
+            ) from None
 
     @contextlib.contextmanager
     def _commits_held(self):
