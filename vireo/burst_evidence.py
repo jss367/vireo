@@ -10,8 +10,8 @@ decide whether to trust it:
   mask, quality and eye features. A ranking over half a burst must say so
   ("no misses flagged" and "misses never computed" must never look alike).
 - ``ambiguity``: the rule-based reasons the scorer's pick is not to be taken
-  at face value (``assess_ambiguity``). A burst with no reasons is the
-  scorer's to decide; a burst with reasons is handed to the reviewer.
+  at face value (``assess_ambiguity``). Positive keeper validation is
+  independent of relative ranking and is still required for automatic keeps.
 - per-frame URLs for the 1:1 focus crop (``/photos/<id>/focus-crop``), the
   detection crop, the mask and the preview, so the reviewer judges
   sharpness from native pixels rather than a downscaled frame.
@@ -62,6 +62,7 @@ MAX_FOCUS_CROP_SIZE = 1024
 EDGE_CROP_COMPLETE = 0.9
 
 AMBIGUITY_CODES = (
+    "positive_keep_not_validated",
     "unanalyzed_frames",
     "close_call",
     "no_eye_located",
@@ -401,6 +402,11 @@ def build_evidence_pack(
         pack["cards"], coverage,
         eye_detect_enabled=scoring["eye_detect_enabled"], margin=margin,
     )
+    if pack.get("ranking_status") == "provisional":
+        pack["ambiguity"]["needs_review"] = True
+        pack["ambiguity"]["reasons"].append({
+            "code": "positive_keep_not_validated", "detail": pack["keep_review_message"],
+        })
     pack["scoring"] = scoring
     return pack
 
@@ -457,6 +463,8 @@ def build_folder_bursts(
             "coverage": pack["coverage"],
             "scored": pack["scored"],
             "best_photo_id": pack["best_photo_id"],
+            "ranked_candidate_id": pack.get("ranked_candidate_id"),
+            "ranking_status": pack.get("ranking_status"),
             "ambiguity": pack["ambiguity"],
         })
     return {

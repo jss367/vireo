@@ -271,6 +271,7 @@ def triage_encounters(encounters, config=None):
                 burst_photos = burst
 
             for photo in burst_photos:
+                photo["ranking_selected"] = id(photo) in enc_keep_ids
                 if explicit_decision(photo):
                     photo["label"] = explicit_decision(photo)
                 elif photo.get("selection_eligible") is False:
@@ -278,7 +279,7 @@ def triage_encounters(encounters, config=None):
                 elif photo.get("label") == "REJECT":
                     pass  # already labeled
                 elif id(photo) in enc_keep_ids:
-                    photo["label"] = "KEEP"
+                    photo["label"] = "KEEP" if photo.get("automatic_keep_eligible") else "REVIEW"
                 else:
                     photo["label"] = "REVIEW"
                 all_photos.append(photo)

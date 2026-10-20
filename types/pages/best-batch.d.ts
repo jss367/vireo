@@ -9,6 +9,7 @@ interface BestBatchCard {
 }
 interface BestBatchResponse {
   cards?: BestBatchCard[]; best_photo_id?: number | null; count: number;
+  ranked_candidate_id?: number | null; ranking_status?: string; keep_review_message?: string;
   sequence_range?: [number, number] | null; photo_ids?: number[];
   suggested_reject_ids?: number[]; scope_method?: string;
 }

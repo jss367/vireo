@@ -38,6 +38,7 @@ export function inspectPhoto(photoId) {
   var card = state.bestBatchData.cards.find(function(c) { return c.id === photoId; });
   if (!card) return;
   state.inspectedId = card.id;
+  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   showInspectImage(card);
 
   var role = byId('inspectRole');
@@ -100,15 +101,15 @@ export function renderBatch(data) {
   byId('bestSubtitle').textContent =
     data.count + ' photos' + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
 
-  byId('focusNote').textContent = cards.some(hasEyeKeypoint)
+  byId('focusNote').textContent = (data.keep_review_message ? data.keep_review_message + ' ' : '') + (cards.some(hasEyeKeypoint)
     ? 'Eye crops are centered on detected keypoints. Click a crop to inspect the full frame.'
-    : 'No eye keypoints found for this batch; focus evidence falls back to subject/full-frame context.';
+    : 'No eye keypoints found for this batch; focus evidence falls back to subject/full-frame context.');
 
   byId('focusGrid').innerHTML = cards.map(focusCardHtml).join('');
   byId('rankList').innerHTML = cards.map(rankCardHtml).join('');
 
   /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !data.photo_ids || data.photo_ids.length < 2;
-  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = !data.best_photo_id;
+  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   /** @type {HTMLButtonElement} */ (byId('rejectBtn')).disabled = !data.best_photo_id;
   inspectPhoto(best.id);
 }

@@ -1,0 +1,136 @@
+"""A relative winner is a candidate, never positive evidence of a usable animal."""
+
+import json
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+from keep_safety import KEEP_REVIEW_MESSAGE, review_ranked_response, review_ranked_suggestions
+from pipeline import run_triage, serialize_results
+from subject_readiness import automatic_keep_assessment
+
+
+def measured_photo(photo_id=1, **overrides):
+    photo = {"id": photo_id, "mask_path": "/mask.png", "subject_present": True,
+             "subject_tenengrad": 500., "bg_tenengrad": 50., "subject_clip_high": 0.,
+             "subject_clip_low": 0., "subject_y_median": 115., "crop_complete": .95,
+             "bg_separation": 10., "subject_size": .15, "flag": "none"}
+    photo.update(overrides)
+    return photo
+
+
+@pytest.mark.parametrize("raw", [0., .001, 500., 1e9])
+def test_singleton_ranking_does_not_validate_absolute_usability(raw):
+    photo = measured_photo(subject_tenengrad=raw)
+    encounters, photos = run_triage([{"photos": [photo]}])
+    assert photo["selection_eligible"] is True  # inputs remain useful for comparison
+    assert photo["ranking_selected"] is True
+    assert photo["quality_composite"] is not None
+    assert photo["label"] == "REVIEW"
+    assert photo["automatic_keep_eligible"] is False
+    assert photo["keep_reasons"] == ["absolute_focus_not_validated", "animal_subject_not_validated"]
+    saved = serialize_results({"encounters": encounters, "photos": photos, "summary": {}})
+    assert saved["photos"][0]["keep_status"] == "not_validated"
+
+
+@pytest.mark.parametrize("raw_values", [[.001, .002, .003], [.001, 100000.], [500.]])
+def test_all_poor_and_mixed_groups_stay_provisional_without_positive_validation(raw_values):
+    photos = [measured_photo(i, subject_tenengrad=raw) for i, raw in enumerate(raw_values, 1)]
+    run_triage([{"photos": photos}])
+    assert all(p["label"] == "REVIEW" for p in photos)
+    assert all(p["quality_composite"] is not None for p in photos)
+    assert any(p["ranking_selected"] for p in photos)
+
+
+def test_classifier_confidence_and_claimed_cached_validation_cannot_authorize_a_keep():
+    photo = measured_photo(detection_conf=1., species_top5=[("Osprey", .9999)],
+                           confirmed_species="Osprey", focus_evidence={"absolute_status": "validated"},
+                           automatic_keep_eligible=True, keep_status="validated")
+    run_triage([{"photos": [photo]}])
+    assert photo["label"] == "REVIEW"
+    assert automatic_keep_assessment(photo)["eligible"] is False
+
+
+def test_independent_ranker_returns_are_guarded_with_decisions_preserved():
+    @review_ranked_response
+    def independent_subject_ranker():
+        return {"best_photo_id": 1, "alternate_ids": [2, 3], "suggested_reject_ids": [2, 3, 4, 5],
+                "cards": [
+                    {"id": 1, "rank": 1, "role": "best", "label": "KEEP"},
+                    {"id": 2, "rank": 2, "role": "alternate", "label": None},
+                    {"id": 3, "rank": 3, "role": "reject", "label": "REVIEW"},
+                    {"id": 4, "rank": 4, "role": "reject", "label": "REJECT", "flag": "flagged"},
+                    {"id": 5, "rank": 5, "role": "best", "label": "KEEP", "flag": "rejected"},
+                ]}, None
+
+    response, error = independent_subject_ranker()
+    assert error is None
+    assert response["best_photo_id"] is None
+    assert response["ranked_candidate_id"] == 1
+    assert response["alternate_ids"] == []
+    assert response["suggested_reject_ids"] == []
+    assert [c["label"] for c in response["cards"]] == ["REVIEW", "REVIEW", "REVIEW", "KEEP", "REJECT"]
+    assert [c["role"] for c in response["cards"]] == ["review", "review", "review", "kept", "reject"]
+    assert response["cards"][0]["reasons"][0] == KEEP_REVIEW_MESSAGE
+    assert [c["rank"] for c in response["cards"]] == [1, 2, 3, 4, 5]
+
+
+def test_unavailable_evidence_stays_visible_and_unknown_is_not_photographic_failure():
+    result = {"cards": [{"id": 1, "rank": None, "role": "review", "label": "REVIEW",
+                         "analysis_status": "not_run", "analysis_reasons": ["detection_not_run"]}]}
+    review_ranked_suggestions(result)
+    assert result["ranked_candidate_id"] is None
+    assert result["cards"][0]["analysis_status"] == "not_run"
+    assert result["suggested_reject_ids"] == []
+
+
+@pytest.mark.parametrize("flag,label", [("flagged", "KEEP"), ("picked", "KEEP"), ("rejected", "REJECT")])
+def test_explicit_photographer_decisions_override_unvalidated_evidence(flag, label):
+    photo = measured_photo(flag=flag, subject_tenengrad=0.)
+    run_triage([{"photos": [photo]}])
+    assert photo["label"] == label
+    assert photo["automatic_keep_eligible"] is False
+
+
+def test_error_from_ranker_is_preserved():
+    @review_ranked_response
+    def unavailable():
+        return None, "No current analysis"
+    assert unavailable() == (None, "No current analysis")
+
+
+def test_reported_before_state_winners_and_clear_wildlife_controls():
+    fixture = json.loads((Path(__file__).parent / "fixtures/keep_safety_review_examples.json").read_text())
+    by_id = {p["id"]: p for p in fixture["photos"]}
+    for pid in (213640, 214325, 216521):
+        photo = deepcopy(by_id[pid])
+        assert photo["label"] == "KEEP" and photo["flag"] == "none"
+        run_triage([{"photos": [photo]}])
+        assert photo["label"] == "REVIEW"
+        assert photo["selection_eligible"] is True
+        assert photo["automatic_keep_eligible"] is False
+    failures = deepcopy([by_id[pid] for pid in (213640, 214325, 216521)])
+    run_triage([{"photos": failures}])
+    assert all(p["label"] == "REVIEW" for p in failures)
+    # Independently viewed clear wildlife controls retain useful measurements.
+    # Clarity by visual review is not a calibrated automatic validator.
+    for pid in (214419, 216716):
+        photo = deepcopy(by_id[pid])
+        run_triage([{"photos": [photo]}])
+        assert photo["quality_composite"] is not None
+        assert photo["label"] == ("KEEP" if photo["flag"] == "flagged" else "REVIEW")
+        assert photo["automatic_keep_eligible"] is False
+
+
+def test_reject_role_requires_recorded_failure_and_cannot_create_a_keeper():
+    result = {"best_photo_id": 1, "summary": {"keep_count": 2, "review_count": 0, "reject_count": 0},
+              "cards": [{"id": 1, "rank": 1, "label": "REJECT", "role": "best",
+                         "reject_reasons": ["blown_highlights (0.99)"]},
+                        {"id": 2, "rank": 2, "label": "REJECT", "role": "reject"}]}
+    review_ranked_suggestions(result)
+    assert result["best_photo_id"] is None
+    assert result["ranked_candidate_id"] == 2
+    assert result["suggested_reject_ids"] == [1]
+    assert result["cards"][0]["role"] == "reject"
+    assert result["cards"][1]["role"] == "review"
+    assert result["summary"] == {"keep_count": 0, "review_count": 1, "reject_count": 1}
