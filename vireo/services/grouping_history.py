@@ -557,7 +557,12 @@ def apply_grouping_photo_edit(
     db: Database, entry: HistoryEntry, items: Iterable[sqlite3.Row], *, undo: bool,
 ) -> None:
     """Replay the photo half of a grouping action without releasing its transaction."""
-    change = json.loads(entry["new_value"]).get("photo_edit")
+    payload = json.loads(entry["new_value"])
+    for item in payload.get("flag_items", []):
+        value = item["old_value" if undo else "new_value"]
+        db.photo_review.set_flag(item["photo_id"], value, _commit=False)
+        db.queue_flag_change_if_enabled(item["photo_id"], value, _commit=False)
+    change = payload.get("photo_edit")
     if not change:
         return
     action = change["action_type"]

@@ -25,6 +25,7 @@ import os
 import re
 import time
 
+import pytest
 from playwright.sync_api import expect
 
 # Regression guard for a fixed product bug: grmOnToggleChange() used to pin
@@ -250,10 +251,11 @@ def test_pipeline_burst_loupe_context_open_browse_uses_selected_photo(live_serve
 
 def test_smart_default_flags_checked_when_moves_pending(live_server, page):
     """Moving a frame to rejects pre-checks "Apply picks/rejects" via the smart
-    default; "Confirm species" stays unchecked because the species field is
-    empty (no pending species change)."""
+    default; "Confirm species" stays unchecked when every frame already
+    carries the unchanged species."""
     photo_ids = live_server["data"]["photos"][0:3]  # hawk1/2/3, one burst
-    _write_single_burst_cache(live_server, photo_ids)
+    _write_single_burst_cache(live_server, photo_ids, confirmed_species="Red-tailed Hawk")
+    _tag_all(live_server, photo_ids, "Red-tailed Hawk")
 
     _open_burst_modal(page, live_server)
 
@@ -280,6 +282,7 @@ def test_apply_and_close_is_single_flight_while_request_is_pending(live_server, 
 
     page.route("**/api/pipeline/group/apply", delay_apply)
     _open_burst_modal(page, live_server)
+    page.locator("#grmConfirmSpeciesChk").uncheck()  # This case exercises flags only.
 
     page.keyboard.press("x")
     expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
@@ -884,10 +887,10 @@ def test_combined_apply_species_split_relocates_pending_removal(live_server, pag
         expect(preview.locator('.species-preview-apply')).to_be_enabled()
     preview.locator('.species-preview-split').check()
     expect(preview.locator('.species-preview-apply')).to_be_enabled()
-    with page.expect_response('**/api/pipeline/group/apply') as response:
+    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')) as response:
         preview.locator('.species-preview-apply').click()
     assert response.value.status == 200
-    assert ids[0] in response.value.request.post_data_json['rejects'], response.value.request.post_data_json
+    assert ids[0] in response.value.request.post_data_json['group_changes']['rejects'], response.value.request.post_data_json
     expect(page.locator('#grmOverlay')).not_to_have_class(re.compile(r'\bopen\b'))
     cache = _read_cache(live_server)
     assert [enc['photo_ids'] for enc in cache['encounters']] == [ids[:1], ids[1:]]
@@ -896,3 +899,49 @@ def test_combined_apply_species_split_relocates_pending_removal(live_server, pag
     }
     assert _photo_flags(live_server, ids)[ids[0]] == 'rejected'
     assert _photos_with_species(live_server, ids, 'Northern Goshawk') == {ids[0]}
+
+
+@pytest.mark.parametrize('failure', ['network', 'server', 'membership'])
+def test_combined_apply_failed_request_never_saves_a_species_only_half(live_server, page, failure):
+    ids = live_server['data']['photos'][:3]
+    _write_single_burst_cache(live_server, ids)
+    _open_burst_modal(page, live_server)
+    page.keyboard.press('x')
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{ids[1]}"]').click()
+    page.locator('#grmRemoveBtn').click()
+    page.locator('#grmSpecies').fill('Northern Goshawk')
+    page.locator('#grmApplyBtn').click()
+    preview = page.locator('#speciesConfirmationPreview')
+    expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    db = live_server['db']
+    before_flags = _photo_flags(live_server, ids)
+    before_species = db.photo_species.get_species_for_photos(ids)
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    if failure == 'membership':
+        cache = _read_cache(live_server)
+        source = cache['encounters'][0]['bursts'][0]
+        source['photo_ids'].remove(ids[1])
+        cache['encounters'][0]['bursts'].append({'photo_ids': [ids[1]]})
+        with open(_cache_path(live_server), 'w') as handle:
+            json.dump(cache, handle)
+    else:
+        def fail_write(route):
+            if route.request.post_data_json.get('preview'):
+                route.continue_()
+            elif failure == 'network':
+                route.abort('failed')
+            else:
+                route.fulfill(status=503, json={'error': 'Injected Group Review failure'})
+        page.route('**/api/encounters/species', fail_write)
+    before_cache = _read_cache(live_server)
+    standalone_flags = []
+    page.on('request', lambda request: standalone_flags.append(request.url)
+            if '/api/pipeline/group/apply' in request.url else None)
+    preview.locator('.species-preview-apply').click()
+    expect(page.locator('#grmApplyBtn')).to_be_enabled()
+    expect(page.locator('#grmOverlay')).to_have_class(re.compile(r'\bopen\b'))
+    assert standalone_flags == []
+    assert _photo_flags(live_server, ids) == before_flags
+    assert db.photo_species.get_species_for_photos(ids) == before_species
+    assert _read_cache(live_server) == before_cache
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history

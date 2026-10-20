@@ -29,7 +29,9 @@ def _seed_transition(live_server):
 def _open_preview(page, live_server, species):
     page.goto(f"{live_server['url']}/pipeline/review")
     page.locator('[data-species-widget="1"][data-level="encounter"] .species-name').first.click()
-    page.locator('.species-dropdown.open .species-dropdown-item').get_by_text(species, exact=True).click()
+    field = page.locator('.species-dropdown.open input[type=text]')
+    field.fill(species)
+    field.press('Enter')
     preview = page.locator('#speciesConfirmationPreview')
     expect(preview.locator('.species-preview-apply')).to_be_enabled()
     return preview

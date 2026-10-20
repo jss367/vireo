@@ -7,7 +7,7 @@ function reviewEncounterSpecies(initial) {
     dialog.id = 'speciesConfirmationPreview';
     dialog.setAttribute('aria-label', 'Preview species confirmation');
     dialog.innerHTML = '<h2>Preview species confirmation</h2>' +
-      '<p>Inspect every frame and subject before applying. Existing flags are preserved. Stored model evidence includes historical label sets and low-confidence detections; it is not a confirmation.</p>' +
+      '<p>Inspect every frame and subject before applying. ' + (initial.group_changes ? 'This confirmation also saves the staged Group Review pick, reject and removal decisions together. Cancel saves no changes. ' : 'Existing flags are preserved. ') + 'Stored model evidence includes historical label sets and low-confidence detections; it is not a confirmation.</p>' +
       '<label>Species action <select class="species-preview-mode"><option value="add">Add species; preserve existing species</option>' +
       '<option value="replace">Replace the named species only</option></select></label> ' +
       '<label>Species to replace <select class="species-preview-previous" disabled></select></label>' +
@@ -17,7 +17,7 @@ function reviewEncounterSpecies(initial) {
       '<button class="species-preview-range btn btn-secondary">Select frame range</button> (shown order)</p>' +
       '<p class="species-preview-summary" role="status">Loading exact affected photos…</p>' +
       '<div class="species-preview-matrix"></div>' +
-      '<p><button class="species-preview-cancel btn btn-secondary">Cancel</button> <button class="species-preview-apply btn btn-primary" disabled>Apply confirmation</button></p>';
+      '<p><button class="species-preview-cancel btn btn-secondary">Cancel</button> <button class="species-preview-apply btn btn-primary" disabled>' + (initial.group_changes ? 'Apply all reviewed changes' : 'Apply confirmation') + '</button></p>';
     document.body.appendChild(dialog);
     var session = createSpeciesPreviewSession(dialog, initial, resolve);
     dialog.querySelector('.species-preview-cancel')?.addEventListener('click', session.cancel);

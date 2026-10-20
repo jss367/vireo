@@ -316,3 +316,144 @@ def test_preview_binds_attached_species_source_identity(app_and_db, change, sour
     assert json.load(open(path)) == before_cache
     assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history
     assert db.conn.execute('SELECT COUNT(*) FROM keywords').fetchone()[0] == before_keywords
+
+
+def combined_request(ids):
+    return {'species': 'Eared Grebe', 'photo_ids': ids[:1], 'source_photo_ids': ids[:2],
+            'burst_index': 0, 'add': True, 'split': True,
+            'group_changes': {'picks': ids[:1], 'rejects': ids[1:2], 'candidates': [],
+                              'removed': ids[2:], 'encounter_index': 0, 'burst_index': 0,
+                              'expected_burst_photo_ids': ids}}
+
+
+def test_combined_species_flags_split_and_removal_share_one_undo(app_and_db):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    client = app.test_client()
+    body = combined_request(ids)
+    before = json.load(open(path))
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    preview = request_preview(client, body)
+    response = apply(client, body, preview)
+    assert response.status_code == 200, response.get_json()
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[1])['flag'] == 'rejected'
+    assert set(db.photo_species.get_species_for_photos(ids)[ids[0]]) == {'Western Grebe', 'Eared Grebe'}
+    assert db.photo_species.get_species_for_photos(ids)[ids[2]] == ['Western Grebe']
+    after = json.load(open(path))
+    assert [enc['photo_ids'] for enc in after['encounters']] == [ids[:1], ids[1:]]
+    assert [burst['photo_ids'] for burst in after['encounters'][1]['bursts']] == [ids[1:2], ids[2:]]
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history + 1
+    assert client.post('/api/undo').status_code == 200
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+    assert json.load(open(path))['encounters'] == before['encounters']
+    assert client.post('/api/redo').status_code == 200
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[1])['flag'] == 'rejected'
+    assert 'Eared Grebe' in db.photo_species.get_species_for_photos(ids)[ids[0]]
+    assert json.load(open(path))['encounters'] == after['encounters']
+
+
+@pytest.mark.parametrize('failure', ['flag', 'removal', 'history', 'save', 'after_save', 'commit'])
+def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch, failure):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    # Production caches are written through save_results_raw, which stores
+    # normalized summary counts. Match that on-disk shape for exact rollback.
+    from pipeline import load_results_raw, save_results_raw
+    cache_dir = os.path.dirname(path)
+    save_results_raw(load_results_raw(cache_dir, db.active_workspace_id), cache_dir, db.active_workspace_id)
+    client = app.test_client()
+    body = combined_request(ids)
+    preview = request_preview(client, body)
+    before = json.load(open(path))
+    before_species = db.photo_species.get_species_for_photos(ids)
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    before_pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
+    import pipeline
+    from db import Database
+    from repositories.photo_review import PhotoReviewRepository
+    from services import grouping_history, review_group_changes
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('injected combined apply failure')
+
+    with monkeypatch.context() as patch:
+        if failure == 'flag':
+            original = PhotoReviewRepository.set_flag
+            def fail_second_flag(self, pid, *args, **kwargs):
+                result = original(self, pid, *args, **kwargs)
+                if pid == ids[1]:
+                    fail()
+                return result
+            patch.setattr(PhotoReviewRepository, 'set_flag', fail_second_flag)
+        elif failure == 'removal':
+            original = review_group_changes.detach_review_photo
+            def fail_after_removal(*args, **kwargs):
+                original(*args, **kwargs)
+                fail()
+            patch.setattr(review_group_changes, 'detach_review_photo', fail_after_removal)
+        elif failure == 'history':
+            patch.setattr(grouping_history, 'convert_to_grouping_edit', fail)
+        elif failure == 'after_save':
+            original_save = pipeline.save_results_raw
+            saved = False
+            def fail_after_save(*args, **kwargs):
+                nonlocal saved
+                result = original_save(*args, **kwargs)
+                if not saved:
+                    saved = True
+                    fail()
+                return result
+            patch.setattr(pipeline, 'save_results_raw', fail_after_save)
+        elif failure == 'save':
+            patch.setattr(pipeline, 'save_results_raw', fail)
+        else:
+            patch.setattr(Database, 'commit', fail)
+        assert apply(client, body, preview).status_code == 500
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert db.photo_species.get_species_for_photos(ids) == before_species
+    assert json.load(open(path)) == before
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')] == before_pending
+
+
+@pytest.mark.parametrize('stale', ['membership', 'decisions'])
+def test_combined_apply_rejects_stale_membership_or_decisions_before_writes(app_and_db, stale):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    client = app.test_client()
+    body = combined_request(ids)
+    preview = request_preview(client, body)
+    if stale == 'membership':
+        cached = json.load(open(path))
+        cached['encounters'][0]['bursts'][0]['photo_ids'] = ids[:2]
+        cached['encounters'][0]['bursts'].append({'photo_ids': ids[2:]})
+        with open(path, 'w') as handle:
+            json.dump(cached, handle)
+    else:
+        body['group_changes']['picks'], body['group_changes']['rejects'] = body['group_changes']['rejects'], body['group_changes']['picks']
+    before = json.load(open(path))
+    assert apply(client, body, preview).status_code == 409
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+    assert json.load(open(path)) == before
+
+
+def test_combined_apply_supports_legacy_raw_bursts(app_and_db):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    cached = json.load(open(path))
+    cached['encounters'][0]['bursts'] = [ids]
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    client = app.test_client()
+    body = combined_request(ids)
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    assert db.photos.get(ids[0])['flag'] == 'flagged'
+    assert db.photos.get(ids[1])['flag'] == 'rejected'
+    assert [enc['photo_ids'] for enc in response.get_json()['encounters']] == [ids[:1], ids[1:]]
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path))['encounters'] == cached['encounters']
