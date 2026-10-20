@@ -337,6 +337,19 @@ def _scoring_settings(effective_cfg, margin):
     }
 
 
+
+def _evidence_ambiguity(pack, scoring, margin):
+    """Qualify every provisional ranking, including selected-subject comparisons."""
+    ambiguity = assess_ambiguity(pack["cards"], pack["coverage"],
+                                 eye_detect_enabled=scoring["eye_detect_enabled"], margin=margin)
+    if pack.get("ranking_status") == "provisional":
+        ambiguity["needs_review"] = True
+        ambiguity["reasons"].append({
+            "code": "positive_keep_not_validated", "detail": pack["keep_review_message"],
+        })
+    return ambiguity
+
+
 def build_evidence_pack(
     db, seed_photo_id, rows, *, effective_cfg, margin=DEFAULT_CLOSE_CALL_MARGIN,
     focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None, comparison=None,
@@ -411,15 +424,7 @@ def build_evidence_pack(
     coverage = coverage_counts(pack["cards"])
     coverage["photos"] = len(photo_ids)
     pack["coverage"] = coverage
-    pack["ambiguity"] = assess_ambiguity(
-        pack["cards"], coverage,
-        eye_detect_enabled=scoring["eye_detect_enabled"], margin=margin,
-    )
-    if pack.get("ranking_status") == "provisional":
-        pack["ambiguity"]["needs_review"] = True
-        pack["ambiguity"]["reasons"].append({
-            "code": "positive_keep_not_validated", "detail": pack["keep_review_message"],
-        })
+    pack["ambiguity"] = _evidence_ambiguity(pack, scoring, margin)
     pack["scoring"] = scoring
     return pack
 
@@ -431,8 +436,7 @@ def _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin,
         card.update(subject_urls(card["id"], card["subject"], focus_size))
     pack["coverage"] = coverage_counts(pack["cards"])
     pack["coverage"]["with_selected_subject"] = sum(c["subject"]["detection_id"] is not None for c in pack["cards"])
-    pack["ambiguity"] = assess_ambiguity(pack["cards"], pack["coverage"],
-                                         eye_detect_enabled=scoring["eye_detect_enabled"], margin=margin)
+    pack["ambiguity"] = _evidence_ambiguity(pack, scoring, margin)
     pack["scoring"] = scoring
     return pack
 

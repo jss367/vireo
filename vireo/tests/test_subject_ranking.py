@@ -576,3 +576,25 @@ def test_partial_selected_generation_stays_unranked_and_out_of_peer_scores(compa
     # A single complete subject still cannot satisfy comparison's two-subject minimum.
     too_few = _pack(app, pids[:2], requested_species=TARGET)
     assert too_few["scored"] is False and too_few["best_photo_id"] is None
+
+
+@pytest.mark.parametrize("requested_species", [True, False])
+def test_selected_subject_provisional_ranking_requires_review(comparison_library, requested_species):
+    import config as cfg
+    from keep_safety import KEEP_REVIEW_MESSAGE
+
+    app, db, pids, detections = comparison_library
+    overrides = {pid: detections[pid][0] for pid in pids}
+    comparison = SubjectComparison(TARGET) if requested_species else SubjectComparison(subject_overrides=overrides)
+    _analyze(db, pids, comparison, cfg.load())
+    context = {"requested_species": TARGET} if requested_species else {
+        "compare_subjects": True, "subject_overrides": overrides,
+    }
+    pack = _pack(app, pids, **context)
+    assert pack["scored"] is True
+    assert pack["ranked_candidate_id"] == pids[2]
+    assert pack["ranking_status"] == "provisional" and pack["best_photo_id"] is None
+    assert pack["ambiguity"]["needs_review"] is True
+    assert pack["ambiguity"]["reasons"] == [{
+        "code": "positive_keep_not_validated", "detail": KEEP_REVIEW_MESSAGE,
+    }]
