@@ -102,8 +102,11 @@ def test_shared_intent_reconciliation_rolls_back_with_failed_batch(app_and_db, m
     assert not db.edit_history.latest_undoable()
 
 
+@pytest.mark.parametrize('detach_before_decision', [False, True])
 @pytest.mark.parametrize('operation', ['save', 'resolve'])
-def test_identity_decision_repairs_sibling_sync_already_publishing(app_and_db, tmp_path, monkeypatch, operation):
+def test_identity_decision_repairs_sibling_sync_already_publishing(
+    app_and_db, tmp_path, monkeypatch, operation, detach_before_decision,
+):
     import xmp
     from sync import sync_from_xmp, sync_to_xmp
     from test_sync import _setup_photo_with_xmp
@@ -128,6 +131,10 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(app_and_db, t
     decisions = []
 
     def decide_before_publish(tree, target):
+        if detach_before_decision:
+            db.remove_workspace_folder(second, db.photos.get(pid)['folder_id'])
+            db.photo_visibility.revoke_grants(second, [pid])
+            db.commit()
         response = save(client, [pid]) if operation == 'save' else resolve(client, current_group(client))
         assert response.status_code == 200
         decisions.append(True)
@@ -138,9 +145,11 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(app_and_db, t
         assert sync_to_xmp(db)['failed'] == 0
     assert decisions == [True]
     desired = 'keyword_remove' if operation == 'save' else 'keyword_add'
+    repair_workspace = first if detach_before_decision else second
+    db.set_active_workspace(repair_workspace)
     repair = db.conn.execute(
         'SELECT change_token, sync_started FROM pending_changes WHERE photo_id=? AND workspace_id=? AND change_type=? AND value=?',
-        (pid, second, desired, CANDIDATES[0]),
+        (pid, repair_workspace, desired, CANDIDATES[0]),
     ).fetchone()
     assert repair and repair['change_token'] != old_token
     assert repair['sync_started']
@@ -150,6 +159,68 @@ def test_identity_decision_repairs_sibling_sync_already_publishing(app_and_db, t
     sync_from_xmp(db, [pid])
     assert (CANDIDATES[0] in db.photo_species.get_species_for_photos([pid]).get(pid, [])) is (operation == 'resolve')
     db.set_active_workspace(first)
+
+
+@pytest.mark.parametrize('detached', [False, True])
+def test_zero_link_save_and_alias_intents_converge_through_resolution_history(app_and_db, tmp_path, detached):
+    from sync import sync_from_xmp, sync_to_xmp
+    from test_sync import _setup_photo_with_xmp
+    from xmp import read_keywords
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Alias sync')
+    scientific = 'Tyrannus melancholicus'
+    db.conn.execute(
+        "INSERT INTO taxa(id, inat_id, name, common_name, rank) VALUES (90001, 90001, ?, ?, 'species')",
+        (scientific, CANDIDATES[0]),
+    )
+    db.add_keyword(scientific, is_species=True)
+    pid, path = _setup_photo_with_xmp(tmp_path, db, keywords={scientific, CANDIDATES[0], 'Unrelated note'})
+    folder = db.photos.get(pid)['folder_id']
+    db.add_workspace_folder(second, folder)
+    for name in (scientific, CANDIDATES[0]):
+        db.queue_change(pid, 'keyword_add', name, workspace_id=second)
+    unrelated = db.queue_change(pid, 'keyword_add', 'Another note', workspace_id=second)
+    if detached:
+        db.remove_workspace_folder(second, folder)
+        db.photo_visibility.revoke_grants(second, [pid])
+        db.commit()
+    assert not db.photo_species.get_species_for_photos([pid])
+    assert save(client, [pid]).status_code == 200
+    assert not db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_add' AND value IN (?, ?)",
+        (pid, scientific, CANDIDATES[0]),
+    ).fetchone()
+    assert db.conn.execute('SELECT 1 FROM pending_changes WHERE change_token=?', (unrelated,)).fetchone()
+    if detached:
+        assert not db.conn.execute(
+            "SELECT 1 FROM pending_changes WHERE photo_id=? AND workspace_id=? AND value IN (?, ?)",
+            (pid, second, scientific, CANDIDATES[0]),
+        ).fetchone()
+    assert sync_to_xmp(db)['failed'] == 0
+    assert not ({scientific, CANDIDATES[0]} & read_keywords(path))
+    db.add_workspace_folder(second, folder)
+    db.set_active_workspace(second)
+    assert sync_to_xmp(db)['failed'] == 0
+    sync_from_xmp(db, [pid])
+    assert not db.photo_species.get_species_for_photos([pid])
+    assert {'Unrelated note', 'Another note'} <= read_keywords(path)
+    db.set_active_workspace(first)
+    for name in (scientific, CANDIDATES[0]):
+        db.queue_change(pid, 'keyword_remove', name, workspace_id=second)
+    assert resolve(client, current_group(client), photo_ids=[pid]).status_code == 200
+    for action, expected in ((None, True), ('undo', False), ('redo', True)):
+        db.set_active_workspace(first)
+        if action:
+            assert client.post('/api/' + action).status_code == 200
+        db.set_active_workspace(second)
+        assert sync_to_xmp(db)['failed'] == 0
+        assert (CANDIDATES[0] in read_keywords(path)) is expected
+        assert scientific not in read_keywords(path)
+        assert {'Unrelated note', 'Another note'} <= read_keywords(path)
+        sync_from_xmp(db, [pid])
+        assert bool(db.photo_species.get_species_for_photos([pid])) is expected
 
 
 @pytest.mark.parametrize('operation', ['merge', 'rename'])

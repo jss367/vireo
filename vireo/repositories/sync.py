@@ -421,6 +421,30 @@ class SyncRepository:
         return [claimed[key] for c in changes
                 if (key := (c["id"], c["change_token"])) in claimed]
 
+    def keyword_intents_for_photo(self, photo_id: int) -> list[sqlite3.Row]:
+        """All workspace keyword intents for a shared photo, including detached scopes."""
+        return self.conn.execute(
+            "SELECT * FROM pending_changes WHERE photo_id=? AND change_type IN "
+            "('keyword_add', 'keyword_remove', 'keyword_remove_flat') ORDER BY id", (photo_id,),
+        ).fetchall()
+
+    def retire_keyword_intents(self, photo_id: int, values: Collection[str]) -> list[sqlite3.Row]:
+        """Retire selected spellings globally; caller retains captured-write repair work.
+
+        Must run in the caller's writer transaction. Returning the old tokens
+        and claim state lets a domain decision replace them in authorized
+        visible scopes without letting an old sync acknowledge the new rows.
+        """
+        removed = []
+        for chunk in self._chunks(list(dict.fromkeys(values))):
+            marks = ','.join('?' for _ in chunk)
+            removed.extend(self.conn.execute(
+                "DELETE FROM pending_changes WHERE photo_id=? AND change_type IN "
+                "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
+                f"AND value IN ({marks}) RETURNING *", [photo_id, *chunk],
+            ).fetchall())
+        return removed
+
     def flat_keyword_removals(self, photo_id: int, value: str) -> list[dict[str, Any]]:
         """The queued ``keyword_remove_flat`` rows for one photo and keyword.
 

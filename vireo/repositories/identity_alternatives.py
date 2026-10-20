@@ -129,7 +129,7 @@ class IdentityAlternativesRepository:
                  state['reason'], state['missing_evidence'], state.get('status', 'unresolved')),
             )
 
-    def _candidate_identities(self, candidates: Collection[str]) -> set[str]:
+    def candidate_identities(self, candidates: Collection[str]) -> set[str]:
         """Resolve named candidates with the catalog's authoritative source precedence."""
         names = {keyword_match_key(name) for name in candidates}
         identities, linked_names = set(), set()
@@ -159,7 +159,7 @@ class IdentityAlternativesRepository:
         Unrelated species in a genuine mixed-species frame are left alone.
         """
         names = {keyword_match_key(name) for name in candidates}
-        identities = self._candidate_identities(candidates)
+        identities = self.candidate_identities(candidates)
         result = {}
         for ids in chunked(list(photo_ids)):
             rows = self.conn.execute(

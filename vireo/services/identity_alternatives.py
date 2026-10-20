@@ -73,7 +73,9 @@ def _snapshot(identity: dict[str, Any] | None, links: list[dict[str, Any]]) -> s
     return json.dumps({'identity': identity, 'links': links}, sort_keys=True)
 
 
-def _queue_shared_keyword(db: Database, photo_id: int, name: str, *, present: bool) -> None:
+def _queue_shared_keyword(
+    db: Database, photo_id: int, name: str, *, present: bool, may_have_written: bool = False,
+) -> None:
     """Every workspace sync must converge the shared sidecar to this decision."""
     workspaces = {db.require_workspace_id()}
     workspaces.update(row['id'] for row in db.photo_visibility.affected_workspaces([photo_id]))
@@ -86,6 +88,35 @@ def _queue_shared_keyword(db: Database, photo_id: int, name: str, *, present: bo
         # its sidecar may already contain that older value.
         queue(db, photo_id, name, workspace_id=workspace_id, _commit=False)
         db.queue_change(photo_id, kind, name, workspace_id=workspace_id, _commit=False)
+        if may_have_written or db.pending_changes.keyword_sidecar_alias(photo_id, workspace_id, name):
+            db.pending_changes.mark_sync_started(photo_id, workspace_id, kind, name)
+
+
+def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) -> None:
+    """Reconcile candidate spellings even when no catalog attachment changed."""
+    identities = db.identity_alternatives.candidate_identities(names)
+    affected = {keyword_match_key(name): name for name in names}
+    pending = db.pending_changes.keyword_intents_for_photo(photo_id)
+    selected = []
+    for row in pending:
+        name = row['value']
+        if (keyword_match_key(name) in affected
+                or identities & db.identity_alternatives.candidate_identities([name])):
+            affected[keyword_match_key(name)] = name
+            selected.append(name)
+    removed = db.pending_changes.retire_keyword_intents(photo_id, selected)
+    may_have_written = any(row['sync_started'] for row in removed)
+    current = {keyword_match_key(row['name']): row['name']
+               for row in db.photo_keywords.get_for_photos([photo_id]).get(photo_id, [])}
+    # Retained aliases are real confirmations, while an obsolete queued alias
+    # absent from the catalog needs removal rather than a second confirmation.
+    for link in db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, []):
+        name = db.keywords.name_of(link['keyword_id'])
+        if name:
+            affected[keyword_match_key(name)] = name
+    for key, name in affected.items():
+        _queue_shared_keyword(db, photo_id, current.get(key, name), present=key in current,
+                              may_have_written=may_have_written)
 
 
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:
@@ -100,12 +131,10 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
         name = db.keywords.name_of(kid)
         if name:
             db.tag_photo(photo_id, kid, source=keyword_source_max(new_links[kid]['source']), _commit=False)
-    # Include retained target links: an existing confirmation can still have
-    # an obsolete pending removal in another workspace.
-    for kid in old_links.keys() | new_links.keys():
-        name = db.keywords.name_of(kid)
-        if name:
-            _queue_shared_keyword(db, photo_id, name, present=kid in new_links)
+    names = [name for data in (before, after) if data['identity']
+             and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
+    names.extend(name for kid in old_links.keys() | new_links.keys() if (name := db.keywords.name_of(kid)))
+    _reconcile_keyword_intents(db, photo_id, names)
     db.identity_alternatives.set_state(photo_id, after['identity'])
 
 
