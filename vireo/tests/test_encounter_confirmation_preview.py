@@ -367,7 +367,9 @@ def test_combined_species_flags_split_and_removal_share_one_undo(app_and_db):
 
 
 @pytest.mark.parametrize('failure', ['flag', 'removal', 'history', 'save', 'after_save', 'commit'])
-def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch, failure):
+@pytest.mark.parametrize('split', [False, True])
+@pytest.mark.parametrize('mode', ['add', 'remove', 'replace'])
+def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch, failure, split, mode):
     app, db = app_and_db
     ids, path = seed(app, db, 'Western Grebe')
     # Production caches are written through save_results_raw, which stores
@@ -377,6 +379,13 @@ def test_combined_apply_failure_rolls_back_every_effect(app_and_db, monkeypatch,
     save_results_raw(load_results_raw(cache_dir, db.active_workspace_id), cache_dir, db.active_workspace_id)
     client = app.test_client()
     body = combined_request(ids)
+    body['split'] = split
+    if mode != 'add':
+        body.pop('add')
+        if mode == 'remove':
+            body.update(species='Western Grebe', remove=True)
+        else:
+            body['previous_species'] = 'Western Grebe'
     preview = request_preview(client, body)
     before = json.load(open(path))
     before_species = db.photo_species.get_species_for_photos(ids)
@@ -837,7 +846,8 @@ def test_partial_confirmation_preserves_untouched_burst_primary_order(app_and_db
     assert json.load(open(path))['encounters'] == response.get_json()['encounters']
 
 
-def test_preferred_primary_order_does_not_merge_shared_name_taxon_homonyms(app_and_db):
+@pytest.mark.parametrize('combined', [False, True])
+def test_preferred_primary_order_does_not_merge_shared_name_taxon_homonyms(app_and_db, combined):
     app, db = app_and_db
     ids, path = seed(app, db)
     db.conn.executemany('INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)', [
@@ -860,14 +870,21 @@ def test_preferred_primary_order_does_not_merge_shared_name_taxon_homonyms(app_a
     before = db.photo_species.get_species_for_photos(ids, include_identities=True)
     client = app.test_client()
     body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    if combined:
+        body.update(photo_ids=ids[:2], source_photo_ids=ids, burst_index=0,
+                    group_changes=combined_request(ids)['group_changes'])
     response = apply(client, body, request_preview(client, body))
     assert response.status_code == 200, response.get_json()
     enc = response.get_json()['encounters'][0]
-    assert enc['confirmed_species_list'] == ['Eared Grebe']
+    assert enc['confirmed_species_list'] == ([] if combined else ['Eared Grebe'])
     assert enc['bursts'][0]['species_override']['species_list'] == ['Eared Grebe']
+    if combined:
+        assert enc['bursts'][1]['species_override']['species_list'] == ['Robin']
     after = db.photo_species.get_species_for_photos(ids, include_identities=True)
     assert all(entry in after[pid] for pid, entries in before.items() for entry in entries)
     assert before[ids[0]][0]['key'] != before[ids[1]][0]['key']
+    if combined:
+        assert after[ids[2]] == before[ids[2]]
     assert client.post('/api/undo').status_code == 200
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before
     assert client.post('/api/redo').status_code == 200
@@ -1044,3 +1061,107 @@ def test_previous_species_root_snapshot_excludes_irrelevant_candidates(app_and_d
     assert apply(client, body, preview).status_code == 200
     assert tuple(db.conn.execute('SELECT * FROM keywords WHERE id=?', (kid,)).fetchone()) == untouched
     assert all(names == ['Eared Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
+
+
+@pytest.mark.parametrize('mode', ['add', 'remove', 'replace'])
+@pytest.mark.parametrize('split', [False, True])
+def test_combined_species_summaries_use_final_burst_membership(app_and_db, mode, split):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    initial = ['Western Grebe', 'Eared Grebe', 'American Wigeon'] if mode == 'remove' else ['Western Grebe', 'American Wigeon']
+    for name in initial[1:]:
+        kid = db.add_keyword(name, is_species=True)
+        for pid in ids:
+            db.tag_photo(pid, kid)
+    cached = json.load(open(path))
+    enc = cached['encounters'][0]
+    enc['confirmed_species_list'] = initial
+    enc['focus_cohorts'] = {'subject': {'scope': 'encounter', 'basis': 'subject', 'size': len(ids), 'photo_ids': ids}}
+    enc['bursts'][0].update(
+        species_override={'species': initial[0], 'species_list': initial, 'confirmed': True},
+        trace=[{'pair': ids[:2]}], focus_cohorts={'subject': {'photo_ids': ids}},
+    )
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    body = combined_request(ids)
+    body.update(photo_ids=ids[:2], source_photo_ids=ids, split=split)
+    if mode == 'add':
+        expected = ['Western Grebe', 'American Wigeon', 'Eared Grebe']
+    elif mode == 'remove':
+        body.pop('add')
+        body.update(species='Western Grebe', remove=True)
+        expected = ['Eared Grebe', 'American Wigeon']
+    else:
+        body.pop('add')
+        body['previous_species'] = 'Western Grebe'
+        expected = ['Eared Grebe', 'American Wigeon']
+    client = app.test_client()
+    before_species = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    groups = response.get_json()['encounters']
+    bursts = {tuple(burst['photo_ids']): burst for group in groups for burst in group['bursts']}
+    surviving, removed = bursts[tuple(ids[:2])], bursts[tuple(ids[2:])]
+    assert surviving['species_override'] == {'species': expected[0], 'species_list': expected, 'confirmed': True}
+    assert removed['species_override'] == {'species': initial[0], 'species_list': initial, 'confirmed': True}
+    assert all('trace' not in burst and 'focus_cohorts' not in burst for burst in bursts.values())
+    expected_groups = [expected, initial] if split else [
+        {'add': ['Western Grebe', 'American Wigeon'], 'remove': ['Eared Grebe', 'American Wigeon'],
+         'replace': ['American Wigeon']}[mode]]
+    assert [group['confirmed_species_list'] for group in groups] == expected_groups
+    assert all(group['species_confirmed'] for group in groups)
+    if not split:
+        assert groups[0]['focus_cohorts'] == enc['focus_cohorts']
+    after = json.load(open(path))
+    after_species = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history + 1
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path))['encounters'] == cached['encounters']
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before_species
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert client.post('/api/redo').status_code == 200
+    assert json.load(open(path))['encounters'] == after['encounters']
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == after_species
+    assert db.photos.get(ids[0])['flag'] == 'flagged' and db.photos.get(ids[1])['flag'] == 'rejected'
+
+
+@pytest.mark.parametrize('split', [False, True])
+def test_combined_removal_from_later_burst_restores_exact_full_cache(app_and_db, split):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    # Reconfirm an existing tag: history then owns flags/grouping only, so its
+    # snapshot round-trip includes every cache field without a photo refresh.
+    extra = db.add_keyword('Eared Grebe', is_species=True)
+    db.tag_photo(ids[1], extra)
+    cached = json.load(open(path))
+    cached['encounters'][0].update(burst_count=2, bursts=[{'photo_ids': ids[:1]}, {'photo_ids': ids[1:]}])
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    from pipeline import load_results_raw, save_results_raw
+    cache_dir = os.path.dirname(path)
+    save_results_raw(load_results_raw(cache_dir, db.active_workspace_id), cache_dir, db.active_workspace_id)
+    before = json.load(open(path))
+    before_species = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids[1:2], 'source_photo_ids': ids[1:],
+            'burst_index': 1, 'add': True, 'split': split,
+            'group_changes': {'picks': ids[1:2], 'rejects': [], 'candidates': [], 'removed': ids[2:],
+                              'encounter_index': 0, 'burst_index': 1, 'expected_burst_photo_ids': ids[1:]}}
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    after = json.load(open(path))
+    bursts = {tuple(burst['photo_ids']): burst for enc in after['encounters'] for burst in enc['bursts']}
+    assert bursts[tuple(ids[:1])]['species_override']['species_list'] == ['Western Grebe']
+    assert bursts[tuple(ids[1:2])]['species_override']['species_list'] == ['Western Grebe', 'Eared Grebe']
+    assert bursts[tuple(ids[2:])]['species_override']['species_list'] == ['Western Grebe']
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before_species
+    assert db.photos.get(ids[1])['flag'] == 'flagged'
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path)) == before
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before_species
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
+    assert client.post('/api/redo').status_code == 200
+    assert json.load(open(path)) == after
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before_species
+    assert db.photos.get(ids[1])['flag'] == 'flagged'

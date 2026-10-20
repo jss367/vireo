@@ -34,6 +34,9 @@ def detach_review_photo(results: JsonDict, enc_idx: int, burst_idx: int, photo_i
 
     # Remove photo from burst
     burst["photo_ids"].remove(photo_id)
+    # Burst-local pair/cohort provenance no longer describes these members.
+    burst.pop("trace", None)
+    burst.pop("focus_cohorts", None)
 
     if len(burst["photo_ids"]) == 0:
         # Last photo — remove the empty burst

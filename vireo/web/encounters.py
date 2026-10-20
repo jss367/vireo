@@ -1027,14 +1027,18 @@ class _SpeciesConfirmation:
         Apply the pipeline-cache mutation and persist inside the same
         transaction so a failed ``save_results_raw`` rolls back the
         species/keyword edits that would otherwise leave undo pointing
-        at a change that never landed on disk. ``burst_index`` was
-        validated above, so the branch here is unambiguous: burst-
-        scoped requests only touch the burst override, encounter-
-        scoped requests only touch the encounter.
+        at a change that never landed on disk. Legacy requests use the
+        validated burst/encounter scope. Previewed requests derive all
+        affected summaries after staged removals establish final membership.
         """
         cached = self.cached
         if not (cached and self.target_enc is not None):
             return
+        flag_items = []
+        if self.group_plan is not None:
+            from services.review_group_changes import apply_group_changes
+            # Derive shared species only after removals establish final bursts.
+            flag_items = apply_group_changes(self.db, cached, self.group_plan)
         if self.preview_scope:
             from services.encounter_confirmation import apply_scope
             apply_scope(self.db, cached, self.target_enc, self.photo_ids,
@@ -1045,7 +1049,7 @@ class _SpeciesConfirmation:
             self._apply_encounter_species()
         before_cached = self.before_cached
         if self.group_plan is not None:
-            self._apply_combined_group()
+            self._apply_combined_group(flag_items)
         elif (
             self.photo_edit_id is not None
             and before_cached["encounters"] != cached["encounters"]
@@ -1071,12 +1075,10 @@ class _SpeciesConfirmation:
         self.cache_saved = True
         self.save_results_raw(cached, self.cache_dir, self.db.active_workspace_id)
 
-    def _apply_combined_group(self):
-        """Finish flags/removals and one history entry in the species transaction."""
+    def _apply_combined_group(self, flag_items):
+        """Record the completed species/cull decision as one history entry."""
         from services.grouping_history import convert_to_grouping_edit, record_grouping_edit
-        from services.review_group_changes import apply_group_changes
 
-        flag_items = apply_group_changes(self.db, self.cached, self.group_plan)
         self.group_photo_states = {
             pid: {"flag": self.db.photos.get(pid)["flag"] or "none"}
             for key in ("picks", "rejects", "candidates") for pid in self.group_plan[key]
