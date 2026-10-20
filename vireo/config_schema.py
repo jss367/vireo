@@ -667,10 +667,10 @@ SCHEMA = {
         "desc": "Classifier confidence gate for eye-focus.",
     },
     "pipeline.eye_detection_conf_gate": {
-        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "type": "float", "min": 0.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
-        "label": "Eye: detection confidence",
-        "desc": "Detection confidence gate for eye-focus.",
+        "label": "Eye: minimum keypoint score",
+        "desc": "Minimum raw model score for eye-focus; not a probability. Scores and thresholds may exceed one.",
     },
     "pipeline.eye_window_k": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,

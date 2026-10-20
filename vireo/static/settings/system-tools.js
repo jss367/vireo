@@ -442,6 +442,12 @@ async function loadMcpConnectInfo() {
   try {
     var data = await safeFetch('/api/system/mcp-config', {}, { toast: false });
     commandEl.textContent = data.claude_code;
+    var codexCommand = document.getElementById('mcpCodexCommand');
+    var codexToml = document.getElementById('mcpCodexToml');
+    var shell = document.getElementById('mcpCommandShell');
+    if (codexCommand) codexCommand.textContent = data.codex.command;
+    if (codexToml) codexToml.textContent = data.codex.config_toml;
+    if (shell) shell.textContent = data.shell;
     // Flask sorts keys; show the file the way people write it, command first.
     var servers = data.claude_desktop.mcpServers || {};
     /** @type {Record<string, {command: string, args: string[]}>} */ var ordered = {};
@@ -450,9 +456,37 @@ async function loadMcpConnectInfo() {
     });
     jsonEl.textContent = JSON.stringify({ mcpServers: ordered }, null, 2);
   } catch (err) {
-    var message = err instanceof Error ? err.message : String(err);
-    commandEl.textContent = 'Could not load the connection command: ' + message;
-    jsonEl.textContent = commandEl.textContent;
+    // A failed response can contain sensitive diagnostics; do not echo it.
+    ['mcpClaudeCodeCommand', 'mcpClaudeDesktopJson', 'mcpCodexCommand', 'mcpCodexToml'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = 'Could not load setup instructions. Reload Settings and check the Vireo log panel.';
+    });
+  }
+}
+
+async function checkMcpConnection() {
+  var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('mcpCheckButton'));
+  var result = document.getElementById('mcpCheckResult');
+  if (!button || !result || button.disabled) return;
+  button.disabled = true;
+  result.textContent = 'Starting the MCP server and reading catalog status…';
+  try {
+    var data = await safeFetch('/api/system/mcp-check', { method: 'POST' }, { toast: false });
+    if (!data.ok) {
+      result.textContent = 'Server check failed: ' + data.message;
+      return;
+    }
+    var workspace = data.status.active_workspace || {};
+    var folders = (data.folders || []).map(/** @param {{path: string}} folder */ function (folder) { return folder.path; });
+    result.textContent = 'MCP server started and answered read-only tools.\n' +
+      'Workspace: ' + workspace.name + ' (id ' + workspace.id + ')\n' +
+      'Photos: ' + data.status.photo_count + '\n' +
+      'Folders: ' + (folders.join('\n') || 'None') + '\n' +
+      'Confirm this is your intended catalog. Check your assistant’s own MCP status to verify its connection.';
+  } catch (err) {
+    result.textContent = 'Could not complete the server check. Check Vireo’s log panel, reload Settings and retry.';
+  } finally {
+    button.disabled = false;
   }
 }
 

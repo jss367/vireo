@@ -333,9 +333,10 @@ export function _lbRenderEyeCrosshair(/** @type {LightboxPhoto | null | undefine
   marker.className = 'lb-eye-crosshair';
   marker.style.left = xPct.toFixed(3) + '%';
   marker.style.top = yPct.toFixed(3) + '%';
-  if (photo.eye_conf != null) {
+  if (photo.eye_conf != null && Number.isFinite(photo.eye_conf)) {
     var label = document.createElement('span');
-    label.textContent = 'eye ' + Math.round(photo.eye_conf * 100) + '%';
+    label.textContent = 'eye score ' + photo.eye_conf.toFixed(3);
+    label.title = 'Raw keypoint model score; not a probability. Scores may exceed one.';
     marker.appendChild(label);
   }
   container.appendChild(marker);

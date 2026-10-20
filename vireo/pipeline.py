@@ -2125,7 +2125,7 @@ def save_results_raw(results, cache_dir, workspace_id):
 #   1. Classifier confidence >= C AND species in {Aves, Mammalia}.
 #   2. ONNX weights for the routed model present on disk (no auto-download
 #      from the stage — weights are user-opt-in via the pipeline page).
-#   3. Eye keypoint confidence >= T.
+#   3. Finite eye keypoint score >= T (raw model units, not probability).
 #   4. Eye keypoint falls inside the subject mask.
 
 
@@ -2296,16 +2296,22 @@ def _current_primary_mask_for_eye(db, row, iw, ih):
 
 
 def _eye_candidates_in_mask(kps, mask, T):
-    """Return the eye keypoints that pass the confidence and mask gates."""
+    """Return finite eye keypoints passing the raw-score and mask gates.
+
+    ``T`` uses the decoder's raw model units. Scores above one are valid;
+    NaN/inf scores or coordinates must never reach focus measurement/storage.
+    """
     eye_candidates = []
     for k_point in kps:
         if k_point["name"] not in ("left_eye", "right_eye"):
             continue
+        if not np.isfinite([k_point["conf"], k_point["x"], k_point["y"]]).all():
+            continue
         if k_point["conf"] < T:
             continue
-        mx, my = int(k_point["x"]), int(k_point["y"])
-        if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
+        if not (0 <= k_point["x"] < mask.shape[1] and 0 <= k_point["y"] < mask.shape[0]):
             continue
+        mx, my = int(k_point["x"]), int(k_point["y"])
         if not mask[my, mx]:
             continue
         eye_candidates.append(k_point)

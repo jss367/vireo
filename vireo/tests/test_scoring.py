@@ -316,6 +316,26 @@ def test_focus_score_uses_eye_tenengrad_when_populated():
     )
 
 
+def test_above_one_keypoint_score_does_not_inflate_quality():
+    """Only measured eye sharpness contributes to quality after localization."""
+    import copy
+
+    from scoring import score_encounter
+
+    original = {"photos": [
+        _make_base_photo(eye_tenengrad=5000, eye_conf=0.9),
+        _make_base_photo(eye_tenengrad=50000, eye_conf=0.9),
+    ]}
+    above_one = copy.deepcopy(original)
+    above_one["photos"][0]["eye_conf"] = 1.0579406023025513
+    config = {"eye_detect_enabled": True, "reject_eye_focus": 0.35}
+    score_encounter(original, config=config)
+    score_encounter(above_one, config=config)
+    for before, after in zip(original["photos"], above_one["photos"], strict=True):
+        for field in ("eye_focus_score", "focus_score", "quality_composite", "reject_reasons", "label"):
+            assert before[field] == after[field]
+
+
 def test_focus_score_falls_back_to_subject_tenengrad_when_eye_null():
     """Photos without an eye signal keep the pre-feature body-ranking behavior."""
     from scoring import score_encounter

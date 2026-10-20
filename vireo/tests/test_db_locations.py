@@ -90,6 +90,19 @@ def test_photo_location_statuses_empty_input_skips_query(db):
     assert statements == []
 
 
+def test_cached_place_details_selects_newest_exact_place_without_workspace(db):
+    db.locations.reverse_geocode_cache_put(1, 2, "park", '{"name":"Old"}')
+    db.locations.reverse_geocode_cache_put(3, 4, "park", '{"name":"New"}')
+    db.locations.reverse_geocode_cache_put(5, 6, "other", '{"name":"Other"}')
+    # Make recency explicit rather than depending on clock resolution.
+    db.conn.execute("UPDATE place_reverse_geocode_cache SET fetched_at=10 WHERE lat_grid=1")
+    db.conn.execute("UPDATE place_reverse_geocode_cache SET fetched_at=20 WHERE lat_grid=3")
+    assert db.locations.cached_place_details(["park", "park", "missing"]) == {"park": '{"name":"New"}'}
+    statements = _trace(db)
+    assert db.locations.cached_place_details([]) == {}
+    assert statements == []
+
+
 def test_photo_location_statuses_classify_each_source(db, fid):
     exif = _photo(db, fid, "exif.jpg", 1.0, 2.0)
     half = _photo(db, fid, "half.jpg", 1.0, None)

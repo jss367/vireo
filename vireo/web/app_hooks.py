@@ -63,6 +63,8 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
     "browse.api_selection_wildlife_state",
     "photo_edit_recipes.api_photo_edit_recipe_summary",
     "collections.api_collection_preview",
+    # Explicit diagnostic action, but its MCP tool calls only read the catalog.
+    "system.api_system_mcp_check",
 })
 
 

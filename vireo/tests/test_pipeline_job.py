@@ -9297,6 +9297,7 @@ def test_extract_masks_single_unreadable_file_is_reported_not_skipped(
     assert em["skipped"] == 0, (
         f"An unreadable file is not a benign skip; got {em!r}"
     )
+    assert em["outcomes"]["counts"] == {"completed": 2, "unreadable": 1}
     assert state["proxy_calls"] == 3, (
         f"Every photo should still have been attempted; got "
         f"{state['proxy_calls']}"
@@ -9339,6 +9340,7 @@ def test_extract_masks_no_subject_still_counts_as_benign_skip(
     assert em.get("unreadable", 0) == 0, (
         f"Nothing was unreadable here; got {em!r}"
     )
+    assert em["outcomes"]["counts"] == {"sam_no_mask": 2}
     final = _extract_masks_final_update(runner)
     assert final["status"] == "completed", (
         f"No-subject skips must not fail the stage; got {final!r}"
@@ -18851,3 +18853,88 @@ def test_failed_stage_preserves_benign_notes_on_the_terminal_result(tmp_path, mo
     assert job["status"] == "failed"
     assert job["result"]["notes"]
     assert "[scan] genuine failure" not in job["result"]["notes"]
+
+
+def test_extract_masks_records_person_only_skip_without_claiming_sam_ran(tmp_path, monkeypatch):
+    """Reproduce the duck sequence: a confident person box is not an animal."""
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder_id = db.add_folder(folder_path)
+    photo_id = _add_photo_with_detection(db, folder_id, folder_path, "duck.jpg")
+    db.detections.clear(photo_id)
+    db.detections.save(photo_id, [{
+        "box": {"x": .18, "y": .35, "w": .53, "h": .39},
+        "confidence": .69, "category": "person",
+    }], detector_model="megadetector-v6")
+    collection_id = db.collections.add("Portrait", json.dumps([
+        {"field": "photo_ids", "value": [photo_id]},
+    ]))
+    state = _stub_extract_masks_heavy_ops(monkeypatch)
+    _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+    diagnostics = result["stages"]["extract_masks"]["outcomes"]
+    assert diagnostics["counts"] == {"no_retained_animal": 1}
+    assert diagnostics["samples"]["no_retained_animal"] == [{"photo_id": photo_id}]
+    assert diagnostics["settings"]["detector_confidence"] == .2
+    assert state["proxy_calls"] == 0
+
+
+def test_extract_masks_retains_exception_type_and_photo_in_result(tmp_path, monkeypatch):
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder_id = db.add_folder(folder_path)
+    photo_id = _add_photo_with_detection(db, folder_id, folder_path, "duck.jpg")
+    collection_id = db.collections.add("Portrait", json.dumps([
+        {"field": "photo_ids", "value": [photo_id]},
+    ]))
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    import masking
+
+    def broken_mask(*args, **kwargs):
+        raise ValueError("invalid segmentation output")
+
+    monkeypatch.setattr(masking, "generate_mask", broken_mask)
+    _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+    diagnostics = result["stages"]["extract_masks"]["outcomes"]
+    assert diagnostics["counts"] == {"failed": 1}
+    assert diagnostics["samples"]["failed"] == [{
+        "photo_id": photo_id, "error": "ValueError: invalid segmentation output",
+    }]
+
+
+def test_stage_outcomes_bound_samples_without_losing_counts():
+    from pipeline_stages.outcomes import StageOutcomes
+    outcomes = StageOutcomes()
+    for photo_id in range(100):
+        outcomes.record(photo_id, "failed", ValueError("x" * 2000))
+    saved = outcomes.as_dict()
+    assert saved["counts"] == {"failed": 100}
+    assert saved["samples_truncated"] is True
+    assert len(saved["samples"]["failed"]) == saved["sample_limit_per_outcome"]
+    assert len(saved["samples"]["failed"][0]["error"]) == 1000
+
+
+@pytest.mark.parametrize("box_count,reason", [
+    (None, "no_detection_evidence"),
+    (0, "detector_completed_zero_boxes"),
+    (2, "detector_persistence_incomplete"),
+])
+def test_extract_masks_distinguishes_zero_boxes_from_missing_execution(
+    tmp_path, monkeypatch, box_count, reason,
+):
+    db_path, db, ws_id = _open_db(tmp_path)
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    folder_id = db.add_folder(folder_path)
+    photo_id = _add_photo_with_detection(db, folder_id, folder_path, "duck.jpg")
+    db.detections.clear(photo_id)
+    if box_count is not None:
+        db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count)
+        db.commit()
+    collection_id = db.collections.add("Portrait", json.dumps([
+        {"field": "photo_ids", "value": [photo_id]},
+    ]))
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    _, result = _run_extract_masks_only(db_path, ws_id, collection_id)
+    assert result["stages"]["extract_masks"]["outcomes"]["counts"] == {reason: 1}

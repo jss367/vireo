@@ -11,6 +11,8 @@ import sys
 import tempfile
 import time
 
+from export_metadata import export_metadata_args as _export_metadata_args
+from export_metadata import timestamp_parts
 from image_edits import apply_recipe_to_loaded_image
 from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS, load_image
 from proc import no_window_kwargs
@@ -639,7 +641,10 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         when beside-original exports span multiple folders, the complete list
         is available in ``destinations``. When collect_files is true, ``files``
         contains only successful output paths and is not guaranteed to remain
-        positionally aligned with photo_ids.
+        positionally aligned with photo_ids. Metadata selections also return
+        ``metadata_summary`` provenance/unavailable counts for successful files;
+        collect_files adds per-output ``metadata_details``. Source precedence
+        and format limitations are documented in docs/export-metadata.md.
     """
     return _PhotoExportBatch(
         db, vireo_dir, photo_ids, destination, options,
@@ -722,6 +727,7 @@ class _PhotoExportBatch:
         self.exported_files = [] if collect_files else None
         self.errors = []
         self.metadata_jobs = []
+        self.metadata_reports = {}
         self.resolved_destinations = []
         self.resolved_destination_set = set()
         # Destinations that received at least one finished file. A destination is
@@ -760,6 +766,17 @@ class _PhotoExportBatch:
             db.locations.get_effective(self.photo_ids, verify_workspace=False)
             if "location" in self.metadata_fields else {}
         )
+        if "location" in self.metadata_fields:
+            leaves = db.locations.get_photo_leaves(self.photo_ids)
+            paths = db.locations.get_photo_paths(leaves)
+            cached = db.locations.cached_place_details([
+                row["place_id"] for row in leaves.values() if row["place_id"]
+            ])
+            for pid, row in leaves.items():
+                self.location_map.setdefault(pid, {}).update({
+                    "hierarchy": paths[pid], "place_id": row["place_id"],
+                    "place_details": cached.get(row["place_id"]),
+                })
 
         # Get species keywords for all photos in one query
         self.species_map = db.photo_species.get_species_for_photos(self.photo_ids)
@@ -851,13 +868,17 @@ class _PhotoExportBatch:
                 img.close()
             if self.metadata_fields:
                 try:
+                    report = {}
                     metadata_args = _export_metadata_args(
                         self.metadata_fields,
                         photo,
                         species_list,
                         self.camera_data_map.get(pid, {}),
-                        self.location_map.get(pid),
+                        self.location_map.get(pid, {}),
+                        source_metadata=self.exif_data_map.get(pid),
+                        report=report,
                     )
+                    self.metadata_reports[out_path] = {"photo_id": pid, "fields": report}
                 except Exception:  # broad: remove the untagged output on any failure, then re-raise
                     # A checked metadata option is part of the requested
                     # output contract. Do not leave behind an apparently
@@ -891,6 +912,9 @@ class _PhotoExportBatch:
         self.written_destination_set.add(photo_destination)
         if self.exported_files is not None:
             self.exported_files.append(out_path)
+        report = self.metadata_reports.get(out_path)
+        if report is not None:
+            report["written"] = True
 
     def _finish_metadata(self):
         """Count only metadata successes, retaining cancellation and pause boundaries."""
@@ -905,6 +929,8 @@ class _PhotoExportBatch:
             self.exported += metadata_exported
             self.errors.extend(metadata_errors)
             success_set = set(metadata_success_paths)
+            for path in success_set:
+                self.metadata_reports[path]["written"] = True
             self.written_destination_set.update(
                 self.metadata_job_destinations[path] for path in success_set
                 if path in self.metadata_job_destinations
@@ -951,6 +977,25 @@ class _PhotoExportBatch:
         }
         if self.exported_files is not None:
             result["files"] = self.exported_files
+        if self.metadata_fields:
+            result.update(self._metadata_result())
+        return result
+
+    def _metadata_result(self):
+        """Aggregate provenance and missing fields only for finished outputs."""
+        summary = {}
+        details = []
+        for path, report in self.metadata_reports.items():
+            if not report.get("written"):
+                continue
+            for field, source in report["fields"].items():
+                counts = summary.setdefault(field, {})
+                counts[source] = counts.get(source, 0) + 1
+            if self.exported_files is not None:
+                details.append({"photo_id": report["photo_id"], "path": path, "fields": report["fields"]})
+        result = {"metadata_summary": summary}
+        if self.exported_files is not None:
+            result["metadata_details"] = details
         return result
 
 
@@ -1009,124 +1054,8 @@ def _photo_value(photo, key, default=None):
 
 
 def _export_timestamp_parts(timestamp):
-    """Return date/time fields for a catalog ISO timestamp."""
-    value = str(timestamp or "").strip()
-    match = re.match(
-        r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})"
-        r"(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$",
-        value,
-    )
-    if not match:
-        return None, None, None, None, None, None
-    year, month, day, hour, minute, second, subsecond, offset = match.groups()
-    if offset == "Z":
-        offset = "+00:00"
-    date = f"{year}:{month}:{day}"
-    capture_time = f"{hour}:{minute}:{second}{offset or ''}"
-    suffix = (f".{subsecond}" if subsecond else "") + (offset or "")
-    xmp_datetime = f"{year}-{month}-{day}T{hour}:{minute}:{second}{suffix}"
-    # EXIF stores the offset in separate tags, so keep its base timestamp
-    # timezone-free even though IPTC and XMP carry the suffix inline.
-    exif_datetime = f"{date} {hour}:{minute}:{second}"
-    return date, capture_time, exif_datetime, xmp_datetime, subsecond, offset
-
-
-def _metadata_assignment(tag, value):
-    """Build an ExifTool assignment while rejecting line-oriented arguments."""
-    text = str(value).replace("\r", " ").replace("\n", " ")
-    return f"-{tag}={text}"
-
-
-def _export_metadata_args(fields, photo, species, camera_data, location_data=None):
-    """Build ExifTool assignments for one rendered export."""
-    args = []
-    selected = set(fields)
-
-    if "species" in selected:
-        for index, name in enumerate(species):
-            operator = "=" if index == 0 else "+="
-            clean = str(name).replace("\r", " ").replace("\n", " ")
-            args.extend([
-                f"-XMP-dc:Subject{operator}{clean}",
-                f"-IPTC:Keywords{operator}{clean}",
-            ])
-
-    (
-        date,
-        capture_time,
-        exif_datetime,
-        xmp_datetime,
-        subsecond,
-        offset,
-    ) = _export_timestamp_parts(_photo_value(photo, "timestamp"))
-    if "capture_date" in selected and date:
-        args.append(_metadata_assignment("IPTC:DateCreated", date))
-    if "capture_time" in selected and capture_time:
-        args.append(_metadata_assignment("IPTC:TimeCreated", capture_time))
-    if (
-        "capture_date" in selected
-        and "capture_time" in selected
-        and exif_datetime
-    ):
-        args.extend([
-            _metadata_assignment("EXIF:DateTimeOriginal", exif_datetime),
-            _metadata_assignment("EXIF:CreateDate", exif_datetime),
-            _metadata_assignment("XMP-exif:DateTimeOriginal", xmp_datetime),
-            _metadata_assignment("XMP-xmp:CreateDate", xmp_datetime),
-        ])
-        if subsecond:
-            args.extend([
-                _metadata_assignment("EXIF:SubSecTimeOriginal", subsecond),
-                _metadata_assignment("EXIF:SubSecTimeDigitized", subsecond),
-            ])
-        if offset:
-            args.extend([
-                _metadata_assignment("EXIF:OffsetTimeOriginal", offset),
-                _metadata_assignment("EXIF:OffsetTimeDigitized", offset),
-            ])
-
-    if "rating" in selected:
-        rating = _photo_value(photo, "rating")
-        if rating is not None:
-            args.append(_metadata_assignment("XMP-xmp:Rating", int(rating)))
-
-    if "location" in selected:
-        location_source = location_data if location_data is not None else photo
-        latitude = _photo_value(location_source, "latitude")
-        longitude = _photo_value(location_source, "longitude")
-        if latitude is not None and longitude is not None:
-            latitude = float(latitude)
-            longitude = float(longitude)
-            args.extend([
-                _metadata_assignment("EXIF:GPSLatitude", abs(latitude)),
-                _metadata_assignment(
-                    "EXIF:GPSLatitudeRef", "N" if latitude >= 0 else "S"
-                ),
-                _metadata_assignment("EXIF:GPSLongitude", abs(longitude)),
-                _metadata_assignment(
-                    "EXIF:GPSLongitudeRef", "E" if longitude >= 0 else "W"
-                ),
-            ])
-
-    if "camera" in selected:
-        camera_tags = (
-            ("EXIF:Make", camera_data.get("camera_make")),
-            ("EXIF:Model", camera_data.get("camera_model")),
-            ("EXIF:LensModel", camera_data.get("lens")),
-            ("EXIF:FocalLength", camera_data.get("focal_length")),
-            ("EXIF:FNumber", camera_data.get("aperture")),
-            ("EXIF:ExposureTime", camera_data.get("shutter_speed")),
-            ("EXIF:ISO", camera_data.get("iso")),
-        )
-        args.extend(
-            _metadata_assignment(tag, value)
-            for tag, value in camera_tags
-            if value not in (None, "")
-        )
-
-    # A selected field can legitimately be unavailable for one photo. In
-    # that case there is nothing to write and the image itself still exports.
-    return args
+    """Compatibility entry point for export timestamp formatting."""
+    return timestamp_parts(timestamp)
 
 
 def _exiftool_argfile_path(path):

@@ -5,6 +5,33 @@ import pytest
 from playwright.sync_api import expect
 
 
+def test_eye_keypoint_threshold_uses_raw_score_units(live_server, page):
+    url = live_server["url"]
+    page.goto(url + "/settings")
+    _wait_for_settings_idle(page)
+    page.locator(".collapsible-header").filter(has_text="Pipeline Tuning").click()
+    field = page.locator("#cfgEyeDetectionConfGate")
+    expect(field).to_have_value("0.5")
+    expect(page.locator("#cfgEyeDetectionConfGateVal")).to_have_text("0.5")
+    assert field.get_attribute("max") is None
+    with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST") as saved:
+        field.fill("1.05")
+        field.press("Tab")
+    assert saved.value.ok
+    assert page.request.get(url + "/api/config").json()["pipeline"]["eye_detection_conf_gate"] == 1.05
+    page.reload()
+    _wait_for_settings_idle(page)
+    page.locator(".collapsible-header").filter(has_text="Pipeline Tuning").click()
+    expect(field).to_have_value("1.05")
+    expect(page.locator("#cfgEyeDetectionConfGateVal")).to_have_text("1.05")
+    with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST") as reset:
+        page.get_by_role("button", name="Reset to defaults", exact=True).click()
+    assert reset.value.ok
+    expect(field).to_have_value("0.5")
+    expect(page.locator("#cfgEyeDetectionConfGateVal")).to_have_text("0.5")
+    assert page.request.get(url + "/api/config").json()["pipeline"]["eye_detection_conf_gate"] == 0.5
+
+
 def test_time_format_saves_and_applies_to_photo_cards(live_server, page):
     url = live_server["url"]
     page.request.post(url + "/api/config", data={"browse_card_fields": ["filename", "capture_date"]})

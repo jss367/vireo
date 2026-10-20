@@ -350,6 +350,43 @@ def test_get_predictions_latest_fingerprint_only(db, cat):
     assert [r["species"] for r in db.predictions.get_rows()] == ["New"]
 
 
+@pytest.mark.parametrize("floor", [None, 0.8])
+@pytest.mark.parametrize("scope", ["workspace", "photo", "chunked"])
+def test_get_predictions_detector_floor_and_current_labels(db, cat, floor, scope):
+    """Only current, eligible rows surface; cached rows reappear when lowered."""
+    pid = cat["p"][0]
+    threshold = 0.2 if floor is None else floor
+    if floor is not None:
+        db.workspaces.update(cat["ws"], config_overrides={"detector_confidence": floor})
+    high = _det(db, pid, conf=0.9, model="md-high")
+    boundary = _det(db, pid, conf=threshold, model="md-boundary")
+    low = _det(db, pid, conf=0.1, model="md-low")
+    full = _det(db, pid, conf=0.0, model="full-image")
+    for det, species, confidence, fingerprint in [
+        (high, "Old", 0.99, "old"),
+        (high, "Current", 0.6, "new"),
+        (boundary, "Boundary", 0.7, "new"),
+        (low, "Hidden", 0.95, "new"),
+        (full, "Full Image", 0.8, "new"),
+    ]:
+        db.predictions.add(det, species, confidence, "m1", labels_fingerprint=fingerprint)
+    # All inserts can share a timestamp: the larger id must break the tie.
+    db.conn.execute("UPDATE predictions SET created_at = '2026-01-01'")
+    db.commit()
+    photo_ids = {
+        "workspace": None,
+        "photo": [pid],
+        "chunked": list(range(10_000, 10_800)) + [pid],
+    }[scope]
+    assert [r["species"] for r in db.predictions.get_rows(photo_ids=photo_ids)] == [
+        "Full Image", "Boundary", "Current",
+    ]
+    db.workspaces.update(cat["ws"], config_overrides={"detector_confidence": 0})
+    assert [r["species"] for r in db.predictions.get_rows(photo_ids=photo_ids)] == [
+        "Hidden", "Full Image", "Boundary", "Current",
+    ]
+
+
 def test_get_predictions_chunks_and_resorts(db, cat):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Low", 0.2, "m1")

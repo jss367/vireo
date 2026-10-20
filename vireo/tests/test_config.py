@@ -381,7 +381,7 @@ def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch
             "pipeline": {
                 "eye_detect_enabled": False,
                 "eye_classifier_conf_gate": 0.72,
-                "eye_detection_conf_gate": 0.61,
+                "eye_detection_conf_gate": 1.05,
                 "eye_window_k": 0.12,
                 "reject_eye_focus": 0.55,
             },
@@ -394,7 +394,7 @@ def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch
     p = loaded["pipeline"]
     assert p["eye_detect_enabled"] is False
     assert p["eye_classifier_conf_gate"] == 0.72
-    assert p["eye_detection_conf_gate"] == 0.61
+    assert p["eye_detection_conf_gate"] == 1.05
     assert p["eye_window_k"] == 0.12
     assert p["reject_eye_focus"] == 0.55
 

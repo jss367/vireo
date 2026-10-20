@@ -841,24 +841,27 @@ class PredictionRepository:
         per ``(detection_id, classifier_model)`` so stale rows from prior
         label sets don't contaminate ``/api/predictions`` or
         ``/api/predictions/compare`` after re-classification.
+        Real detections must meet the workspace detector floor; synthetic
+        full-image anchors remain eligible with their zero confidence.
 
-        Row-level scoping for prediction-field rules: the workspace/rules
-        subquery below is applied at the photo level (``p.id IN (...)``),
-        which correctly limits *which photos* surface but returns every
-        current prediction for those photos. When the rules tree references
-        Review-only fields (``prediction_confidence``, ``prediction_status``,
-        ``classifier_model``, ``taxonomy_*``), a photo with a sibling
-        prediction that matches would still return low-confidence /
-        already-accepted rows that don't satisfy the visible filter — the
-        Review grid and Accept All would then act on rows the filter chip
-        excluded. ``_filter_prediction_rows_by_rules`` re-evaluates those
-        leaves against each returned row so the grid matches the chip. It
-        applies only when the tree can be resolved safely per row — see
-        that method's docstring for when it falls back to the SQL result.
+        The rules subquery scopes photos (``p.id IN (...)``), returning every
+        current prediction for matching photos. For Review-only fields
+        (``prediction_confidence``, ``prediction_status``, ``classifier_model``,
+        ``taxonomy_*``), ``_filter_prediction_rows_by_rules`` also evaluates
+        each row so Review and Accept All exclude nonmatching siblings.
+        It applies only when the tree can be resolved safely per row — see
+        that method's docstring for the fallback to the SQL result.
         """
+        import config as cfg
         ws = self.workspace_id
-        base_conditions = ["wf.workspace_id = ?"]
-        base_params = [ws]
+        detector_floor = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        base_conditions = [
+            "wf.workspace_id = ?",
+            "(d.detector_model = 'full-image' OR d.detector_confidence >= ?)",
+        ]
+        base_params = [ws, detector_floor]
         if rules is not None:
             self._append_rules_scope(rules, base_conditions, base_params)
         if model:
