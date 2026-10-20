@@ -50,7 +50,35 @@ def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
         {**old, **_clean_serialized_photo(scored_by_id[old["id"]])}
         for old in data.get("photos", []) if old["id"] in scored_by_id
     ]
+    _refresh_species_summaries(data, scored)
     refresh_serialized_summary(data)
+
+
+def _refresh_species_summaries(data: JsonDict, current: list[JsonDict]) -> None:
+    """Refresh derived classifier summaries without changing explicit species edits."""
+    from pipeline import rebuild_species_predictions
+    from pipeline_results import candidate_species_override, rebuild_encounter_species_label
+
+    # Use freshly loaded rows, not saved grouping-time classifier hints.
+    photos_by_id = {photo["id"]: photo for photo in current}
+    for encounter in data.get("encounters", []):
+        ids = encounter.get("photo_ids", [])
+        subset = {"photos": [photos_by_id[pid] for pid in ids if pid in photos_by_id]}
+        encounter["species_predictions"] = rebuild_species_predictions(subset, ids)
+        encounter["species"] = rebuild_encounter_species_label(subset, ids)
+        for burst in encounter.get("bursts", []):
+            if not isinstance(burst, dict):
+                continue  # Raw photo-id lists have no derived species fields.
+            ids = burst.get("photo_ids", [])
+            subset = {"photos": [photos_by_id[pid] for pid in ids if pid in photos_by_id]}
+            burst["species_predictions"] = rebuild_species_predictions(subset, ids)
+            species = rebuild_encounter_species_label(subset, ids)
+            if "species" in burst:
+                burst["species"] = species
+            override = burst.get("species_override")
+            if (isinstance(override, dict) and not override.get("confirmed")
+                    and not isinstance(override.get("species_list"), list)):
+                burst["species_override"] = candidate_species_override(species)
 
 
 def _current_groups(data: JsonDict, photos: dict[int, JsonDict]) -> list[JsonDict]:

@@ -77,8 +77,11 @@ def test_reopening_reloads_analysis_and_current_decisions_without_writes(db, tmp
     assert rows[ids[0]]["reject_reasons"] == []
     assert not rows[ids[0]].get("rarity_protected")
     assert all(p["review_confirmed"] for p in result["photos"])
-    assert [{key: group[key] for key in original} for group, original in
-            zip(result["encounters"], old["encounters"], strict=True)] == old["encounters"]
+    for group, original in zip(result["encounters"], old["encounters"], strict=True):
+        assert {key: group[key] for key in original if key != "bursts"} == {
+            key: value for key, value in original.items() if key != "bursts"}
+        assert [{key: burst[key] for key in original_burst} for burst, original_burst in
+                zip(group["bursts"], original["bursts"], strict=True)] == original["bursts"]
     assert result["summary"]["keep_count"] == 1 + (rows[ids[3]]["label"] == "KEEP")
     assert result["summary"]["reject_count"] == 1
     assert result["summary"]["review_count"] == 1 + (rows[ids[3]]["label"] == "REVIEW")
@@ -206,3 +209,125 @@ def test_saved_view_entry_points_recover_exact_reported_membership(db, tmp_path,
     # Application startup can maintain its own bookkeeping, so compare photo decisions directly.
     assert [line for line in db.conn.iterdump() if line.startswith('INSERT INTO "photos"')] == [
         line for line in before if line.startswith('INSERT INTO "photos"')]
+
+
+def _classification(db, pid, species, confidence=.9, fingerprint='current'):
+    detections = db.detections.get(pid, 0, None)
+    if not detections:
+        db.detections.save(pid, [{'box': {'x': .1, 'y': .1, 'w': .4, 'h': .4},
+                                  'confidence': .9, 'category': 'animal'}], detector_model='megadetector-v6')
+        detections = db.detections.get(pid, 0, None)
+    db.predictions.add(detections[0]['id'], species, confidence, 'review-classifier',
+                       labels_fingerprint=fingerprint)
+    return db.conn.execute('SELECT id FROM predictions WHERE detection_id=? AND species=? AND labels_fingerprint=?',
+                           (detections[0]['id'], species, fingerprint)).fetchone()['id']
+
+
+def test_reopening_rebuilds_species_aggregates_after_classifier_changes(db, tmp_path):
+    ids = [_photo(db, tmp_path, f'duck{i}.jpg') for i in range(2)]
+    for pid in ids:
+        _classification(db, pid, 'Old Species', .99, 'old-labels')
+    saved = _old_review(ids)
+    saved['encounters'][0]['bursts'][0]['species_override'] = {'species': 'Old Species', 'confirmed': False}
+    save_results_raw(saved, str(tmp_path), db.active_workspace_id)
+    initial = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert initial['encounters'][0]['species'] == ['Old Species', .99]
+    for pid in ids:
+        _classification(db, pid, 'Current Species', .85, 'new-labels')
+    db.commit()
+    before = list(db.conn.iterdump())
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    encounter = refreshed['encounters'][0]
+    assert encounter['species'] == ['Current Species', .85]
+    assert encounter['species_predictions'] == [{
+        'species': 'Current Species', 'species_key': 'name:current species', 'count': 2,
+        'avg_confidence': .85, 'models': [{'model': 'review-classifier', 'confidence': .85, 'photo_count': 2}],
+    }]
+    burst = encounter['bursts'][0]
+    assert burst['species_predictions'] == encounter['species_predictions']
+    assert burst['species_override'] == {'species': 'Current Species', 'confirmed': False}
+    assert encounter['confirmed_species'] == 'Mandarin Duck' and encounter['species_confirmed']
+    assert list(db.conn.iterdump()) == before
+    persisted = (tmp_path / f'pipeline_results_ws{db.active_workspace_id}.json').read_bytes()
+    assert load_results(str(tmp_path), db.active_workspace_id, db=db) == refreshed
+    assert (tmp_path / f'pipeline_results_ws{db.active_workspace_id}.json').read_bytes() == persisted
+
+
+def test_species_aggregates_clear_when_current_evidence_disappears(db, tmp_path):
+    pid = _photo(db, tmp_path)
+    prediction = _classification(db, pid, 'Old Species')
+    saved = _old_review([pid])
+    burst = saved['encounters'][0]['bursts'][0]
+    burst['species'] = ['Old Species', .9]
+    burst['species_override'] = {'species': 'Old Species', 'confirmed': False}
+    save_results_raw(saved, str(tmp_path), db.active_workspace_id)
+    assert load_results(str(tmp_path), db.active_workspace_id, db=db)['encounters'][0]['species'][0] == 'Old Species'
+    db.conn.execute('DELETE FROM predictions WHERE id=?', (prediction,))
+    db.commit()
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    encounter = refreshed['encounters'][0]
+    assert refreshed['photos'][0]['species_top5'] == []
+    assert encounter['species'] == [None, 0.] and encounter['species_predictions'] == []
+    burst = encounter['bursts'][0]
+    assert burst['species'] == [None, 0.] and burst['species_predictions'] == []
+    assert burst['species_override'] is None
+    assert encounter['confirmed_species'] == 'Mandarin Duck' and encounter['species_confirmed']
+
+
+@pytest.mark.parametrize('override', [
+    {'species': 'Confirmed Bird', 'confirmed': True},
+    {'species': 'Confirmed Bird', 'confirmed': True, 'species_list': ['Confirmed Bird', 'Other Bird']},
+    {'species': 'Edited Bird', 'confirmed': False, 'species_list': ['Edited Bird']},
+    {'species': None, 'confirmed': False, 'species_list': []},
+])
+def test_species_refresh_preserves_authoritative_burst_edits(db, tmp_path, override):
+    pid = _photo(db, tmp_path)
+    _classification(db, pid, 'Current Species', .8)
+    saved = _old_review([pid])
+    saved['encounters'][0]['confirmed_species_list'] = ['Mandarin Duck', 'Saved Bird']
+    saved['encounters'][0]['bursts'][0]['species_override'] = deepcopy(override)
+    save_results_raw(saved, str(tmp_path), db.active_workspace_id)
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    encounter = refreshed['encounters'][0]
+    assert encounter['bursts'][0]['species_override'] == override
+    assert encounter['confirmed_species_list'] == ['Mandarin Duck', 'Saved Bird']
+    assert encounter['confirmed_species'] == 'Mandarin Duck' and encounter['species_confirmed']
+    assert encounter['species'] == ['Current Species', .8]
+    assert encounter['bursts'][0]['species_predictions'][0]['species'] == 'Current Species'
+
+
+def test_species_refresh_uses_surviving_members_and_retains_raw_bursts(db, tmp_path):
+    ids = [_photo(db, tmp_path, f'bird{i}.jpg') for i in range(3)]
+    for pid, name, confidence in zip(ids, ['First Bird', 'Second Bird', 'Excluded Bird'], [.7, .9, .99], strict=True):
+        _classification(db, pid, name, confidence)
+    saved = _old_review(ids[:2])
+    for photo in saved['photos']:
+        photo['grouping_species_top5'] = [['Stale Grouping Hint', .99, 'old-classifier']]
+    encounter = saved['encounters'][0]
+    encounter.update(photo_ids=ids, photo_count=3, burst_count=2,
+                     grouping_edit={'detached_from': 7}, time_range=['saved-start', 'saved-end'])
+    encounter['bursts'] = [
+        {'photo_ids': [ids[0], ids[2]], 'species_predictions': [{'species': 'Old Bird'}],
+         'species_override': {'species': 'Old Bird', 'confirmed': False}, 'grouping_edit': 'detached'},
+        [ids[1], ids[2]],
+    ]
+    save_results_raw(saved, str(tmp_path), db.active_workspace_id)
+    before = list(db.conn.iterdump())
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    encounter = refreshed['encounters'][0]
+    assert encounter['photo_ids'] == ids[:2] and encounter['photo_count'] == 2
+    assert encounter['burst_count'] == 2
+    assert encounter['grouping_edit'] == {'detached_from': 7}
+    assert encounter['time_range'] == ['saved-start', 'saved-end']
+    assert encounter['species'] == ['Second Bird', .45]
+    assert {p['species']: (p['count'], p['avg_confidence']) for p in encounter['species_predictions']} == {
+        'First Bird': (1, .7), 'Second Bird': (1, .9),
+    }
+    burst = encounter['bursts'][0]
+    assert burst['photo_ids'] == [ids[0]] and burst['grouping_edit'] == 'detached'
+    assert burst['species_predictions'][0]['species'] == 'First Bird'
+    assert burst['species_predictions'][0]['count'] == 1
+    assert burst['species_override'] == {'species': 'First Bird', 'confirmed': False}
+    assert encounter['bursts'][1] == [ids[1]]
+    assert all(photo['review_confirmed'] for photo in refreshed['photos'])
+    assert list(db.conn.iterdump()) == before
