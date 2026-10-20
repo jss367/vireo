@@ -70,7 +70,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
             "split": bool(body.get("split")), "previous_species_choices": edit.current_species_list}
 
 
-def _refresh_group(db: Database, results: JsonDict, enc: JsonDict) -> None:
+def _refresh_group(db: Database, results: JsonDict, enc: JsonDict, *, membership_changed: bool) -> None:
     """Derive labels from all members after a subset edit, preserving extra taxa."""
     from pipeline import derive_burst_override, rebuild_species_predictions
     from pipeline_results import compute_time_range, rebuild_encounter_species_label
@@ -94,13 +94,24 @@ def _refresh_group(db: Database, results: JsonDict, enc: JsonDict) -> None:
     enc["species_confirmed"] = bool(common.get("confirmed"))
     enc["photo_count"] = len(ids)
     enc["burst_count"] = len(enc.get("bursts") or [])
-    enc["time_range"] = compute_time_range({p["id"]: p for p in results.get("photos", [])}, ids)
+    photos_by_id = {p["id"]: p for p in results.get("photos", [])}
+    enc["time_range"] = compute_time_range(photos_by_id, ids)
+    if "missing_timestamp_count" in enc:
+        enc["missing_timestamp_count"] = sum(not photos_by_id.get(pid, {}).get("timestamp") for pid in ids)
     enc["species_predictions"] = rebuild_species_predictions(results, ids)
-    enc["species"] = rebuild_encounter_species_label(results, ids, fallback=enc.get("species"))
+    # A split cannot inherit a guess supported only by the other membership.
+    # Explicit confirmations above remain independent of classifier summaries.
+    enc["species"] = rebuild_encounter_species_label(
+        results, ids, fallback=None if membership_changed else enc.get("species"),
+    )
+    if membership_changed:
+        enc.pop("focus_cohorts", None)
     enc.pop("trace", None)
     for burst in enc.get("bursts") or []:
         burst["species_override"] = override(burst["photo_ids"])
         burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
+        if "species" in burst:
+            burst["species"] = rebuild_encounter_species_label(results, burst["photo_ids"])
 
 
 def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], *, split: bool) -> None:
@@ -119,6 +130,9 @@ def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], 
                 if members:
                     child = copy.deepcopy(burst)
                     child["photo_ids"] = members
+                    if members != burst["photo_ids"]:
+                        child.pop("trace", None)
+                        child.pop("focus_cohorts", None)
                     bursts.append(child)
             group["bursts"] = bursts
         index = results["encounters"].index(enc)
@@ -135,8 +149,8 @@ def apply_scope(db: Database, results: JsonDict, enc: JsonDict, ids: list[int], 
             and detached_range[1] < remaining_range[0]
         )
         results["encounters"].insert(index if insert_before else index + 1, detached)
-        _refresh_group(db, results, detached)
-    _refresh_group(db, results, enc)
+        _refresh_group(db, results, detached, membership_changed=True)
+    _refresh_group(db, results, enc, membership_changed=split)
     summary = results.setdefault("summary", {})
     summary["encounter_count"] = len(results["encounters"])
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in results["encounters"])

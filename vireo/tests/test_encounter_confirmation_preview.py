@@ -606,3 +606,101 @@ def test_preview_homonym_snapshot_excludes_unrelated_catalog_edits(app_and_db, m
     else:
         assert current['preview_token'] == preview['preview_token']
         assert apply(client, body, preview).status_code == 200
+
+
+@pytest.mark.parametrize('selected_index', [0, 2])
+def test_split_drops_classifier_label_supported_only_by_detached_frames(app_and_db, selected_index):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    selected = ids[selected_index:selected_index + 1]
+    remaining = [pid for pid in ids if pid not in selected]
+    cached = json.load(open(path))
+    cached['encounters'][0]['species'] = ['Classifier Spoonbill', .9]
+    cached['encounters'][0]['bursts'][0]['species'] = ['Classifier Spoonbill', .9]
+    for photo in cached['photos']:
+        photo['species_top5'] = [['Classifier Spoonbill', .9, 'test']] if photo['id'] in selected else []
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': selected, 'source_photo_ids': ids, 'add': True, 'split': True}
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    by_ids = {tuple(enc['photo_ids']): enc for enc in response.get_json()['encounters']}
+    source, detached = by_ids[tuple(remaining)], by_ids[tuple(selected)]
+    assert source['species'] == [None, 0.0]
+    assert source['species_predictions'] == []
+    assert source['bursts'][0]['species'] == [None, 0.0]
+    assert detached['species'] == ['Classifier Spoonbill', .9]
+    assert detached['species_predictions'][0]['count'] == 1
+    assert detached['bursts'][0]['species_predictions'][0]['count'] == 1
+    assert source['confirmed_species_list'] == ['Western Grebe']
+    assert set(detached['confirmed_species_list']) == {'Western Grebe', 'Eared Grebe'}
+    assert source['species_confirmed'] and detached['species_confirmed']
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path))['encounters'] == cached['encounters']
+    assert client.post('/api/redo').status_code == 200
+    assert json.load(open(path))['encounters'] == response.get_json()['encounters']
+
+
+@pytest.mark.parametrize(('timestamps', 'expected'), [
+    ([None, '2026-10-20T10:01:00', '2026-10-20T10:02:00'], [1, 0]),
+    (['2026-10-20T10:00:00', None, None], [0, 2]),
+    ([None, None, None], [1, 2]),
+])
+def test_split_recounts_missing_timestamps_for_each_new_membership(app_and_db, timestamps, expected):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    cached = json.load(open(path))
+    for photo, timestamp in zip(cached['photos'], timestamps, strict=True):
+        photo['timestamp'] = timestamp
+    cached['encounters'][0]['missing_timestamp_count'] = sum(ts is None for ts in timestamps)
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids[:1], 'source_photo_ids': ids, 'add': True, 'split': True}
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    by_ids = {tuple(enc['photo_ids']): enc for enc in response.get_json()['encounters']}
+    detached, source = by_ids[tuple(ids[:1])], by_ids[tuple(ids[1:])]
+    assert [detached['missing_timestamp_count'], source['missing_timestamp_count']] == expected
+    assert detached['time_range'] == [timestamps[0], timestamps[0]]
+    assert source['time_range'] == [timestamps[1], timestamps[2]]
+    assert detached['photo_count'] == 1 and source['photo_count'] == 2
+    assert detached['burst_count'] == source['burst_count'] == 1
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path))['encounters'] == cached['encounters']
+    assert client.post('/api/redo').status_code == 200
+    assert json.load(open(path))['encounters'] == response.get_json()['encounters']
+
+
+@pytest.mark.parametrize('split', [False, True])
+def test_split_discards_membership_bound_cohorts_without_changing_confirmation_modes(app_and_db, split):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    cached = json.load(open(path))
+    enc = cached['encounters'][0]
+    enc.update(species=['Saved classifier candidate', .8], trace=[{'pair': ids[:2]}],
+               focus_cohorts={'body': ids})
+    enc['bursts'][0].update(trace=[{'pair': ids[:2]}], focus_cohorts={'body': ids})
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids[:1], 'source_photo_ids': ids, 'add': True, 'split': split}
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    groups = response.get_json()['encounters']
+    assert len(groups) == (2 if split else 1)
+    for group in groups:
+        assert 'trace' not in group
+        assert 'missing_timestamp_count' not in group  # Preserve old cache shape.
+        if split:
+            assert 'focus_cohorts' not in group
+            assert group['species'] == [None, 0.0]
+            assert all('trace' not in burst and 'focus_cohorts' not in burst for burst in group['bursts'])
+        else:
+            assert group['focus_cohorts'] == {'body': ids}
+            assert group['bursts'][0]['focus_cohorts'] == {'body': ids}
+            assert group['species'] == ['Saved classifier candidate', .8]
+    actual = db.photo_species.get_species_for_photos(ids)
+    assert set(actual[ids[0]]) == {'Western Grebe', 'Eared Grebe'}
+    assert actual[ids[1]] == actual[ids[2]] == ['Western Grebe']
