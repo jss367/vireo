@@ -238,6 +238,43 @@ Full-frame previews and subject crops support visual review of pose, eye
 visibility, and obstructions; this feature does not introduce aesthetic weights.
 
 
+## Exporting photos with metadata
+
+The export endpoints use an explicit `metadata_fields` list. Saved presets are
+not applied automatically to API requests: read `/api/export/presets` and copy
+the desired preset settings, including its metadata selection. To preserve
+available photographic metadata, send the same request to
+`POST /api/jobs/export/preflight` for review and `POST /api/jobs/export` to run:
+
+```json
+{
+  "photo_ids": [123],
+  "destination": "/absolute/path/to/exports",
+  "format": "jpg",
+  "quality": 92,
+  "metadata_fields": ["species", "capture_date", "capture_time", "rating", "location", "camera"]
+}
+```
+
+Preflight's `metadata` object contains `requested_fields`, `metadata_free`, and
+a readable `description`. An empty or omitted list explicitly requests a
+metadata-free export; Vireo never silently adds fields. Image/container fields
+and color profiles may still be present.
+
+Poll `/api/jobs/<job_id>` after starting the export. The completed
+`result.metadata.categories` maps each requested category to **photo counts**:
+`requested`, `written`, `unavailable`, `failed`, and `not_attempted`.
+These last four counts sum to `requested`. A category is available when at least
+one of its values can be written; camera/exposure does not imply that every
+camera tag was present. Unavailable means no value was available for that
+category in the catalog/effective location. No coordinates are invented.
+`not_attempted` covers photos that did not reach metadata preparation, such as
+render failures or cancellation. `written` counts only successful ExifTool
+writes, independently of image creation. A failed metadata write removes the
+derivative and reports an export error. Check these counts and `result.errors`
+before describing an export as complete. For location-sensitive work, also
+verify the output GPS tags with ExifTool when coordinates were available.
+
 ## Worked example
 
 ```bash

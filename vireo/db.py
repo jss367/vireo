@@ -1894,6 +1894,7 @@ class Database:
             ),
             resolve_species_display_name=self.resolve_species_display_name,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
+            get_effective_config=self.get_effective_config,
         )
 
     @property
@@ -3233,7 +3234,7 @@ class Database:
         """Build the (catalog-wide) culling-analysis repository on this connection."""
         from repositories.culling import CullingRepository
 
-        return CullingRepository(self.conn)
+        return CullingRepository(self.conn, self.get_effective_config)
 
     @property
     def culling(self) -> CullingRepository:

@@ -116,7 +116,8 @@ def test_browse_export_offers_embedded_metadata_checkboxes(app_and_db):
         assert control in html
     assert "Capture date &amp; time" in html
     assert "fields.push('capture_date', 'capture_time')" in html
-    assert "exportRequest.metadata_fields = selectedExportMetadataFields();" in html
+    assert "metadata_fields: selectedExportMetadataFields()," in html
+    assert 'id="exportMetadataSummary"' in html
     assert "Unchecked details are left out." in html
 
 

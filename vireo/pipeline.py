@@ -203,6 +203,7 @@ def load_photo_features(db, collection_id=None, config=None,
     load.load_subject_evidence()
     load.load_confirmed_species()
     load.rescue_weak_runs()
+    load.load_analysis_provenance()
     photos = load.build_photos()
     photos = load.apply_encounter_continuity(photos)
 
@@ -380,6 +381,7 @@ class _FeatureLoad:
                 },
                 "detection_confidence": det["detector_confidence"],
                 "category": det["category"],
+                "detector_model": det["detector_model"],
                 "is_primary": not subjects_by_photo[det["photo_id"]],
                 "suggested_crop": json.loads(det["suggested_crop"]) if det["suggested_crop"] else None,
                 "quality_score": det["subject_quality_score"],
@@ -485,6 +487,7 @@ class _FeatureLoad:
                 "w": top["w"],
                 "h": top["h"],
                 "detection_conf": top["confidence"],
+                "detector_model": top["detector_model"],
             }
 
     def load_subject_evidence(self):
@@ -513,6 +516,55 @@ class _FeatureLoad:
         self.mdv6_passing_photo_ids = {
             pid for pid, dets in mdv6_dets.items() if dets
         }
+
+    def load_analysis_provenance(self):
+        """Resolve saved stage artifacts against this workspace's selected inputs."""
+        self.analysis_rows = defaultdict(dict)
+        for row in self.db.pipeline_features.analysis_provenance_rows(self.ws_id, scoped=self.scoped):
+            self.analysis_rows[row["id"]][row["run_model"]] = dict(row)
+
+    def _analysis_provenance(self, row):
+        """Build evidence, without inventing failure or no-subject verdicts."""
+        pid = row["id"]
+        subjects = self.subjects_by_photo.get(pid) or []
+        primary = ({**subjects[0]["box"], "detector_model": subjects[0]["detector_model"]}
+                   if subjects else self.primary_det_by_photo.get(pid)
+                   if pid in self.rescued_weak_ids else None)
+        model = primary["detector_model"] if primary else "megadetector-v6"
+        rows = self.analysis_rows.get(pid, {})
+        evidence = rows.get(model) or next(iter(rows.values()), {})
+        has_run = model in rows
+        detection = {"status": "complete" if has_run or primary else "not_run"}
+        if has_run and evidence.get("input_fingerprint"):
+            from computation_cache import source_input
+            source_hash = evidence.get("file_hash")
+            if (isinstance(source_hash, str) and len(source_hash) == 64
+                    and all(c in "0123456789abcdef" for c in source_hash)
+                    and not evidence.get("companion_path")):
+                detection["current"] = evidence["input_fingerprint"] == source_input(
+                    source_hash, "vireo-detector-source-v1",
+                )[1]
+            else:
+                # A stamped run whose current input cannot be verified is
+                # unavailable for automatic decisions, not a negative verdict.
+                detection["current"] = False
+        detection["no_qualifying_subject"] = has_run and not primary and pid not in self.rescued_weak_ids
+        segmentation = {"status": "incomplete"}
+        if row["mask_path"] and primary:
+            expected_variant = self.pipeline_cfg.get("sam2_variant")
+            current = (
+                evidence.get("stored_mask_path") == row["mask_path"]
+                and evidence.get("mask_model") == model
+                and all(evidence.get("prompt_" + key) == primary[key] for key in "xywh")
+                and (not expected_variant or evidence.get("active_mask_variant") == expected_variant)
+                and os.path.isfile(row["mask_path"])
+            )
+            segmentation = {"status": "complete", "current": current}
+        # No-subject verdicts need no segmentation; the readiness policy keeps
+        # them in REVIEW independently of missing mask measurements.
+        if detection["no_qualifying_subject"]:
+            segmentation = {}
+        return {"detection": detection, "segmentation": segmentation}
 
     def load_confirmed_species(self):
         """Load user-confirmed species keywords, canonicalizing hierarchy
@@ -673,6 +725,7 @@ class _FeatureLoad:
                     "x": top["x"], "y": top["y"],
                     "w": top["w"], "h": top["h"],
                     "detection_conf": top["confidence"],
+                    "detector_model": top["detector_model"],
                 }
 
     def build_photos(self):
@@ -777,6 +830,7 @@ class _FeatureLoad:
             "species_top5": self.species_by_photo.get(pid, []),
             "confirmed_species_identities": self.confirmed_identities.get(pid, []),
             "subjects": self.subjects_by_photo.get(pid, []),
+            "analysis_provenance": self._analysis_provenance(row),
             "confirmed_species": self.confirmed_by_photo.get(pid),
             "confirmed_species_list": self.confirmed_list_by_photo.get(pid, []),
             "subject_absent": subject_absent,
@@ -962,6 +1016,7 @@ def _clear_derived_scores(photos):
         "focus_score", "exposure_score", "composition_score",
         "area_score", "noise_score", "quality_composite",
         "reject_reasons", "label", "rarity_protected",
+        "analysis_status", "analysis_reasons", "selection_eligible", "eye_focus_score",
     ]
     for p in photos:
         for k in derived_keys:

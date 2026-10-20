@@ -10,6 +10,8 @@ All weights and thresholds are configurable with defaults from the design doc.
 import logging
 import math
 
+from subject_readiness import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
+
 log = logging.getLogger(__name__)
 
 # Default weights and thresholds
@@ -219,8 +221,11 @@ def composite_quality_score(photo, encounter_photos, config=None):
         config: optional dict overriding DEFAULTS
 
     Returns:
-        float in [0, 1]
+        float in [0, 1], or None when required analysis is unavailable
     """
+    if not subject_analysis_readiness(photo)["eligible"]:
+        return None
+    encounter_photos = [p for p in encounter_photos if subject_analysis_readiness(p)["eligible"]]
     cfg = {**DEFAULTS, **(config or {})}
 
     enc_tenegrads = [
@@ -282,12 +287,10 @@ def hard_reject_reasons(photo, q_score, config=None):
     Returns:
         list of reason strings (empty if no reject)
     """
+    if not subject_analysis_readiness(photo)["eligible"] or q_score is None:
+        return []
     cfg = {**DEFAULTS, **(config or {})}
     reasons = []
-
-    # Rule 1: No mask (no bird detected)
-    if not photo.get("mask_path") and not photo.get("subject_mask_available", False):
-        reasons.append("no_subject_mask")
 
     # Rule 2: Subject severely clipped
     cc = photo.get("crop_complete")
@@ -339,10 +342,12 @@ def score_encounter(encounter, config=None):
     """Score all photos in an encounter and apply hard reject rules.
 
     Enriches each photo dict with:
-        - quality_composite: float (Q_i)
+        - quality_composite: float (Q_i), or None when analysis is unavailable
         - focus_score, exposure_score, composition_score, area_score, noise_score
         - reject_reasons: list (empty if not rejected)
-        - label: 'REJECT' or None (KEEP/REVIEW assigned later by MMR)
+        - analysis_status, analysis_reasons, selection_eligible
+        - label: REVIEW for unavailable analysis; REJECT or None otherwise
+          (explicit photographer decisions take precedence)
 
     Args:
         encounter: dict with 'photos' key (list of photo dicts)
@@ -352,7 +357,7 @@ def score_encounter(encounter, config=None):
         encounter dict (modified in place)
     """
     cfg = {**DEFAULTS, **_normalize_scoring_config(config)}
-    photos = encounter["photos"]
+    photos = [p for p in encounter["photos"] if mark_analysis_readiness(p)]
 
     # Compute per-encounter normalization data
     enc_tenegrads = [p.get("subject_tenengrad", 0) or 0 for p in photos]
@@ -453,7 +458,7 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
 
     # Check focus reject using encounter percentile
     reasons = hard_reject_reasons(photo, q, config=cfg)
-    has_mask = bool(photo.get("mask_path") or photo.get("subject_mask_available", False))
+    has_mask = bool(photo.get("mask_path") or photo.get("subject_mask_available"))
     if f < cfg.get("reject_focus", 0.35) and has_mask:
         reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
 
@@ -475,4 +480,4 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
         )
 
     photo["reject_reasons"] = reasons
-    photo["label"] = "REJECT" if reasons else None
+    photo["label"] = explicit_decision(photo) or ("REJECT" if reasons else None)

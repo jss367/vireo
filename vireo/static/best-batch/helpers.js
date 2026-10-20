@@ -32,7 +32,13 @@ export function thumbnailUrl(photoOrId) {
 export function roleLabel(role) {
   if (role === 'best') return 'Best';
   if (role === 'alternate') return 'Alt';
-  return role === 'review' ? 'Review' : 'Reject';
+  if (role === 'review') return 'Needs review';
+  return 'Reject';
+}
+
+/** @param {BestBatchCard} card */
+export function rankLabel(card) {
+  return (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role);
 }
 
 /** @param {BestBatchCard} card */

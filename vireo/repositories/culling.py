@@ -2,16 +2,17 @@
 
 The analysis groups a scope's photos by predicted species and scene, then
 ranks each group. Per photo it reads the highest-confidence prediction on any
-of its detections (any classifier, any labels fingerprint: the analysis
-runs over photo ids its caller already scoped), the quality,
+of its eligible detections (any classifier, newest labels fingerprint
+per detection/model: the caller already scoped the photo ids), the quality,
 file-type, time, pHash and filename signals it ranks on, and, for a photo
 with no stored pHash, the source identity the pHash backfill loads the image
 from; the backfill then stores the hash it computed. Embeddings come from
 ``db.masks_features.get_embedding`` and the folder paths from
 ``FolderRepository.all_rows``.
 
-Photo rows and predictions are catalog-wide, so the repository takes no
-workspace id. ``set_phash`` does not commit: the backfill commits once per
+Photo rows and predictions are catalog-wide; the prediction ranking resolves
+the active workspace's effective detector floor through its config callback.
+``set_phash`` does not commit: the backfill commits once per
 photo through ``Database.commit`` so the writer lock is released between
 photos.
 
@@ -20,27 +21,49 @@ Callers reach it as ``db.culling`` (a fresh repository per access, see
 """
 
 import sqlite3
+from collections.abc import Callable
+from typing import Any
+
+import config as cfg
 
 
 class CullingRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection,
+        # Config values span arbitrary settings and workspace overrides.
+        get_effective_config: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
         self.conn = conn
+        self.get_effective_config = get_effective_config
 
-    def top_prediction(self, photo_id: int) -> sqlite3.Row | None:
+    def top_prediction(
+        self, photo_id: int, min_detector_confidence: float | None = None,
+    ) -> sqlite3.Row | None:
         """The photo's highest-confidence prediction across its detections.
 
         ``species``, ``confidence``, ``classifier_model``,
         ``scientific_name``, ``labels_fingerprint`` and ``source_taxon_id``,
         or None when the photo has no prediction.
         """
+        if min_detector_confidence is None:
+            min_detector_confidence = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2
+            )
         return self.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model,
                       pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE d.photo_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id,),
+                 AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC, pr.id DESC LIMIT 1""",
+            (photo_id, min_detector_confidence),
         ).fetchone()
 
     def photo_signals(self, photo_id: int) -> sqlite3.Row | None:

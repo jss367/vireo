@@ -523,7 +523,9 @@ def pack_checks():
     db = types.SimpleNamespace(photos=types.SimpleNamespace(analysis_evidence_rows=lambda ids, floor: evidence))
     unscored = pure["build_evidence_pack"](db, 1, rows, effective_cfg={})
     assert unscored["scored"] is False and unscored["best_photo_id"] is None
-    assert unscored["coverage"]["photos"] == 2 and unscored["coverage"]["with_quality"] == 1
+    # Cached metric columns alone do not establish current analysis for an unscored batch.
+    assert unscored["coverage"]["photos"] == 2 and unscored["coverage"]["with_quality"] == 0
+    assert not any(card["has_quality"] for card in unscored["cards"])
     assert any(r["code"] == "unanalyzed_frames" for r in unscored["ambiguity"]["reasons"])
     pure["build_best_batch_response"] = lambda *a: (
         dict(
