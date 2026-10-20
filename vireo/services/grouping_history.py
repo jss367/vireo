@@ -44,18 +44,38 @@ _CACHE_SPECIES_ENCOUNTER_FIELDS = ("confirmed_species", "confirmed_species_list"
 _CACHE_SPECIES_BURST_FIELDS = ("species_override",)
 
 
-def _grouping_signature(encounters: Iterable[JsonDict] | None) -> list[JsonDict]:
-    """Return an encounters snapshot without cache-only species fields."""
+# These summaries are recomputed from live measurements and predictions when a
+# saved review is reopened. They do not identify a user grouping edit.
+_DERIVED_GROUP_FIELDS = ("species", "species_predictions", "focus_cohorts")
+
+
+def _burst_signature(burst: JsonDict | list[int], *, include_confirmations: bool) -> JsonDict:
+    if not isinstance(burst, dict):
+        return {"photo_ids": burst}
+    stripped = {key: value for key, value in burst.items()
+                if key not in _DERIVED_GROUP_FIELDS + _CACHE_SPECIES_BURST_FIELDS}
+    override = burst.get("species_override")
+    if isinstance(override, dict) and (
+        isinstance(override.get("species_list"), list)
+        or (include_confirmations and override.get("confirmed"))
+    ):
+        # Explicit lists (even empty or unconfirmed) are user edits. Legacy
+        # unconfirmed hints are derived; old single-value confirmation cache
+        # leftovers retain the LIFO tolerance used by structural history.
+        stripped["species_override"] = override
+    return stripped
+
+
+def _grouping_signature(
+    encounters: Iterable[JsonDict] | None, *, include_confirmations: bool = False,
+) -> list[JsonDict]:
+    """Identify grouping edits independently of refreshed classifier/focus evidence."""
+    excluded = _DERIVED_GROUP_FIELDS + (() if include_confirmations else _CACHE_SPECIES_ENCOUNTER_FIELDS)
     signature = []
     for enc in encounters or []:
-        stripped = {
-            k: v for k, v in enc.items()
-            if k not in _CACHE_SPECIES_ENCOUNTER_FIELDS and k != "bursts"
-        }
+        stripped = {key: value for key, value in enc.items() if key not in excluded and key != "bursts"}
         stripped["bursts"] = [
-            {k: v for k, v in b.items() if k not in _CACHE_SPECIES_BURST_FIELDS}
-            if isinstance(b, dict) else {"photo_ids": b}
-            for b in enc.get("bursts", [])
+            _burst_signature(burst, include_confirmations=include_confirmations) for burst in enc.get("bursts", [])
         ]
         signature.append(stripped)
     return signature
@@ -73,12 +93,12 @@ def _preserve_cleared_species_overrides(
 ) -> None:
     """Carry ``clearBurstOverride`` clears from current into the restored target.
 
-    ``clearBurstOverride`` writes ``species_override = None`` straight through
-    ``/api/pipeline/save-cache`` without recording a history entry, so its
-    change is invisible to ``_grouping_signature``. Without this pass, a
-    subsequent grouping undo would silently resurrect the pre-clear override
-    on the same burst. Match by photo_ids so bursts that moved between
-    encounters (e.g. across a burst detach) still find their pair.
+    Legacy direct cache clears can set ``species_override = None`` without
+    recording history. A clear of a legacy single-value override is invisible
+    to ``_grouping_signature``; without this pass, grouping undo would resurrect
+    that pre-clear value. Explicit list edits remain checked by the signature,
+    and the current clear endpoint records its own label-edit history. Match by
+    photo_ids so bursts moved between encounters still find their pair.
 
     Non-null species state in ``current`` is left alone: it's either the
     intended after-state of this grouping edit or leftover cache from a
@@ -498,8 +518,11 @@ def restore_grouping_edit(db: Database, entry: HistoryEntry, *, undo: bool) -> I
         current = load_results_raw(cache_dir, db.require_workspace_id())
         expected = change["after" if undo else "before"]
         target = change["before" if undo else "after"]
-        signature = (lambda value: value) if change.get("label_edit") else _grouping_signature
-        if current is None or signature(current.get("encounters")) != signature(expected):
+        include_confirmations = bool(change.get("label_edit"))
+        current_signature = _grouping_signature(
+            current.get("encounters") if current is not None else None, include_confirmations=include_confirmations,
+        )
+        if current is None or current_signature != _grouping_signature(expected, include_confirmations=include_confirmations):
             raise GroupingHistoryStale(
                 "The photo groups have changed since this edit. "
                 "These groups cannot be restored without replacing newer work."

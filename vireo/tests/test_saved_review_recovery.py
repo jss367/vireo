@@ -331,3 +331,113 @@ def test_species_refresh_uses_surviving_members_and_retains_raw_bursts(db, tmp_p
     assert encounter['bursts'][1] == [ids[1]]
     assert all(photo['review_confirmed'] for photo in refreshed['photos'])
     assert list(db.conn.iterdump()) == before
+
+
+def _review_with_detachable_bursts(db, tmp_path, ids, override):
+    saved = _old_review(ids)
+    saved['encounters'][0]['burst_count'] = 2
+    saved['encounters'][0]['bursts'] = [
+        {'photo_ids': ids[:2], 'species_override': deepcopy(override)},
+        {'photo_ids': ids[2:], 'species_override': {'species': 'Old Species', 'confirmed': False}},
+    ]
+    for pid in ids:
+        _classification(db, pid, 'Old Species', .9, 'old-labels')
+    save_results_raw(saved, str(tmp_path), db.active_workspace_id)
+    return load_results(str(tmp_path), db.active_workspace_id, db=db)
+
+
+def _group_membership(results):
+    return [(encounter['photo_ids'], [burst['photo_ids'] if isinstance(burst, dict) else burst
+                                    for burst in encounter['bursts']]) for encounter in results['encounters']]
+
+
+@pytest.mark.parametrize('override', [
+    {'species': 'Edited Bird', 'confirmed': False, 'species_list': ['Edited Bird']},
+    {'species': None, 'confirmed': False, 'species_list': []},
+])
+def test_classifier_refresh_preserves_real_grouping_undo_redo(app_and_db, tmp_path, override):
+    app, db = app_and_db
+    ids = [_photo(db, tmp_path, f'history{i}.jpg') for i in range(3)]
+    original = _review_with_detachable_bursts(db, tmp_path, ids, override)
+    client = app.test_client()
+    detach = client.post('/api/pipeline/detach-burst', json={'encounter_index': 0, 'burst_index': 0})
+    assert detach.status_code == 200, detach.get_json()
+    detached = load_results_raw(str(tmp_path), db.active_workspace_id)
+    history_id = client.get('/api/undo/status').get_json()['id']
+    for pid in ids:
+        _classification(db, pid, 'Current Species', .8, 'new-labels')
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert all(encounter['species'] == ['Current Species', .8] for encounter in refreshed['encounters'])
+    assert _group_membership(refreshed) == _group_membership(detached)
+    decisions = [(db.photos.get(pid)['flag'], db.photos.get(pid)['rating']) for pid in ids]
+    undo = client.post('/api/undo')
+    assert undo.status_code == 200, undo.get_json()
+    assert undo.get_json()['entry_id'] == history_id
+    restored = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert _group_membership(restored) == _group_membership(original)
+    assert restored['encounters'][0]['species'] == ['Current Species', .8]
+    assert restored['encounters'][0]['bursts'][0]['species_override'] == override
+    redo = client.post('/api/redo')
+    assert redo.status_code == 200, redo.get_json()
+    assert redo.get_json()['entry_id'] == history_id
+    replayed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert _group_membership(replayed) == _group_membership(detached)
+    burst = next(burst for encounter in replayed['encounters'] for burst in encounter['bursts']
+                 if burst['photo_ids'] == ids[:2])
+    assert burst['species_override'] == override
+    assert all(encounter['species'] == ['Current Species', .8] for encounter in replayed['encounters'])
+    assert [(db.photos.get(pid)['flag'], db.photos.get(pid)['rating']) for pid in ids] == decisions
+
+
+@pytest.mark.parametrize('newer_edit', ['membership', 'species_list'])
+def test_classifier_refresh_does_not_hide_actual_newer_grouping_edits(app_and_db, tmp_path, newer_edit):
+    app, db = app_and_db
+    ids = [_photo(db, tmp_path, f'history{i}.jpg') for i in range(3)]
+    _review_with_detachable_bursts(db, tmp_path, ids, {'species': 'Edited Bird', 'confirmed': False,
+                                                   'species_list': ['Edited Bird']})
+    client = app.test_client()
+    assert client.post('/api/pipeline/detach-burst', json={'encounter_index': 0, 'burst_index': 0}).status_code == 200
+    for pid in ids:
+        _classification(db, pid, 'Current Species', .8, 'new-labels')
+    newer = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    detached = next(encounter for encounter in newer['encounters'] if encounter['photo_ids'] == ids[:2])
+    if newer_edit == 'membership':
+        detached['bursts'] = [{'photo_ids': [pid]} for pid in ids[:2]]
+        detached['burst_count'] = 2
+    else:
+        detached['bursts'][0]['species_override'] = {'species': None, 'confirmed': False, 'species_list': []}
+    save_results_raw(newer, str(tmp_path), db.active_workspace_id)
+    response = client.post('/api/undo')
+    assert response.status_code == 409, response.get_json()
+    assert load_results_raw(str(tmp_path), db.active_workspace_id)['encounters'] == newer['encounters']
+    assert not client.get('/api/undo/status').get_json()['available']
+
+
+@pytest.mark.parametrize('override', [
+    {'species': 'Edited Bird', 'confirmed': True},
+    {'species': 'Edited Bird', 'confirmed': False, 'species_list': ['Edited Bird']},
+    {'species': None, 'confirmed': False, 'species_list': []},
+])
+def test_classifier_refresh_preserves_burst_label_undo_redo(app_and_db, tmp_path, override):
+    app, db = app_and_db
+    ids = [_photo(db, tmp_path, f'label-history{i}.jpg') for i in range(3)]
+    _review_with_detachable_bursts(db, tmp_path, ids, override)
+    client = app.test_client()
+    clear = client.post('/api/pipeline/save-cache', json={'clear_override': {
+        'encounter_photo_ids': ids, 'burst_photo_ids': ids[:2], 'expected_override': override,
+    }})
+    assert clear.status_code == 200, clear.get_json()
+    for pid in ids:
+        _classification(db, pid, 'Current Species', .8, 'new-labels')
+    refreshed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert refreshed['encounters'][0]['bursts'][0]['species_override'] is None
+    undo = client.post('/api/undo')
+    assert undo.status_code == 200, undo.get_json()
+    restored = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert restored['encounters'][0]['bursts'][0]['species_override'] == override
+    assert restored['encounters'][0]['species'] == ['Current Species', .8]
+    redo = client.post('/api/redo')
+    assert redo.status_code == 200, redo.get_json()
+    replayed = load_results(str(tmp_path), db.active_workspace_id, db=db)
+    assert replayed['encounters'][0]['bursts'][0]['species_override'] is None
+    assert replayed['encounters'][0]['species'] == ['Current Species', .8]
