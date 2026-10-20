@@ -2881,6 +2881,74 @@ def _read_eye_fields(db, pid):
     return (row[0], row[1], row[2], row[3])
 
 
+@pytest.mark.parametrize("score,threshold,accepted", [
+    (0.0, 0.0, True), (0.499, 0.5, False), (0.5, 0.5, True),
+    (1.0, 1.0, True), (1.05794, 1.05, True), (1.05794, 1.06, False),
+    (float("nan"), 0.5, False), (float("inf"), 0.5, False),
+    (-float("inf"), 0.5, False),
+])
+def test_eye_candidate_gate_uses_finite_raw_scores(score, threshold, accepted):
+    from pipeline import _eye_candidates_in_mask
+
+    candidate = {"name": "left_eye", "x": 1.0, "y": 1.0, "conf": score}
+    result = _eye_candidates_in_mask([candidate], np.ones((3, 3), dtype=bool), threshold)
+    assert result == ([candidate] if accepted else [])
+
+
+@pytest.mark.parametrize("axis,value", [
+    ("x", float("nan")), ("y", float("inf")), ("x", -float("inf")),
+    ("x", -0.1), ("y", 3.0),
+])
+def test_eye_candidate_gate_rejects_invalid_coordinates(axis, value):
+    from pipeline import _eye_candidates_in_mask
+
+    candidate = {"name": "left_eye", "x": 1.0, "y": 1.0, "conf": 1.1}
+    candidate[axis] = value
+    assert _eye_candidates_in_mask([candidate], np.ones((3, 3), dtype=bool), 0.5) == []
+
+
+@pytest.mark.parametrize("taxonomy_class,model", [
+    ("Aves", "superanimal-bird"), ("Mammalia", "superanimal-quadruped"),
+])
+def test_eye_stage_preserves_above_one_score_and_focus_center(tmp_path, monkeypatch, taxonomy_class, model):
+    import keypoints as kp
+    from focus_crop import focus_point
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path, taxonomy_class=taxonomy_class)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+    routed = []
+
+    def detect(image, bbox, model_name):
+        routed.append(model_name)
+        return [{"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 1.0579406023025513}]
+
+    monkeypatch.setattr(kp, "detect_keypoints", detect)
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True, "eye_detection_conf_gate": 1.05})
+    x, y, score, sharpness = _read_eye_fields(db, pid)
+    assert routed == [model]
+    assert score == 1.0579406023025513
+    assert sharpness > 0
+    assert focus_point(
+        {"eye_x": x, "eye_y": y, "eye_tenengrad": sharpness}, [], "auto", eye_enabled=True,
+    ) == ((x, y), "eye")
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")])
+def test_eye_stage_never_persists_nonfinite_model_score(tmp_path, monkeypatch, score):
+    import keypoints as kp
+    from pipeline import EYE_KP_FINGERPRINT_VERSION, detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *_args: [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": score},
+    ])
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+    assert db.conn.execute("SELECT eye_kp_fingerprint FROM photos WHERE id=?", (pid,)).fetchone()[0] == EYE_KP_FINGERPRINT_VERSION
+
+
 def test_eye_stage_gate1_low_classifier_conf_no_write(tmp_path, monkeypatch):
     """Gate 1: classifier conf below threshold → no keypoint model is even loaded."""
     import keypoints as kp

@@ -714,14 +714,14 @@
       </div>
       <div class="setting-row">
         <div class="setting-label">
-          Eye keypoint confidence gate
-          <small>Minimum confidence required on the eye keypoint output before the stage trusts it. Back-of-head frames usually fall here.</small>
+          Minimum eye keypoint score
+          <small>Minimum raw model score required to trust an eye location. This is not a probability; scores and thresholds can exceed one. Bird and mammal model scores are not calibrated to each other.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgEyeDetectionConfGate" min="0" max="100" value="50"
-                 style="width:120px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgEyeDetectionConfGateVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEyeDetectionConfGateVal">50%</span>
+          <input type="number" id="cfgEyeDetectionConfGate" min="0" step="0.01" value="0.5"
+                 style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;text-align:center;"
+                 onchange="document.getElementById('cfgEyeDetectionConfGateVal').textContent = this.value; saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEyeDetectionConfGateVal">0.5</span>
         </div>
       </div>
       <div class="setting-row">

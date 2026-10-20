@@ -631,6 +631,27 @@ def test_browse_lightbox_close_skips_reload_when_photo_unchanged(
     ), "closing the lightbox re-rendered the detail panel"
 
 
+@pytest.mark.parametrize("score,expected", [
+    (0.0, "eye score 0.000"), (1.0, "eye score 1.000"),
+    (1.0579406023025513, "eye score 1.058"),
+    (None, None), (float("nan"), None), (float("inf"), None),
+])
+def test_lightbox_eye_label_uses_raw_score(live_server, page, score, expected):
+    page.goto(live_server["url"] + "/browse")
+    # Exercise the page's actual renderer with invalid values as well as
+    # values representable in JSON (JSON cannot carry NaN/Infinity).
+    page.evaluate("""async score => {
+        const overlays = await import('/static/lightbox/overlays.js');
+        overlays._lbRenderEyeCrosshair({id: 1, eye_x: 0.5, eye_y: 0.5, eye_conf: score});
+    }""", score)
+    label = page.locator("#lightboxEye .lb-eye-crosshair span")
+    if expected is None:
+        expect(label).to_have_count(0)
+    else:
+        expect(label).to_have_text(expected)
+        expect(label).to_have_attribute("title", re.compile("not a probability"))
+
+
 def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
     live_server, page, tmp_path,
 ):
