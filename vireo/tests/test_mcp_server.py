@@ -9,8 +9,10 @@ SDK's client.
 
 import json
 import os
+import shlex
 import sys
 import threading
+import tomllib
 from pathlib import Path
 
 import anyio
@@ -397,6 +399,49 @@ def test_mcp_config_route_serves_connect_info(app_and_db):
     response = app.test_client().get("/api/system/mcp-config", headers={"X-Vireo-Token": TOKEN})
     assert response.status_code == 200
     assert response.get_json() == connect_info()
+    data = response.get_json()
+    assert {"command", "claude_code", "claude_desktop"} <= data.keys()
+    assert data["claude_desktop"]["mcpServers"]["vireo"] == {
+        "command": data["command"][0], "args": data["command"][1:],
+    }
+    assert data["codex"]["command"]
+    assert tomllib.loads(data["codex"]["config_toml"])["mcp_servers"]["vireo"] == {
+        "command": data["command"][0], "args": data["command"][1:],
+    }
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_generated_snippets_quote_paths_and_preserve_argv(monkeypatch, frozen, platform):
+    executable = (
+        "C:\\My Photos & Birds\\O'Brien $`é\\vireo-server.exe" if platform == "win32"
+        else '/My Photos & Birds/O\'Brien $`é/"vireo-server"'
+    )
+    monkeypatch.setattr(sys, "executable", executable)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(mcp_server, "__file__", "/Source Photos/O'Brien $`é/vireo/mcp_server.py")
+    command = server_command()
+    info = connect_info()
+    assert command[0] == executable
+    assert command[-1] == "--mcp"
+    assert len(command) == (2 if frozen else 3)
+    assert tomllib.loads(info["codex"]["config_toml"]) == {"mcp_servers": {"vireo": {
+        "command": command[0], "args": command[1:],
+    }}}
+    assert info["claude_desktop"] == {"mcpServers": {"vireo": {
+        "command": command[0], "args": command[1:],
+    }}}
+    for client, snippet in (("codex", info["codex"]["command"]), ("claude", info["claude_code"])):
+        expected = [client, "mcp", "add", "vireo", "--", *command]
+        if platform == "win32":
+            # Single-quoted PowerShell arguments escape apostrophes by doubling them.
+            import re
+            assert snippet.startswith("& ")
+            assert [arg.replace("''", "'") for arg in re.findall(r"'((?:[^']|'')*)'", snippet)] == expected
+            assert info["shell"] == "PowerShell"
+        else:
+            assert shlex.split(snippet) == expected
 
 
 @pytest.mark.skipif(sys.platform == "win32",

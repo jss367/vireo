@@ -21,6 +21,11 @@
   .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-sm.btn-danger { border-color: var(--danger); color: var(--danger); }
   .btn-sm.btn-danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
+  #mcpCheckResult { max-height: 240px; overflow-y: auto; }
+  @media (max-width: 600px) {
+    #mcpConnectSection .setting-row { flex-direction: column; gap: 10px; }
+    #mcpConnectSection .setting-row > div { width: 100%; min-width: 0; }
+  }
 
   .collapsible-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -971,16 +976,39 @@
     </div>
   </div>
 
-  <!-- Claude and other MCP clients -->
+  <!-- Assistant setup and independent server verification -->
   <div class="section" id="mcpConnectSection">
-    <div class="section-title">Claude and AI assistants</div>
+    <div class="section-title">Codex, Claude and AI assistants</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Vireo is a Model Context Protocol (MCP) server. Claude Code, Claude Desktop and other MCP clients can search this catalog, look at photos, read burst rankings, and set flags, ratings and keywords through the same routes the app uses, on the subscription you already have. Each change they make is one Undo step here. Vireo must be running while the assistant works, and nothing leaves this computer unless the assistant you are talking to sends it.
+      Vireo is a Model Context Protocol (MCP) server. Codex, Claude Code, Claude Desktop and other MCP clients can search this catalog, look at photos, read burst rankings, and set flags, ratings and keywords through the same routes the app uses, on the subscription you already have. Each change they make is one Undo step here. Vireo must be running while the assistant works, and nothing leaves this computer unless the assistant you are talking to sends it.
+    </p>
+    <p style="font-size:12px;color:var(--text-dim);">
+      Claude and Codex keep separate registrations. Configure each assistant you use. Commands below are generated for this installation; run them in <span id="mcpCommandShell">a terminal</span> on this computer. After moving Vireo or its source environment, reload this page and update the registration.
     </p>
     <div class="setting-row" style="align-items:flex-start;">
       <div class="setting-label">
+        Codex
+        <small>Run once, then start a new Codex session. Restart the app or extension if it still shows the old tools.</small>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
+        <code id="mcpCodexCommand" style="flex:1;min-width:0;font-size:12px;white-space:pre-wrap;word-break:break-all;background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;user-select:all;">Loading&hellip;</code>
+        <button type="button" class="btn-sm" onclick="copyMcpSnippet('mcpCodexCommand')">Copy</button>
+      </div>
+    </div>
+    <div class="setting-row" style="align-items:flex-start;">
+      <div class="setting-label">
+        Codex configuration file
+        <small>Alternative to the command: add or replace the Vireo table in <code>~/.codex/config.toml</code> (or <code>$CODEX_HOME/config.toml</code> if set). Do not add a second Vireo table. A trusted project's <code>.codex/config.toml</code> may override it.</small>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
+        <pre id="mcpCodexToml" style="flex:1;min-width:0;margin:0;font-size:12px;white-space:pre-wrap;word-break:break-all;background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;user-select:all;">Loading&hellip;</pre>
+        <button type="button" class="btn-sm" onclick="copyMcpSnippet('mcpCodexToml')">Copy</button>
+      </div>
+    </div>
+    <div class="setting-row" style="align-items:flex-start;">
+      <div class="setting-label">
         Claude Code
-        <small>Run once in a terminal; Claude Code then starts the server itself whenever it needs Vireo.</small>
+        <small>Run once in your project, then restart the Claude Code session. Claude Code starts the server when it needs Vireo.</small>
       </div>
       <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
         <code id="mcpClaudeCodeCommand" style="flex:1;min-width:0;font-size:12px;white-space:pre-wrap;word-break:break-all;background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;user-select:all;">Loading&hellip;</code>
@@ -997,6 +1025,25 @@
         <button type="button" class="btn-sm" onclick="copyMcpSnippet('mcpClaudeDesktopJson')">Copy</button>
       </div>
     </div>
+    <div class="setting-row" style="align-items:flex-start;">
+      <div class="setting-label">
+        Verify the server
+        <small>Starts the generated command, initializes MCP and reads status and folders. Does not change photos or assistant registrations. Discovery may target a different running Vireo instance; confirm the workspace and folder paths.</small>
+      </div>
+      <div style="flex:1;min-width:0;">
+        <button type="button" class="btn-sm" id="mcpCheckButton" onclick="checkMcpConnection()">Run read-only check</button>
+        <pre id="mcpCheckResult" role="status" aria-live="polite" style="font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;">Server check has not run. Assistant connection status must be checked in the assistant.</pre>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--text-dim);">
+      <code>codex mcp list</code> shows registrations; in a running Codex CLI session, <code>/mcp</code> shows active servers and tools. In Claude Code use <code>/mcp</code>; in Claude Desktop check its developer/server and tool status after restarting. In Conductor, open <strong>MCP status</strong>, choose <strong>Refresh status</strong>, then start a new agent session to load configuration changes. Check status again after the session starts.
+      A running Vireo HTTP server, a saved registration, or a successful check here does not establish that your assistant is connected.
+      See <a href="https://developers.openai.com/codex/mcp" target="_blank" rel="noopener noreferrer">Codex MCP setup</a> and <a href="https://conductor.build/docs/reference/mcp" target="_blank" rel="noopener noreferrer">Conductor MCP status</a>.
+    </p>
+    <p style="font-size:12px;color:var(--text-dim);">
+      For a read-only smoke check in the assistant, ask: <q>Call Vireo's vireo_status, list_workspaces and list_folders tools. Report the active workspace and folder paths so I can confirm the intended catalog. Do not switch workspaces or change photos.</q>
+      If tools are missing, check the selected client's registration and start a new session. If the server will not start, check the executable path and source dependencies. If Vireo rejects credentials, restart Vireo and check any VIREO_URL/VIREO_TOKEN overrides; never paste runtime tokens into chat.
+    </p>
   </div>
 
   <!-- External Editors -->
