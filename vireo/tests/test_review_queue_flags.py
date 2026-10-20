@@ -78,3 +78,44 @@ def test_stale_workspace_does_not_write_even_when_photo_is_shared(client_with_ph
     assert response.status_code == 409
     assert response.get_json()['code'] == 'workspace_changed'
     assert db.photos.get(photo_id)['flag'] == 'none'
+
+
+def test_workspace_activation_after_request_db_opens_cannot_write(client_with_photo, monkeypatch):
+    from db import Database
+
+    app, db, photo_id = client_with_photo
+    observed_workspace = db.active_workspace_id
+    other_workspace = db.create_workspace('Concurrent review')
+    db.add_workspace_folder(other_workspace, db.photos.get(photo_id)['folder_id'])
+    original = PhotoReviewService.set_flag
+    statements = []
+
+    def activate_then_write(service, *args, **kwargs):
+        # The request already holds a Database with the old cached workspace.
+        assert service.db.active_workspace_id == observed_workspace
+        with Database(db._db_path) as concurrent:
+            concurrent.workspaces.update(other_workspace, last_opened_at='2999-01-01T00:00:00')
+        service.db.conn.set_trace_callback(statements.append)
+        return original(service, *args, **kwargs)
+
+    monkeypatch.setattr(PhotoReviewService, 'set_flag', activate_then_write)
+    response = app.test_client().post(f'/api/photos/{photo_id}/flag', json={
+        'flag': 'rejected', 'observed_flag': 'none', 'observed_workspace_id': observed_workspace,
+    })
+    assert response.status_code == 409
+    assert response.get_json()['code'] == 'workspace_changed'
+    assert db.photos.get(photo_id)['flag'] == 'none'
+    assert not db.edit_history.list_recent()
+    assert db.photo_review.current_flag_note(photo_id) is None
+    workspace_read = next(i for i, sql in enumerate(statements) if 'SELECT id FROM workspaces ORDER BY' in sql)
+    assert statements.index('BEGIN IMMEDIATE') < workspace_read
+
+
+def test_matching_workspace_and_flag_guard_allows_write(client_with_photo):
+    app, db, photo_id = client_with_photo
+    response = app.test_client().post(f'/api/photos/{photo_id}/flag', json={
+        'flag': 'flagged', 'observed_flag': 'none', 'observed_workspace_id': db.active_workspace_id,
+    })
+    assert response.status_code == 200
+    assert db.photos.get(photo_id)['flag'] == 'flagged'
+    assert len(db.edit_history.list_recent()) == 1

@@ -13,6 +13,7 @@ from services.photo_review import (
     FLAG_SOURCE_MAX_CHARS,
     FlagConflict,
     PhotoReviewService,
+    WorkspaceConflict,
 )
 
 VALID_FLAGS = ("none", "flagged", "rejected")
@@ -90,13 +91,13 @@ def create_photo_review_blueprint(get_db, json_error):
         if "observed_workspace_id" in body and not _valid_flag_photo_id(observed_workspace):
             return json_error("observed_workspace_id must be a positive integer")
         db = get_db()
-        if observed_workspace is not None and db.active_workspace_id != observed_workspace:
-            return json_error("The active workspace changed. Reload Review before changing flags.",
-                              409, code="workspace_changed")
         try:
             PhotoReviewService(db).set_flag(
                 photo_id, flag, source=source, reason=reason, observed_flag=observed_flag,
+                observed_workspace_id=observed_workspace,
             )
+        except WorkspaceConflict as exc:
+            return json_error(str(exc), 409, code="workspace_changed")
         except FlagConflict as exc:
             return json_error(str(exc), 409, code="flag_conflict")
         except ValueError as exc:
