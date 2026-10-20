@@ -2,6 +2,7 @@
 
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -140,7 +141,8 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     assert all(set(species[pid]) == {*before_species.get(pid, []), target_name} for pid in ids)
 
 
-def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live_server, page):
+@pytest.mark.parametrize('history_refresh', ['normal', 'delayed', 'failed', 'failed_status'])
+def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live_server, page, history_refresh):
     from services.identity_alternatives import save_alternatives
     ids = open_panel(live_server, page)
     db = live_server['db']
@@ -161,12 +163,36 @@ def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live
     with db._commits_held():
         save_alternatives(db, ids, ['Tropical Kingbird', "Couch's Kingbird"], 'Newer shared review', 'An audio recording')
     db.set_active_workspace(first)
+    page.evaluate("() => switchBpTab('history')")
+    # Prime the actual row action before the conflict, including when its pane is hidden.
+    expect(page.locator('#bpHistoryList .bp-history-row button')).to_have_count(1)
+    held = []
+    if history_refresh == 'delayed':
+        page.route('**/api/edit-history?*', lambda route: held.append(route))
+    elif history_refresh in ('failed', 'failed_status'):
+        page.route('**/api/edit-history?*', lambda route: route.fulfill(status=503, json={'error': 'Offline'}))
+    if history_refresh == 'failed_status':
+        page.route('**/api/undo/status', lambda route: route.fulfill(status=503, json={'error': 'Offline'}))
     undo = page.locator('#historyUndoBtn')
     expect(undo).to_be_enabled()
     with page.expect_response(lambda response: response.url.endswith('/api/undo') and response.request.method == 'POST') as response:
         undo.click()
     assert response.value.status == 409
+    # A failed list/status refresh must not expose an old row label for a new action.
+    if history_refresh != 'normal':
+        expect(page.locator('#bpHistoryList .bp-history-row button')).to_have_count(0)
+        assert db.photos.get(pid)['rating'] == changed_rating
+    if history_refresh == 'failed_status':
+        expect(undo).to_be_disabled()
+        page.unroute('**/api/undo/status')
+        page.evaluate("() => window.dispatchEvent(new Event('focus'))")
     expect(undo).to_have_attribute('title', re.compile(re.escape('Undo: ' + description)))
+    if history_refresh == 'delayed':
+        assert held
+        held.pop().continue_()
+    elif history_refresh in ('failed', 'failed_status'):
+        page.unroute('**/api/edit-history?*')
+        page.evaluate("() => switchBpTab('history')")
     expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text=description).locator('button')).to_have_count(1)
     expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text='Superseded identification:').locator('button')).to_have_count(0)
     assert db.photos.get(pid)['rating'] == changed_rating

@@ -5250,20 +5250,12 @@ class Database:
                     'That grouping or species action was superseded by newer analysis. '
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
+        elif entry['action_type'] == 'identity_alternatives':
+            self._replay_identity_history(entry, items, undo=True)
         else:
-            from services.identity_alternatives import IdentityHistoryStale
-
-            try:
-                with self._commits_held():
-                    self._apply_undo(entry, items)
-                    history.mark_undone(entry['id'])
-            except IdentityHistoryStale:
-                history.retire_superseded_identity_entry(entry['id'])
-                history.commit()
-                raise IdentityHistoryStale(
-                    'That identification was changed elsewhere. History has been refreshed; '
-                    'review the next action before trying again.'
-                ) from None
+            with self._commits_held():
+                self._apply_undo(entry, items)
+                history.mark_undone(entry['id'])
         return entry
 
     def redo_last_undo(self):
@@ -5313,21 +5305,37 @@ class Database:
                     'That grouping or species action was superseded by newer analysis. '
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
+        elif entry['action_type'] == 'identity_alternatives':
+            self._replay_identity_history(entry, items, undo=False)
         else:
-            from services.identity_alternatives import IdentityHistoryStale
+            with self._commits_held():
+                self._apply_redo(entry, items)
+                history.mark_redone(entry['id'])
+        return entry
 
+    def _replay_identity_history(self, entry, items, *, undo):
+        """Retire exactly this stale action while retaining the writer lock."""
+        from services.identity_alternatives import IdentityHistoryStale
+
+        history = self._edit_history_repository()
+        stale = False
+        with self._commits_held():
             try:
-                with self._commits_held():
-                    self._apply_redo(entry, items)
-                    history.mark_redone(entry['id'])
+                with history.identity_replay():
+                    if undo:
+                        self._apply_undo(entry, items)
+                        history.mark_undone(entry['id'])
+                    else:
+                        self._apply_redo(entry, items)
+                        history.mark_redone(entry['id'])
             except IdentityHistoryStale:
                 history.retire_superseded_identity_entry(entry['id'])
-                history.commit()
-                raise IdentityHistoryStale(
-                    'That identification was changed elsewhere. History has been refreshed; '
-                    'review the next action before trying again.'
-                ) from None
-        return entry
+                stale = True
+        if stale:
+            raise IdentityHistoryStale(
+                'That identification was changed elsewhere. History has been refreshed; '
+                'review the next action before trying again.'
+            ) from None
 
     @contextlib.contextmanager
     def _commits_held(self):

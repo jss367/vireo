@@ -25,9 +25,10 @@ Callers reach it as ``db.edit_history`` (a fresh repository per access, see
 id-keyed lookups; recording, undo and redo stay on ``Database``.
 """
 
+import contextlib
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 
@@ -277,6 +278,21 @@ class EditHistoryRepository:
         """Clear an entry's undone flag and commit."""
         self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry_id,))
         self.conn.commit()
+
+    @contextlib.contextmanager
+    def identity_replay(self) -> Iterator[None]:
+        """Rollback a failed replay without releasing its SQLite writer lock."""
+        if not self.conn.in_transaction:
+            self.conn.execute('BEGIN IMMEDIATE')
+        self.conn.execute('SAVEPOINT identity_history_replay')
+        try:
+            yield
+        except BaseException:
+            self.conn.execute('ROLLBACK TO identity_history_replay')
+            self.conn.execute('RELEASE identity_history_replay')
+            raise
+        else:
+            self.conn.execute('RELEASE identity_history_replay')
 
     def retire_superseded_identity_entry(self, entry_id: int) -> None:
         """Skip a stale action on both cursors while retaining its complete audit."""

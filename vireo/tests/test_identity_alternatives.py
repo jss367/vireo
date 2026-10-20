@@ -731,6 +731,43 @@ def test_superseded_identity_retires_audit_and_exposes_next_action_without_repla
     assert db.conn.execute('SELECT 1 FROM edit_history_items WHERE edit_id=?', (stale_id,)).fetchone()
 
 
+def test_identity_retirement_keeps_writer_lock_against_concurrent_rowid_reuse(app_and_db, monkeypatch):
+    from db import Database
+    from repositories.edit_history import EditHistoryRepository
+    from services.identity_alternatives import save_alternatives
+    app, db = app_and_db
+    client = app.test_client()
+    assert save(client, [1]).status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    stale_id = db.edit_history.oldest_redoable()['id']
+    # An external attachment creates a redo conflict without advancing history.
+    keyword = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.tag_photo(1, keyword)
+    original = EditHistoryRepository.retire_superseded_identity_entry
+    attempts = []
+    with Database(db._db_path) as other:
+        other.set_active_workspace(db.require_workspace_id())
+        other.conn.execute('PRAGMA busy_timeout=0')
+
+        def competing_retirement(repository, entry_id):
+            assert entry_id == stale_id
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                with other._commits_held():
+                    save_alternatives(other, [2], CANDIDATES, 'Independent newer edit', '')
+            attempts.append(entry_id)
+            original(repository, entry_id)
+
+        monkeypatch.setattr(EditHistoryRepository, 'retire_superseded_identity_entry', competing_retirement)
+        assert client.post('/api/redo').status_code == 409
+        assert attempts == [stale_id]
+        with other._commits_held():
+            new_id = save_alternatives(other, [2], CANDIDATES, 'Independent newer edit', '')
+        assert new_id != stale_id
+        assert other.edit_history.latest_undoable()['id'] == new_id
+        assert other.conn.execute('SELECT action_type FROM edit_history WHERE id=?', (new_id,)).fetchone()[0] == 'identity_alternatives'
+        assert other.conn.execute('SELECT action_type FROM edit_history WHERE id=?', (stale_id,)).fetchone()[0] == 'identity_alternatives_superseded'
+
+
 def save(client, ids, **changes):
     workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={

@@ -1333,7 +1333,9 @@ async function changeHistory(operation, btn) {
     return true;
   } catch (e) {
     // A permanent conflict can retire an action while preserving its audit.
-    // Refresh the history list as well as the controls before another click.
+    // Invalidate stale row actions immediately; a list reload can be slow or fail.
+    document.querySelectorAll('#bpHistoryList .bp-history-row button, #bpHistoryList .bp-history-redo button').forEach(function(button) { button.remove(); });
+    historyStatus = {undo: {available: false}, redo: {available: false}};
     loadEditHistory();
     return false;
   } finally {
