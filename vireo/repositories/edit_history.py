@@ -291,9 +291,12 @@ class EditHistoryRepository:
             photo_edit = change.get('photo_edit')
             if photo_edit:
                 # A recompute invalidates structure, not the recorded photo edit.
+                remaining = {'photo_edit': photo_edit, 'photo_only': True}
+                if change.get('flag_items'):
+                    remaining['flag_items'] = change['flag_items']
                 self.conn.execute(
                     "UPDATE edit_history SET new_value = ?, description = ? WHERE id = ?",
-                    (json.dumps({'photo_edit': photo_edit, 'photo_only': True, 'flag_items': change.get('flag_items', [])}),
+                    (json.dumps(remaining),
                      "Photo changes from: " + row["description"], entry_id),
                 )
                 # The stale snapshot is never restored again; drop its blob.

@@ -533,14 +533,18 @@ _STALE_MSG = (
 
 
 @pytest.mark.parametrize("direction", ["undo", "redo"])
+@pytest.mark.parametrize("flag_items", [None, [], [{"photo_id": 1, "old_value": "none", "new_value": "flagged"}]])
 def test_stale_grouping_with_photo_edit_keeps_photo_half(
-    db, pids, monkeypatch, direction,
+    db, pids, monkeypatch, direction, flag_items,
 ):
     gh = _grouping_hooks(monkeypatch, stale=True)
     undone = 0 if direction == "undo" else 1
     photo_edit = {"action_type": "flag"}
+    payload = {"photo_edit": photo_edit, "x": 1}
+    if flag_items is not None:
+        payload["flag_items"] = flag_items
     edit_id = _raw_edit(
-        db, "pipeline_grouping", json.dumps({"photo_edit": photo_edit, "x": 1}),
+        db, "pipeline_grouping", json.dumps(payload),
         undone=undone, description="Detach burst",
     )
     db.conn.execute(
@@ -558,7 +562,10 @@ def test_stale_grouping_with_photo_edit_keeps_photo_half(
     assert info.value.__suppress_context__
     assert not db.conn.in_transaction
     row = _history_rows(db, "id = ?", (edit_id,))[0]
-    assert json.loads(row["new_value"]) == {"photo_edit": photo_edit, "photo_only": True}
+    expected = {"photo_edit": photo_edit, "photo_only": True}
+    if flag_items:
+        expected["flag_items"] = flag_items
+    assert json.loads(row["new_value"]) == expected
     assert row["description"] == "Photo changes from: Detach burst"
     assert row["undone"] == undone
     with _reader(db) as conn:
