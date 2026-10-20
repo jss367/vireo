@@ -105,7 +105,7 @@ def test_reader_is_read_only_and_hides_labels_before_feature_preparation(library
     monkeypatch.setattr(config, "load", lambda: pytest.fail("Mutable config must not be read"))
     conn = open_library(library)
     with pytest.raises(sqlite3.OperationalError, match="readonly"):
-        conn.execute("DELETE FROM photos")
+        conn.execute("DELETE FROM main.photos")
     features = load_photo_features(FeatureReader(conn, 1), photo_ids=list(range(1, 13)), effective_config={})
     assert all(p["confirmed_species"] is None for p in features)
     conn.close()
