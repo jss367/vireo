@@ -49,7 +49,7 @@ export async function loadHistory() {
     var html = '<table class="data-table-sm"><thead><tr><th>Type</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
     rows.forEach(function(r) {
       var cls = r.status === 'completed' ? 'status-completed' : r.status === 'failed' ? 'status-failed' : '';
-      var started = r.started_at ? new Date(r.started_at).toLocaleString() : '-';
+      var started = r.started_at ? window.VireoTime.dateTime(new Date(r.started_at)) : '-';
       var duration = r.duration != null ? formatDuration(r.duration) : '-';
       var result = '-';
       if (r.summary) {

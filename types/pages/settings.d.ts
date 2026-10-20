@@ -93,6 +93,7 @@ interface SettingsConfig {
   pipeline?: Record<string,SettingsValue>;
   ingest?: Record<string,SettingsValue>;
   numbered_navigation_mode?: string;
+  time_format?: string;
   keyboard_shortcuts?: Record<string,SettingsValue>;
 }
 interface SettingsLabel {labels_file:string;name:string;taxon_groups?:string[];usable_count?:number;species_count?:number;ambiguous_count?:number}

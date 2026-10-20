@@ -1801,7 +1801,7 @@ function _lpMinOrder() {
 /** @param {NavLogRecord} record @param {number} minOrder */
 function _lpMakeLineEl(record, minOrder) {
   var time = new Date(record.time * 1000);
-  var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  var timeStr = window.VireoTime.time(time, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   var div = document.createElement('div');
   div.className = 'lp-line lp-' + record.level;
   div.dataset.level = record.level;

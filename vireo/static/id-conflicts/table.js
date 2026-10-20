@@ -118,7 +118,7 @@ function renderPhotoCell(photo) {
   var thumbUrl = window.vireoThumbnailUrl
     ? window.vireoThumbnailUrl(photo)
     : '/thumbnails/' + photo.photo_id + '.jpg';
-  if (photo.timestamp) meta.push(photo.timestamp.replace('T', ' ').substring(0, 16));
+  if (photo.timestamp) meta.push(window.VireoTime.captureDateTime(photo.timestamp));
   if (photo.rating) meta.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   if (photo.wildlife_excluded) meta.push('not wildlife');

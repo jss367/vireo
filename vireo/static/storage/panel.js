@@ -160,7 +160,7 @@ async function refreshStoragePage() {
     loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(),
   ]);
   /** @type {HTMLElement} */ (document.getElementById('storageUpdatedAt')).textContent =
-    'Updated ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'});
+    'Updated ' + window.VireoTime.time(new Date(), {hour: 'numeric', minute: '2-digit', second: '2-digit'});
   if (btn) btn.disabled = false;
 }
 

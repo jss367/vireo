@@ -757,7 +757,7 @@ function _formatCheckedAt(checkedAt) {
   const secs = Number(checkedAt);
   if (!Number.isFinite(secs) || secs <= 0) return '';
   try {
-    return new Date(secs * 1000).toLocaleTimeString();
+    return window.VireoTime.time(new Date(secs * 1000));
   } catch (e) { return ''; }
 }
 

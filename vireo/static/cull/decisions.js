@@ -75,8 +75,8 @@ function encounterLabel(enc, idx, count) {
   var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
   if (enc.time_range && enc.time_range[0]) {
     var day = enc.time_range[0].substring(0, 10);
-    var start = (enc.time_range[0].split('T')[1] || enc.time_range[0]).substring(0, 8);
-    var end = enc.time_range[1] ? (enc.time_range[1].split('T')[1] || enc.time_range[1]).substring(0, 8) : '';
+    var start = window.VireoTime.captureTime(enc.time_range[0]);
+    var end = enc.time_range[1] ? window.VireoTime.captureTime(enc.time_range[1]) : '';
     label = day + ' · Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
   }
   if (enc.burst_count) label += ' / ' + enc.burst_count + ' bursts';

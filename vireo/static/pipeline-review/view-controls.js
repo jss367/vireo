@@ -192,7 +192,7 @@ function formatEncounterTimeRange(timeRange) {
     return {
       dayKey: match[1] + '-' + match[2] + '-' + match[3],
       date: monthNames[monthIndex] + ' ' + Number(match[3]) + ', ' + match[1],
-      time: match[4],
+      time: window.VireoTime.captureTime(value),
     };
   }
 

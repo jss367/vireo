@@ -136,7 +136,7 @@ function _renderSaveStatus() {
     el.textContent = String('Save failed \u2014 changes not saved');
     el.title = 'The last save was rejected. Edit the field again to retry.';
   } else if (_saveStatus.lastSavedAt) {
-    var t = _saveStatus.lastSavedAt.toLocaleTimeString([], {
+    var t = window.VireoTime.time(_saveStatus.lastSavedAt, {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
     el.setAttribute('data-state', 'saved');

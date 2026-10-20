@@ -113,6 +113,7 @@ DEFAULTS = {
     # out of "Needs Identification" and are skipped by the classifier.
     "subject_types": ["taxonomy", "individual", "genre"],
     # --- Display ---
+    "time_format": "system",
     "browse_card_fields": [
         "filename", "location_status", "rating", "flag", "sharpness"
     ],

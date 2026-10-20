@@ -110,7 +110,7 @@ function formatTimeAgo(isoStr) {
   if (sec < 60) return 'just now';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
-  return d.toLocaleString();
+  return window.VireoTime.dateTime(d);
 }
 
 // Whether a new scan would show the same groups, from the counts

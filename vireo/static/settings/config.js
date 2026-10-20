@@ -1,9 +1,7 @@
 async function loadConfig() {
   try {
     /** @type {SettingsConfig} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
-    /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value =
-      String(cfg.numbered_navigation_mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order');
-    window.vireoSetNumberedNavigationMode(/** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value);
+    loadDisplayConfig(cfg);
     var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
     /** @type {HTMLInputElement} */ (document.getElementById('cfgThreshold')).value = String(pct);
     /** @type {HTMLElement} */ (document.getElementById('cfgThresholdVal')).textContent = String(pct + '%');
@@ -290,7 +288,7 @@ function _editedSecrets() {
     var similarity = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSimilarity')).value, 10) / 100;
     var secrets = _editedSecrets();
     var keywordCase = /** @type {HTMLSelectElement} */ (document.getElementById('cfgKeywordCase')).value;
-    var numberedNavigationMode = /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value;
+    var display = readDisplayConfig();
     var maxEditHistory = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMaxEditHistory')).value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
     _saveStatusMark('config', 'inflight', gen);
@@ -303,7 +301,7 @@ function _editedSecrets() {
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
           keyword_case: keywordCase,
-          numbered_navigation_mode: numberedNavigationMode,
+          ...display,
           max_edit_history: maxEditHistory,
           google_maps_prefer_english: /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsPreferEnglish')).checked,
           external_editors: collectExternalEditors(),
@@ -401,9 +399,7 @@ function _editedSecrets() {
       throw e;
     }
     _rememberSavedSecrets(secrets);
-    if (window.vireoSetNumberedNavigationMode) {
-      window.vireoSetNumberedNavigationMode(numberedNavigationMode);
-    }
+    applyDisplayConfig(display);
     _saveStatusMark('config', 'ok', gen);
     if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     // Drop the cached editor list so the next "Open in Editor" action
@@ -411,6 +407,28 @@ function _editedSecrets() {
     if (typeof window.invalidateEditorsCache === 'function') {
       window.invalidateEditorsCache();
     }
+}
+
+/** @param {SettingsConfig} cfg */
+function loadDisplayConfig(cfg) {
+  var navigation = /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode'));
+  var clock = /** @type {HTMLSelectElement} */ (document.getElementById('cfgTimeFormat'));
+  navigation.value = cfg.numbered_navigation_mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order';
+  clock.value = cfg.time_format === '12h' || cfg.time_format === '24h' ? cfg.time_format : 'system';
+  applyDisplayConfig(readDisplayConfig());
+}
+
+function readDisplayConfig() {
+  return {
+    numbered_navigation_mode: /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value,
+    time_format: /** @type {HTMLSelectElement} */ (document.getElementById('cfgTimeFormat')).value,
+  };
+}
+
+/** @param {{numbered_navigation_mode: string; time_format: string}} display */
+function applyDisplayConfig(display) {
+  window.vireoSetNumberedNavigationMode(display.numbered_navigation_mode);
+  window.VireoTime.setFormat(display.time_format);
 }
 
 function saveConfig() {

@@ -214,6 +214,14 @@ SCHEMA = {
     },
 
     # --- Display ----------------------------------------------------------
+    "time_format": {
+        "type": "enum", "enum": ["system", "12h", "24h"],
+        "enum_labels": {"system": "System default", "12h": "12-hour", "24h": "24-hour"},
+        "category": "Display", "scope": "global",
+        "label": "Time format",
+        "desc": "Use the system default, 12-hour, or 24-hour clock for displayed times. "
+                "Photo capture times keep the camera's recorded local time.",
+    },
     "photos_per_page": {
         "type": "int", "min": 10, "max": 500,
         "category": "Display", "scope": "global",

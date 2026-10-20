@@ -118,7 +118,7 @@ function buildStars(rating) {
 /** @param {string | null | undefined} ts */
 function formatDate(ts) {
   if (!ts) return '';
-  return ts.replace('T', ' ').substring(0, 16);
+  return window.VireoTime.captureDateTime(ts);
 }
 
 /* ── State for bi-directional sync ── */

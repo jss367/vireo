@@ -1,3 +1,4 @@
+/// <reference path="../time.d.ts" />
 // The Map page (map-page.js): the parts of Leaflet and Leaflet.markercluster
 // it uses, the photos /api/photos/geo returns, and the functions the other
 // map scripts and the shared navbar give it.
