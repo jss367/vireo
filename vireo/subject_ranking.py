@@ -217,8 +217,9 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
     from scoring import score_encounter
     cards, eligible = comparison_frames(db, photos, comparison, effective_cfg)
     by_id = {c["id"]: c for c in cards}
+    encounter = {"photos": eligible}
     if len(eligible) >= 2:
-        score_encounter({"photos": eligible}, config=effective_cfg)
+        score_encounter(encounter, config=effective_cfg)
         for frame in eligible:
             if not frame.get("selection_eligible", True):
                 reasons = frame.get("analysis_reasons") or ["subject_analysis_unavailable"]
@@ -237,6 +238,7 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
         card.update(rank=rank, role=role, label=photo.get("label") or "REVIEW", quality=photo["quality_composite"],
                     quality_pct=round(photo["quality_composite"] * 100), focus=photo["focus_score"],
                     focus_basis="eye" if photo.get("eye_focus_score") is not None else "subject",
+                    focus_evidence=photo.get("focus_evidence"),
                     reject_reasons=photo.get("reject_reasons", []),
                     reasons=_best_batch_reasons(photo, eligible, is_best=photo is best))
     cards.sort(key=lambda c: (c["rank"] is None, c["rank"] or 0))
@@ -246,4 +248,5 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
             "alternate_ids": [c["id"] for c in cards if c["role"] == "alternate"],
             "suggested_reject_ids": [c["id"] for c in cards if c["role"] == "reject" and c["flag"] == "none"],
             "comparison": {"requested_species": comparison.requested_species, "subject_overrides": comparison.subject_overrides},
+            "focus_cohorts": encounter.get("focus_cohorts", {}),
             "scored": bool(eligible), "unscored_reason": None if eligible else "At least two selected subjects need current quality analysis"}
