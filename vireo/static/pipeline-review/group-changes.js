@@ -415,9 +415,13 @@ async function grmConfirmSpeciesCall(species, memberIds) {
     });
     return;
   }
+  /** @type {ReviewSpeciesEdit} */ var initial = {species: species, photo_ids: memberIds};
+  if (grmState.burstIdx != null) initial.burst_index = grmState.burstIdx;
+  var reviewed = await reviewEncounterSpecies(initial);
+  if (!reviewed) return false;
   var resp = await safeFetch('/api/encounters/species', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ species: species, photo_ids: memberIds, burst_index: grmState.burstIdx }),
+    body: JSON.stringify(reviewed),
   });
   // Adopt authoritative structure (mirrors confirmSpecies()).
   if (resp && resp.encounters) {
@@ -638,7 +642,7 @@ async function grmApply() {
         // already committed idempotently above, so a retry re-runs only the
         // species side. No try/catch — propagating the throw is the desired
         // "keep modal open" behavior.
-        if (memberIds.length) await grmConfirmSpeciesCall(species, memberIds);
+        if (memberIds.length && await grmConfirmSpeciesCall(species, memberIds) === false) return false;
         if (!sessionIsActive()) return false;
       }
     }
@@ -677,6 +681,7 @@ function bindGroupReviewKeyboard() {
     /* --- Keyboard handling --- */
 
     document.addEventListener('keydown', function(e) {
+      if (document.getElementById('speciesConfirmationPreview')) return;
       if (!/** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')) return;
       // The shared lightbox stacks over Group Review and owns its own key handling.
       // Its handler consumes arrows and P/X but not Space/Delete/Backspace, so those

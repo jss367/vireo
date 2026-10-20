@@ -1800,7 +1800,7 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
           window.__speciesPosts = [];
           const originalSafeFetch = window.safeFetch;
           window.safeFetch = (url, opts, cfg) => {
-            if (String(url).includes('/api/encounters/species')) {
+            if (String(url).includes('/api/encounters/species') && !JSON.parse(opts.body).preview) {
               window.__speciesPosts.push(JSON.parse(opts.body));
               return new Promise(resolve => {
                 window.__resolveSpeciesPost = () => resolve({
@@ -1819,7 +1819,7 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
         """
     )
 
-    post_count = page.evaluate(
+    page.evaluate(
         """
         () => {
           const event = { stopPropagation() {} };
@@ -1827,13 +1827,15 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
             confirmSpecies(event, 1, null, null),
             confirmSpecies(event, 1, null, null),
           ];
-          return window.__speciesPosts.length;
         }
         """
     )
-
-    assert post_count == 1
+    expect(page.locator('#speciesConfirmationPreview')).to_have_count(1)
+    expect(page.locator('#speciesConfirmationPreview .species-preview-apply')).to_be_enabled()
     expect(confirm_button).to_be_disabled()
+    assert page.evaluate('window.__speciesPosts.length') == 0
+    page.locator('#speciesConfirmationPreview .species-preview-apply').click()
+    assert page.evaluate('window.__speciesPosts.length') == 1
 
     page.evaluate("() => window.__resolveSpeciesPost()")
     page.evaluate("() => Promise.all(window.__confirmPromises)")

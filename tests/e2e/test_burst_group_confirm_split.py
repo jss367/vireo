@@ -365,8 +365,10 @@ def test_species_only_apply_leaves_flags_untouched_and_tags_all_frames(live_serv
     page.locator("#grmSpecies").fill("Northern Goshawk")
     expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
 
-    with page.expect_response("**/api/encounters/species"):
-        page.locator("#grmApplyBtn").click()
+    page.locator("#grmApplyBtn").click()
+    expect(page.locator("#speciesConfirmationPreview .species-preview-apply")).to_be_enabled()
+    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')):
+        page.locator("#speciesConfirmationPreview .species-preview-apply").click()
     expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
 
     # No flag changed: the staged reject was discarded with the unchecked box.
@@ -421,8 +423,10 @@ def test_smart_default_species_checked_when_frame_missing_keyword(live_server, p
     expect(page.locator("#grmOverlay .grm-card-kw-dot")).to_have_count(2)
     expect(page.locator("#grmOverlay .grm-card-kw-badge")).to_have_count(0)
 
-    with page.expect_response("**/api/encounters/species"):
-        page.locator("#grmApplyBtn").click()
+    page.locator("#grmApplyBtn").click()
+    expect(page.locator("#speciesConfirmationPreview .species-preview-apply")).to_be_enabled()
+    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')):
+        page.locator("#speciesConfirmationPreview .species-preview-apply").click()
     expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
 
     # All three frames now carry the species keyword — the missing one got it.
@@ -627,8 +631,10 @@ def test_species_only_with_removed_photo_keeps_member_and_tags_it(live_server, p
     page.locator("#grmSpecies").fill("Broad-winged Hawk")
     expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
 
-    with page.expect_response("**/api/encounters/species"):
-        page.locator("#grmApplyBtn").click()
+    page.locator("#grmApplyBtn").click()
+    expect(page.locator("#speciesConfirmationPreview .species-preview-apply")).to_be_enabled()
+    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')):
+        page.locator("#speciesConfirmationPreview .species-preview-apply").click()
     expect(page.locator("#grmOverlay")).not_to_have_class(re.compile(r"\bopen\b"))
 
     # Removal discarded: the burst still holds all three frames.

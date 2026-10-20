@@ -180,6 +180,37 @@ before deciding. Record decisions through the normal flag endpoints so they
 show up in, and can be reversed from, the Undo panel. Design:
 `docs/plans/2026-10-17-burst-evidence-adjudication-design.md`.
 
+### Previewing encounter species confirmation
+
+`POST /api/encounters/species` (also `/api/v1/encounters/species`) supports
+an exact photo-set preview before writing species keywords. For example:
+
+```json
+{"species":"Eared Grebe","photo_ids":[102,103],"source_photo_ids":[101,102,103],"add":true,"split":true,"preview":true}
+```
+
+The response includes `photos` (every source photo with its filename, capture
+time, flag, existing species, selected state, proposed `additions` and
+`removals`, and detection-scoped stored model evidence), `photo_count`, exact
+`photo_ids`, and `preview_token`. Each prediction identifies its model, label
+fingerprint, review status and whether its label set is historical. Subjects
+below the workspace detector threshold are marked. Stored evidence is never
+itself a confirmation.
+
+Apply by sending the same request without `preview`, with the returned
+`preview_token`. Narrowing photos or changing add/replace/split choices requires
+a fresh preview. The server rechecks the encounter, all source photos' keywords
+and provenance, subject boxes, classifier output and decisions while holding the
+writer lock. Stale previews return HTTP 409 without species changes.
+
+Use `add: true` to preserve existing species. To replace one explicitly named
+species, omit `add` and send `previous_species`; unrelated species are retained.
+`split: true` separates exactly the selected frames into another encounter and
+requires fewer than all encounter members. Without it, disagreement never
+changes membership. Species and membership changes share one Undo step, and
+flags are preserved. Legacy requests without a preview token retain their
+established API behavior; the Process Review UI always previews its decisions.
+
 ## Worked example
 
 ```bash

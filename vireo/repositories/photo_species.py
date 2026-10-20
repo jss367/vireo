@@ -51,6 +51,61 @@ class PhotoSpeciesRepository:
         # under its module name so the moved bodies read ``self._chunks``.
         self._chunks = chunks
 
+    def confirmation_evidence(self, photo_ids: Collection[int]) -> list[dict[str, Any]]:
+        """Current photo membership and every subject's workspace-visible evidence.
+
+        Do not flatten subjects into a single winning species. Include review
+        statuses, even rejected alternatives, so a preview never hides a second
+        subject or silently treats a model suggestion as a human confirmation.
+        """
+        result = []
+        ws = self.workspace_id
+        for chunk in self._chunks(photo_ids):
+            marks = ",".join("?" for _ in chunk)
+            photos = self.conn.execute(
+                f"SELECT id, filename, timestamp, flag FROM photos WHERE id IN ({marks})",
+                list(chunk),
+            ).fetchall()
+            by_id = {r["id"]: dict(r, subjects=[], keywords=[]) for r in photos}
+            keyword_rows = self.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id, pk.source
+                    FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id
+                    WHERE pk.photo_id IN ({marks}) AND (k.is_species=1 OR k.type='taxonomy')
+                    ORDER BY pk.photo_id, k.id""", list(chunk),
+            ).fetchall()
+            for keyword in keyword_rows:
+                by_id[keyword["photo_id"]]["keywords"].append(dict(keyword))
+            subjects = {}
+            rows = self.conn.execute(
+                f"""SELECT d.photo_id, d.id AS detection_id, d.box_x, d.box_y,
+                           d.box_w, d.box_h, d.detector_confidence, d.detector_model, d.category,
+                           p.id AS prediction_id, p.species, p.confidence,
+                           p.classifier_model, p.labels_fingerprint,
+                           COALESCE(r.status, 'pending') AS status
+                    FROM detections d LEFT JOIN predictions p ON p.detection_id=d.id
+                    LEFT JOIN prediction_review r ON r.prediction_id=p.id AND r.workspace_id=?
+                    WHERE d.photo_id IN ({marks})
+                    ORDER BY d.photo_id, d.id, p.confidence DESC, p.id""",
+                [ws, *chunk],
+            ).fetchall()
+            for row in rows:
+                did = row["detection_id"]
+                if did not in subjects:
+                    subject = {k: row[k] for k in (
+                        "detection_id", "box_x", "box_y", "box_w", "box_h", "detector_confidence",
+                        "detector_model", "category",
+                    )}
+                    subject["predictions"] = []
+                    subjects[did] = subject
+                    by_id[row["photo_id"]]["subjects"].append(subject)
+                if row["prediction_id"] is not None:
+                    subjects[did]["predictions"].append({k: row[k] for k in (
+                        "prediction_id", "species", "confidence", "classifier_model",
+                        "labels_fingerprint", "status",
+                    )})
+            result.extend(by_id.values())
+        return result
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""

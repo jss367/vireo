@@ -91,7 +91,14 @@ def test_review_grid_species_menu_opens_offscreen_and_confirms(live_server, page
     writes = []
 
     def confirm(route):
-        writes.append(route.request.post_data_json)
+        body = route.request.post_data_json
+        if body.get('preview'):
+            route.fulfill(json={'ok': True, 'preview_token': 'current-photos', 'photo_count': len(body['photo_ids']),
+                'photos': [{'id': pid, 'filename': f'bird-{pid}.NEF', 'selected': True,
+                            'subjects': [], 'existing_species': [], 'additions': [body['species']], 'removals': []}
+                           for pid in body['photo_ids']]})
+            return
+        writes.append(body)
         route.fulfill(json={"ok": True})
 
     page.route("**/api/encounters/species", confirm)
@@ -104,9 +111,13 @@ def test_review_grid_species_menu_opens_offscreen_and_confirms(live_server, page
     expect(menu.locator("input")).to_be_visible()
     expect(menu.locator(".species-dropdown-item")).to_have_count(5)
     menu.get_by_text("Red-crowned Amazon", exact=True).click()
+    expect(page.locator('#speciesConfirmationPreview .species-preview-apply')).to_be_enabled()
+    page.locator('#speciesConfirmationPreview .species-preview-apply').click()
     expect(last.locator(".species-name").first).to_have_text("Red-crowned Amazon")
     expect(last.locator(".species-name").first).to_have_class("species-name confirmed")
-    assert writes == [{"species": "Red-crowned Amazon", "photo_ids": list(range(25, 37))}]
+    assert writes == [{"species": "Red-crowned Amazon", "photo_ids": list(range(25, 37)),
+                       "source_photo_ids": list(range(25, 37)), "add": True,
+                       "split": False, "preview_token": "current-photos"}]
 
     # A full render after partial widget updates must retain the confirmed
     # state, and Hide confirmed must remove exactly that encounter.
