@@ -106,9 +106,10 @@ interface Window {VireoFolderBrowser: new(options: FolderBrowserOptions) => {
   close(): void; browse(path: string | null): Promise<void>; confirm(): void;
 };}
 
-interface ExportPreflightRequest {photo_ids: number[]; destination: string;}
+interface ExportPreflightRequest {photo_ids: number[]; destination: string; metadata_fields?: string[];}
 interface ExportPreflightResult {
   rename_count: number;
+  metadata?: {description: string};
   renames?: {requested_name: string; export_name: string}[];
   destination_folders?: string[]; destination_folder_count?: number;
   error?: string;

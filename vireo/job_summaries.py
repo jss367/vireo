@@ -271,6 +271,16 @@ def _export(result: dict, config: dict) -> tuple[str, list[str]]:
         summary += f", {_n(renamed, 'file')} renamed to avoid overwriting"
         for rename in result.get("renames") or []:
             details.append(f"{rename['requested_name']} → {rename['export_name']}")
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        summary += f"; metadata requested: {metadata.get('description', 'selection unavailable')}"
+        for field, counts in metadata.get("categories", {}).items():
+            details.append(
+                f"{field.replace('_', ' ').capitalize()} (photo counts): "
+                f"{counts['requested']} requested, {counts['written']} written, "
+                f"{counts['unavailable']} unavailable, {counts['failed']} failed, "
+                f"{counts['not_attempted']} not attempted"
+            )
     return summary, details
 
 

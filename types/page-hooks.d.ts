@@ -130,7 +130,7 @@ interface VireoPageHooks {
   loadStoragePanel?(): Promise<void>;
 }
 
-interface VireoExportPreflightRequest {photo_ids: number[]; destination: string}
+interface VireoExportPreflightRequest {photo_ids: number[]; destination: string; metadata_fields?: string[]}
 
 type VireoPageHookName = keyof VireoPageHooks;
 

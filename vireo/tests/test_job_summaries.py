@@ -609,3 +609,14 @@ def test_missing_originals_scan_leads_with_the_answer():
     )
     out = describe_result("missing_originals_scan", {"cancelled": True, "scope": "workspace"})
     assert out["summary"] == "Check cancelled"
+
+
+def test_export_summary_includes_metadata_outcomes():
+    out = describe_result('export', {'exported': 1, 'metadata': {
+        'description': 'Location (GPS)', 'metadata_free': False,
+        'categories': {'location': {'requested': 2, 'written': 1, 'unavailable': 1,
+                                    'failed': 0, 'not_attempted': 0}},
+    }})
+    assert 'metadata requested: Location (GPS)' in out['summary']
+    assert any('2 requested, 1 written, 1 unavailable, 0 failed, 0 not attempted' in d
+               for d in out['details'])
