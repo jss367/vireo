@@ -14,6 +14,7 @@ from pipeline_locks import (
     acquire_photo_mask,
 )
 from pipeline_stages.context import PipelineRun
+from pipeline_stages.outcomes import StageOutcomes
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from resource_ledger import (
     ResourceWaitCancelled,
@@ -100,6 +101,9 @@ def extract_masks_stage(
         run.stages["extract_masks"]["status"] = "skipped"
         run.runner.update_step(run.job["id"], "extract_masks", status="completed",
                            summary="Skipped")
+        run.result["stages"]["extract_masks"] = {
+            "reason": "disabled" if run.params.skip_extract_masks else "not_started",
+        }
         return
 
     run.stages["extract_masks"]["status"] = "running"
@@ -141,6 +145,10 @@ def extract_masks_stage(
         log.exception("Pipeline extract-masks stage failed")
         run.stages["extract_masks"]["status"] = "failed"
         run.runner.update_step(run.job["id"], "extract_masks", status="failed", error=str(e))
+        masks.outcomes.stage_error = f"{type(e).__name__}: {e}"[:1000]
+    finally:
+        result = run.result["stages"].setdefault("extract_masks", {})
+        result["outcomes"] = masks.outcomes.as_dict()
 
     run.update_stages(run.runner, run.job["id"], run.stages)
 
@@ -254,6 +262,7 @@ class _MaskPass:
         source_offline_state: SourceOfflineState,
     ) -> None:
         self.run = run
+        self.outcomes = StageOutcomes()
         self.staged_mask_file = staged_mask_file
         self.extract_masks_early_exit = extract_masks_early_exit
         self.filter_excluded = filter_excluded
@@ -357,6 +366,15 @@ class _MaskPass:
             "weak_detection_confidence", 0.12,
         )
         self.contextual_weak_ids = self._find_contextual_weak_ids()
+        self.outcomes.settings = {
+            "detector_confidence": self.detector_confidence,
+            "weak_detection_confidence": self.weak_detection_confidence,
+            "weak_rescue_enabled": self.weak_rescue_enabled,
+            "sam2_variant": self.sam2_variant,
+            "dinov2_variant": self.dinov2_variant,
+            "proxy_longest_edge": self.proxy_longest_edge,
+            "raw_subject_analysis": self.run.params.raw_subject_analysis,
+        }
 
     def _find_contextual_weak_ids(self) -> set[int]:
         contextual_weak_ids: set = set()
@@ -460,6 +478,10 @@ class _MaskPass:
         already_masked_ids, at_risk_dropped_ids = (
             self._dropped_mask_outcomes(dropped)
         )
+        for photo_id in at_risk_dropped_ids:
+            self.outcomes.record(photo_id, "source_offline")
+        for photo_id in already_masked_ids:
+            self.outcomes.record(photo_id, "cached_offline")
         self.em_preflight_unreadable = len(at_risk_dropped_ids)
         self.em_preflight_masked = len(already_masked_ids)
         # Publish so eye_keypoints (later downstream) sees
@@ -577,6 +599,9 @@ class _MaskPass:
                     d for d in detection_store.get_detections(thread_db, p["id"], min_conf=0)
                     if d["detector_model"] != "full-image"
                 ]
+                self.outcomes.record(
+                    p["id"], "no_qualifying_detection" if raw_dets else self._empty_detector_reason(p["id"]),
+                )
                 if raw_dets:
                     has_mask = thread_db.masks_features.photo_mask_path(p["id"])
                     if not has_mask:
@@ -585,6 +610,14 @@ class _MaskPass:
         self.photos_to_process = [
             photo_det_map[pid] for pid in photo_det_map
         ]
+
+    def _empty_detector_reason(self, photo_id: int) -> str:
+        count = self.thread_db.model_runs.detector_run_box_count(photo_id, "megadetector-v6")
+        if count == 0:
+            return "detector_completed_zero_boxes"
+        if count is not None:
+            return "detector_persistence_incomplete"
+        return "no_detection_evidence"
 
     def _qualifying_detections(self, p: sqlite3.Row) -> list[sqlite3.Row]:
         """The detections that may drive this photo's mask, primary first."""
@@ -930,7 +963,8 @@ class _MaskPass:
                 if run.control.cancellation_requested():
                     raise
                 continue
-            except Exception:  # broad: per-photo boundary; one photo's failure is counted and the batch continues
+            except Exception as error:  # broad: per-photo boundary; one photo's failure is counted and the batch continues
+                self.outcomes.record(item.photo_id, "failed", error)
                 self.em_failed += 1
                 log.warning("Mask extraction failed for photo %s", item.photo_id, exc_info=True)
                 # A failed write can leave this connection inside a
@@ -952,6 +986,9 @@ class _MaskPass:
         run = self.run
         current = self._sync_primary_subject(item.photo_id)
         if not current:
+            # Candidate selection can include people/vehicles, or become stale
+            # while waiting for the photo lock. SAM did not run in this branch.
+            self.outcomes.record(item.photo_id, "no_retained_animal")
             self.skipped += 1
             return _NEXT_PHOTO
         selected = current[0]
@@ -959,6 +996,7 @@ class _MaskPass:
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         if self._reuse_cached_mask(item):
+            self.outcomes.record(item.photo_id, "cached")
             self.masked += 1
             self.processed = i + 1
             return _NEXT_PHOTO
@@ -975,6 +1013,7 @@ class _MaskPass:
         # photo the outage started on while the stage
         # walks the rest of the worklist.
         if item.photo["folder_id"] in self.em_offline_folder_ids:
+            self.outcomes.record(item.photo_id, "source_offline")
             self.em_unreadable += 1
             self.em_offline_unreadable += 1
             self.processed = i + 1
@@ -1001,6 +1040,7 @@ class _MaskPass:
             # failure, but a share that dropped mid-run
             # will fail every remaining read the same way.
             self._count_unreadable_source(item)
+            self.outcomes.record(item.photo_id, "unreadable")
             self.processed = i + 1
             return _NEXT_PHOTO
         if run.control.should_abort_without_pause(run.abort):
@@ -1014,6 +1054,7 @@ class _MaskPass:
         # phases.
         mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
         if mask is None:
+            self.outcomes.record(item.photo_id, "sam_no_mask")
             self.skipped += 1
             self.processed = i + 1
             return _NEXT_PHOTO
@@ -1027,6 +1068,7 @@ class _MaskPass:
             return _STOP
 
         self._store_mask(item, proxy, mask, completeness, features, analysis_report)
+        self.outcomes.record(item.photo_id, "completed")
         self.masked += 1
         return None
 
