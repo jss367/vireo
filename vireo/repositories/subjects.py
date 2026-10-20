@@ -92,6 +92,32 @@ class SubjectsRepository:
             "SELECT s.* FROM detection_subjects s JOIN detections d ON d.id=s.detection_id WHERE d.photo_id=?",
             (photo_id,))}
 
+    def ranking_analysis(self, detection_id: int, source_key: str) -> dict[str, Any] | None:
+        """One immutable analysis generation, including its exact mask bytes."""
+        row = self.conn.execute(
+            "SELECT features, mask_png FROM subject_ranking_analysis "
+            "WHERE detection_id=? AND source_key=?", (detection_id, source_key),
+        ).fetchone()
+        return {"features": json.loads(row["features"]), "mask_png": row["mask_png"]} if row else None
+
+    def save_ranking_analysis(
+        self, detection_id: int, source_key: str, features: Mapping[str, Any], mask_png: bytes,
+    ) -> None:
+        """Publish one immutable generation and prune its superseded cache rows.
+
+        Caller commits the insert and prune together. Contexts with different
+        settings may need reanalysis; old URLs already fail key validation.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO subject_ranking_analysis(detection_id, source_key, features, mask_png) "
+            "SELECT id, ?, ?, ? FROM detections WHERE id=?",
+            (source_key, json.dumps(features, allow_nan=False), mask_png, detection_id),
+        )
+        self.conn.execute(
+            "DELETE FROM subject_ranking_analysis WHERE detection_id=? AND source_key!=?",
+            (detection_id, source_key),
+        )
+
     # -- primary projection -----------------------------------------------------
 
     def clear_primary_features(self, photo_id: int) -> None:

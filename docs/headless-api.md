@@ -180,6 +180,64 @@ before deciding. Record decisions through the normal flag endpoints so they
 show up in, and can be reversed from, the Undo panel. Design:
 `docs/plans/2026-10-17-burst-evidence-adjudication-design.md`.
 
+### Comparing a requested species or chosen subjects
+
+Best Batch and burst-evidence GET/POST requests accept `requested_species` (a
+species name, `taxon:<iNaturalist id>`, or `scientific:<binomial>`) and optional
+`subject_overrides` mapping photo IDs to detection IDs. GET encodes the override
+object as JSON in its query string. `compare_subjects=true` enables subject
+comparison without a species filter. Requests without this context retain the
+existing primary-subject ranking.
+
+```json
+{
+  "photo_ids": [216268, 216270, 215514],
+  "requested_species": "Vermilion Flycatcher",
+  "subject_overrides": {"216268": 123456}
+}
+```
+
+Automatic species selection requires a current detection-scoped accepted
+prediction. Photo-level keywords and pending predictions identify candidates,
+but never establish which bird supplies measurements. Multiple matching birds,
+conflicting confirmations, and uncertain identities remain unranked review
+items. An explicit override selects a retained animal in that photo for this
+comparison; it does not confirm a species or change the saved primary subject.
+A conflicting accepted species identification must be reviewed first.
+
+Each card's `subject` records its `detection_id`, selection reason, species key,
+candidate predictions with review/model provenance, and `analysis_key`.
+`evidence_status` distinguishes ready subjects from `subject_analysis_missing`,
+`subject_identity_uncertain`, `subject_identity_conflict`, and
+`multiple_matching_subjects`. These review reasons also appear in `ambiguity`.
+`coverage.with_selected_subject` counts resolved choices; `with_detection`
+counts photos with any retained animal. Mask, quality, and eye coverage count
+only evidence belonging to the selected subject. Unresolved or unanalyzed
+subjects do not enter score percentiles or rejection suggestions. At least two
+analyzed subjects are required for a relative comparison, and an all-rejected
+comparison has no suggested best frame.
+
+To compute missing evidence, POST the same comparison to
+`/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
+poll `/api/jobs/<job_id>`, then fetch the comparison again. Job results report
+`analyzed`, `cached`, unresolved identities, and per-photo errors separately.
+Analysis uses original-derived images capped at 1024 pixels on the longest
+edge, SAM masks, and the existing mask-gated eye policy when enabled and its
+model is available. Each card reports the actual analysis dimensions and eye
+availability. A missing original remains retryable. The cache retains only the
+latest published analysis generation per detection, pruning superseded masks in
+the same transaction. Switching to another analysis context can require
+reanalysis. No flags, ratings, edit recipes, or primary-subject choices are
+written by comparison analysis.
+
+Subject focus and mask URLs carry `detection_id` and `analysis_key`; consumers
+should use the returned URLs together. Their responses refuse stale or foreign
+subject evidence with 404 instead of falling back to the photo's primary bird.
+Focus responses include `X-Vireo-Detection-Id` and `X-Vireo-Analysis-Key`.
+Full-frame previews and subject crops support visual review of pose, eye
+visibility, and obstructions; this feature does not introduce aesthetic weights.
+
+
 ## Exporting photos with metadata
 
 The export endpoints use an explicit `metadata_fields` list. Saved presets are

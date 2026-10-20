@@ -286,7 +286,7 @@ def hard_reject_reasons(photo, q_score, config=None):
     reasons = []
 
     # Rule 1: No mask (no bird detected)
-    if not photo.get("mask_path"):
+    if not photo.get("mask_path") and not photo.get("subject_mask_available", False):
         reasons.append("no_subject_mask")
 
     # Rule 2: Subject severely clipped
@@ -453,7 +453,8 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
 
     # Check focus reject using encounter percentile
     reasons = hard_reject_reasons(photo, q, config=cfg)
-    if f < cfg.get("reject_focus", 0.35) and photo.get("mask_path"):
+    has_mask = bool(photo.get("mask_path") or photo.get("subject_mask_available", False))
+    if f < cfg.get("reject_focus", 0.35) and has_mask:
         reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
 
     # Eye-soft reject: catches "sharp body, soft eye" frames. Only fires
@@ -467,7 +468,7 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
         eye_enabled
         and photo.get("eye_tenengrad") is not None
         and f < cfg.get("reject_eye_focus", 0.35)
-        and photo.get("mask_path")
+        and has_mask
     ):
         reasons.append(
             f"eye_soft (E={f:.3f} < {cfg['reject_eye_focus']})"
