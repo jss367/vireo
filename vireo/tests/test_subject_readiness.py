@@ -6,7 +6,7 @@ import pytest
 from pipeline import run_triage
 from scoring import composite_quality_score, hard_reject_reasons, score_encounter
 from selection import mmr_select, triage_encounters
-from subject_analysis import REQUIRED_QUALITY_FIELDS, SCORE_FIELDS, subject_analysis_readiness
+from subject_readiness import REQUIRED_QUALITY_FIELDS, SCORE_FIELDS, subject_analysis_readiness
 
 
 def complete_photo(photo_id=1, **overrides):

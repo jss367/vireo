@@ -10,7 +10,7 @@ All weights and thresholds are configurable with defaults from the design doc.
 import logging
 import math
 
-from subject_analysis import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
+from subject_readiness import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
 
 log = logging.getLogger(__name__)
 

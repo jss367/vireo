@@ -10,7 +10,7 @@ import logging
 from collections import defaultdict
 
 import numpy as np
-from subject_analysis import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
+from subject_readiness import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
 
 log = logging.getLogger(__name__)
 
