@@ -16,6 +16,11 @@ neither rankings nor saved subjects, flags, ratings, or edits.
 The full frame is displayed before saved crop and rotation, in the same upright
 coordinate space as detections and native focus crops. The focus label reports
 the actual source, raster dimensions, and scale relative to catalog dimensions.
+Manual inspection uses automatic source selection and can fall back to an
+available working copy when originals are offline. Its source and scale remain
+visible. The full frame keeps its natural aspect ratio on phones and tablets so
+clicks and overlays stay aligned with the displayed pixels.
+
 One crop pixel is one decoded-raster pixel; a working copy or an embedded RAW
 JPEG must not be treated as a fresh full-resolution sensor sharpness analysis.
 When dimensions cannot support a single scale, the original scale is unknown.

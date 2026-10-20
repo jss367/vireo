@@ -92,6 +92,6 @@ export function bindFocusControls() {
     var y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
     markCenter([x, y]);
     byId('focusSelectionStatus').textContent = 'Manual center: ' + x.toFixed(4) + ', ' + y.toFixed(4) + '. Inspection only; ranking still uses the selected subject.';
-    loadFocus('/photos/' + state.inspectedId + '/focus-crop?size=512&source=original&center=' + x + ',' + y);
+    loadFocus('/photos/' + state.inspectedId + '/focus-crop?size=512&source=auto&center=' + x + ',' + y);
   });
 }
