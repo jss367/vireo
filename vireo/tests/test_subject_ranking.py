@@ -78,6 +78,8 @@ def test_sharp_other_species_never_promotes_soft_target(comparison_library):
     assert pack["best_photo_id"] == pids[2], [(c["id"], c["sharpness"], c["reject_reasons"]) for c in pack["cards"]]
     soft = next(c for c in pack["cards"] if c["id"] == pids[0])
     assert soft["rank"] == 3 and soft["sharpness"] == 0
+    assert soft["label"] == "REJECT" and soft["id"] in pack["suggested_reject_ids"]
+    assert any(reason.startswith("out_of_focus") for reason in soft["reject_reasons"])
     for card in pack["cards"]:
         did = detections[card["id"]][0]
         assert card["subject"]["detection_id"] == did
