@@ -406,3 +406,20 @@ def test_background_analysis_continues_after_selected_detection_disappears(compa
     assert job["result"]["errors"][0]["photo_id"] == pids[0]
     assert "not a retained animal" in job["result"]["errors"][0]["error"]
     assert job["progress"]["current"] == len(pids)
+
+
+
+def test_previously_returned_media_rejects_a_new_identity_conflict(comparison_library, monkeypatch):
+    app, db, pids, _ = comparison_library
+    import config as cfg
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    card = _pack(app, pids, requested_species=TARGET)["cards"][0]
+    db.predictions.add(card["subject"]["detection_id"], "Mule Deer", .9, "conflicting-model", status="accepted")
+    def never_decode(*args):
+        raise AssertionError("Conflicted subject must be rejected before loading pixels")
+    monkeypatch.setattr("web.media._focus_source_image", never_decode)
+    client = app.test_client()
+    for url in (card["focus_crop_url"], card["focus_crop_mask_url"], card["mask_url"]):
+        response = client.get(url)
+        assert response.status_code == 404
+        assert "identity is unresolved" in response.get_json()["error"]

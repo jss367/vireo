@@ -2420,6 +2420,8 @@ def _comparison_media_subject(db, photo, args, effective):
     except (TypeError, ValueError):
         raise ValueError("Invalid detection_id") from None
     detection, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection_id}))
+    if detection is None:
+        raise ValueError("Selected subject identity is unresolved; refresh the comparison")
     key, analysis = cached_analysis(db, photo, detection, effective)
     requested_key = args.get("analysis_key")
     if not requested_key or analysis is None or key != requested_key:
