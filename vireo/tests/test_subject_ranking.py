@@ -466,3 +466,48 @@ def test_explicit_subject_can_recover_a_weak_detection_without_changing_primary(
     assert card['subject']['detection_id'] == did
     assert card['evidence_status'] == 'subject_analysis_missing'
     assert db.subjects.choice(pid)['detection_id'] == ids[pid][1]
+    assert app.test_client().get(card['crop_url']).status_code == 200
+
+
+def test_focus_eye_uses_detection_generation_and_rejects_changed_identity(comparison_library, monkeypatch):
+    app, db, pids, ids = comparison_library
+    import config as cfg
+    monkeypatch.setattr('subject_analysis.measure_eye', lambda *args: {
+        'eye_x': .2, 'eye_y': .5, 'eye_conf': .9, 'eye_tenengrad': 123, 'eye_status': 'measured',
+    })
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    card = _pack(app, pids, requested_species=TARGET)['cards'][0]
+    url = card['focus_crop_url'] + '&basis=eye'
+    response = app.test_client().get(url)
+    assert response.status_code == 200
+    assert response.headers['X-Vireo-Focus-Basis'] == 'eye'
+    assert response.headers['X-Vireo-Focus-Center'] == '0.2000,0.5000'
+    prediction = db.conn.execute('SELECT id FROM predictions WHERE detection_id=?', (ids[card['id']][0],)).fetchone()
+    db.update_prediction_status(prediction['id'], 'rejected')
+    assert app.test_client().get(url).status_code == 404
+
+
+def test_selected_generation_provenance_and_unavailable_ranking_policy(comparison_library, monkeypatch):
+    app, db, pids, _ = comparison_library
+    import config as cfg
+    import scoring
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    original = scoring.score_encounter
+    def readiness_policy(encounter, config):
+        for photo in encounter['photos']:
+            assert photo['analysis_provenance'] == {
+                'detection': {'status': 'complete', 'current': True, 'no_qualifying_subject': False},
+                'segmentation': {'status': 'complete', 'current': True},
+            }
+            assert photo['subject_mask_available']
+        original(encounter, config=config)
+        unavailable = next(p for p in encounter['photos'] if p['id'] == pids[2])
+        unavailable.update(selection_eligible=False, quality_composite=None, focus_score=None,
+                           analysis_status='incomplete', analysis_reasons=['missing_subject_tenengrad'])
+    monkeypatch.setattr(scoring, 'score_encounter', readiness_policy)
+    pack = _pack(app, pids, requested_species=TARGET)
+    unavailable = next(c for c in pack['cards'] if c['id'] == pids[2])
+    assert unavailable['rank'] is None and unavailable['role'] == 'review'
+    assert unavailable['quality'] is None and not unavailable['has_quality']
+    assert unavailable['reasons'] == ['missing subject tenengrad']
+    assert pids[2] not in [pack['best_photo_id'], *pack['alternate_ids'], *pack['suggested_reject_ids']]

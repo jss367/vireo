@@ -68,8 +68,8 @@ export function inspectPhoto(photoId) {
 function focusCardHtml(card) {
   var hasEye = Boolean(card.subject && card.focus_crop_url && hasEyeKeypoint(card));
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-    '<div class="focus-crop ' + 'native' + '">' +
-      '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + '' + '">' +
+    '<div class="focus-crop native">' +
+      '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       (hasEye ? '<span class="crosshair"></span>' : '') +
     '</div>' +
     '<div class="focus-meta">' +

@@ -39,6 +39,7 @@ export function renderSubject(card) {
   var messages = {
     ready: 'Selected subject has current analysis.',
     subject_analysis_missing: 'Selected subject needs analysis.',
+    subject_analysis_unavailable: 'Selected subject analysis is unavailable under the current scoring settings.',
     subject_identity_uncertain: 'Species is not confirmed on a specific subject. Choose the intended animal.',
     subject_identity_conflict: 'This subject has a conflicting species confirmation. Review its identity.',
     multiple_matching_subjects: 'Several subjects match this species. Choose the intended animal.',

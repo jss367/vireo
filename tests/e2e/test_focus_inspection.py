@@ -49,6 +49,11 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     page.locator('#subjectChoices').select_option(index=2)
     expect(page.locator('#focusRasterStatus')).to_contain_text('Selected subject evidence is unavailable')
     expect(page.locator('#focusSubjectBox')).to_be_visible()
+    page.wait_for_function('document.getElementById("chosenSubjectImg").naturalWidth > 0')
+    page.locator('#manualFocusBtn').click()
+    bounds = page.locator('#inspectImg').bounding_box()
+    page.locator('#inspectImg').click(position={'x': bounds['width'] * .75, 'y': bounds['height'] * .25})
+    expect(page.locator('#focusRasterStatus')).to_contain_text('Basis: point')
     for pid in pids:
         after = dict(db.photos.get(pid))
         assert after['flag'] == before[pid][0]['flag']

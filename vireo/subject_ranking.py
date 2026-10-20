@@ -202,6 +202,8 @@ def comparison_frames(db, photos, comparison, effective_cfg):
             frame = {k: photo.get(k) for k in ("id", "filename", "width", "height", "flag", "rating")}
             frame.update(features)
             frame["subject_mask_available"] = bool(analysis["mask_png"])
+            frame["analysis_provenance"] = {"detection": {"status": "complete", "current": True, "no_qualifying_subject": False},
+                                            "segmentation": {"status": "complete", "current": True}}
             card.update(sharpness=features["subject_tenengrad"], has_eye=features.get("eye_tenengrad") is not None)
             for k in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "crop_complete", "subject_size", "analysis", "eye_status"):
                 card[k] = features.get(k)
@@ -214,12 +216,20 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
     from best_batch import _best_batch_reasons
     from scoring import score_encounter
     cards, eligible = comparison_frames(db, photos, comparison, effective_cfg)
+    by_id = {c["id"]: c for c in cards}
     if len(eligible) >= 2:
         score_encounter({"photos": eligible}, config=effective_cfg)
+        for frame in eligible:
+            if not frame.get("selection_eligible", True):
+                reasons = frame.get("analysis_reasons") or ["subject_analysis_unavailable"]
+                by_id[frame["id"]].update(evidence_status="subject_analysis_unavailable", has_quality=False,
+                                          analysis_status=frame.get("analysis_status"), analysis_reasons=reasons,
+                                          reasons=[reason.replace("_", " ") for reason in reasons])
+        eligible = [frame for frame in eligible if frame.get("selection_eligible", True)]
+        eligible = eligible if len(eligible) >= 2 else []
         eligible.sort(key=lambda p: (p.get("label") != "REJECT", p["quality_composite"], p["focus_score"]), reverse=True)
     else:
         eligible = []
-    by_id = {c["id"]: c for c in cards}
     best = next((p for p in eligible if p.get("label") != "REJECT"), None)
     for rank, photo in enumerate(eligible, 1):
         card = by_id[photo["id"]]

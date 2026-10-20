@@ -3181,15 +3181,16 @@ def create_media_blueprint(
 
         # Get primary detection box — global detections table, threshold
         # resolved from workspace-effective config in get_detections.
-        dets = detection_store.get_detections(db, photo_id)
         requested_detection = request.args.get("detection_id")
+        dets = detection_store.get_detections(db, photo_id, min_conf=0 if requested_detection is not None else None)
         if requested_detection is not None:
+            from focus_crop import valid_subject_box
             try:
                 requested_detection = int(requested_detection)
             except ValueError:
                 return json_error("Invalid detection_id")
             dets = [d for d in dets if d["id"] == requested_detection
-                    and d["category"] == "animal" and d["detector_model"] != "full-image"]
+                    and d["category"] == "animal" and d["detector_model"] != "full-image" and valid_subject_box(d)]
             if not dets:
                 return json_error("Subject not found", 404)
 
@@ -3199,6 +3200,10 @@ def create_media_blueprint(
         if img is None:
             return "Could not load image", 500
 
+        if requested_detection is not None:
+            geometry_error = _focus_geometry_error(img, photo, "subject", request.args)
+            if geometry_error:
+                return json_error(geometry_error, 404)
         img = _crop_to_detection(img, dets, requested_detection)
 
         if requested_detection is not None and request.args.get("suggested") == "1":
