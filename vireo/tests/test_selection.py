@@ -272,9 +272,9 @@ def test_triage_end_to_end():
 
     labels = {p["id"]: p["label"] for p in all_photos}
     assert labels[3] == "REVIEW"  # missing mask is unavailable analysis
-    # At least one KEEP
-    keep_count = sum(1 for l in labels.values() if l == "KEEP")
-    assert keep_count >= 1
+    # Relative winners remain available, but cannot establish absolute usability.
+    assert any(p["ranking_selected"] for p in all_photos)
+    assert all(label != "KEEP" for label in labels.values())
     # All photos have a label
     assert all(p["label"] in ("KEEP", "REVIEW", "REJECT") for p in all_photos)
 

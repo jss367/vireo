@@ -284,6 +284,14 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     )
     expect(page.locator("#flagMixed")).to_be_hidden()
 
+    # These are deliberate photographer decisions. Replaying them through the
+    # legacy bulk action may refresh presentation, but cannot manufacture new
+    # decisions from a provisional rank.
+    assert page.request.post(
+        f"{live_server['url']}/api/batch/flag",
+        data={"photo_ids": burst_ids[1:], "flag": "rejected"},
+    ).ok
+
     page.evaluate(
         """ids => {
           browseState.photos.find(function(photo) { return photo.browse_stack; })._similarity = 0.95;

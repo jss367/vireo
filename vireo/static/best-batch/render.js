@@ -45,6 +45,7 @@ export function inspectPhoto(photoId) {
   var card = state.bestBatchData.cards.find(function(c) { return c.id === photoId; });
   if (!card) return;
   state.inspectedId = card.id;
+  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   showInspectImage(card);
   renderSubject(card);
   renderFocus(card);
@@ -99,7 +100,7 @@ function rankCardHtml(card) {
 export function renderBatch(data) {
   state.bestBatchData = data;
   var cards = data.cards || [];
-  var best = cards.find(function(c) { return c.id === data.best_photo_id; }) || cards[0];
+  var best = cards.find(function(c) { return c.id === (data.ranked_candidate_id || data.best_photo_id); }) || cards[0];
   if (!best) {
     setStatus('No scored photos found in this batch.');
     return;
@@ -109,13 +110,13 @@ export function renderBatch(data) {
   notice.hidden = !data.comparison;
   var unresolved = cards.filter(function(c) { return c.evidence_status !== 'ready'; }).length;
   notice.textContent = data.unscored_reason || (unresolved ? unresolved + ' frames need a subject choice or analysis. Ranking covers the ready subjects.' :
-    !data.best_photo_id && data.scored ? 'No frame passed the current scoring checks for a suggested best.' : 'Inspect the selected subject and full-frame context before deciding.');
+    !data.ranked_candidate_id && !data.best_photo_id && data.scored ? 'No frame is available as a ranked candidate.' : 'Inspect the selected subject and full-frame context before deciding.');
   byId('bestStatus').style.display = 'none';
   byId('bestContent').style.display = '';
   byId('bestSubtitle').textContent =
     data.count + ' photos' + (data.comparison ? ' · Comparing ' + (data.comparison.requested_species || 'chosen subjects') + ' · ' + cards.filter(function(c) { return c.rank != null; }).length + ' ranked' : '') + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
 
-  byId('focusNote').textContent = 'Verify the model box in the full frame. Use manual placement when the suggested subject is wrong; source and scale are shown in the inspection panel.';
+  byId('focusNote').textContent = (data.keep_review_message ? data.keep_review_message + ' ' : '') + 'Verify the model box in the full frame. Use manual placement when the suggested subject is wrong; source and scale are shown in the inspection panel.';
 
   byId('focusGrid').classList.toggle('comparison', !!data.comparison);
   byId('focusGrid').innerHTML = cards.map(focusCardHtml).join('');
@@ -124,7 +125,7 @@ export function renderBatch(data) {
   /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !!data.comparison || !data.photo_ids || data.photo_ids.length < 2;
   byId('reviewBtn').title = data.comparison ? 'Review the selected subjects with the comparison controls below.' : '';
   /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison;
-  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = !data.best_photo_id;
+  /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   /** @type {HTMLButtonElement} */ (byId('rejectBtn')).disabled = !data.best_photo_id;
   var inspected = cards.find(function(c) { return c.id === state.inspectedId; });
   inspectPhoto(inspected ? inspected.id : best.id);

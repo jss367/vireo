@@ -182,6 +182,7 @@ def test_assess_ambiguity_all_rejected():
 
 def test_ambiguity_codes_are_the_documented_set():
     assert set(AMBIGUITY_CODES) == {
+        "positive_keep_not_validated",
         "unanalyzed_frames", "close_call", "no_eye_located",
         "subject_touches_edge", "multiple_subjects", "all_rejected", "subject_identity_uncertain", "subject_identity_conflict",
         "multiple_matching_subjects", "subject_analysis_missing",
@@ -269,7 +270,8 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     assert pack["scope_method"] == "filename_sequence"
     assert pack["scored"] is True
     assert pack["photo_ids"] == pids
-    assert pack["best_photo_id"] == pids[1]
+    assert pack["ranked_candidate_id"] == pids[1]
+    assert pack["best_photo_id"] is None
     assert pack["coverage"] == {
         "photos": 3, "with_detection": 3, "with_mask": 3, "with_quality": 3, "with_eye": 0,
     }
@@ -278,11 +280,11 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     }
     # The best frame carries two animal boxes, so the scorer may have scored
     # the wrong one.
-    assert [r["code"] for r in pack["ambiguity"]["reasons"]] == ["multiple_subjects"]
+    assert [r["code"] for r in pack["ambiguity"]["reasons"]] == ["multiple_subjects", "positive_keep_not_validated"]
     assert pack["ambiguity"]["needs_review"] is True
 
     best = next(c for c in pack["cards"] if c["id"] == pids[1])
-    assert best["role"] == "best"
+    assert best["role"] == "review"
     assert best["detection_count"] == 2
     assert best["has_mask"] is True and best["has_quality"] is True and best["has_eye"] is False
     assert best["crop_complete"] == 1.0
@@ -339,7 +341,8 @@ def test_burst_evidence_post_uses_the_best_batch_selection_contract(app_and_db):
     assert resp.status_code == 200
     pack = resp.get_json()
     assert pack["scope_method"] == "selected_photos"
-    assert pack["best_photo_id"] == pids[1]
+    assert pack["ranked_candidate_id"] == pids[1]
+    assert pack["best_photo_id"] is None
     assert pack["coverage"]["photos"] == 3
 
 
@@ -377,7 +380,7 @@ def test_folder_bursts_lists_every_burst_with_folder_coverage(app_and_db):
     assert data["coverage"]["with_quality"] == 6
     assert data["burst_count"] == 3
     assert data["photos_in_bursts"] == 7
-    assert data["ambiguous_burst_count"] == 2
+    assert data["ambiguous_burst_count"] == 3
     by_seed = {b["seed_photo_id"]: b for b in data["bursts"]}
 
     clear = by_seed[sharp[0]]
@@ -386,22 +389,25 @@ def test_folder_bursts_lists_every_burst_with_folder_coverage(app_and_db):
     assert clear["sequence_range"] == [3069, 3071]
     assert clear["flags"] == {"none": 2, "flagged": 0, "rejected": 1}
     assert clear["scored"] is True
-    assert clear["best_photo_id"] == sharp[1]
-    assert clear["ambiguity"] == {"needs_review": False, "reasons": []}
+    assert clear["ranked_candidate_id"] == sharp[1]
+    assert clear["best_photo_id"] is None
+    assert clear["ambiguity"]["needs_review"] is True
+    assert [r["code"] for r in clear["ambiguity"]["reasons"]] == ["positive_keep_not_validated"]
 
     tie = by_seed[close[0]]
     assert tie["scored"] is True
-    assert [r["code"] for r in tie["ambiguity"]["reasons"]] == ["close_call"]
+    assert [r["code"] for r in tie["ambiguity"]["reasons"]] == ["close_call", "positive_keep_not_validated"]
 
     # One analyzed frame can be ranked while the unavailable frame remains
     # unranked and excluded from automatic reject suggestions.
     half = by_seed[partial[0]]
     assert half["scored"] is True
-    assert half["best_photo_id"] == partial[0]
+    assert half["ranked_candidate_id"] == partial[0]
+    assert half["best_photo_id"] is None
     assert half["coverage"] == {
         "photos": 2, "with_detection": 1, "with_mask": 1, "with_quality": 1, "with_eye": 0,
     }
-    assert [r["code"] for r in half["ambiguity"]["reasons"]] == ["unanalyzed_frames"]
+    assert [r["code"] for r in half["ambiguity"]["reasons"]] == ["unanalyzed_frames", "positive_keep_not_validated"]
 
 
 def test_folder_bursts_rejects_hidden_folders_bad_margin_and_oversized_folders(app_and_db, monkeypatch):
@@ -670,7 +676,8 @@ def test_best_batch_leaves_partial_analysis_unranked_and_out_of_reject_suggestio
     db.conn.commit()
     pack = app.test_client().get(f"/api/photos/{pids[1]}/burst-evidence").get_json()
     assert pack["scored"] is True
-    assert pack["best_photo_id"] == pids[2]
+    assert pack["ranked_candidate_id"] == pids[2]
+    assert pack["best_photo_id"] is None
     assert pids[1] not in pack["suggested_reject_ids"]
     assert pids[1] not in pack["alternate_ids"]
     unavailable = next(card for card in pack["cards"] if card["id"] == pids[1])
@@ -702,7 +709,8 @@ def test_stale_populated_features_are_uncovered_in_burst_ranking(app_and_db):
     db.conn.execute("UPDATE photo_masks SET prompt_x=.2 WHERE photo_id=?", (pids[1],))
     db.commit()
     pack = app.test_client().get(f"/api/photos/{pids[0]}/burst-evidence").get_json()
-    assert pack["scored"] is True and pack["best_photo_id"] == pids[0]
+    assert pack["scored"] is True and pack["ranked_candidate_id"] == pids[0]
+    assert pack["best_photo_id"] is None
     assert pack["coverage"]["with_quality"] == 1
     stale = next(card for card in pack["cards"] if card["id"] == pids[1])
     assert stale["selection_eligible"] is False and stale["has_quality"] is False

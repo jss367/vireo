@@ -68,12 +68,31 @@ def _measured(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def automatic_keep_assessment(photo: Mapping[str, Any]) -> dict[str, Any]:
+    """Separate positive usability evidence from complete inputs and relative rank.
+
+    No calibrated absolute focus or animal-subject validator is installed.
+    Detector confidence, a mask, classifier guesses and percentile scores cannot
+    establish either. Do not accept cached/client ``validated`` status as proof.
+    Until a validated producer exists, even apparently good winners need review.
+    Photographer decisions remain authoritative through ``explicit_decision``.
+    """
+    reasons = ["absolute_focus_not_validated", "animal_subject_not_validated"]
+    if photo.get("selection_eligible") is False:
+        reasons.insert(0, "subject_analysis_unavailable")
+    return {"status": "not_validated", "eligible": False, "reasons": reasons}
+
+
 def mark_analysis_readiness(photo: dict[str, Any]) -> bool:
     """Refresh derived readiness, clearing stale scores for unavailable analysis."""
     readiness = subject_analysis_readiness(photo)
     photo["analysis_status"] = readiness["status"]
     photo["analysis_reasons"] = readiness["reasons"]
     photo["selection_eligible"] = readiness["eligible"]
+    keep = automatic_keep_assessment(photo)
+    photo["automatic_keep_eligible"] = keep["eligible"]
+    photo["keep_status"] = keep["status"]
+    photo["keep_reasons"] = keep["reasons"]
     if not readiness["eligible"]:
         photo.pop("focus_evidence", None)
         for field in SCORE_FIELDS:
