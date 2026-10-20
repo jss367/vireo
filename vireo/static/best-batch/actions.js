@@ -1,5 +1,5 @@
 // Loading the batch and the toolbar actions: open the inspected frame in the
-// lightbox, review the burst, Flag Best, and Flag Best + Reject Rest.
+// lightbox, review the burst, flag the inspected frame, and apply validated suggestions.
 // ES module.
 
 import { byId, state } from './state.js';
@@ -84,16 +84,26 @@ function errorMessage(error, fallback) {
 
 export async function flagBest() {
   var data = state.bestBatchData;
-  if (!data || !data.best_photo_id) return;
+  if (!data || !state.inspectedId) return;
+  var photoId = state.inspectedId;
   try {
     await fetchJson('/api/batch/flag', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: [data.best_photo_id], flag: 'flagged'}),
+      body: JSON.stringify({photo_ids: [photoId], flag: 'flagged'}),
     });
-    showToast('Flagged best photo.', 'success');
+    var current = state.bestBatchData;
+    var card = current && (current.cards || []).find(function(c) { return c.id === photoId; });
+    if (current && card) {
+      card.flag = 'flagged';
+      card.label = 'KEEP';
+      card.role = 'kept';
+      current.suggested_reject_ids = (current.suggested_reject_ids || []).filter(function(id) { return id !== photoId; });
+      renderBatch(current);
+    }
+    showToast('Flagged inspected photo.', 'success');
   } catch (e) {
-    showToast(errorMessage(e, 'Could not flag best photo.'), 'error');
+    showToast(errorMessage(e, 'Could not flag inspected photo.'), 'error');
   }
 }
 

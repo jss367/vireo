@@ -2,6 +2,7 @@
 // /api/photos/best-batch and the shared globals its shared.js reads.
 interface BestBatchCard {
   id: number; filename?: string; rank: number | null; role?: string;
+  flag?: string; label?: string;
   quality_pct?: number | null; focus?: number | null; focus_basis?: string;
   focus_evidence?: {measurement: number; cohort_size: number; absolute_status: string} | null;
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;
@@ -15,6 +16,7 @@ interface BestBatchCard {
 }
 interface BestBatchResponse {
   cards?: BestBatchCard[]; best_photo_id?: number | null; count: number;
+  ranked_candidate_id?: number | null; ranking_status?: string; keep_review_message?: string;
   scored?: boolean; unscored_reason?: string | null;
   comparison?: {requested_species: string | null; subject_overrides: Record<string, number>};
   sequence_range?: [number, number] | null; photo_ids?: number[];

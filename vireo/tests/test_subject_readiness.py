@@ -106,7 +106,7 @@ def test_readiness_recomputes_when_missing_measurements_arrive():
     assert photo["label"] == "REVIEW"
     photo["subject_y_median"] = 115.
     run_triage([{"photos": [photo]}])
-    assert photo["label"] == "KEEP"
+    assert photo["label"] == "REVIEW"
     assert photo["analysis_reasons"] == []
 
 
@@ -213,7 +213,7 @@ def test_loader_checks_current_mask_inputs_and_settings(db, readiness_photo, cha
     run_triage([{"photos": [photo]}])
     if changed == "none":
         assert photo["selection_eligible"] is True
-        assert photo["label"] == "KEEP"
+        assert photo["label"] == "REVIEW"
     else:
         assert photo["selection_eligible"] is False
         assert photo["label"] == "REVIEW"
@@ -239,7 +239,7 @@ def test_measured_zero_is_quality_evidence_not_unavailable_analysis():
     run_triage([{"photos": [photo]}])
     assert photo["analysis_status"] == "complete"
     assert photo["selection_eligible"] is True
-    assert photo["label"] == "KEEP"
+    assert photo["label"] == "REVIEW"
     assert photo["focus_score"] == 0.
     assert photo["reject_reasons"] == []
     assert photo["focus_evidence"]["absolute_status"] == "not_validated"

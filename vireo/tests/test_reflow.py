@@ -91,8 +91,8 @@ def test_reflow_changes_labels_with_stricter_thresholds(tmp_path):
     assert rejects_strict >= rejects_default
 
 
-def test_reflow_changes_labels_with_lenient_thresholds(tmp_path):
-    """Lenient reject thresholds should produce fewer REJECT labels."""
+def test_reflow_lenient_thresholds_preserve_review_without_validated_keep(tmp_path):
+    """Passing reject thresholds leaves ranked photos for manual review."""
     from pipeline import load_photo_features, reflow, run_grouping, run_triage
 
     db = _setup_db(tmp_path)
@@ -109,11 +109,12 @@ def test_reflow_changes_labels_with_lenient_thresholds(tmp_path):
         "reject_clip_high": 0.99,
         "reject_composite": 0.01,
     })
-    # With such lenient thresholds, very few should be rejected
-    # (only "no mask" rule would fire, but all our photos have masks)
-    rejects = results["summary"]["reject_count"]
-    keeps = results["summary"]["keep_count"]
-    assert keeps > 0
+    assert results["summary"]["reject_count"] == 0
+    assert results["summary"]["keep_count"] == 0
+    assert results["summary"]["review_count"] == 6
+    assert any(photo["ranking_selected"] for photo in results["photos"])
+    assert all(photo["selection_eligible"] for photo in results["photos"])
+    assert all(not photo["automatic_keep_eligible"] for photo in results["photos"])
 
 
 def test_reflow_preserves_total_photo_count(tmp_path):
@@ -131,7 +132,7 @@ def test_reflow_preserves_total_photo_count(tmp_path):
 
 
 def test_reflow_mmr_max_keep(tmp_path):
-    """Changing MMR max_keep should affect how many photos are KEEP."""
+    """Selection limits change provisional candidates without automatic KEEP."""
     from pipeline import load_photo_features, reflow, run_grouping
 
     db = _setup_db(tmp_path)
@@ -143,14 +144,19 @@ def test_reflow_mmr_max_keep(tmp_path):
         "reject_crop_complete": 0.01, "reject_composite": 0.01,
         "reject_focus": 0.01, "reject_clip_high": 0.99,
     })
+    selected_1 = sum(photo["ranking_selected"] for photo in results_1["photos"])
     results_10 = reflow(encounters, config={
         "burst_max_keep": 10, "encounter_max_keep": 10,
         "reject_crop_complete": 0.01, "reject_composite": 0.01,
         "reject_focus": 0.01, "reject_clip_high": 0.99,
     })
 
-    # With max_keep=10 (more than we have), more photos should be KEEP
-    assert results_10["summary"]["keep_count"] >= results_1["summary"]["keep_count"]
+    selected_10 = sum(photo["ranking_selected"] for photo in results_10["photos"])
+    assert selected_1 == 1
+    assert selected_10 == 6
+    for results in (results_1, results_10):
+        assert results["summary"]["keep_count"] == 0
+        assert results["summary"]["review_count"] == 6
 
 
 def test_reflow_returns_correct_format(tmp_path):

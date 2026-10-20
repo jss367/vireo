@@ -75,9 +75,11 @@ def test_sharp_other_species_never_promotes_soft_target(comparison_library):
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
     pack = _pack(app, pids, requested_species=TARGET)
     assert pack["scored"]
-    winner = pack.get("ranked_candidate_id") or pack["best_photo_id"]
-    assert winner == pids[2], [(c["id"], c["sharpness"], c["reject_reasons"]) for c in pack["cards"]]
+    assert pack["ranked_candidate_id"] == pids[2], [(c["id"], c["sharpness"], c["reject_reasons"]) for c in pack["cards"]]
     soft = next(c for c in pack["cards"] if c["id"] == pids[0])
+    assert pack["best_photo_id"] is None
+    assert pack["ranking_status"] == "provisional"
+    assert pack["suggested_reject_ids"] == pack["alternate_ids"] == []
     assert soft["rank"] == 3 and soft["sharpness"] == 0
     assert soft["focus_evidence"]["basis"] == "subject"
     assert soft["focus_evidence"]["measurement"] == soft["sharpness"]
@@ -260,7 +262,7 @@ def test_background_analysis_is_scoped_and_reports_unresolved_frames(comparison_
     assert job["result"]["errors"] == []
     assert job["progress"]["current"] == 3
     pack = _pack(app, pids, requested_species=TARGET)
-    assert (pack.get("ranked_candidate_id") or pack["best_photo_id"]) == pids[2]
+    assert pack["ranked_candidate_id"] == pids[2]
     assert db.subjects.choice(pids[0])["detection_id"] == ids[pids[0]][1]
 
 
@@ -284,10 +286,7 @@ def test_all_ranking_entrypoints_preserve_subject_context(comparison_library):
         get = client.get(f"/api/photos/{pids[0]}/{endpoint}", query_string={"requested_species": TARGET})
         post = client.post(f"/api/photos/{endpoint}", json={"photo_ids": pids, "requested_species": TARGET})
         assert get.status_code == post.status_code == 200
-        get_pack, post_pack = get.get_json(), post.get_json()
-        assert (get_pack.get("ranked_candidate_id") or get_pack["best_photo_id"]) == pids[2]
-        assert (post_pack.get("ranked_candidate_id") or post_pack["best_photo_id"]) == pids[2]
-        assert get_pack["best_photo_id"] == post_pack["best_photo_id"]
+        assert get.get_json()["ranked_candidate_id"] == post.get_json()["ranked_candidate_id"] == pids[2]
         assert get.get_json()["comparison"] == post.get_json()["comparison"]
 
 
@@ -577,3 +576,25 @@ def test_partial_selected_generation_stays_unranked_and_out_of_peer_scores(compa
     # A single complete subject still cannot satisfy comparison's two-subject minimum.
     too_few = _pack(app, pids[:2], requested_species=TARGET)
     assert too_few["scored"] is False and too_few["best_photo_id"] is None
+
+
+@pytest.mark.parametrize("requested_species", [True, False])
+def test_selected_subject_provisional_ranking_requires_review(comparison_library, requested_species):
+    import config as cfg
+    from keep_safety import KEEP_REVIEW_MESSAGE
+
+    app, db, pids, detections = comparison_library
+    overrides = {pid: detections[pid][0] for pid in pids}
+    comparison = SubjectComparison(TARGET) if requested_species else SubjectComparison(subject_overrides=overrides)
+    _analyze(db, pids, comparison, cfg.load())
+    context = {"requested_species": TARGET} if requested_species else {
+        "compare_subjects": True, "subject_overrides": overrides,
+    }
+    pack = _pack(app, pids, **context)
+    assert pack["scored"] is True
+    assert pack["ranked_candidate_id"] == pids[2]
+    assert pack["ranking_status"] == "provisional" and pack["best_photo_id"] is None
+    assert pack["ambiguity"]["needs_review"] is True
+    assert pack["ambiguity"]["reasons"] == [{
+        "code": "positive_keep_not_validated", "detail": KEEP_REVIEW_MESSAGE,
+    }]

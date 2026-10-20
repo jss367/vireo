@@ -11,6 +11,8 @@ import os
 import re
 from datetime import datetime
 
+from keep_safety import review_ranked_response
+
 DEFAULT_BEST_BATCH_MAX_PHOTOS = 120
 
 
@@ -203,10 +205,11 @@ def _best_batch_reasons(photo, photos, is_best=False):
     if is_best and not reasons:
         reasons.append("best available score in this batch")
     if not reasons:
-        reasons.append("usable alternate")
+        reasons.append("relative comparison candidate")
     return reasons[:4]
 
 
+@review_ranked_response
 def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
     import config as cfg
     from pipeline import (

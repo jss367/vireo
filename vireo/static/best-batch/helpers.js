@@ -30,6 +30,7 @@ export function thumbnailUrl(photoOrId) {
 
 /** @param {string | undefined} role */
 export function roleLabel(role) {
+  if (role === 'kept') return 'Kept by you';
   if (role === 'best') return 'Best';
   if (role === 'alternate') return 'Alt';
   if (role === 'review') return 'Needs review';

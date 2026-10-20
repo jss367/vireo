@@ -14,6 +14,7 @@ import math
 import places
 from db import KEYWORD_TYPES
 from flask import Blueprint, jsonify, request
+from keep_safety import best_batch_application_error
 from services.edit_history import atomic_edit, change_photo_location
 from services.pending_changes import (
     queue_keyword_add,
@@ -342,6 +343,10 @@ def create_batch_blueprint(
                 db._verify_photo_in_workspace(pid)
         except ValueError as e:
             return json_error(str(e), 403)
+
+        safety_error = best_batch_application_error(photos_map, best_photo_id, normalized_reject_ids)
+        if safety_error:
+            return json_error(safety_error, 409)
 
         items = []
         for pid in photo_ids:

@@ -854,14 +854,17 @@ def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):
     data = resp.get_json()
     assert data["scope_method"] == "filename_sequence"
     assert data["photo_ids"] == pids
-    assert data["best_photo_id"] == pids[1]
-    assert data["best_filename"] == "DSC_3070.jpg"
+    assert data["ranked_candidate_id"] == pids[1]
+    assert data["best_photo_id"] is None
+    assert data["best_filename"] is None
+    assert data["cards"][0]["filename"] == "DSC_3070.jpg"
     assert data["sequence_range"] == [3069, 3071]
-    assert data["cards"][0]["role"] == "best"
+    assert data["cards"][0]["role"] == "review"
 
     selected = client.post("/api/photos/best-batch", json={"photo_ids": pids}).get_json()
     assert selected["scope_method"] == "selected_photos"
-    assert selected["best_photo_id"] == pids[1]
+    assert selected["ranked_candidate_id"] == pids[1]
+    assert selected["best_photo_id"] is None
 
 
 def test_api_photo_best_batch_capture_time_requires_real_timestamps(app_and_db):
@@ -920,62 +923,33 @@ def test_api_photo_best_batch_ranks_capture_time_without_sequence(app_and_db):
     data = resp.get_json()
     assert data["scope_method"] == "capture_time"
     assert data["photo_ids"] == pids
-    assert data["best_photo_id"] == pids[1]
+    assert data["ranked_candidate_id"] == pids[1]
+    assert data["best_photo_id"] is None
 
 
-def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
-    """Best Batch apply updates mixed flags as one atomic undo action."""
+def test_api_best_batch_flags_cannot_apply_provisional_rank_or_overwrite_user_flags(app_and_db):
     app, db = app_and_db
-    photos = db.photos.list_page()
-    photo_ids = [p["id"] for p in photos]
-    best_id, reject_id, keep_reject_id = photo_ids
+    best_id, reject_id, other_id = [p["id"] for p in db.photos.list_page()]
     db.photo_review.set_flag(reject_id, "flagged")
-
+    db.photo_review.set_flag(other_id, "rejected")
     client = app.test_client()
-    pre_history = db.edit_history.list_recent()
-    resp = client.post(
-        "/api/batch/best-batch-flags",
-        json={
-            "best_photo_id": best_id,
-            "reject_photo_ids": [reject_id, keep_reject_id],
-        },
-    )
-
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["updated"] == 3
-    flags = {
-        row["id"]: row["flag"]
-        for row in db.conn.execute(
-            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
-            (best_id, reject_id, keep_reject_id),
-        )
-    }
-    assert flags == {
-        best_id: "flagged",
-        reject_id: "rejected",
-        keep_reject_id: "rejected",
-    }
-    post_history = db.edit_history.list_recent()
-    assert len(post_history) == len(pre_history) + 1
-    assert post_history[0]["action_type"] == "flag"
-    assert post_history[0]["new_value"] == "best_batch_apply"
-    assert post_history[0]["item_count"] == 3
-
-    undo = client.post("/api/undo")
-
-    assert undo.status_code == 200, undo.get_json()
-    flags = {
-        row["id"]: row["flag"]
-        for row in db.conn.execute(
-            "SELECT id, flag FROM photos WHERE id IN (?, ?, ?)",
-            (best_id, reject_id, keep_reject_id),
-        )
-    }
-    assert flags == {
-        best_id: "none",
-        reject_id: "flagged",
-        keep_reject_id: "none",
-    }
+    before = {p["id"]: p["flag"] for p in db.photos.list_page()}
+    history = db.edit_history.list_recent()
+    for body in [
+        {"best_photo_id": best_id, "reject_photo_ids": [reject_id, other_id]},
+        {"best_photo_id": reject_id, "reject_photo_ids": [best_id]},
+        {"best_photo_id": other_id, "reject_photo_ids": []},
+    ]:
+        resp = client.post("/api/batch/best-batch-flags", json=body)
+        assert resp.status_code == 409, resp.get_json()
+        assert {p["id"]: p["flag"] for p in db.photos.list_page()} == before
+        assert db.edit_history.list_recent() == history
+    # A deliberate individual review remains an ordinary undoable flag action.
+    response = client.post("/api/batch/flag", json={"photo_ids": [best_id], "flag": "flagged"})
+    assert response.status_code == 200
+    assert db.photos.get(best_id)["flag"] == "flagged"
+    assert client.post("/api/undo").status_code == 200
+    assert db.photos.get(best_id)["flag"] == before[best_id]
 
 
 def test_api_best_batch_flags_rejects_best_photo_in_rejects(app_and_db):
