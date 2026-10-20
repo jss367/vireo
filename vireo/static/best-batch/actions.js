@@ -85,12 +85,22 @@ function errorMessage(error, fallback) {
 export async function flagBest() {
   var data = state.bestBatchData;
   if (!data || !state.inspectedId) return;
+  var photoId = state.inspectedId;
   try {
     await fetchJson('/api/batch/flag', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: [state.inspectedId], flag: 'flagged'}),
+      body: JSON.stringify({photo_ids: [photoId], flag: 'flagged'}),
     });
+    var current = state.bestBatchData;
+    var card = current && (current.cards || []).find(function(c) { return c.id === photoId; });
+    if (current && card) {
+      card.flag = 'flagged';
+      card.label = 'KEEP';
+      card.role = 'kept';
+      current.suggested_reject_ids = (current.suggested_reject_ids || []).filter(function(id) { return id !== photoId; });
+      renderBatch(current);
+    }
     showToast('Flagged inspected photo.', 'success');
   } catch (e) {
     showToast(errorMessage(e, 'Could not flag inspected photo.'), 'error');
