@@ -51,6 +51,7 @@
     if (busy) return;
     reset();
     editing = group.group_id;
+    /** @type {HTMLDetailsElement} */ (element('identityAlternativesEditor')).open = true;
     element('identityCancelEdit').hidden = false;
     group.photo_ids.forEach(function(id) { addPhotoOption(id, 'Photo ' + id, true); });
     field('identityCandidates').value = group.candidates.join('\n');
@@ -73,7 +74,6 @@
     root.replaceChildren();
     groups.forEach(function(group) {
       var article = document.createElement('article');
-      article.style.cssText = 'padding:12px 0;border-top:1px solid var(--border,#444);';
       var heading = document.createElement('h3');
       heading.textContent = group.candidates.join(' or ') + ' — unresolved';
       article.appendChild(heading);
@@ -126,6 +126,7 @@
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
       }));
       reset();
+      /** @type {HTMLDetailsElement} */ (element('identityAlternativesEditor')).open = false;
       status(result.warning || 'Identification saved. Undo is available in edit history.');
       if (result.warning) showToast(result.warning, 'warning');
       document.dispatchEvent(new CustomEvent('vireo:edit-history-changed'));

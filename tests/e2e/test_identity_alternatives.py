@@ -8,6 +8,7 @@ def open_panel(live_server, page):
     expect(page.locator('#grid .card').first).to_be_visible()
     page.locator('#identityAlternativesPanel > summary').click()
     expect(page.locator('#identityAlternativesCount')).to_contain_text('0 photos')
+    page.locator('#identityAlternativesEditor > summary').click()
     page.locator('#identityLoadPhotos').click()
     expect(page.locator('#identityPhotos option')).to_have_count(5)
     ids = live_server['data']['photos'][:2]
