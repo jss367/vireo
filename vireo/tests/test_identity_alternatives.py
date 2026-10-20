@@ -349,6 +349,8 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     switch(first)
     db.photo_review.set_flag(1, 'rejected')
     db.photo_review.set_flag(2, 'flagged')
+    prior = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.tag_photo(1, prior, source='accept')
     assert save(client, [1, 2]).status_code == 200
     original = current_group(client)
     switch(second)
@@ -366,6 +368,7 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     assert resolve(client, original, photo_ids=[2]).status_code == 409
     before = db.identity_alternatives.for_photos(include_resolved=True)
     tags = db.photo_species.get_species_for_photos([1, 2])
+    pending = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
     # The first item would undo successfully; the conflicting second item
     # must roll back the whole batch, including history markers and intents.
     latest = db.edit_history.latest_undoable()['id']
@@ -374,6 +377,7 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     assert 'changed elsewhere' in response.get_json()['error']
     assert db.identity_alternatives.for_photos(include_resolved=True) == before
     assert db.photo_species.get_species_for_photos([1, 2]) == tags
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
     assert db.edit_history.latest_undoable()['id'] == latest
     assert db.photos.get(1)['flag'] == 'rejected'
     assert db.photos.get(2)['flag'] == 'flagged'
@@ -432,6 +436,26 @@ def test_history_rejects_superseded_candidate_associations_without_changing_iden
     assert client.post('/api/undo').status_code == 409
     assert current_group(client) == before
     assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[0]]}
+
+
+def test_redo_rejects_invisible_photo_and_rolls_back_visible_batch_items(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Retains both photos')
+    db.photo_visibility.grant(second, [1, 2])
+    db.commit()
+    assert save(client, [1, 2]).status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    redo_id = db.edit_history.oldest_redoable()['id']
+    db.remove_workspace_folder(first, db.photos.get(2)['folder_id'])
+    db.photo_visibility.revoke_grants(first, [2])
+    db.commit()
+    assert db.photo_visibility.visible_photo_ids([1, 2]) == [1]
+    assert client.post('/api/redo').status_code == 409
+    assert not db.identity_alternatives.photo_ids()
+    assert db.conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
+    assert db.edit_history.oldest_redoable()['id'] == redo_id
 
 
 def save(client, ids, **changes):

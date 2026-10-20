@@ -37,7 +37,8 @@ def _check_replay_state(db: Database, photo_id: int, before: dict[str, Any], aft
     links = db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, [])
     expected_links = {link['keyword_id']: link['source'] for link in before['links']}
     actual_links = {link['keyword_id']: link['source'] for link in links}
-    if current != before['identity'] or actual_links != expected_links:
+    if (photo_id not in db.photo_visibility.visible_photo_ids([photo_id])
+            or current != before['identity'] or actual_links != expected_links):
         raise IdentityHistoryConflict(
             'This identification was changed elsewhere. Reload the photo and review its current identity before editing history.'
         )
