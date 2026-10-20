@@ -33,7 +33,7 @@ def test_manual_focus_center_and_subject_inspection_preserve_decisions(page, liv
     db.commit()
     page.goto(live_server['url'] + f'/best-batch?photo_id={pids[0]}')
     page.locator('#compareSubjectsBtn').click()
-    expect(page.locator('#inspectImg')).to_have_attribute('src', f'/photos/{pids[0]}/edit-preview?size=1920&recipe=%7B%7D')
+    expect(page.locator('#inspectImg')).to_have_attribute('src', f'/photos/{pids[0]}/preview?size=1920&view=source')
     page.wait_for_function('document.getElementById("inspectImg").naturalWidth > 0')
     expect(page.locator('#focusRasterStatus')).to_contain_text('Selected subject evidence is unavailable')
     page.locator('#manualFocusBtn').click()

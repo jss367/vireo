@@ -15,6 +15,18 @@ function markCenter(center) {
   }
 }
 
+/** @param {Response} response */
+async function focusResponseError(response) {
+  var fallback = 'Focus evidence unavailable (HTTP ' + response.status + '). Refresh the photo or choose another center.';
+  if ((response.headers.get('Content-Type') || '').includes('application/json')) {
+    try {
+      var data = await response.json();
+      if (typeof data?.error === 'string' && data.error.trim()) return data.error;
+    } catch (_error) { /* A malformed error body still means the focus pixels are unavailable. */ }
+  }
+  return fallback;
+}
+
 /** @param {string} url */
 async function loadFocus(url) {
   var current = ++sequence;
@@ -26,7 +38,7 @@ async function loadFocus(url) {
   byId('focusRasterStatus').textContent = 'Loading focus pixels…';
   try {
     var response = await fetch(url, {signal: controller.signal});
-    if (!response.ok) throw new Error((await response.json()).error || 'Focus evidence unavailable');
+    if (!response.ok) throw new Error(await focusResponseError(response));
     var blob = await response.blob();
     if (current !== sequence) return;
     var old = image.dataset.objectUrl;

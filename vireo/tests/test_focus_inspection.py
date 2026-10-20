@@ -123,3 +123,23 @@ def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_d
     response = app.test_client().get(f'/photos/{pid}/focus-crop')
     assert response.status_code == 404
     assert 'changed while decoding' in response.get_json()['error']
+
+
+@pytest.mark.parametrize('basis', ['frame', 'Frame', ' frame ', ' FRAME '])
+@pytest.mark.parametrize('stale_mask', [False, True])
+def test_frame_basis_normalization_never_revalidates_unused_subjects(app_and_db, basis, stale_mask):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid)
+    db.detections.save(pid, [{'box': {'x': .1, 'y': .2, 'w': .2, 'h': .2},
+                              'confidence': .9, 'category': 'animal'}], detector_model='test')
+    if stale_mask:
+        db.conn.execute('UPDATE photos SET mask_path=? WHERE id=?', ('stale-mask.png', pid))
+    db.commit()
+    client = app.test_client()
+    response = client.get(f'/photos/{pid}/focus-crop', query_string={'basis': basis, 'size': 128})
+    assert response.status_code == 200
+    assert response.headers['X-Vireo-Focus-Basis'] == 'frame'
+    assert response.headers['X-Vireo-Focus-Center'] == '0.5000,0.5000'
+    subject = client.get(f'/photos/{pid}/focus-crop', query_string={'basis': ' Subject '})
+    assert subject.status_code == (404 if stale_mask else 200)

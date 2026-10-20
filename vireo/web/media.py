@@ -2433,7 +2433,7 @@ def _comparison_media_subject(db, photo, args, effective):
     return detection, analysis
 
 
-def _validated_focus_source(config, db, photo, args, effective, source_choice, boxes=()):
+def _validated_focus_source(config, db, photo, args, effective, source_choice, boxes=(), basis="auto"):
     """Decoding may outlive a source replacement; revalidate pinned evidence."""
     img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
     if img is not None and args.get("detection_id") is not None:
@@ -2442,7 +2442,7 @@ def _validated_focus_source(config, db, photo, args, effective, source_choice, b
         except ValueError:
             img.close()
             raise
-    if img is not None and args.get("detection_id") is None and args.get("center") is None and args.get("basis") != "frame":
+    if img is not None and args.get("detection_id") is None and args.get("center") is None and basis != "frame":
         from focus_crop import focus_subject_detections
         try:
             current = focus_subject_detections(db, photo["id"])
@@ -2655,6 +2655,31 @@ class _PreviewServer:
         if pm == 0:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
+
+    def _serve_source_frame(self, photo_id, size):
+        """Serve the cached upright, unedited frame used for manual placement."""
+        import config as cfg
+        from services.source_frame_preview import SourceFrameUnavailable, source_frame_bytes
+
+        db = self._get_db()
+        effective = db.get_effective_config(cfg.load())
+        try:
+            data = source_frame_bytes(
+                db, photo_id, size, os.path.dirname(self._config["THUMB_CACHE_DIR"]),
+                effective.get("preview_quality", 90),
+                lambda photo, folder: _focus_source_image(self._config, photo, folder, "auto"),
+            )
+        except SourceFrameUnavailable:
+            return "Full frame unavailable; refresh and try again", 404
+        except ArtifactProducerFailed as error:
+            if not isinstance(error.__cause__, SourceFrameUnavailable):
+                raise
+            return "Full frame unavailable; refresh and try again", 404
+        response = Response(data, mimetype="image/jpeg")
+        response.cache_control.private = True
+        response.cache_control.max_age = 0
+        response.add_etag()
+        return response.make_conditional(request)
 
     def _reconcile_preview_cache_file(
         self, db, photo, photo_id, size, cache_path, recipe, render_recipe, bypass_cache,
@@ -3296,7 +3321,7 @@ def create_media_blueprint(
             photo = {**dict(photo), "eye_x": None, "eye_y": None, "eye_tenengrad": None}
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
-            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice, boxes)
+            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice, boxes, basis)
         except ValueError as exc:
             return json_error(str(exc), 404)
         if img is None:
@@ -3367,6 +3392,7 @@ def create_media_blueprint(
         Query params:
           size: int — max dimension (longest side). Must be in
                 allowed_preview_sizes() to avoid unbounded cache growth.
+          view: source — cached upright, unedited full frame for inspection.
         """
         from flask import request
 
@@ -3376,6 +3402,8 @@ def create_media_blueprint(
             return "Invalid size", 400
         if size not in previews.allowed_preview_sizes():
             return "Unsupported size", 400
+        if request.args.get("view") == "source":
+            return previews._serve_source_frame(photo_id, size)
         return previews._serve_preview(photo_id, size, _prepare_source=_prepare_source)
 
     @blueprint.route("/photos/<int:photo_id>/edit-mask-preview")

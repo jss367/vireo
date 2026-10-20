@@ -35,7 +35,7 @@ function showInspectImage(card) {
   };
   state.inspectImgFallback = fallback;
   img.addEventListener('error', fallback);
-  img.src = '/photos/' + card.id + '/edit-preview?size=1920&recipe=%7B%7D';
+  img.src = '/photos/' + card.id + '/preview?size=1920&view=source';
   img.alt = card.filename || '';
 }
 
