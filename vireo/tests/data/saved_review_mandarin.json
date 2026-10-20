@@ -1,0 +1,1133 @@
+{
+  "provenance": "Exact saved encounter membership from the reported 71-frame sequence; issue #2242.",
+  "encounters": [
+    {
+      "species": [
+        "Mandarin Duck",
+        1.7113
+      ],
+      "confirmed_species": null,
+      "confirmed_species_list": [],
+      "species_predictions": [
+        {
+          "species": "Mandarin Duck",
+          "species_key": "taxon:7106",
+          "count": 18,
+          "avg_confidence": 0.9507,
+          "models": [
+            {
+              "model": "BioCLIP-2.5",
+              "confidence": 1.0,
+              "photo_count": 9
+            },
+            {
+              "model": "iNat21 (EVA-02 Large)",
+              "confidence": 0.9014,
+              "photo_count": 9
+            }
+          ]
+        },
+        {
+          "species": "Pacific Wren (Troglodytes pacificus)",
+          "species_key": "taxon:144882",
+          "count": 1,
+          "avg_confidence": 0.8877,
+          "models": [
+            {
+              "model": "BioCLIP-2.5",
+              "confidence": 0.8877,
+              "photo_count": 1
+            }
+          ]
+        },
+        {
+          "species": "Cave Swallow",
+          "species_key": "taxon:11855",
+          "count": 1,
+          "avg_confidence": 0.0861,
+          "models": [
+            {
+              "model": "iNat21 (EVA-02 Large)",
+              "confidence": 0.0861,
+              "photo_count": 1
+            }
+          ]
+        }
+      ],
+      "species_confirmed": false,
+      "photo_count": 71,
+      "burst_count": 5,
+      "time_range": [
+        "2026-10-17T10:24:29.150000",
+        "2026-10-17T10:24:39.510000"
+      ],
+      "photo_ids": [
+        216692,
+        216693,
+        216694,
+        216695,
+        216696,
+        216697,
+        216698,
+        216699,
+        216700,
+        216701,
+        216702,
+        216703,
+        216704,
+        216705,
+        216706,
+        216707,
+        216708,
+        216709,
+        216710,
+        216711,
+        216712,
+        216713,
+        216714,
+        216715,
+        216716,
+        216717,
+        216718,
+        216719,
+        216720,
+        216721,
+        216722,
+        216723,
+        216724,
+        216725,
+        216726,
+        216727,
+        216728,
+        216729,
+        216730,
+        216731,
+        216732,
+        216733,
+        216734,
+        216735,
+        216736,
+        216737,
+        216738,
+        216739,
+        216740,
+        216741,
+        216742,
+        216743,
+        216744,
+        216745,
+        216746,
+        216747,
+        216748,
+        216749,
+        216750,
+        216751,
+        216752,
+        216753,
+        216754,
+        216755,
+        216756,
+        216757,
+        216758,
+        216759,
+        216760,
+        216761,
+        216762
+      ],
+      "missing_timestamp_count": 0,
+      "bursts": [
+        {
+          "photo_ids": [
+            216692,
+            216693,
+            216694,
+            216695
+          ],
+          "species_predictions": [],
+          "species_override": null
+        },
+        {
+          "photo_ids": [
+            216696,
+            216697,
+            216698,
+            216699,
+            216700,
+            216701,
+            216702,
+            216703,
+            216704,
+            216705,
+            216706,
+            216707,
+            216708,
+            216709,
+            216710,
+            216711,
+            216712,
+            216713,
+            216714,
+            216715
+          ],
+          "species_predictions": [
+            {
+              "species": "Mandarin Duck",
+              "species_key": "taxon:7106",
+              "count": 6,
+              "avg_confidence": 0.9507,
+              "models": [
+                {
+                  "model": "BioCLIP-2.5",
+                  "confidence": 1.0,
+                  "photo_count": 3
+                },
+                {
+                  "model": "iNat21 (EVA-02 Large)",
+                  "confidence": 0.9014,
+                  "photo_count": 3
+                }
+              ]
+            }
+          ],
+          "species_override": null
+        },
+        {
+          "photo_ids": [
+            216716
+          ],
+          "species_predictions": [
+            {
+              "species": "Pacific Wren (Troglodytes pacificus)",
+              "species_key": "taxon:144882",
+              "count": 1,
+              "avg_confidence": 0.8877,
+              "models": [
+                {
+                  "model": "BioCLIP-2.5",
+                  "confidence": 0.8877,
+                  "photo_count": 1
+                }
+              ]
+            },
+            {
+              "species": "Cave Swallow",
+              "species_key": "taxon:11855",
+              "count": 1,
+              "avg_confidence": 0.0861,
+              "models": [
+                {
+                  "model": "iNat21 (EVA-02 Large)",
+                  "confidence": 0.0861,
+                  "photo_count": 1
+                }
+              ]
+            }
+          ],
+          "species_override": null
+        },
+        {
+          "photo_ids": [
+            216717,
+            216718,
+            216719,
+            216720,
+            216721,
+            216722,
+            216723,
+            216724,
+            216725,
+            216726,
+            216727,
+            216728,
+            216729,
+            216730,
+            216731,
+            216732,
+            216733,
+            216734
+          ],
+          "species_predictions": [
+            {
+              "species": "Mandarin Duck",
+              "species_key": "taxon:7106",
+              "count": 12,
+              "avg_confidence": 0.9507,
+              "models": [
+                {
+                  "model": "BioCLIP-2.5",
+                  "confidence": 1.0,
+                  "photo_count": 6
+                },
+                {
+                  "model": "iNat21 (EVA-02 Large)",
+                  "confidence": 0.9014,
+                  "photo_count": 6
+                }
+              ]
+            }
+          ],
+          "species_override": null
+        },
+        {
+          "photo_ids": [
+            216735,
+            216736,
+            216737,
+            216738,
+            216739,
+            216740,
+            216741,
+            216742,
+            216743,
+            216744,
+            216745,
+            216746,
+            216747,
+            216748,
+            216749,
+            216750,
+            216751,
+            216752,
+            216753,
+            216754,
+            216755,
+            216756,
+            216757,
+            216758,
+            216759,
+            216760,
+            216761,
+            216762
+          ],
+          "species_predictions": [],
+          "species_override": null
+        }
+      ]
+    }
+  ],
+  "photos": [
+    {
+      "id": 216692,
+      "filename": "DSC_5426.NEF",
+      "timestamp": "2026-10-17T10:24:29.150000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216693,
+      "filename": "DSC_5427.NEF",
+      "timestamp": "2026-10-17T10:24:29.220000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216694,
+      "filename": "DSC_5428.NEF",
+      "timestamp": "2026-10-17T10:24:29.270000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216695,
+      "filename": "DSC_5429.NEF",
+      "timestamp": "2026-10-17T10:24:29.320000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216696,
+      "filename": "DSC_5430.NEF",
+      "timestamp": "2026-10-17T10:24:32.700000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216697,
+      "filename": "DSC_5431.NEF",
+      "timestamp": "2026-10-17T10:24:32.770000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216698,
+      "filename": "DSC_5432.NEF",
+      "timestamp": "2026-10-17T10:24:32.820000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216699,
+      "filename": "DSC_5433.NEF",
+      "timestamp": "2026-10-17T10:24:32.870000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216700,
+      "filename": "DSC_5434.NEF",
+      "timestamp": "2026-10-17T10:24:32.920000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216701,
+      "filename": "DSC_5435.NEF",
+      "timestamp": "2026-10-17T10:24:32.970000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216702,
+      "filename": "DSC_5436.NEF",
+      "timestamp": "2026-10-17T10:24:33.020000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216703,
+      "filename": "DSC_5437.NEF",
+      "timestamp": "2026-10-17T10:24:33.070000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216704,
+      "filename": "DSC_5438.NEF",
+      "timestamp": "2026-10-17T10:24:33.120000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216705,
+      "filename": "DSC_5439.NEF",
+      "timestamp": "2026-10-17T10:24:33.170000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216706,
+      "filename": "DSC_5440.NEF",
+      "timestamp": "2026-10-17T10:24:33.220000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216707,
+      "filename": "DSC_5441.NEF",
+      "timestamp": "2026-10-17T10:24:33.270000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216708,
+      "filename": "DSC_5442.NEF",
+      "timestamp": "2026-10-17T10:24:33.320000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216709,
+      "filename": "DSC_5443.NEF",
+      "timestamp": "2026-10-17T10:24:33.370000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216710,
+      "filename": "DSC_5444.NEF",
+      "timestamp": "2026-10-17T10:24:33.420000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216711,
+      "filename": "DSC_5445.NEF",
+      "timestamp": "2026-10-17T10:24:33.470000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216712,
+      "filename": "DSC_5446.NEF",
+      "timestamp": "2026-10-17T10:24:33.520000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216713,
+      "filename": "DSC_5447.NEF",
+      "timestamp": "2026-10-17T10:24:33.570000",
+      "label": "KEEP",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216714,
+      "filename": "DSC_5448.NEF",
+      "timestamp": "2026-10-17T10:24:33.620000",
+      "label": "REVIEW",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216715,
+      "filename": "DSC_5449.NEF",
+      "timestamp": "2026-10-17T10:24:33.670000",
+      "label": "REVIEW",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216716,
+      "filename": "DSC_5450.NEF",
+      "timestamp": "2026-10-17T10:24:33.720000",
+      "label": "KEEP",
+      "flag": "flagged",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216717,
+      "filename": "DSC_5451.NEF",
+      "timestamp": "2026-10-17T10:24:33.770000",
+      "label": "KEEP",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216718,
+      "filename": "DSC_5452.NEF",
+      "timestamp": "2026-10-17T10:24:33.820000",
+      "label": "REVIEW",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216719,
+      "filename": "DSC_5453.NEF",
+      "timestamp": "2026-10-17T10:24:33.870000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216720,
+      "filename": "DSC_5454.NEF",
+      "timestamp": "2026-10-17T10:24:33.920000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216721,
+      "filename": "DSC_5455.NEF",
+      "timestamp": "2026-10-17T10:24:33.970000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216722,
+      "filename": "DSC_5456.NEF",
+      "timestamp": "2026-10-17T10:24:34.020000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216723,
+      "filename": "DSC_5457.NEF",
+      "timestamp": "2026-10-17T10:24:34.070000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216724,
+      "filename": "DSC_5458.NEF",
+      "timestamp": "2026-10-17T10:24:34.120000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216725,
+      "filename": "DSC_5459.NEF",
+      "timestamp": "2026-10-17T10:24:34.170000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216726,
+      "filename": "DSC_5460.NEF",
+      "timestamp": "2026-10-17T10:24:34.220000",
+      "label": "KEEP",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216727,
+      "filename": "DSC_5461.NEF",
+      "timestamp": "2026-10-17T10:24:34.270000",
+      "label": "KEEP",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216728,
+      "filename": "DSC_5462.NEF",
+      "timestamp": "2026-10-17T10:24:34.320000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216729,
+      "filename": "DSC_5463.NEF",
+      "timestamp": "2026-10-17T10:24:34.370000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216730,
+      "filename": "DSC_5464.NEF",
+      "timestamp": "2026-10-17T10:24:34.420000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216731,
+      "filename": "DSC_5465.NEF",
+      "timestamp": "2026-10-17T10:24:34.470000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216732,
+      "filename": "DSC_5466.NEF",
+      "timestamp": "2026-10-17T10:24:34.530000",
+      "label": "REVIEW",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216733,
+      "filename": "DSC_5467.NEF",
+      "timestamp": "2026-10-17T10:24:34.580000",
+      "label": "REVIEW",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": []
+    },
+    {
+      "id": 216734,
+      "filename": "DSC_5468.NEF",
+      "timestamp": "2026-10-17T10:24:34.630000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216735,
+      "filename": "DSC_5469.NEF",
+      "timestamp": "2026-10-17T10:24:38.150000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216736,
+      "filename": "DSC_5470.NEF",
+      "timestamp": "2026-10-17T10:24:38.210000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216737,
+      "filename": "DSC_5471.NEF",
+      "timestamp": "2026-10-17T10:24:38.260000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216738,
+      "filename": "DSC_5472.NEF",
+      "timestamp": "2026-10-17T10:24:38.310000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216739,
+      "filename": "DSC_5473.NEF",
+      "timestamp": "2026-10-17T10:24:38.360000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216740,
+      "filename": "DSC_5474.NEF",
+      "timestamp": "2026-10-17T10:24:38.410000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216741,
+      "filename": "DSC_5475.NEF",
+      "timestamp": "2026-10-17T10:24:38.460000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216742,
+      "filename": "DSC_5476.NEF",
+      "timestamp": "2026-10-17T10:24:38.510000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216743,
+      "filename": "DSC_5477.NEF",
+      "timestamp": "2026-10-17T10:24:38.560000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216744,
+      "filename": "DSC_5478.NEF",
+      "timestamp": "2026-10-17T10:24:38.610000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216745,
+      "filename": "DSC_5479.NEF",
+      "timestamp": "2026-10-17T10:24:38.660000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216746,
+      "filename": "DSC_5480.NEF",
+      "timestamp": "2026-10-17T10:24:38.710000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216747,
+      "filename": "DSC_5481.NEF",
+      "timestamp": "2026-10-17T10:24:38.760000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216748,
+      "filename": "DSC_5482.NEF",
+      "timestamp": "2026-10-17T10:24:38.810000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216749,
+      "filename": "DSC_5483.NEF",
+      "timestamp": "2026-10-17T10:24:38.860000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216750,
+      "filename": "DSC_5484.NEF",
+      "timestamp": "2026-10-17T10:24:38.910000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216751,
+      "filename": "DSC_5485.NEF",
+      "timestamp": "2026-10-17T10:24:38.960000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216752,
+      "filename": "DSC_5486.NEF",
+      "timestamp": "2026-10-17T10:24:39.010000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216753,
+      "filename": "DSC_5487.NEF",
+      "timestamp": "2026-10-17T10:24:39.060000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216754,
+      "filename": "DSC_5488.NEF",
+      "timestamp": "2026-10-17T10:24:39.110000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216755,
+      "filename": "DSC_5489.NEF",
+      "timestamp": "2026-10-17T10:24:39.160000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216756,
+      "filename": "DSC_5490.NEF",
+      "timestamp": "2026-10-17T10:24:39.210000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216757,
+      "filename": "DSC_5491.NEF",
+      "timestamp": "2026-10-17T10:24:39.260000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216758,
+      "filename": "DSC_5492.NEF",
+      "timestamp": "2026-10-17T10:24:39.310000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216759,
+      "filename": "DSC_5493.NEF",
+      "timestamp": "2026-10-17T10:24:39.360000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216760,
+      "filename": "DSC_5494.NEF",
+      "timestamp": "2026-10-17T10:24:39.410000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216761,
+      "filename": "DSC_5495.NEF",
+      "timestamp": "2026-10-17T10:24:39.460000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    },
+    {
+      "id": 216762,
+      "filename": "DSC_5496.NEF",
+      "timestamp": "2026-10-17T10:24:39.510000",
+      "label": "REJECT",
+      "flag": "none",
+      "rating": 0,
+      "reject_reasons": [
+        "no_subject_mask",
+        "low_quality (0.225 < 0.4)"
+      ]
+    }
+  ],
+  "summary": {}
+}
