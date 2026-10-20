@@ -5,7 +5,8 @@ import sys
 from datetime import datetime, timedelta
 
 import numpy as np
-from repositories.masks_features import PipelineFeatures
+from repositories.masks_features import MaskQuality, PipelineFeatures
+from subject_readiness import REQUIRED_QUALITY_FIELDS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from services import photo_ingest
@@ -13,9 +14,12 @@ from services import photo_ingest
 
 def _setup_db(tmp_path):
     """Create a DB with photos that have full pipeline features."""
+    import config as cfg
     from db import Database
     from dino_embed import embedding_to_blob
 
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small"}})
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
 
@@ -29,20 +33,20 @@ def _setup_db(tmp_path):
             db, fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
             timestamp=ts.isoformat(), width=4000, height=3000,
         )
-        db.masks_features.update_pipeline_features(
-            pid,
-            PipelineFeatures(
-                mask_path=f"/masks/{pid}.png",
-                subject_tenengrad=100 + i * 80,
-                bg_tenengrad=30,
-                crop_complete=0.5 + i * 0.1,
-                bg_separation=50.0,
-                subject_clip_high=0.01 + i * 0.06,
-                subject_clip_low=0.01,
-                subject_y_median=120.0,
-                phash_crop=f"{pid:016x}",
-            ),
+        mask_path = tmp_path / f"{pid}-mask.png"
+        mask_path.write_bytes(b"scratch-mask")
+        features = PipelineFeatures(
+            mask_path=str(mask_path),
+            subject_tenengrad=100 + i * 80,
+            bg_tenengrad=30,
+            crop_complete=0.5 + i * 0.1,
+            bg_separation=50.0,
+            subject_clip_high=0.01 + i * 0.06,
+            subject_clip_low=0.01,
+            subject_y_median=120.0,
+            phash_crop=f"{pid:016x}",
         )
+        db.masks_features.update_pipeline_features(pid, features)
         db.masks_features.update_embeddings(
             pid,
             dino_subject_embedding=embedding_to_blob(emb),
@@ -53,8 +57,15 @@ def _setup_db(tmp_path):
             subject_size=0.1,
         )
         det_ids = db.detections.save(pid, [
-            {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
-        ], detector_model="megadetector")
+            {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+        ], detector_model="megadetector-v6")
+        db.model_runs.record_detector_run(pid, "megadetector-v6", 1)
+        quality = MaskQuality(subject_size=.1, **{
+            key: getattr(features, key) for key in REQUIRED_QUALITY_FIELDS if key != "subject_size"
+        })
+        db.masks_features.upsert_mask(pid, "sam2-small", str(mask_path), "megadetector-v6",
+                                     (.2, .2, .4, .4), quality)
+        db.masks_features.set_active_variant(pid, "sam2-small", .2)
         db.predictions.add(det_ids[0], "robin", 0.9, "bioclip", category="match")
 
     return db

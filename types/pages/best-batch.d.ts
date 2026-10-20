@@ -7,7 +7,7 @@ interface BestBatchCard {
   crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string;
   eye_status?: string | null; analysis?: {width: number; height: number} | null;
   subject?: {detection_id: number | null; selection: string; candidates: {
-    detection_id: number; box: {x: number; y: number; w: number; h: number};
+    detection_id: number; detector_confidence: number; box: {x: number; y: number; w: number; h: number};
     predictions: {species: string; status: string}[];
   }[]};
   width?: number | null; height?: number | null; reasons?: string[];

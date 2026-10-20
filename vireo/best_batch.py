@@ -176,6 +176,9 @@ def _quality_rank(photos, key, photo_id):
 
 def _best_batch_reasons(photo, photos, is_best=False):
     reasons = []
+    if photo.get("selection_eligible") is False:
+        return ["Subject analysis needs review: " + reason.replace("_", " ")
+                for reason in photo.get("analysis_reasons", [])]
     reject_reasons = photo.get("reject_reasons") or []
     if reject_reasons:
         return [str(r).replace("_", " ") for r in reject_reasons[:3]]
@@ -237,7 +240,7 @@ def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
         return None, "Could not score this batch"
 
     ranked = sorted(
-        result_photos,
+        [p for p in result_photos if p.get("selection_eligible")],
         key=lambda p: (
             p.get("label") != "REJECT",
             p.get("quality_composite") if p.get("quality_composite") is not None else -1,
@@ -245,48 +248,18 @@ def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
         ),
         reverse=True,
     )
+    if not ranked:
+        return None, "Complete subject analysis on at least one photo before using Best Batch"
     best = ranked[0]
     alternate_ids = [p["id"] for p in ranked[1:5] if p.get("label") != "REJECT"]
-    reject_ids = [p["id"] for p in result_photos if p["id"] != best["id"]]
+    reject_ids = [p["id"] for p in ranked if p["id"] != best["id"]]
     sequence_keys = [_filename_sequence_key(p.get("filename")) for p in result_photos]
     sequence_nums = [key[1] for key in sequence_keys if key]
 
-    cards = []
-    for idx, photo in enumerate(ranked, start=1):
-        if photo["id"] == best["id"]:
-            role = "best"
-        elif photo["id"] in alternate_ids:
-            role = "alternate"
-        else:
-            role = "reject"
-        cards.append({
-            "id": photo["id"],
-            "filename": photo.get("filename"),
-            "width": photo.get("width"),
-            "height": photo.get("height"),
-            "rank": idx,
-            "role": role,
-            "label": photo.get("label"),
-            "quality": photo.get("quality_composite"),
-            "quality_pct": (
-                round(photo["quality_composite"] * 100)
-                if photo.get("quality_composite") is not None else None
-            ),
-            "focus": photo.get("eye_focus_score", photo.get("focus_score")),
-            "focus_basis": "eye" if photo.get("eye_focus_score") is not None else "subject",
-            "sharpness": photo.get("subject_tenengrad"),
-            "eye_x": photo.get("eye_x"),
-            "eye_y": photo.get("eye_y"),
-            "eye_conf": photo.get("eye_conf"),
-            "eye_tenengrad": photo.get("eye_tenengrad"),
-            "exposure": photo.get("exposure_score"),
-            "crop_complete": photo.get("crop_complete"),
-            "subject_size": photo.get("subject_size"),
-            "reject_reasons": list(photo.get("reject_reasons") or []),
-            "flag": photo.get("flag") or "none",
-            "rating": photo.get("rating"),
-            "reasons": _best_batch_reasons(photo, result_photos, is_best=photo["id"] == best["id"]),
-        })
+    cards = [_best_batch_card(photo, result_photos, best["id"], alternate_ids, idx)
+             for idx, photo in enumerate(ranked, start=1)]
+    cards.extend(_best_batch_card(photo, result_photos, best["id"], alternate_ids, None)
+                 for photo in result_photos if not photo.get("selection_eligible"))
 
     best_reasons = _best_batch_reasons(best, result_photos, is_best=True)
     return {
@@ -304,3 +277,46 @@ def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
         "alternate_ids": alternate_ids,
         "suggested_reject_ids": reject_ids,
     }, None
+
+
+def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
+    """Keep unavailable frames visible as unranked manual-review cards."""
+    if not photo.get("selection_eligible"):
+        role = "review"
+    elif photo["id"] == best_id:
+        role = "best"
+    elif photo["id"] in alternate_ids:
+        role = "alternate"
+    else:
+        role = "reject"
+    return {
+        "id": photo["id"],
+        "filename": photo.get("filename"),
+        "width": photo.get("width"),
+        "height": photo.get("height"),
+        "rank": rank,
+        "role": role,
+        "label": photo.get("label"),
+        "quality": photo.get("quality_composite"),
+        "quality_pct": (
+            round(photo["quality_composite"] * 100)
+            if photo.get("quality_composite") is not None else None
+        ),
+        "focus": photo.get("eye_focus_score", photo.get("focus_score")),
+        "focus_basis": "eye" if photo.get("eye_focus_score") is not None else "subject",
+        "sharpness": photo.get("subject_tenengrad"),
+        "eye_x": photo.get("eye_x"),
+        "eye_y": photo.get("eye_y"),
+        "eye_conf": photo.get("eye_conf"),
+        "eye_tenengrad": photo.get("eye_tenengrad"),
+        "exposure": photo.get("exposure_score"),
+        "crop_complete": photo.get("crop_complete"),
+        "subject_size": photo.get("subject_size"),
+        "reject_reasons": list(photo.get("reject_reasons") or []),
+        "selection_eligible": photo.get("selection_eligible", False),
+        "analysis_status": photo.get("analysis_status"),
+        "analysis_reasons": photo.get("analysis_reasons", []),
+        "flag": photo.get("flag") or "none",
+        "rating": photo.get("rating"),
+        "reasons": _best_batch_reasons(photo, photos, is_best=photo["id"] == best_id),
+    }

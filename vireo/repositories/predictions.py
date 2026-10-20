@@ -1277,13 +1277,15 @@ class PredictionRepository:
         ``classifier_model``, and the active workspace's ``group_id`` and
         ``status`` (``pending`` without a review row). Ties on confidence go
         to the higher id; predictions with no species and photos with no
-        such prediction are absent. Not filtered by workspace visibility or
-        detector confidence. Empty input reads nothing and resolves no
-        workspace.
+        such prediction are absent. The workspace's detector floor applies to
+        real detections; full-image anchors remain eligible. Callers verify
+        visibility. Empty input reads nothing and resolves no workspace.
         """
         if not photo_ids:
             return {}
         ws = self.workspace_id
+        import config as cfg
+        detector_floor = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         results = {}
         for chunk in self._chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -1305,6 +1307,7 @@ class PredictionRepository:
                          ON pr_rev.prediction_id = pr.id
                         AND pr_rev.workspace_id = ?
                        WHERE d.photo_id IN ({placeholders})
+                         AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
                          AND pr.species IS NOT NULL
                          AND COALESCE(pr_rev.status, 'pending') != 'rejected'
                          AND pr.labels_fingerprint = (
@@ -1315,7 +1318,7 @@ class PredictionRepository:
                              LIMIT 1
                          )
                    ) WHERE rn = 1""",
-                (ws, *chunk),
+                (ws, *chunk, detector_floor),
             ).fetchall()
             for row in rows:
                 results[row["photo_id"]] = row

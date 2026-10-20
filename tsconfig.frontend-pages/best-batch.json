@@ -5,6 +5,7 @@
     "../vireo/static/best-batch/actions.js",
     "../vireo/static/best-batch/boot.js",
     "../vireo/static/best-batch/helpers.js",
+    "../vireo/static/best-batch/focus.js",
     "../vireo/static/best-batch/render.js",
     "../vireo/static/best-batch/shared.js",
     "../vireo/static/best-batch/state.js",

@@ -161,6 +161,75 @@ def normalize_metadata_fields(fields):
     return normalized
 
 
+def export_metadata_selection(fields):
+    """Describe the explicit selection, including an intentional empty one."""
+    fields = normalize_metadata_fields(fields)
+    labels = {
+        "species": "Species keywords", "capture_date": "Capture date",
+        "capture_time": "Capture time", "rating": "Rating",
+        "location": "Location (GPS)", "camera": "Camera & exposure",
+    }
+    return {
+        "requested_fields": fields,
+        "metadata_free": not fields,
+        "description": (
+            ", ".join(labels[field] for field in fields)
+            if fields else "None selected — metadata-free export"
+        ),
+    }
+
+
+class _ExportMetadataReport:
+    """Count photo/category outcomes independently of image creation.
+
+    A category is available when at least one assignment can be generated.
+    Missing values within a category (e.g. an unknown lens) are never invented.
+    Unreached photos remain not_attempted, including render failures/cancellation.
+    """
+
+    def __init__(self, fields, photo_count):
+        self.summary = export_metadata_selection(fields)
+        self.summary["categories"] = {
+            field: {"requested": photo_count, "unavailable": 0, "written": 0,
+                    "failed": 0, "not_attempted": photo_count}
+            for field in fields
+        }
+        self.pending = {}
+
+    def prepare(self, path, photo, species, camera, location, *, source_metadata=None, report=None):
+        fields = self.summary["requested_fields"]
+        # Generate the complete command first, including combined date/time tags.
+        # The report dict carries per-field provenance for the real command;
+        # availability probes must not overwrite it.
+        args = _export_metadata_args(
+            fields, photo, species, camera, location,
+            source_metadata=source_metadata, report=report,
+        )
+        assignments = set(args)
+        available = []
+        for field in fields:
+            without_field = _export_metadata_args(
+                [other for other in fields if other != field], photo, species, camera, location,
+                source_metadata=source_metadata,
+            )
+            # Count assignments enabled jointly by date and time, even when
+            # standalone IPTC time is unavailable without a UTC offset.
+            if assignments.difference(without_field):
+                available.append(field)
+            else:
+                counts = self.summary["categories"][field]
+                counts["unavailable"] += 1
+                counts["not_attempted"] -= 1
+        self.pending[path] = available
+        return args
+
+    def finish(self, path, success):
+        for field in self.pending.pop(path, []):
+            counts = self.summary["categories"][field]
+            counts["written" if success else "failed"] += 1
+            counts["not_attempted"] -= 1
+
+
 DEFAULT_EXPORT_SUBFOLDER = "exported"
 
 MAX_EXPORT_SUBFOLDER_LEN = 120
@@ -727,6 +796,7 @@ class _PhotoExportBatch:
         self.exported_files = [] if collect_files else None
         self.errors = []
         self.metadata_jobs = []
+        self.metadata_report = _ExportMetadataReport(self.metadata_fields, len(self.photo_ids))
         self.metadata_reports = {}
         self.resolved_destinations = []
         self.resolved_destination_set = set()
@@ -869,8 +939,8 @@ class _PhotoExportBatch:
             if self.metadata_fields:
                 try:
                     report = {}
-                    metadata_args = _export_metadata_args(
-                        self.metadata_fields,
+                    metadata_args = self.metadata_report.prepare(
+                        out_path,
                         photo,
                         species_list,
                         self.camera_data_map.get(pid, {}),
@@ -908,6 +978,7 @@ class _PhotoExportBatch:
 
     def _record_success(self, out_path, photo_destination):
         """Count an output that does not need a deferred metadata write."""
+        self.metadata_report.finish(out_path, True)
         self.exported += 1
         self.written_destination_set.add(photo_destination)
         if self.exported_files is not None:
@@ -929,6 +1000,8 @@ class _PhotoExportBatch:
             self.exported += metadata_exported
             self.errors.extend(metadata_errors)
             success_set = set(metadata_success_paths)
+            for path, _filename, _args in self.metadata_jobs:
+                self.metadata_report.finish(path, path in success_set)
             for path in success_set:
                 self.metadata_reports[path]["written"] = True
             self.written_destination_set.update(
@@ -974,6 +1047,7 @@ class _PhotoExportBatch:
             ],
             "destination_mode": "custom" if self.destination else "original",
             "subfolder": self.subfolder,
+            "metadata": self.metadata_report.summary,
         }
         if self.exported_files is not None:
             result["files"] = self.exported_files

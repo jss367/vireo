@@ -41,7 +41,7 @@ def test_browse_export_reports_where_the_photos_went(live_server, page, field_ph
     page.locator("#exportSubmitBtn").click()
 
     toast = page.locator('#toastContainer [data-type="success"]')
-    expect(toast).to_have_text(f"Exported 2 photos to {dest}", timeout=15000)
+    expect(toast).to_have_text(f"Exported 2 photos to {dest}. Metadata: none selected (metadata-free export)", timeout=15000)
 
 
 def test_browse_export_reports_an_unreachable_original_folder(
@@ -56,7 +56,8 @@ def test_browse_export_reports_an_unreachable_original_folder(
     toast = page.locator('#toastContainer [data-type="error"]')
     expect(toast).to_have_text(
         "Nothing was exported. 1 photo failed: "
-        f"kestrel-a.jpg: original folder is not reachable ({folder})",
+        f"kestrel-a.jpg: original folder is not reachable ({folder})"
+        ". Metadata: none selected (metadata-free export)",
         timeout=15000,
     )
     assert not folder.exists()

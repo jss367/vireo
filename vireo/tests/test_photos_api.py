@@ -811,6 +811,20 @@ def _mark_best_batch_quality(db, photo_id, sharpness):
            WHERE id = ?""",
         (sharpness, photo_id),
     )
+    # A measured fixture includes the provenance the production loader checks.
+    from pathlib import Path
+
+    from repositories.masks_features import MaskQuality
+
+    mask_path = Path(db.conn.execute("PRAGMA database_list").fetchone()[2]).parent / f"ready-mask-{photo_id}.png"
+    mask_path.write_bytes(b"scratch-mask")
+    db.detections.save(photo_id, [{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
+                                   "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.masks_features.upsert_mask(photo_id, "sam2-small", str(mask_path), "MDV6", (.1, .1, .2, .2),
+        MaskQuality(subject_tenengrad=sharpness, bg_tenengrad=5, crop_complete=1,
+                    bg_separation=0, subject_clip_high=0, subject_clip_low=0,
+                    subject_y_median=115, subject_size=.05, noise_estimate=1))
+    db.masks_features.set_active_variant(photo_id, "sam2-small", .2)
 
 
 def test_api_photo_best_batch_ranks_filename_sequence(app_and_db):

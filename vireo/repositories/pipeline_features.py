@@ -242,6 +242,31 @@ class PipelineFeaturesRepository:
             (workspace_id, *floor_params),
         ).fetchall()
 
+    def analysis_provenance_rows(self, workspace_id: int, *, scoped: bool) -> list[sqlite3.Row]:
+        """Detector completion and active-mask provenance for current workspace inputs.
+
+        Kept separate from quality columns so an empty detections cache never
+        masquerades as a completed detector verdict. A detector run can be
+        legacy (no portable input fingerprint); its presence still establishes
+        completion, while stamped runs can be checked against source identity.
+        """
+        scope_sql = _SCOPE_SQL if scoped else ""
+        return self.conn.execute(
+            f"""SELECT p.id, p.file_hash, p.companion_path, p.active_mask_variant,
+                       p.quality_input_recipe,
+                       dr.detector_model AS run_model, dr.input_fingerprint,
+                       pm.path AS stored_mask_path, pm.detector_model AS mask_model,
+                       pm.prompt_x, pm.prompt_y, pm.prompt_w, pm.prompt_h
+                  FROM photos p
+                  JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                  LEFT JOIN detector_runs dr ON dr.photo_id = p.id
+                       AND dr.detector_model != 'full-image'
+                  LEFT JOIN photo_masks pm ON pm.photo_id = p.id
+                       AND pm.variant = p.active_mask_variant
+                 WHERE wf.workspace_id = ? {scope_sql}""",
+            (workspace_id,),
+        ).fetchall()
+
     # -- workspace membership -----------------------------------------------------
 
     def workspace_photo_ids(self, workspace_id: int) -> set[int]:
