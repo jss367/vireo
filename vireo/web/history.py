@@ -94,7 +94,7 @@ def create_history_blueprint(
                 # only the photo edit was reversed.
                 return True
             action = (payload.get("photo_edit") or {}).get("action_type")
-        if action not in ("species_replace", "keyword_add", "prediction_accept"):
+        if action not in ("species_replace", "keyword_add", "prediction_accept", "identity_alternatives"):
             return True
         photo_ids = [
             pid for pid in db.edit_history.item_photo_ids(entry["id"], distinct=True)
@@ -117,7 +117,7 @@ def create_history_blueprint(
             # changed them.
             refresh_cache_species_for_photos(
                 cache_dir, db.active_workspace_id, species_by_photo,
-                photos_only=True,
+                photos_only=action != "identity_alternatives",
             )
         except Exception:  # broad: the undo already committed; a stale pipeline cache must not fail it
             log.exception(

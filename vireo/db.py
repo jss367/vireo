@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from repositories.edits import EditsRepository
     from repositories.exif_search import ExifSearchRepository
     from repositories.folders import FolderRepository
+    from repositories.identity_alternatives import IdentityAlternativesRepository
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
@@ -3415,6 +3416,12 @@ class Database:
         """
         return self._photo_keyword_repository()
 
+    @property
+    def identity_alternatives(self) -> IdentityAlternativesRepository:
+        """Unresolved candidate identities; never confirmed species keywords."""
+        from repositories.identity_alternatives import IdentityAlternativesRepository
+        return IdentityAlternativesRepository(self.conn, self._ws_id)
+
     def _photo_species_repository(self) -> PhotoSpeciesRepository:
         """Build the photo-species reads on this connection.
 
@@ -4175,7 +4182,7 @@ class Database:
         )
 
     def tag_photo(
-        self, photo_id, keyword_id, source=KEYWORD_SOURCE_MANUAL, _commit=True,
+        self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
     ):
         """Associate a keyword with a photo.
 
@@ -5692,6 +5699,14 @@ class Database:
             )
         self._reject_edit_prediction(old_meta)
 
+    def _undo_identity_alternatives(self, entry, item):
+        from services.identity_alternatives import replay_identity_edit
+        replay_identity_edit(self, item['photo_id'], item['new_value'], item['old_value'])
+
+    def _redo_identity_alternatives(self, entry, item):
+        from services.identity_alternatives import replay_identity_edit
+        replay_identity_edit(self, item['photo_id'], item['old_value'], item['new_value'])
+
     _EDIT_FIELD_SETTERS = {
         'flag': _edit_set_flag,
         'wildlife_excluded': _edit_set_wildlife_excluded,
@@ -5706,6 +5721,7 @@ class Database:
         'prediction_accept': _undo_keyword_add,
         'keyword_remove': _undo_keyword_remove,
         'species_replace': _undo_species_replace,
+        'identity_alternatives': _undo_identity_alternatives,
     }
     _REDO_HANDLERS = {
         'rating': _redo_rating,
@@ -5713,6 +5729,7 @@ class Database:
         'prediction_accept': _redo_keyword_add,
         'keyword_remove': _redo_keyword_remove,
         'species_replace': _redo_species_replace,
+        'identity_alternatives': _redo_identity_alternatives,
     }
 
     def _edit_old_value_meta(self, old_value):

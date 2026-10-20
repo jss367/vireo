@@ -29,6 +29,7 @@ separate implementations: a fix in one does not reach the other.
 | `group-loupe.js` | Loupe lock, eye crosshair, hover zoom, align drags, card transforms, and strip 1:1 |
 | `group-cards.js` | Card pan drags, selection clicks, offset resets, and box sharpness |
 | `group-changes.js` | Zone moves, the Apply label, applying the burst, and the modal's keyboard |
+| `identity-alternatives.js` | Catalog-backed unresolved identities, evidence, and reversible single-species resolution; independently binds after DOMContentLoaded |
 | `boot.js` | The shortcut config fetch, the bootstrap requests and filter bar, and every listener |
 
 Load `boot.js` last. The other files declare functions and initialize state;
@@ -84,6 +85,31 @@ changing this code:
   included. The Group Review handler (`group-changes.js`) acts only while
   `#grmOverlay` is open and the lightbox is not. Boot registers the A/S handler
   first; keep both guard lists and that order.
+
+## Unresolved species alternatives
+
+The independent `identity-alternatives.js` panel loads workspace-wide review
+groups from `GET /api/identity-alternatives`, including when classification
+has no prediction rows. Each group contains `group_id`, `photo_ids`,
+`candidates`, `reason`, and `missing_evidence`. The form's photo chooser takes
+the displayed cards and their burst members within the current collection;
+the user explicitly selects the frames before saving.
+
+`POST /api/identity-alternatives` creates a group. Updating an existing group
+also sends its observed `group_id`; stale membership returns 409. Resolving
+through `POST /api/identity-alternatives/resolve` sends that group ID, a
+`photo_ids` subset, and one candidate `species`. Both writes use the shared
+decision lock and regroup lock. The catalog's `identity_alternatives` edit
+history action replays the uncertainty and candidate-keyword delta together,
+including XMP keyword intents and original association provenance. Other
+confirmed species and flags are outside that delta.
+
+Candidates and evidence are workspace review state in the catalog, like
+prediction review decisions; they are not written as confirmed species
+keywords. Use the panel's explicit Resolve controls to close the uncertainty.
+Its groups stay separate from the prediction status tabs and genuine
+multi-species confirmations. The script binds itself after DOMContentLoaded,
+refetches after edit-history changes, and drops stale GET responses.
 
 ## Photo action feedback
 

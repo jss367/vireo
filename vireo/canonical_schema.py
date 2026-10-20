@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 24
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -142,6 +142,21 @@ def create_current_flag_attribution(conn):
         conn.execute(statement)
 
 
+def create_identity_alternatives(conn):
+    """Review uncertainty is separate from confirmed taxonomy associations."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS photo_identity_alternatives (
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        candidates TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        missing_evidence TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (workspace_id, photo_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_alternatives_group "
+                 "ON photo_identity_alternatives(workspace_id, group_id)")
+
+
 def create_subject_ranking_analysis(conn):
     """Independent comparison evidence never changes a photo's primary subject."""
     conn.execute("""CREATE TABLE IF NOT EXISTS subject_ranking_analysis (
@@ -158,6 +173,7 @@ def create_auxiliary_schema_objects(conn):
     create_formerly_lazy_objects(conn)
     create_current_flag_attribution(conn)
     create_subject_ranking_analysis(conn)
+    create_identity_alternatives(conn)
 
 
 class CanonicalSchema:
