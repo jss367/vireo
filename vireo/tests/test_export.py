@@ -4226,3 +4226,45 @@ def test_metadata_report_does_not_count_render_failure_as_write_failure(export_e
     assert result['metadata']['categories']['capture_date'] == {
         'requested': 1, 'written': 0, 'unavailable': 0, 'failed': 0, 'not_attempted': 1,
     }
+
+
+@pytest.mark.parametrize(('fields', 'timestamp', 'available'), [
+    (['capture_date', 'capture_time'], '2024-06-15T14:30:22', {'capture_date', 'capture_time'}),
+    (['capture_date', 'capture_time'], '2024-06-15T14:30:22-07:00', {'capture_date', 'capture_time'}),
+    (['capture_time'], '2024-06-15T14:30:22', set()),
+    (['capture_time'], '2024-06-15T14:30:22-07:00', {'capture_time'}),
+    (['capture_date', 'capture_time'], None, set()),
+    (['species', 'capture_time'], '2024-06-15T14:30:22', {'species'}),
+])
+def test_metadata_availability_uses_combined_assignments(fields, timestamp, available):
+    report = export_mod._ExportMetadataReport(fields, 1)
+    provenance = {}
+    report.prepare('output.jpg', {'timestamp': timestamp}, ['Hawk'], {}, None,
+                   report=provenance)
+    report.finish('output.jpg', True)
+    for field, counts in report.summary['categories'].items():
+        assert counts == {
+            'requested': 1, 'written': int(field in available),
+            'unavailable': int(field not in available), 'failed': 0, 'not_attempted': 0,
+        }
+    if 'capture_time' in fields and timestamp and timestamp.endswith('-07:00'):
+        assert provenance['capture_offset'] == 'catalog'
+
+
+def test_combined_capture_time_without_offset_is_reported_written(export_env):
+    from metadata import exiftool_available, extract_metadata
+    if not exiftool_available():
+        pytest.skip('ExifTool is not available')
+    env = export_env
+    result = export_photos(env['db'], env['vireo_dir'], [env['p1']], env['dest'],
+                           {'metadata_fields': ['capture_date', 'capture_time']})
+    assert result['exported'] == 1
+    assert result['errors'] == []
+    for field in ('capture_date', 'capture_time'):
+        assert result['metadata']['categories'][field] == {
+            'requested': 1, 'written': 1, 'unavailable': 0, 'failed': 0, 'not_attempted': 0,
+        }
+    output = os.path.join(env['dest'], 'bird1.jpg')
+    metadata = extract_metadata([output])[output]
+    assert metadata['EXIF']['DateTimeOriginal'] == '2024:06:15 14:30:22'
+    assert 'TimeCreated' not in metadata.get('IPTC', {})

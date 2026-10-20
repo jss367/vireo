@@ -199,19 +199,22 @@ class _ExportMetadataReport:
     def prepare(self, path, photo, species, camera, location, *, source_metadata=None, report=None):
         fields = self.summary["requested_fields"]
         # Generate the complete command first, including combined date/time tags.
-        # The report dict (if supplied) carries main's per-field source
-        # provenance; feature detection does not populate it so a one-field
-        # retry cannot overwrite the real run's provenance for that field.
+        # The report dict carries per-field provenance for the real command;
+        # availability probes must not overwrite it.
         args = _export_metadata_args(
             fields, photo, species, camera, location,
             source_metadata=source_metadata, report=report,
         )
+        assignments = set(args)
         available = []
         for field in fields:
-            if _export_metadata_args(
-                [field], photo, species, camera, location,
+            without_field = _export_metadata_args(
+                [other for other in fields if other != field], photo, species, camera, location,
                 source_metadata=source_metadata,
-            ):
+            )
+            # Count assignments enabled jointly by date and time, even when
+            # standalone IPTC time is unavailable without a UTC offset.
+            if assignments.difference(without_field):
                 available.append(field)
             else:
                 counts = self.summary["categories"][field]
