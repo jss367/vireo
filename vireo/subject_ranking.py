@@ -33,6 +33,8 @@ def parse_comparison(values):
             raise ValueError("subject_overrides must be a photo-id to detection-id object") from None
     if species is not None and (not isinstance(species, str) or not species.strip() or len(species) > 300):
         raise ValueError("requested_species must be a non-empty species name or identity key")
+    if isinstance(species, str) and species.strip().startswith("taxon:"):
+        _requested_taxon_id(species.strip())
     if not isinstance(overrides, dict) or len(overrides) > 500:
         raise ValueError("subject_overrides must be a photo-id to detection-id object")
     parsed = {}
@@ -43,9 +45,16 @@ def parse_comparison(values):
     return SubjectComparison(species.strip() if species else None, parsed) if species or parsed or enabled else None
 
 
+def _requested_taxon_id(name):
+    raw_id = name[6:]
+    if not raw_id.isascii() or not raw_id.isdecimal() or not 0 < int(raw_id) < 2**63:
+        raise ValueError("taxon id must be a positive signed-64-bit integer")
+    return int(raw_id)
+
+
 def requested_identity(resolver, name):
-    if name.startswith("taxon:") and name[6:].isdigit():
-        return resolver.resolve(name, source={"taxon_id": int(name[6:])})
+    if name.startswith("taxon:"):
+        return resolver.resolve(name, source={"taxon_id": _requested_taxon_id(name)})
     if name.startswith("scientific:"):
         return resolver.resolve(name[11:], scientific_name=name[11:])
     return resolver.display(name[5:] if name.startswith("name:") else name)

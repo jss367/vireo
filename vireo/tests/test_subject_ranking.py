@@ -340,3 +340,22 @@ def test_mixed_species_confirmations_block_automatic_subject_selection(compariso
     selected = _pack(app, pids, requested_species=TARGET, subject_overrides={str(pids[0]): ids[pids[0]][0]})
     card = next(c for c in selected["cards"] if c["id"] == pids[0])
     assert card["subject"]["detection_id"] == ids[pids[0]][0]
+
+
+@pytest.mark.parametrize("taxon_id", ["0", "-1", "not-a-number", str(2**63), "999999999999999999999999"])
+def test_invalid_explicit_taxon_ids_return_400_for_all_comparison_routes(comparison_library, taxon_id):
+    app, _, pids, _ = comparison_library
+    client = app.test_client()
+    for endpoint in ("best-batch", "burst-evidence"):
+        get = client.get(f"/api/photos/{pids[0]}/{endpoint}", query_string={"requested_species": "taxon:" + taxon_id})
+        post = client.post(f"/api/photos/{endpoint}", json={"photo_ids": pids, "requested_species": "taxon:" + taxon_id})
+        assert get.status_code == post.status_code == 400
+        assert "taxon id" in get.get_json()["error"]
+        assert "taxon id" in post.get_json()["error"]
+
+
+def test_largest_supported_explicit_taxon_id_is_valid(comparison_library):
+    app, _, pids, _ = comparison_library
+    pack = _pack(app, pids, requested_species=f"taxon:{2**63 - 1}")
+    assert not pack["scored"]
+    assert all(c["subject"]["requested_species_key"] == f"taxon:{2**63 - 1}" for c in pack["cards"])
