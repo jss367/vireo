@@ -907,7 +907,7 @@ class PredictionRepository:
                            pr_rev.total_votes AS total_votes,
                            d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                            d.detector_confidence, d.detector_model,
-                           p.filename, p.timestamp
+                           p.filename, p.timestamp, p.flag
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos p ON p.id = d.photo_id

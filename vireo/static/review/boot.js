@@ -31,38 +31,47 @@ document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 })();
 
 /* ---------- Bootstrap ---------- */
-VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('reviewBar')));
-currentSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
-updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
-applyReviewQueryParams();
-loadPredictions();
-loadCollectionFilter();
-VireoFilter.init({
-  page: 'review',
-  root: /** @type {HTMLElement} */ (document.getElementById('vireoFilterBar')),
-  scopeLabel: 'Review \u00b7 Predictions',
-  onChange: loadPredictions,
-  // Review keeps its collection scope outside the filter tree and passes
-  // it separately as ``collection_id`` on /api/predictions. The Misses
-  // handoff payload only serializes ``state.root``/``state.visual``, so
-  // without exposing this scope the handoff menu would offer Misses under
-  // a Review-collection view and land on workspace-wide misses matching
-  // the chip \u2014 with bulk reject/recompute enabled against photos
-  // outside the source collection (Codex review r3627997828).
-  getScope: function() {
-    if (currentCollection === 'all') {
-      return { folder_id: null, collection_id: null };
-    }
-    var collId = parseInt(currentCollection, 10);
-    return {
-      folder_id: null,
-      collection_id: isNaN(collId) ? null : collId,
-    };
-  },
-}).then(function() {
-  // Restored/deep-linked filters weren't part of the first fetch above.
-  if (VireoFilter.hasFilters()) loadPredictions();
-}).catch(function() {});
+async function initializeReviewPage() {
+  VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('reviewBar')));
+  currentSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
+  updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
+  applyReviewQueryParams();
+  await initializeReviewQueue();
+  applyReviewQueryParams();
+  await loadCollectionFilter();
+  reviewQueueSelectCollection();
+  await VireoFilter.init({
+    page: 'review',
+    root: /** @type {HTMLElement} */ (document.getElementById('vireoFilterBar')),
+    scopeLabel: 'Review \u00b7 Predictions',
+    onChange: loadPredictions,
+    // Review keeps its collection scope outside the filter tree and passes
+    // it separately as ``collection_id`` on /api/predictions. The Misses
+    // handoff payload only serializes ``state.root``/``state.visual``, so
+    // without exposing this scope the handoff menu would offer Misses under
+    // a Review-collection view and land on workspace-wide misses matching
+    // the chip \u2014 with bulk reject/recompute enabled against photos
+    // outside the source collection (Codex review r3627997828).
+    getScope: function() {
+      if (currentCollection === 'all') {
+        return { folder_id: null, collection_id: null };
+      }
+      var collId = parseInt(currentCollection, 10);
+      return {
+        folder_id: null,
+        collection_id: isNaN(collId) ? null : collId,
+      };
+    },
+  }).catch(function(error) {
+    throw new Error('Could not restore Review filters: ' + reviewErrorMessage(error, 'Reload to retry.'));
+  });
+  rqRestoreFilters();
+  await switchCollection(currentCollection);
+  bindReviewQueue();
+}
+initializeReviewPage().catch(function(error) {
+  showToast('Could not initialize Review: ' + reviewErrorMessage(error, 'Reload to retry.'), 'error');
+});
 
 // Undo/redo lives in the shared navbar. The database changes there, but this
 // page otherwise keeps rendering the status snapshot fetched on initial load.
@@ -73,6 +82,8 @@ VireoFilter.init({
 // ``loadPredictions`` would otherwise intersect the fresh server response with
 // the stale set and drop the newly matching card.
 document.addEventListener('vireo:edit-history-changed', function() {
+  reviewQueue.current = null;
+  ++reviewQueue.sequence;
   switchCollection(currentCollection);
 });
 

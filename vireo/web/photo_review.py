@@ -11,7 +11,9 @@ from flask import Blueprint, jsonify, request
 from services.photo_review import (
     FLAG_REASON_MAX_CHARS,
     FLAG_SOURCE_MAX_CHARS,
+    FlagConflict,
     PhotoReviewService,
+    WorkspaceConflict,
 )
 
 VALID_FLAGS = ("none", "flagged", "rejected")
@@ -82,8 +84,22 @@ def create_photo_review_blueprint(get_db, json_error):
         if message:
             return json_error(message)
         source, reason = provenance
+        observed_flag = body.get("observed_flag")
+        if "observed_flag" in body and observed_flag not in VALID_FLAGS:
+            return json_error("observed_flag must be 'none', 'flagged', or 'rejected'")
+        observed_workspace = body.get("observed_workspace_id")
+        if "observed_workspace_id" in body and not _valid_flag_photo_id(observed_workspace):
+            return json_error("observed_workspace_id must be a positive integer")
+        db = get_db()
         try:
-            PhotoReviewService(get_db()).set_flag(photo_id, flag, source=source, reason=reason)
+            PhotoReviewService(db).set_flag(
+                photo_id, flag, source=source, reason=reason, observed_flag=observed_flag,
+                observed_workspace_id=observed_workspace,
+            )
+        except WorkspaceConflict as exc:
+            return json_error(str(exc), 409, code="workspace_changed")
+        except FlagConflict as exc:
+            return json_error(str(exc), 409, code="flag_conflict")
         except ValueError as exc:
             return json_error(str(exc), 403)
         return jsonify({"ok": True})

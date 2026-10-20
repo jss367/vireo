@@ -2,7 +2,8 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Grid Rendering ---------- */
-function getVisibleItems() {
+/** @param {boolean} [includeGroupMembers] */
+function getVisibleItems(includeGroupMembers) {
   var filtered = predictions.slice(); // copy for sorting
 
   // Filter by minimum confidence
@@ -39,6 +40,8 @@ function getVisibleItems() {
       default: return 0;
     }
   });
+
+  if (includeGroupMembers) return filtered;
 
   // Deduplicate groups — show only the first photo per group
   /** @type {Record<string,boolean>} */ var seenGroups = {};

@@ -16,6 +16,7 @@ function renderAll() {
   renderButtons();
   renderGrid();
   checkPendingSync();
+  renderReviewQueue();
 }
 
 function renderModelFilter() {
