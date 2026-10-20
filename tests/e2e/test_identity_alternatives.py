@@ -1,5 +1,7 @@
 """The unresolved identity workflow remains separate from real species tags."""
 
+import re
+
 from playwright.sync_api import expect
 
 
@@ -136,3 +138,38 @@ def test_merged_single_candidate_stays_unconfirmed_until_explicit_resolution(liv
     expect(group).to_have_count(0)
     species = db.photo_species.get_species_for_photos(ids)
     assert all(set(species[pid]) == {*before_species.get(pid, []), target_name} for pid in ids)
+
+
+def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live_server, page):
+    from services.identity_alternatives import save_alternatives
+    ids = open_panel(live_server, page)
+    db = live_server['db']
+    pid = ids[0]
+    original_rating = db.photos.get(pid)['rating']
+    changed_rating = 4 if original_rating == 5 else 5
+    page.evaluate("args => safeFetch('/api/photos/' + args.id + '/rating', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rating:args.rating})})",
+                  {'id': pid, 'rating': changed_rating})
+    description = db.edit_history.latest_undoable()['description']
+    page.locator('#identitySave').click()
+    group = page.locator('#identityAlternativesGroups article')
+    expect(group).to_have_count(1)
+    first = db.require_workspace_id()
+    second = db.create_workspace('Another reviewer')
+    db.photo_visibility.grant(second, ids)
+    db.commit()
+    db.set_active_workspace(second)
+    with db._commits_held():
+        save_alternatives(db, ids, ['Tropical Kingbird', "Couch's Kingbird"], 'Newer shared review', 'An audio recording')
+    db.set_active_workspace(first)
+    undo = page.locator('#historyUndoBtn')
+    expect(undo).to_be_enabled()
+    with page.expect_response(lambda response: response.url.endswith('/api/undo') and response.request.method == 'POST') as response:
+        undo.click()
+    assert response.value.status == 409
+    expect(undo).to_have_attribute('title', re.compile(re.escape('Undo: ' + description)))
+    expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text=description).locator('button')).to_have_count(1)
+    expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text='Superseded identification:').locator('button')).to_have_count(0)
+    assert db.photos.get(pid)['rating'] == changed_rating
+    undo.click()
+    expect(page.locator('#undoMsg')).not_to_contain_text(description)
+    assert db.photos.get(pid)['rating'] == original_rating

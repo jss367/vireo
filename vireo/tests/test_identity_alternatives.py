@@ -596,7 +596,10 @@ def test_global_identity_resolution_and_history_are_shared_but_visibility_filter
     assert db.identity_alternatives.for_photos(include_resolved=True) == before
     assert db.photo_species.get_species_for_photos([1, 2]) == tags
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
-    assert db.edit_history.latest_undoable()['id'] == latest
+    retired = db.conn.execute('SELECT action_type, undone FROM edit_history WHERE id=?', (latest,)).fetchone()
+    assert retired['action_type'] == 'identity_alternatives_superseded'
+    assert retired['undone'] == 0
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history_items WHERE edit_id=?', (latest,)).fetchone()[0] == 2
     assert db.photos.get(1)['flag'] == 'rejected'
     assert db.photos.get(2)['flag'] == 'flagged'
 
@@ -674,6 +677,58 @@ def test_redo_rejects_invisible_photo_and_rolls_back_visible_batch_items(app_and
     assert not db.identity_alternatives.photo_ids()
     assert db.conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
     assert db.edit_history.oldest_redoable()['id'] == redo_id
+    assert db.conn.execute('SELECT action_type FROM edit_history WHERE id=?', (redo_id,)).fetchone()[0] == 'identity_alternatives'
+    db.add_workspace_folder(first, db.photos.get(2)['folder_id'])
+    assert client.post('/api/redo').status_code == 200
+    assert db.identity_alternatives.photo_ids() == {1, 2}
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+def test_superseded_identity_retires_audit_and_exposes_next_action_without_replaying_it(app_and_db, direction):
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Superseding review')
+    db.photo_visibility.grant(second, [1])
+    switch = _workspace_switcher(db)
+    switch(first)
+    if direction == 'undo':
+        assert client.post('/api/photos/1/rating', json={'rating': 5}).status_code == 200
+        rating_id = db.edit_history.latest_undoable()['id']
+        assert save(client, [1]).status_code == 200
+        stale_id = db.edit_history.latest_undoable()['id']
+    else:
+        assert save(client, [1]).status_code == 200
+        stale_id = db.edit_history.latest_undoable()['id']
+        assert client.post('/api/photos/1/rating', json={'rating': 5}).status_code == 200
+        rating_id = db.edit_history.latest_undoable()['id']
+        assert client.post('/api/undo').status_code == 200
+        assert client.post('/api/undo').status_code == 200
+    switch(second)
+    observed = current_group(client)['group_id'] if direction == 'undo' else None
+    assert save(client, [1], group_id=observed, reason='Newer review in another workspace').status_code == 200
+    current = db.identity_alternatives.for_photos(include_resolved=True)
+    switch(first)
+    rating_before = db.photos.get(1)['rating']
+    response = client.post('/api/' + direction)
+    assert response.status_code == 409
+    assert 'History has been refreshed' in response.get_json()['error']
+    assert db.photos.get(1)['rating'] == rating_before
+    assert db.identity_alternatives.for_photos(include_resolved=True) == current
+    retired = db.conn.execute('SELECT * FROM edit_history WHERE id=?', (stale_id,)).fetchone()
+    assert retired['action_type'] == 'identity_alternatives_superseded'
+    assert retired['undone'] == int(direction == 'redo')
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history_items WHERE edit_id=?', (stale_id,)).fetchone()[0] == 1
+    next_action = db.edit_history.latest_undoable() if direction == 'undo' else db.edit_history.oldest_redoable()
+    assert next_action['id'] == rating_id
+    assert client.get('/api/' + direction + '/status').get_json()['description'] == next_action['description']
+    assert client.post('/api/' + direction).status_code == 200
+    assert db.photos.get(1)['rating'] == (3 if direction == 'undo' else 5)
+    assert db.identity_alternatives.for_photos(include_resolved=True) == current
+    # A new edit may prune a normal redo branch, but keeps the retired audit.
+    assert client.post('/api/photos/1/rating', json={'rating': 4}).status_code == 200
+    assert db.conn.execute('SELECT 1 FROM edit_history WHERE id=?', (stale_id,)).fetchone()
+    assert db.conn.execute('SELECT 1 FROM edit_history_items WHERE edit_id=?', (stale_id,)).fetchone()
 
 
 def save(client, ids, **changes):

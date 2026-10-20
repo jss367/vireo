@@ -1332,7 +1332,9 @@ async function changeHistory(operation, btn) {
     await refreshHistoryLightbox();
     return true;
   } catch (e) {
-    // safeFetch reports the error. The server retains the history entry.
+    // A permanent conflict can retire an action while preserving its audit.
+    // Refresh the history list as well as the controls before another click.
+    loadEditHistory();
     return false;
   } finally {
     await refreshHistoryControls();

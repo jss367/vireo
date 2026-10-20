@@ -5188,6 +5188,7 @@ class Database:
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
+        'identity_alternatives_superseded',
         'prediction_reject', 'discard',
         # Legacy rows lack the before-state required for a lossless replay.
         # New assignments use photo_location; new reject/review decisions
@@ -5250,9 +5251,19 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            with self._commits_held():
-                self._apply_undo(entry, items)
-                history.mark_undone(entry['id'])
+            from services.identity_alternatives import IdentityHistoryStale
+
+            try:
+                with self._commits_held():
+                    self._apply_undo(entry, items)
+                    history.mark_undone(entry['id'])
+            except IdentityHistoryStale:
+                history.retire_superseded_identity_entry(entry['id'])
+                history.commit()
+                raise IdentityHistoryStale(
+                    'That identification was changed elsewhere. History has been refreshed; '
+                    'review the next action before trying again.'
+                ) from None
         return entry
 
     def redo_last_undo(self):
@@ -5303,9 +5314,19 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            with self._commits_held():
-                self._apply_redo(entry, items)
-                history.mark_redone(entry['id'])
+            from services.identity_alternatives import IdentityHistoryStale
+
+            try:
+                with self._commits_held():
+                    self._apply_redo(entry, items)
+                    history.mark_redone(entry['id'])
+            except IdentityHistoryStale:
+                history.retire_superseded_identity_entry(entry['id'])
+                history.commit()
+                raise IdentityHistoryStale(
+                    'That identification was changed elsewhere. History has been refreshed; '
+                    'review the next action before trying again.'
+                ) from None
         return entry
 
     @contextlib.contextmanager
