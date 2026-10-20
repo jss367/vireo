@@ -10,9 +10,39 @@ import sys
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+@pytest.mark.parametrize("score", [-0.1, 0.0, 0.5, 1.0, 1.0579406023025513])
+def test_decoders_preserve_raw_scores(score):
+    """Neither heatmaps nor SimCC are normalized or clipped by the decoder."""
+    from keypoints import decode_heatmaps, decode_simcc
+
+    heatmaps = np.full((1, 1, 2, 2), score - 1, dtype=np.float32)
+    heatmaps[0, 0, 1, 1] = score
+    assert decode_heatmaps(heatmaps, 256)[0, 2] == pytest.approx(score)
+    sx = np.array([[[score - 1, score + 0.2]]], dtype=np.float32)
+    sy = np.array([[[score - 1, score]]], dtype=np.float32)
+    assert decode_simcc(sx, sy, 256)[0, 2] == pytest.approx(score)
+
+
+@pytest.mark.parametrize("output_type", ["heatmap", "simcc"])
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_model_outputs_cannot_be_trusted(output_type, invalid):
+    from keypoints import decode_heatmaps, decode_simcc
+    from pipeline import _eye_candidates_in_mask
+
+    values = np.full((1, 1, 2), invalid, dtype=np.float32)
+    decoded = (decode_simcc(values, values, 2) if output_type == "simcc"
+               else decode_heatmaps(values.reshape(1, 1, 1, 2), 2))
+    x, y, score = decoded[0]
+    assert _eye_candidates_in_mask(
+        [{"name": "left_eye", "x": x, "y": y, "conf": score}],
+        np.ones((2, 2), dtype=bool), 0.5,
+    ) == []
 
 
 def test_decode_simcc_picks_argmax():

@@ -138,9 +138,9 @@ async function loadConfig() {
     var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
     /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value = String(ecg);
     /** @type {HTMLElement} */ (document.getElementById('cfgEyeClassifierConfGateVal')).textContent = String(ecg + '%');
-    var edg = VireoPipelineConfig.percent(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
+    var edg = VireoPipelineConfig.asNumber(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
     /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value = String(edg);
-    /** @type {HTMLElement} */ (document.getElementById('cfgEyeDetectionConfGateVal')).textContent = String(edg + '%');
+    /** @type {HTMLElement} */ (document.getElementById('cfgEyeDetectionConfGateVal')).textContent = String(edg);
     var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
     /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value = String(ewk);
     /** @type {HTMLElement} */ (document.getElementById('cfgEyeWindowKVal')).textContent = String((ewk / 100).toFixed(2));
@@ -370,7 +370,7 @@ function _editedSecrets() {
             miss_oof_ratio: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value, 10) / 100,
             eye_detect_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked,
             eye_classifier_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value, 10) / 100,
-            eye_detection_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value, 10) / 100,
+            eye_detection_conf_gate: parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value),
             eye_window_k: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value, 10) / 100,
             reject_eye_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value, 10) / 100,
             burst_time_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value, 10) || 3,
@@ -471,7 +471,7 @@ function resetPipelineDefaults() {
   setPercent('cfgRejectClip', 'reject_clip_high');
   setPercent('cfgRejectComposite', 'reject_composite');
   setPercent('cfgEyeClassifierConfGate', 'eye_classifier_conf_gate');
-  setPercent('cfgEyeDetectionConfGate', 'eye_detection_conf_gate');
+  setValue('cfgEyeDetectionConfGate', Number(p.eye_detection_conf_gate), '');
   setPercent('cfgRejectEyeFocus', 'reject_eye_focus');
   setValue('cfgBurstTimeGap', Number(p.burst_time_gap), 's');
   setValue(

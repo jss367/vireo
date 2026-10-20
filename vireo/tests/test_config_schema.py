@@ -59,6 +59,21 @@ def test_schema_entries_have_required_fields():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("value", [0, 0.5, 1.0, 1.05, 2.0])
+def test_eye_keypoint_gate_accepts_raw_score_thresholds(value):
+    from config_schema import validate_value
+
+    assert validate_value("pipeline.eye_detection_conf_gate", value) == value
+
+
+@pytest.mark.parametrize("value", [-0.1, float("nan"), float("inf"), -float("inf")])
+def test_eye_keypoint_gate_rejects_invalid_thresholds(value):
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("pipeline.eye_detection_conf_gate", value)
+
+
 def test_flatten_collapses_nested_dicts_to_dotted_paths():
     from config_schema import flatten
 

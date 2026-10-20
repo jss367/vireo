@@ -11,6 +11,11 @@ Models:
 
 All models load from ~/.vireo/models/<name>/model.onnx with a sibling
 config.json describing input size, normalization, and keypoint names.
+
+``conf`` is a raw model response, not a calibrated probability. SuperAnimal
+exports have a linear heatmap head (finite scores can be negative or exceed
+one); RTMPose uses the minimum of the two raw SimCC axis peaks. Neither
+decoder applies sigmoid, softmax, or clipping. See docs/eye-keypoint-scores.md.
 """
 import json
 import logging
@@ -167,8 +172,9 @@ def decode_simcc(simcc_x, simcc_y, input_size, simcc_split_ratio=2.0):
     """Decode RTMPose simcc-format outputs to (K, 3) keypoints.
 
     RTMPose emits two 1-D classification maps per keypoint (x and y axes);
-    each axis is argmaxed independently and the per-keypoint confidence is
-    the minimum of the two peak activations.
+    each axis is argmaxed independently and the per-keypoint score is
+    the minimum of the two raw peak activations, without softmax. Its range
+    depends on the exported model; it is not a probability.
 
     Args:
         simcc_x: ndarray of shape (1, K, size_x).
@@ -198,6 +204,8 @@ def decode_heatmaps(heatmaps, input_size):
     Simple argmax + rescale. SuperAnimal heatmap-head models use this path;
     RTMPose goes through decode_simcc instead. Subpixel refinement (quadratic
     fit around argmax) is deferred until real-image tests show the need.
+    The score is the raw heatmap maximum. The supported SuperAnimal ResNet-50
+    exports end in a linear ConvTranspose, so it has no [0, 1] bound.
     """
     hm = heatmaps[0]  # (K, H', W')
     K, H, W = hm.shape
