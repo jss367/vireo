@@ -162,6 +162,15 @@ def test_invalid_payload_does_not_write_review_state(app_and_db, changes):
     assert not db.edit_history.latest_undoable()
 
 
+def test_candidate_hierarchy_delimiter_error_explains_the_restriction(app_and_db):
+    app, db = app_and_db
+    response = save(app.test_client(), [1], candidates=['Kingbird|Tropical', "Couch's Kingbird"])
+    assert response.status_code == 400
+    assert "'|' hierarchy delimiter" in response.get_json()['error']
+    assert not db.identity_alternatives.photo_ids()
+    assert not db.edit_history.latest_undoable()
+
+
 def test_groups_are_durable_and_workspace_scoped(app_and_db, tmp_path):
     from db import Database
     app, db = app_and_db

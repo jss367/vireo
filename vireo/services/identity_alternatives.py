@@ -36,7 +36,9 @@ def normalize_candidates(value: object) -> list[str]:
             raise ValueError('Each candidate must be a species name of at most 200 characters')
         name = normalize_keyword_display(item)
         key = keyword_match_key(name)
-        if not key or key in seen or '|' in name:
+        if '|' in name:
+            raise ValueError("Alternative species names may not contain the '|' hierarchy delimiter")
+        if not key or key in seen:
             raise ValueError('Alternative species names must be nonempty and distinct')
         names.append(name)
         seen.add(key)
