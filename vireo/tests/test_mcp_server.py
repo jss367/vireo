@@ -382,13 +382,16 @@ def test_vireo_url_accepts_each_loopback_form(monkeypatch, good_url, expected):
     assert VireoClient()._resolve() == (expected, "paired")
 
 
-def test_server_command_for_checkout_and_frozen_build(monkeypatch):
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_server_command_for_checkout_and_frozen_build(monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
     assert server_command() == [sys.executable, str(APP), "--mcp"]
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "/Applications/Vireo.app/Contents/MacOS/vireo-server")
     assert server_command() == ["/Applications/Vireo.app/Contents/MacOS/vireo-server", "--mcp"]
     info = connect_info()
-    assert info["claude_code"].startswith("claude mcp add vireo -- ")
+    prefix = "& 'claude' 'mcp' 'add' 'vireo' '--' " if platform == "win32" else "claude mcp add vireo -- "
+    assert info["claude_code"].startswith(prefix)
     assert info["claude_desktop"] == {"mcpServers": {"vireo": {
         "command": "/Applications/Vireo.app/Contents/MacOS/vireo-server", "args": ["--mcp"],
     }}}
