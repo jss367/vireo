@@ -3,7 +3,7 @@
 import json
 import sys
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -62,6 +62,27 @@ def test_check_endpoint_initializes_stdio_and_reads_only(served_catalog):
     assert all(method == "GET" for method, path in reads if path != "/api/system/mcp-check")
     assert "connected" not in result
     assert TOKEN not in json.dumps(result)
+
+
+@pytest.mark.parametrize("transfer_running", [False, True])
+def test_check_neither_reserves_nor_is_blocked_by_workspace_transfer(app_and_db, monkeypatch, transfer_running):
+    app, db = app_and_db
+    runner = app._job_runner
+    reservation = runner.workspace_mutation(db.active_workspace_id, exclusive=True, label="NAS transfer")
+    calls = []
+    reserve = runner.workspace_mutation
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "workspace_mutation", spy)
+    monkeypatch.setattr(diagnostics, "check_connection", lambda: {"ok": True})
+    with reservation if transfer_running else nullcontext():
+        response = app.test_client().post("/api/system/mcp-check", headers={"X-Vireo-Token": TOKEN})
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert calls == []
 
 
 @pytest.mark.parametrize("override", ["wrong-token", "not-running"])
