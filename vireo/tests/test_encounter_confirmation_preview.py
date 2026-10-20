@@ -196,3 +196,58 @@ def test_mixed_encounter_without_common_cached_species_can_replace_a_named_frame
     cache = json.load(open(path))
     assert cache['encounters'][0]['confirmed_species'] is None
     assert cache['encounters'][0]['species_confirmed'] is False
+
+
+@pytest.mark.parametrize('change', ['rename', 'retype', 'relink', 'source_identity', 'taxon_identity'])
+def test_preview_binds_unattached_target_keyword_identity(app_and_db, change):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    target_id = db.add_keyword('Eared Grebe', is_species=True)
+    db.conn.executemany(
+        'INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)',
+        [(900001, 800001, 'Podiceps nigricollis', 'species'),
+         (900002, 800002, 'Podiceps auritus', 'species')],
+    )
+    db.conn.execute('UPDATE keywords SET taxon_id=?, source_taxon_id=? WHERE id=?',
+                    (900001, 800001, target_id))
+    db.commit()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    client = app.test_client()
+    preview = request_preview(client, body)
+    assert all('Eared Grebe' not in row['existing_species'] for row in preview['photos'])
+    if change == 'rename':
+        db.conn.execute("UPDATE keywords SET name='Changed Grebe' WHERE id=?", (target_id,))
+    elif change == 'retype':
+        db.conn.execute("UPDATE keywords SET type='individual', is_species=0 WHERE id=?", (target_id,))
+    elif change == 'relink':
+        db.conn.execute('UPDATE keywords SET taxon_id=900002 WHERE id=?', (target_id,))
+    elif change == 'source_identity':
+        db.conn.execute('UPDATE keywords SET source_taxon_id=800002 WHERE id=?', (target_id,))
+    else:
+        db.conn.execute('UPDATE taxa SET inat_id=800003 WHERE id=900001')
+    db.commit()
+    before_species = db.photo_species.get_species_for_photos(ids)
+    before_cache = json.load(open(path))
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    response = apply(client, body, preview)
+    assert response.status_code == 409, response.get_json()
+    assert db.photo_species.get_species_for_photos(ids) == before_species
+    assert json.load(open(path)) == before_cache
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history
+
+
+def test_preview_binds_inferred_taxon_when_target_keyword_has_not_been_created(app_and_db):
+    app, db = app_and_db
+    ids, _ = seed(app, db, 'Western Grebe')
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (900001, 800001, 'Podiceps nigricollis', 'Eared Grebe', 'species')",
+    )
+    db.commit()
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    preview = request_preview(client, body)
+    assert db.keywords.species_confirmation_target('Eared Grebe')['keyword'] is None
+    db.conn.execute('UPDATE taxa SET inat_id=800002 WHERE id=900001')
+    db.commit()
+    assert apply(client, body, preview).status_code == 409
+    assert db.keywords.species_confirmation_target('Eared Grebe')['keyword'] is None

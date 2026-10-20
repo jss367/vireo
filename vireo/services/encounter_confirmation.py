@@ -20,11 +20,12 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     source_ids = body.get("source_photo_ids", edit.photo_ids)
     evidence = db.photo_species.confirmation_evidence(source_ids)
     species = db.photo_species.get_species_for_photos(source_ids)
-    proposed_species = db.resolve_species_display_name(edit.species)
+    target_state = db.keywords.species_confirmation_target(edit.species)
+    target = target_state["keyword"]
+    proposed_species = target["name"] if target else db.resolve_species_display_name(edit.species)
     historical = db.predictions.superseded_ids([
         p["prediction_id"] for photo in evidence for subject in photo["subjects"] for p in subject["predictions"]
     ])
-    target = db.keyword_taxa.species_root_by_name(edit.species, prefer_taxonomy=True)
     already = db.get_photos_with_equivalent_species(source_ids, target["id"]) if target else set()
     if target and edit.old_rows_by_photo:
         already = db.get_photos_with_equivalent_species(source_ids, target["id"], exclude_keyword_ids={
@@ -54,6 +55,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         "burst_index": edit.burst_index, "rows": rows, "species": edit.species,
         "add": edit.add_mode, "remove": edit.remove_mode,
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
+        "target": target_state,
     }
     token = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
     return {"ok": True, "preview_token": token, "photos": rows,

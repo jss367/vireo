@@ -696,6 +696,31 @@ class KeywordRepository:
             "SELECT id, name FROM keywords WHERE id = ?", (row["id"],),
         ).fetchone()
 
+    def species_confirmation_target(self, name: str) -> dict[str, Any]:
+        """Snapshot the exact add target, its source identity and inferred taxon.
+
+        Share add's candidate selection (including promotable general rows and
+        placed taxonomy leaves). An unattached keyword is still part of an
+        approved confirmation: rename/retype/relink must invalidate its preview.
+        """
+        candidate = self._find_add_candidate(name, None, 'taxonomy')
+        keyword = None
+        if candidate is not None:
+            keyword = self.conn.execute(
+                "SELECT id, name, parent_id, type, is_species, taxon_id, source_taxon_id "
+                "FROM keywords WHERE id=?", (candidate["id"],),
+            ).fetchone()
+        inferred = self._lookup_taxon_id_for_keyword(name, species_only=True)
+        taxon_ids = {tid for tid in (inferred, keyword["taxon_id"] if keyword else None) if tid is not None}
+        taxa = []
+        if taxon_ids:
+            marks = ",".join("?" for _ in taxon_ids)
+            taxa = [dict(row) for row in self.conn.execute(
+                f"SELECT id, inat_id, name, common_name, rank, parent_id FROM taxa "
+                f"WHERE id IN ({marks}) ORDER BY id", sorted(taxon_ids),
+            )]
+        return {"keyword": dict(keyword) if keyword else None, "inferred_taxon_id": inferred, "taxa": taxa}
+
     def get_row(self, keyword_id):
         """Row (``id``, ``name``, ``type``) of one keyword, or None when the id is unknown."""
         return self.conn.execute(
