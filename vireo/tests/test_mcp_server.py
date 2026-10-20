@@ -231,6 +231,43 @@ def test_burst_passes_the_apps_precondition_through(mcp):
     assert "Vireo answered 404: No neighboring batch photos found" in message
 
 
+
+@pytest.mark.parametrize("has_candidate", [True, False])
+def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monkeypatch, has_candidate):
+    from keep_safety import review_ranked_suggestions
+
+    server, _, transport = mcp
+    response = {
+        "seed_photo_id": 42,
+        "cards": [{"id": 42, "filename": "frame.jpg", "rank": 1, "label": "KEEP"}]
+        if has_candidate else [],
+        "best_photo_id": 42,
+    }
+    review_ranked_suggestions(response)
+    paths = []
+
+    def get_json(path):
+        paths.append(path)
+        return response
+
+    monkeypatch.setattr(transport, "get_json", get_json)
+    result = call(server, "burst", photo_id=42)
+    assert paths == ["/api/photos/42/best-batch"]
+    assert result["ranked_candidate_id"] == (42 if has_candidate else None)
+    assert result["ranking_status"] == "provisional"
+    assert result["keep_review_message"] == response["keep_review_message"]
+    assert result["best_photo_id"] is None
+    assert result["best_filename"] is None
+    assert result["alternate_ids"] == []
+    assert result["suggested_reject_ids"] == []
+    if has_candidate:
+        frame = result["frames"][0]
+        assert frame["label"] == "REVIEW"
+        assert frame["automatic_keep_eligible"] is False
+        assert frame["keep_status"] == response["cards"][0]["keep_status"]
+        assert frame["keep_reasons"] == response["cards"][0]["keep_reasons"]
+
+
 def test_set_flag_writes_only_what_the_route_persists(mcp):
     # Omitted provenance preserves the ordinary manual-write payload.
     server, db, transport = mcp

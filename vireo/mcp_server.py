@@ -87,6 +87,7 @@ _EXPOSURE_TAGS = ("ExposureTime", "ShutterSpeed", "FNumber", "Aperture",
 _BURST_CARD_KEYS = (
     "id", "filename", "rank", "role", "label", "quality_pct", "quality",
     "focus", "focus_basis", "sharpness", "exposure", "flag", "rating", "reasons",
+    "automatic_keep_eligible", "keep_status", "keep_reasons",
 )
 _COLLECTION_KEYS = ("id", "name", "photo_count", "available_photo_count",
                     "offline_photo_count", "has_visual", "can_add_photos")
@@ -508,14 +509,15 @@ def _register_photo_tools(server, client):
     @server.tool()
     def burst(photo_id: int) -> dict:
         """The burst of frames shot around a photo, ranked by Vireo's
-        quality analysis: which frame it would keep and why, and which it
-        suggests rejecting. Needs the Process step to have run on the
-        frames."""
+        quality analysis. A provisional ranked candidate still needs manual
+        review; ranking alone does not establish an automatic keeper. Needs
+        the Process step to have run on the frames."""
         data = client.get_json(f"/api/photos/{photo_id}/best-batch")
         return {
             **_pick(data, ("seed_photo_id", "best_photo_id", "best_filename",
                            "best_reasons", "count", "scope_method",
-                           "suggested_reject_ids", "alternate_ids")),
+                           "suggested_reject_ids", "alternate_ids",
+                           "ranked_candidate_id", "ranking_status", "keep_review_message")),
             "frames": [_pick(card, _BURST_CARD_KEYS) for card in data.get("cards", [])],
         }
 
