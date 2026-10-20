@@ -7,6 +7,7 @@
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
 <link rel="stylesheet" href="/static/review/identity-alternatives.css">
+<link rel="stylesheet" href="/static/review/queue.css">
 <title>Vireo - Classify</title>
 <style>
   /* ---------- Header ---------- */
@@ -872,6 +873,8 @@
 <!-- Category Tabs -->
 <div class="tabs" id="tabs"></div>
 
+{% include '_review_queue.html' %}
+
 <!-- Photo Grid -->
 <div class="grid" id="grid"></div>
 <div class="empty" id="empty" style="display:none;">
@@ -897,6 +900,9 @@
 <script defer src="/static/review/group-cards.js"></script>
 <script defer src="/static/review/group-changes.js"></script>
 <script defer src="/static/review/identity-alternatives.js"></script>
+<script defer src="/static/review/queue-state.js"></script>
+<script defer src="/static/review/queue-focus.js"></script>
+<script defer src="/static/review/queue.js"></script>
 <script defer src="/static/review/boot.js"></script>
 
 <!-- Group Review Modal -->

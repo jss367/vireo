@@ -29,7 +29,7 @@ var _predictionsReloading = false;
 
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
-  _predictionsReloading = true;
+  rqBeginReload();
   // Disable the header Accept All immediately so it cannot iterate the
   // stale ``predictions`` array while this reload is in flight. The
   // per-card actions are gated inline in their handlers because they
