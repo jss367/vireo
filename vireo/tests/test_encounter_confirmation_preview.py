@@ -1165,3 +1165,68 @@ def test_combined_removal_from_later_burst_restores_exact_full_cache(app_and_db,
     assert json.load(open(path)) == after
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before_species
     assert db.photos.get(ids[1])['flag'] == 'flagged'
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('mode', ['add', 'remove', 'replace'])
+@pytest.mark.parametrize('combined', [False, True])
+def test_scoped_edits_retain_shared_taxon_when_one_frame_has_same_name_homonym(app_and_db, reverse, mode, combined):
+    app, db = app_and_db
+    ids, path = seed(app, db, 'Western Grebe')
+    db.conn.executemany('INSERT INTO taxa (id, inat_id, name, rank) VALUES (?, ?, ?, ?)', [
+        (900001, 800001, 'Shared Robin', 'species'), (900002, 800002, 'Extra Robin', 'species'),
+    ])
+    keywords = {}
+    for taxon in ([900002, 900001] if reverse else [900001, 900002]):
+        parent = db.add_keyword(f'Homonym guide {taxon}')
+        keywords[taxon] = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES ('Robin', ?, 1, 'taxonomy', ?)",
+            (parent, taxon),
+        ).lastrowid
+    for pid in ids:
+        db.tag_photo(pid, keywords[900001])
+    db.tag_photo(ids[0], keywords[900002])
+    db.commit()
+    cached = json.load(open(path))
+    initial = ['Western Grebe', 'Robin']
+    cached['encounters'][0]['confirmed_species_list'] = initial
+    cached['encounters'][0]['bursts'][0]['species_override'] = {
+        'species': initial[0], 'species_list': initial, 'confirmed': True,
+    }
+    with open(path, 'w') as handle:
+        json.dump(cached, handle)
+    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    if mode == 'add':
+        expected = ['Western Grebe', 'Robin', 'Eared Grebe']
+    elif mode == 'remove':
+        body.pop('add')
+        body.update(species='Western Grebe', remove=True)
+        expected = ['Robin']
+    else:
+        body.pop('add')
+        body['previous_species'] = 'Western Grebe'
+        expected = ['Eared Grebe', 'Robin']
+    if combined:
+        body.update(photo_ids=ids[:2], source_photo_ids=ids, burst_index=0,
+                    group_changes=combined_request(ids)['group_changes'])
+    before = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    client = app.test_client()
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    enc = response.get_json()['encounters'][0]
+    common = (initial if mode == 'add' else ['Robin']) if combined else expected
+    assert enc['confirmed_species_list'] == common
+    assert enc['confirmed_species'] == common[0] and enc['species_confirmed'] is True
+    assert enc['bursts'][0]['species_override'] == {'species': expected[0], 'species_list': expected, 'confirmed': True}
+    if combined:
+        assert enc['bursts'][1]['species_override'] == {'species': initial[0], 'species_list': initial, 'confirmed': True}
+    after = db.photo_species.get_species_for_photos(ids, include_identities=True)
+    for pid in ids:
+        assert [entry for entry in before[pid] if entry['name'] == 'Robin'] == [
+            entry for entry in after[pid] if entry['name'] == 'Robin']
+    assert client.post('/api/undo').status_code == 200
+    assert json.load(open(path))['encounters'] == cached['encounters']
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == before
+    assert client.post('/api/redo').status_code == 200
+    assert json.load(open(path))['encounters'] == response.get_json()['encounters']
+    assert db.photo_species.get_species_for_photos(ids, include_identities=True) == after
