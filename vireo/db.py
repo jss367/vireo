@@ -3470,6 +3470,7 @@ class Database:
             keyword_source_manual=KEYWORD_SOURCE_MANUAL,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
             keyword_source_max_sql=keyword_source_max_sql,
+            keyword_source_max=keyword_source_max,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )

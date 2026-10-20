@@ -9,6 +9,59 @@ from services import photo_ingest
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
+@pytest.mark.parametrize('operation', ['save', 'resolve'])
+@pytest.mark.parametrize('preexisting_survivor', [False, True])
+def test_keyword_merge_retargets_identity_history_without_removing_existing_survivor(
+    app_and_db, operation, preexisting_survivor,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], is_species=True)
+    survivor = db.add_keyword('Surviving Kingbird', is_species=True)
+    if preexisting_survivor:
+        db.tag_photo(1, survivor)
+    if operation == 'save':
+        db.tag_photo(1, source, source='accept')
+    assert save(client, [1]).status_code == 200
+    if operation == 'resolve':
+        assert resolve(client, current_group(client)).status_code == 200
+    db._merge_keyword_into(source, survivor)
+    db.commit()
+
+    assert client.post('/api/undo').status_code == 200
+    expected = ['Surviving Kingbird'] if operation == 'save' or preexisting_survivor else []
+    assert db.photo_species.get_species_for_photos([1]).get(1, []) == expected
+    assert db.identity_alternatives.photo_ids() == ({1} if operation == 'resolve' else set())
+    if operation == 'save':
+        stamp = db.conn.execute(
+            'SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (survivor,),
+        ).fetchone()[0]
+        assert stamp == ('manual' if preexisting_survivor else 'accept')
+    assert client.post('/api/redo').status_code == 200
+    expected = ['Surviving Kingbird'] if operation == 'resolve' or preexisting_survivor else []
+    assert db.photo_species.get_species_for_photos([1]).get(1, []) == expected
+    assert db.identity_alternatives.photo_ids() == ({1} if operation == 'save' else set())
+
+
+def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], is_species=True)
+    survivor = db.add_keyword(CANDIDATES[1], is_species=True)
+    db.tag_photo(1, source)
+    db.tag_photo(1, survivor, source='accept')
+    assert save(client, [1]).status_code == 200
+    db._merge_keyword_into(source, survivor)
+    db.commit()
+    assert client.post('/api/undo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[1]]}
+    assert db.conn.execute(
+        'SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (survivor,),
+    ).fetchone()[0] == 'manual'
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {}
+
+
 def save(client, ids, **changes):
     workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={
