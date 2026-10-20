@@ -183,7 +183,8 @@ def test_assess_ambiguity_all_rejected():
 def test_ambiguity_codes_are_the_documented_set():
     assert set(AMBIGUITY_CODES) == {
         "unanalyzed_frames", "close_call", "no_eye_located",
-        "subject_touches_edge", "multiple_subjects", "all_rejected",
+        "subject_touches_edge", "multiple_subjects", "all_rejected", "subject_identity_uncertain", "subject_identity_conflict",
+        "multiple_matching_subjects", "subject_analysis_missing",
     }
     assert DEFAULT_CLOSE_CALL_MARGIN == 0.10
 
@@ -679,3 +680,33 @@ def test_best_batch_cannot_invent_a_winner_when_all_analysis_is_partial(app_and_
     assert pack["suggested_reject_ids"] == []
     assert pack["alternate_ids"] == []
     assert "Complete subject analysis" in pack["unscored_reason"]
+
+
+def test_stale_populated_features_are_uncovered_in_burst_ranking(app_and_db):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 6200, [30, 800])
+    # Keep the old quality columns populated while invalidating the mask prompt.
+    db.conn.execute("UPDATE photo_masks SET prompt_x=.2 WHERE photo_id=?", (pids[1],))
+    db.commit()
+    pack = app.test_client().get(f"/api/photos/{pids[0]}/burst-evidence").get_json()
+    assert pack["scored"] is True and pack["best_photo_id"] == pids[0]
+    assert pack["coverage"]["with_quality"] == 1
+    stale = next(card for card in pack["cards"] if card["id"] == pids[1])
+    assert stale["selection_eligible"] is False and stale["has_quality"] is False
+    assert stale["analysis_reasons"] == ["segmentation_stale"] and stale["rank"] is None
+    assert pack["ambiguity"]["needs_review"] is True
+    reasons = {reason["code"]: reason["detail"] for reason in pack["ambiguity"]["reasons"]}
+    assert "unanalyzed_frames" in reasons and "1 of 2" in reasons["unanalyzed_frames"]
+    assert "close_call" not in reasons
+    # The same scope in the folder listing must report the qualified subset.
+    folder = db.photos.get(pids[0])["folder_id"]
+    listing = app.test_client().get(f"/api/folders/{folder}/bursts").get_json()
+    burst = next(burst for burst in listing["bursts"] if pids[0] in burst["photo_ids"])
+    assert burst["coverage"]["with_quality"] == 1 and burst["ambiguity"]["needs_review"] is True
+    # If every old generation is stale, no frame is counted as currently analyzed.
+    db.conn.execute("UPDATE photo_masks SET prompt_x=.2 WHERE photo_id=?", (pids[0],))
+    db.commit()
+    unavailable = app.test_client().get(f"/api/photos/{pids[0]}/burst-evidence").get_json()
+    assert unavailable["scored"] is False and unavailable["best_photo_id"] is None
+    assert unavailable["coverage"]["with_quality"] == 0
+    assert unavailable["ambiguity"]["needs_review"] is True

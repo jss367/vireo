@@ -7,6 +7,7 @@
     "../vireo/static/best-batch/helpers.js",
     "../vireo/static/best-batch/render.js",
     "../vireo/static/best-batch/shared.js",
-    "../vireo/static/best-batch/state.js"
+    "../vireo/static/best-batch/state.js",
+    "../vireo/static/best-batch/subjects.js"
   ]
 }
