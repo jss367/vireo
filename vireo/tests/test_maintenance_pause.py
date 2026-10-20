@@ -1159,14 +1159,14 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
     entered, release = threading.Event(), threading.Event()
     from repositories.collections import CollectionRepository
 
-    original_add = CollectionRepository.add
+    original_add = CollectionRepository.add_import
 
     def add_collection(database, *args, **kwargs):
         entered.set()
         assert release.wait(synchronization_timeout(5))
         return original_add(database, *args, **kwargs)
 
-    monkeypatch.setattr(CollectionRepository, "add", add_collection)
+    monkeypatch.setattr(CollectionRepository, "add_import", add_collection)
     monkeypatch.setattr(import_job, "run_import_job", lambda *args, **kwargs: {
         "ok": True, "photo_ids": [photo_id], "discovered": 1,
         "copied": 1, "failed": 0, "total": 1,
