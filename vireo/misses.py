@@ -7,7 +7,7 @@ Tenengrad, burst id). No I/O, no DB access.
 Three categories:
   - no_subject: detector didn't find an animal (subject-less frame)
   - clipped:    subject touches a frame edge or is too small
-  - oof:        subject is out of focus (background sharper than subject)
+  - oof:        focus needs review (uncalibrated image-gradient heuristic)
 
 no_subject is exclusive — when it's true, clipped/oof can't be evaluated
 and both return False.
@@ -108,8 +108,8 @@ def classify_miss(row, siblings, config):
         ratio_bad = bg_t > 0 and (subject_t / bg_t) < _miss_threshold(
             config, "miss_oof_ratio"
         )
-        # Absolute floor: below this, subject sharpness is motion-blur level.
-        # Value chosen empirically to match reject_focus behavior.
+        # Legacy low-gradient heuristic used only to surface review candidates.
+        # This is not a validated absolute sharpness or motion-blur threshold.
         SHARPNESS_FLOOR = 10.0
         floor_bad = subject_t < SHARPNESS_FLOOR
 

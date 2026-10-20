@@ -44,9 +44,12 @@ export function rankLabel(card) {
 /** @param {BestBatchCard} card */
 export function scoreText(card) {
   var parts = [];
-  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
-  if (card.focus != null) parts.push((card.focus_basis === 'eye' ? 'Eye' : 'Subject') + ' ' + Math.round(card.focus * 100));
-  if (card.sharpness != null) parts.push('Subject S ' + Math.round(card.sharpness));
+  if (card.quality_pct != null) parts.push('Quality ranking ' + card.quality_pct);
+  if (card.focus != null) parts.push('Relative ' + (card.focus_basis === 'eye' ? 'eye' : 'subject') + ' focus ' + Math.round(card.focus * 100) + '/100');
+  if (card.focus_evidence) {
+    parts.push('Raw Tenengrad ' + card.focus_evidence.measurement.toFixed(2) + ' among ' + card.focus_evidence.cohort_size + ' same-basis batch photos');
+    parts.push('Absolute focus unvalidated');
+  } else if (card.sharpness != null) parts.push('Subject Tenengrad ' + Math.round(card.sharpness) + '; comparison group unavailable');
   return parts.join(' · ') || 'No score';
 }
 

@@ -8,7 +8,7 @@
 export const CATEGORY_LABELS = {
   no_subject: 'No subject',
   clipped:    'Clipped / tiny',
-  oof:        'Out of focus',
+  oof:        'Focus needs review',
 };
 export const MISS_TUNING_CONTROL_IDS = [
   'missCfgDetectorFloor',

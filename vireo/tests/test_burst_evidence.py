@@ -293,8 +293,10 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     assert best["preview_url"] == f"/photos/{pids[1]}/preview?size=1920"
     assert best["crop_url"] == f"/photos/{pids[1]}/crop"
     worst = next(c for c in pack["cards"] if c["id"] == pids[0])
-    assert worst["label"] == "REJECT"
-    assert worst["reject_reasons"]
+    assert worst["label"] != "REJECT"  # A low relative rank alone cannot reject.
+    assert worst["reject_reasons"] == []
+    assert worst["focus_evidence"]["absolute_status"] == "not_validated"
+    assert pack["focus_cohorts"]["subject"]["photo_ids"] == pids
 
 
 def test_burst_evidence_validates_margin_and_focus_size(app_and_db):

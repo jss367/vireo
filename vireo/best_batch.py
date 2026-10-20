@@ -193,7 +193,7 @@ def _best_batch_reasons(photo, photos, is_best=False):
     elif q_rank is not None and q_rank <= 3:
         reasons.append(f"quality rank #{q_rank}")
     if focus_rank == 1:
-        reasons.append("sharpest eye" if focus_key == "eye_focus_score" else "sharpest subject")
+        reasons.append("highest relative eye focus" if focus_key == "eye_focus_score" else "highest relative subject focus")
     elif focus_rank is not None and focus_rank <= 3:
         reasons.append(f"focus rank #{focus_rank}")
     if exposure_rank == 1 and photo.get("exposure_score", 0) >= 0.7:
@@ -273,6 +273,7 @@ def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
         "best_filename": best.get("filename"),
         "best_reasons": best_reasons,
         "summary": results.get("summary", {}),
+        "focus_cohorts": results["encounters"][0].get("focus_cohorts", {}),
         "cards": cards,
         "alternate_ids": alternate_ids,
         "suggested_reject_ids": reject_ids,
@@ -304,6 +305,7 @@ def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
         ),
         "focus": photo.get("eye_focus_score", photo.get("focus_score")),
         "focus_basis": "eye" if photo.get("eye_focus_score") is not None else "subject",
+        "focus_evidence": photo.get("focus_evidence"),
         "sharpness": photo.get("subject_tenengrad"),
         "eye_x": photo.get("eye_x"),
         "eye_y": photo.get("eye_y"),

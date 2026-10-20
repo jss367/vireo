@@ -73,6 +73,7 @@ export function render() {
         '</div>' +
       '</div>' +
       '<div class="misses-section-body">' +
+        (cat === 'oof' ? '<p>Heuristic review candidates based on image gradients; absolute defocus is unvalidated. Exposure, texture and the selected region can affect these measurements. Inspect before rejecting.</p>' : '') +
         bodyHtml +
       '</div>' +
     '</section>'
@@ -97,7 +98,7 @@ export function render() {
   if (cat === 'clipped' && p.subject_size != null) {
     meta = (p.subject_size * 100).toFixed(1) + '%';
   } else if (cat === 'oof' && p.subject_tenengrad != null && p.bg_tenengrad) {
-    meta = 'r=' + (p.subject_tenengrad / p.bg_tenengrad).toFixed(2);
+    meta = 'Subject/background gradients: ' + (p.subject_tenengrad / p.bg_tenengrad).toFixed(2);
   } else if (cat === 'no_subject' && p.detection_conf != null) {
     meta = 'c=' + Number(p.detection_conf).toFixed(2);
   } else if (cat === 'no_subject' && p.raw_detection_conf != null) {

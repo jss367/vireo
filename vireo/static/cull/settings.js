@@ -28,7 +28,6 @@ function updateSliderDisplay(slider) {
 function getScoringConfig() {
   return {
     reject_crop_complete: sliderVal('slRejectCrop') / 100,
-    reject_focus: sliderVal('slRejectFocus') / 100,
     reject_clip_high: sliderVal('slRejectClip') / 100,
     reject_composite: sliderVal('slRejectComposite') / 100,
     burst_lambda: sliderVal('slBurstLambda') / 100,
