@@ -72,7 +72,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint):
         # Do not publish measurements of a source or prediction that changed mid-inference.
         from subject_ranking import SubjectComparison
         current, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection["id"]}))
-        if analysis_key(path, current, effective_cfg) != key:
+        if current is None or analysis_key(path, current, effective_cfg) != key:
             raise ValueError("Subject analysis inputs changed; retry this frame")
         db.subjects.save_ranking_analysis(detection["id"], key, features, buffer.getvalue())
         db.commit_with_retry()

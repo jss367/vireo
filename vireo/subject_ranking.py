@@ -99,6 +99,10 @@ def resolve_subject(db, photo_id, comparison):
     elif detections:
         selected, state = detections[0], "primary"
     if selected:
+        confirmations = next(c["confirmed_keys"] for c in candidates if c["detection_id"] == selected["id"])
+        if len(confirmations) > 1:
+            selected, state = None, "subject_identity_conflict"
+    if selected:
         selected["prediction_fingerprint"] = hashlib.sha256(json.dumps(
             [dict(p) for p in predictions if p["detection_id"] == selected["id"]], sort_keys=True,
         ).encode()).hexdigest()

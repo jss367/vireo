@@ -359,3 +359,22 @@ def test_largest_supported_explicit_taxon_id_is_valid(comparison_library):
     pack = _pack(app, pids, requested_species=f"taxon:{2**63 - 1}")
     assert not pack["scored"]
     assert all(c["subject"]["requested_species_key"] == f"taxon:{2**63 - 1}" for c in pack["cards"])
+
+
+@pytest.mark.parametrize("selection", ["primary", "explicit"])
+def test_subject_only_comparisons_report_conflicting_confirmations(comparison_library, selection):
+    app, db, pids, ids = comparison_library
+    # The default primary is on the right; the explicit choice below is on the left.
+    did = ids[pids[0]][1 if selection == "primary" else 0]
+    db.predictions.add(did, "Mule Deer", .9, "conflicting-mammal-model", status="accepted")
+    context = {"compare_subjects": True}
+    if selection == "explicit":
+        context["subject_overrides"] = {str(pids[0]): did}
+    pack = _pack(app, pids, **context)
+    card = next(c for c in pack["cards"] if c["id"] == pids[0])
+    assert card["evidence_status"] == "subject_identity_conflict"
+    assert card["subject"]["detection_id"] is None
+    assert card["subject"]["analysis_key"] is None
+    assert card["rank"] is None and card["quality"] is None
+    assert card["eye_tenengrad"] is None
+    assert card["subject"]["requested_species_key"] is None
