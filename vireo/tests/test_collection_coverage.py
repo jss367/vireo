@@ -211,3 +211,20 @@ def test_browser_coverage_drops_stale_scope_and_explains_unknown_counts():
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_prediction_decisions_require_decision_in_every_any_rule_branch(db, tmp_path):
+    _, photos = _photos(db, tmp_path)
+    cid = db.collections.add("Either photo", json.dumps({
+        "mode": "any", "rules": [
+            {"field": "photo_ids", "value": [photos[0]]},
+            {"field": "photo_ids", "value": [photos[1]]},
+        ],
+    }))
+    # Neither a pending prediction nor an automatic taxonomy match proves
+    # an explicit decision, regardless of which OR branch includes the photo.
+    _prediction(db, photos[0], "pending")
+    _prediction(db, photos[1], "accepted", AUTO_MATCH_REVIEW_MARKER)
+    assert collection_coverage(db, cid, {})["review"]["prediction_decision_count"] == 0
+    _prediction(db, photos[0], "reviewed")
+    assert collection_coverage(db, cid, {})["review"]["prediction_decision_count"] == 1

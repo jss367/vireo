@@ -550,6 +550,9 @@ class CollectionRepository:
             return 0
         folder_join, join_clause, where, params = parts
         placeholders = ",".join("?" for _ in statuses)
+        # The decision predicate must apply to every branch of an any-rule tree.
+        if where:
+            where = f"WHERE ({where.removeprefix('WHERE ')})"
         return self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) FROM photos p
                 {folder_join} {join_clause} {where}
