@@ -10,6 +10,7 @@ import logging
 from collections import defaultdict
 
 import numpy as np
+from subject_analysis import explicit_decision, mark_analysis_readiness, subject_analysis_readiness
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +117,9 @@ def mmr_select(candidates, lam, max_keep, config=None):
     """
     if not candidates:
         return []
+    candidates = [p for p in candidates
+                  if p.get("selection_eligible") is not False
+                  and subject_analysis_readiness(p)["eligible"]]
     if len(candidates) <= max_keep:
         return list(candidates)
 
@@ -182,7 +186,10 @@ def species_rarity_protection(photos):
         non_rejected = [p for p in species_photos if p.get("label") != "REJECT"]
         if len(non_rejected) == 0 and species_photos:
             # All rejected — promote best to REVIEW
-            best = max(species_photos, key=lambda p: p.get("quality_composite", 0))
+            eligible = [p for p in species_photos if explicit_decision(p) != "REJECT"]
+            if not eligible:
+                continue
+            best = max(eligible, key=lambda p: p.get("quality_composite") or 0)
             best["label"] = "REVIEW"
             best["rarity_protected"] = True
             protected_ids.add(best.get("id"))
@@ -227,8 +234,14 @@ def triage_encounters(encounters, config=None):
             else:
                 burst_photos = burst  # burst is already a list of photo dicts
 
+            # Recheck legacy/cached callers too: selection cannot depend on
+            # scoring having run first or on an old readiness marker.
+            for photo in burst_photos:
+                mark_analysis_readiness(photo)
+
             # Non-rejected candidates
-            candidates = [p for p in burst_photos if p.get("label") != "REJECT"]
+            candidates = [p for p in burst_photos
+                          if p.get("label") != "REJECT" and p.get("selection_eligible", True)]
 
             # MMR select within burst
             keeps = mmr_select(
@@ -258,7 +271,11 @@ def triage_encounters(encounters, config=None):
                 burst_photos = burst
 
             for photo in burst_photos:
-                if photo.get("label") == "REJECT":
+                if explicit_decision(photo):
+                    photo["label"] = explicit_decision(photo)
+                elif photo.get("selection_eligible") is False:
+                    photo["label"] = "REVIEW"
+                elif photo.get("label") == "REJECT":
                     pass  # already labeled
                 elif id(photo) in enc_keep_ids:
                     photo["label"] = "KEEP"

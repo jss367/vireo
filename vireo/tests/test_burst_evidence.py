@@ -207,6 +207,20 @@ def _mark_quality(db, photo_id, sharpness, *, crop_complete=1.0, eye=None):
            WHERE id = ?""",
         (sharpness, crop_complete, photo_id),
     )
+    # A measured fixture includes the provenance the production loader checks.
+    from pathlib import Path
+
+    from repositories.masks_features import MaskQuality
+
+    mask_path = Path(db.conn.execute("PRAGMA database_list").fetchone()[2]).parent / f"ready-mask-{photo_id}.png"
+    mask_path.write_bytes(b"scratch-mask")
+    db.detections.save(photo_id, [{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
+                                   "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.masks_features.upsert_mask(photo_id, "sam2-small", str(mask_path), "MDV6", (.1, .1, .2, .2),
+        MaskQuality(subject_tenengrad=sharpness, bg_tenengrad=5, crop_complete=crop_complete,
+                    bg_separation=0, subject_clip_high=0, subject_clip_low=0,
+                    subject_y_median=115, subject_size=.05, noise_estimate=1))
+    db.masks_features.set_active_variant(photo_id, "sam2-small", .2)
     if eye is not None:
         db.conn.execute(
             "UPDATE photos SET eye_x = ?, eye_y = ?, eye_conf = 0.9, eye_tenengrad = ? WHERE id = ?",
@@ -256,7 +270,7 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     assert pack["photo_ids"] == pids
     assert pack["best_photo_id"] == pids[1]
     assert pack["coverage"] == {
-        "photos": 3, "with_detection": 1, "with_mask": 3, "with_quality": 3, "with_eye": 0,
+        "photos": 3, "with_detection": 3, "with_mask": 3, "with_quality": 3, "with_eye": 0,
     }
     assert {key: pack["scoring"][key] for key in ("eye_detect_enabled", "close_call_margin", "detector_confidence")} == {
         "eye_detect_enabled": False, "close_call_margin": 0.10, "detector_confidence": 0.2,
@@ -376,14 +390,13 @@ def test_folder_bursts_lists_every_burst_with_folder_coverage(app_and_db):
     assert tie["scored"] is True
     assert [r["code"] for r in tie["ambiguity"]["reasons"]] == ["close_call"]
 
-    # One analyzed frame is enough for the scorer to rank the burst (the
-    # unanalyzed frame fails the no-mask rule), so the listing must say the
-    # ranking covers half the frames rather than hide it.
+    # One analyzed frame can be ranked while the unavailable frame remains
+    # unranked and excluded from automatic reject suggestions.
     half = by_seed[partial[0]]
     assert half["scored"] is True
     assert half["best_photo_id"] == partial[0]
     assert half["coverage"] == {
-        "photos": 2, "with_detection": 0, "with_mask": 1, "with_quality": 1, "with_eye": 0,
+        "photos": 2, "with_detection": 1, "with_mask": 1, "with_quality": 1, "with_eye": 0,
     }
     assert [r["code"] for r in half["ambiguity"]["reasons"]] == ["unanalyzed_frames"]
 
@@ -632,3 +645,35 @@ def test_focus_crop_source_prefers_the_original_over_a_downsized_working_copy(ap
     resp = client.get(f"/photos/{pid}/focus-crop?size=128")
     assert resp.headers["X-Vireo-Focus-Source"] == "working_copy"
     assert resp.headers["X-Vireo-Focus-Original-Scale"] == "1.0000"
+
+
+def test_best_batch_leaves_partial_analysis_unranked_and_out_of_reject_suggestions(app_and_db):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 6000, [10, 800, 30])
+    db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (pids[1],))
+    db.conn.commit()
+    pack = app.test_client().get(f"/api/photos/{pids[1]}/burst-evidence").get_json()
+    assert pack["scored"] is True
+    assert pack["best_photo_id"] == pids[2]
+    assert pids[1] not in pack["suggested_reject_ids"]
+    assert pids[1] not in pack["alternate_ids"]
+    unavailable = next(card for card in pack["cards"] if card["id"] == pids[1])
+    assert unavailable["role"] == "review"
+    assert unavailable["label"] == "REVIEW"
+    assert unavailable["rank"] is None
+    assert unavailable["quality"] is None
+    assert unavailable["analysis_reasons"] == ["missing_subject_clip_low"]
+    assert "Subject analysis needs review" in unavailable["reasons"][0]
+
+
+def test_best_batch_cannot_invent_a_winner_when_all_analysis_is_partial(app_and_db):
+    app, db = app_and_db
+    pids = _seed_burst(db, _folder_id(db), 6100, [10, 800, 30])
+    db.conn.execute("UPDATE photos SET subject_clip_low=NULL")
+    db.conn.commit()
+    pack = app.test_client().get(f"/api/photos/{pids[1]}/burst-evidence").get_json()
+    assert pack["scored"] is False
+    assert pack["best_photo_id"] is None
+    assert pack["suggested_reject_ids"] == []
+    assert pack["alternate_ids"] == []
+    assert "Complete subject analysis" in pack["unscored_reason"]

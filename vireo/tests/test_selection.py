@@ -18,6 +18,10 @@ def _make_photo(photo_id, quality, emb=None, phash=None, species=None, label=Non
         "species_top5": species,
         "label": label,
         "mask_path": "/masks/test.png",
+        "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
+        "subject_tenengrad": 500, "bg_tenengrad": 50,
+        "subject_clip_high": 0, "subject_clip_low": 0, "subject_y_median": 115,
+        "crop_complete": .95, "bg_separation": 10, "subject_size": .15,
     }
 
 
@@ -258,10 +262,16 @@ def test_triage_end_to_end():
         },
     ]
 
+    for burst in encounters[0]["bursts"]:
+        for photo in burst:
+            complete = _make_photo(photo["id"], photo["quality_composite"])
+            complete.update(photo)
+            photo.update(complete)
+
     _, all_photos = triage_encounters(encounters)
 
     labels = {p["id"]: p["label"] for p in all_photos}
-    assert labels[3] == "REJECT"  # hard reject stays
+    assert labels[3] == "REVIEW"  # missing mask is unavailable analysis
     # At least one KEEP
     keep_count = sum(1 for l in labels.values() if l == "KEEP")
     assert keep_count >= 1
@@ -286,7 +296,7 @@ def test_triage_with_rarity_protection():
                         "species_top5": [("rare_owl", 0.9)],
                         "dino_subject_embedding": None,
                         "phash_crop": None,
-                        "mask_path": None,
+                        "mask_path": "/masks/test.png",
                     },
                     {
                         "id": 2,
@@ -295,12 +305,17 @@ def test_triage_with_rarity_protection():
                         "species_top5": [("rare_owl", 0.85)],
                         "dino_subject_embedding": None,
                         "phash_crop": None,
-                        "mask_path": None,
+                        "mask_path": "/masks/test.png",
                     },
                 ],
             ],
         },
     ]
+
+    for photo in encounters[0]["bursts"][0]:
+        complete = _make_photo(photo["id"], photo["quality_composite"])
+        complete.update(photo)
+        photo.update(complete)
 
     _, all_photos = triage_encounters(encounters)
     # Best rare_owl (id=1) should be promoted to REVIEW

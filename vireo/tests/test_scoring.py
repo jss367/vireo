@@ -133,6 +133,8 @@ def test_composite_score_good_photo():
     from scoring import composite_quality_score
 
     photo = {
+        "mask_path": "/masks/1.png",
+        "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
         "subject_tenengrad": 500,
         "bg_tenengrad": 50,
         "subject_clip_high": 0.0,
@@ -152,6 +154,8 @@ def test_composite_score_bad_photo():
     from scoring import composite_quality_score
 
     photo = {
+        "mask_path": "/masks/1.png",
+        "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
         "subject_tenengrad": 10,
         "bg_tenengrad": 500,
         "subject_clip_high": 0.4,
@@ -174,6 +178,8 @@ def test_composite_score_range():
         import random
 
         photo = {
+            "mask_path": "/masks/1.png",
+            "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
             "subject_tenengrad": random.uniform(0, 1000),
             "bg_tenengrad": random.uniform(0, 1000),
             "subject_clip_high": random.uniform(0, 1),
@@ -190,17 +196,17 @@ def test_composite_score_range():
 # -- hard_reject_reasons --
 
 
-def test_reject_no_mask():
+def test_missing_mask_is_not_a_quality_reject():
     from scoring import hard_reject_reasons
 
     reasons = hard_reject_reasons({}, 0.5)
-    assert any("no_subject_mask" in r for r in reasons)
+    assert reasons == []
 
 
 def test_reject_crop_incomplete():
     from scoring import hard_reject_reasons
 
-    photo = {"mask_path": "/masks/1.png", "crop_complete": 0.4}
+    photo = _make_base_photo(crop_complete=0.4)
     reasons = hard_reject_reasons(photo, 0.8)
     assert any("crop_incomplete" in r for r in reasons)
 
@@ -208,7 +214,7 @@ def test_reject_crop_incomplete():
 def test_reject_highlight_clipping():
     from scoring import hard_reject_reasons
 
-    photo = {"mask_path": "/masks/1.png", "subject_clip_high": 0.5}
+    photo = _make_base_photo(subject_clip_high=0.5)
     reasons = hard_reject_reasons(photo, 0.8)
     assert any("highlight_clipping" in r for r in reasons)
 
@@ -216,7 +222,7 @@ def test_reject_highlight_clipping():
 def test_reject_low_composite():
     from scoring import hard_reject_reasons
 
-    photo = {"mask_path": "/masks/1.png", "crop_complete": 0.8}
+    photo = _make_base_photo(crop_complete=0.8)
     reasons = hard_reject_reasons(photo, 0.3)
     assert any("low_quality" in r for r in reasons)
 
@@ -226,6 +232,7 @@ def test_no_reject_good_photo():
 
     photo = {
         "mask_path": "/masks/1.png",
+        "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
         "crop_complete": 0.95,
         "subject_clip_high": 0.01,
     }
@@ -236,8 +243,8 @@ def test_no_reject_good_photo():
 # -- score_encounter --
 
 
-def test_score_encounter_labels_rejects():
-    """score_encounter should label photos that fail hard reject rules."""
+def test_score_encounter_routes_missing_analysis_to_review():
+    """Unavailable quality features cannot create an automatic reject."""
     from scoring import score_encounter
 
     enc = {
@@ -252,8 +259,9 @@ def test_score_encounter_labels_rejects():
                 "bg_separation": 10.0,
                 "subject_size": 0.1,
                 "mask_path": "/masks/1.png",
+            "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
             },
-            {  # Bad photo: no mask
+            {  # Analysis unavailable: no mask
                 "subject_tenengrad": None,
                 "bg_tenengrad": None,
                 "subject_clip_high": None,
@@ -270,7 +278,8 @@ def test_score_encounter_labels_rejects():
     score_encounter(enc)
     assert enc["photos"][0]["label"] is None  # not rejected
     assert enc["photos"][0]["quality_composite"] > 0
-    assert enc["photos"][1]["label"] == "REJECT"
+    assert enc["photos"][1]["label"] == "REVIEW"
+    assert enc["photos"][1]["quality_composite"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +298,7 @@ def _make_base_photo(**overrides):
         "bg_separation": 10.0,
         "subject_size": 0.15,
         "mask_path": "/masks/1.png",
+        "detection_box": {"x": .1, "y": .1, "w": .4, "h": .4},
     }
     photo.update(overrides)
     return photo

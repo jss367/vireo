@@ -1,7 +1,7 @@
 // The Best Batch page (vireo/static/best-batch/): the ranked batch from
 // /api/photos/best-batch and the shared globals its shared.js reads.
 interface BestBatchCard {
-  id: number; filename?: string; rank: number; role?: string;
+  id: number; filename?: string; rank: number | null; role?: string;
   quality_pct?: number | null; focus?: number | null; focus_basis?: string;
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;
   width?: number | null; height?: number | null; reasons?: string[];
