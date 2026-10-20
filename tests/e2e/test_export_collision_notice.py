@@ -155,3 +155,30 @@ def test_photo_editor_notice_follows_destination(live_server, page, export_photo
     _set_destination(page, export_photos["empty"])
     expect(notice).to_be_hidden()
     expect(location).to_have_text(f"Location: {export_photos['empty']}")
+
+
+@pytest.mark.parametrize('editor', [False, True], ids=['browse', 'editor'])
+def test_export_review_shows_metadata_selection(live_server, page, export_photos, editor):
+    if editor:
+        page.goto(f"{live_server['url']}/edit/{export_photos['ids'][0]}")
+        expect(page.locator('#editorFilename')).to_have_text('kestrel-a.jpg')
+        page.locator('#exportBtn').click()
+    else:
+        _open_browse_export(page, live_server, export_photos['ids'])
+    summary = page.locator('#exportMetadataSummary')
+    # Keep the test independent of persisted last-used checkbox selections.
+    for checkbox in page.locator('.export-metadata-option input').all():
+        checkbox.uncheck()
+    expect(summary).to_have_text('Metadata: None selected — metadata-free export')
+    with page.expect_response(lambda r: r.url.endswith(PREFLIGHT)) as response:
+        page.locator('#exportMetadataLocation').check()
+    assert response.value.request.post_data_json['metadata_fields'] == ['location']
+    assert response.value.json()['metadata']['requested_fields'] == ['location']
+    expect(summary).to_have_text('Metadata: Location (GPS)')
+    page.locator('#exportMetadataSpecies').check()
+    expect(summary).to_contain_text('Species keywords')
+    expect(summary).to_contain_text('Location (GPS)')
+    Path('.context').mkdir(exist_ok=True)
+    page.locator('#exportOverlay .export-modal').screenshot(
+        path=f".context/export-metadata-{'editor' if editor else 'browse'}.png",
+    )

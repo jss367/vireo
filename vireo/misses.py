@@ -393,8 +393,8 @@ def compute_misses_for_workspace(
     # candidates.
     if detector_confidence is None:
         detector_confidence = _effective_detector_confidence(db)
-    # max_prediction_conf is the highest classifier confidence across all
-    # detections of the photo, ignoring the workspace detector_confidence
+    # max_prediction_conf is the highest current-label-set classifier confidence
+    # across all detections of the photo, ignoring the workspace detector_confidence
     # cutoff. A classifier prediction at or above
     # `miss_classifier_override_conf` overrides the no_subject flag — the
     # canonical case is a hummingbird where megadetector returned a

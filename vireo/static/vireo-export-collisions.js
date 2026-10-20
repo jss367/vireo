@@ -35,9 +35,7 @@ var VireoExportCollisions = (function() {
   var checkGeneration = 0;
   /** @type {string | null} */
   var shownSignature = null;
-  // The request the notice describes (or is being checked for). Controls
-  // that do not change names (quality, metadata) leave it unchanged, so
-  // editing them neither re-checks nor flickers the notice.
+  // The request describes filenames and the selected metadata categories.
   /** @type {string | null} */
   var checkedKey = null;
   // The photos + destination the location line describes; null while it
@@ -50,6 +48,22 @@ var VireoExportCollisions = (function() {
   function overlay() { return $('exportOverlay'); }
   function notice() { return $('exportCollisionNotice'); }
   function locationLine() { return $('exportLocation'); }
+
+  /** @param {ExportPreflightRequest | null} body @param {ExportPreflightResult | null} [preflight] */
+  function renderMetadata(body, preflight) {
+    var el = $('exportMetadataSummary');
+    if (!el) return;
+    /** @type {Record<string, string>} */
+    var labels = {species: 'Species keywords', capture_date: 'Capture date',
+      capture_time: 'Capture time', rating: 'Rating', location: 'Location (GPS)',
+      camera: 'Camera & exposure'};
+    var fields = (body && body.metadata_fields) || [];
+    el.textContent = body ? 'Metadata: ' + (preflight && preflight.metadata
+      ? preflight.metadata.description
+      : fields.length ? fields.map(function(field) { return labels[field] || field; }).join(', ')
+      : 'None selected — metadata-free export') : '';
+    el.hidden = !body;
+  }
 
   /** @param {ExportPreflightRequest | null} body */
   function locationKey(body) {
@@ -173,6 +187,7 @@ var VireoExportCollisions = (function() {
     }
     render(preflight);
     renderLocation(preflight, locationKey(body));
+    renderMetadata(body, preflight);
   }
 
   function isOpen() {
@@ -186,6 +201,7 @@ var VireoExportCollisions = (function() {
   function schedule() {
     if (!isOpen()) return;
     const body = currentRequest();
+    renderMetadata(body);
     var key = body ? JSON.stringify(body) : null;
     if (key === checkedKey) return;
     checkedKey = key;
@@ -213,6 +229,7 @@ var VireoExportCollisions = (function() {
     timer = null;
     hide();
     setLocation('');
+    renderMetadata(null);
   }
 
   // Export was clicked: its own preflight supersedes any live check, so a
@@ -234,6 +251,7 @@ var VireoExportCollisions = (function() {
   function acknowledged(preflight) {
     cancelPending();
     renderLocation(preflight, locationKey(currentRequest()));
+    renderMetadata(currentRequest(), preflight);
     if (!preflight.rename_count) {
       hide();
       return true;

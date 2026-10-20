@@ -14,7 +14,9 @@
 /**
  * @typedef {{exported?: number, errors?: string[], renamed?: number,
  *   destination?: string, destinations?: string[],
- *   written_destinations?: string[]}} ExportJobResult
+ *   written_destinations?: string[], metadata?: {metadata_free: boolean,
+ *   description: string, categories: Record<string, {requested: number,
+ *   written: number, unavailable: number, failed: number, not_attempted: number}>}}} ExportJobResult
  * @typedef {{status?: string, result?: ExportJobResult | null,
  *   errors?: string[]}} ExportJobDone
  */
@@ -41,6 +43,33 @@ var VireoExportJob = (function() {
     var shown = errors.slice(0, VISIBLE_ERRORS).join('; ');
     var more = errors.length - VISIBLE_ERRORS;
     return more > 0 ? shown + '; and ' + more.toLocaleString() + ' more' : shown;
+  }
+
+  /** @param {ExportJobResult} result */
+  function metadataDetail(result) {
+    var metadata = result.metadata;
+    if (!metadata) return '';
+    if (metadata.metadata_free) return '. Metadata: none selected (metadata-free export)';
+    /** @type {Record<string, string>} */
+    var labels = {species: 'Species keywords', capture_date: 'Capture date',
+      capture_time: 'Capture time', rating: 'Rating', location: 'Location (GPS)',
+      camera: 'Camera & exposure'};
+    return '. Metadata (photo counts): ' + Object.entries(metadata.categories).map(function(entry) {
+      var field = entry[0];
+      var counts = entry[1];
+      var text = (labels[field] || field) + ' ' + counts.written + '/' + counts.requested + ' written';
+      if (counts.unavailable) text += ', ' + counts.unavailable + ' unavailable';
+      if (counts.failed) text += ', ' + counts.failed + ' failed';
+      if (counts.not_attempted) text += ', ' + counts.not_attempted + ' not attempted';
+      return text;
+    }).join('; ');
+  }
+
+  /** @param {ExportJobResult} result */
+  function missingMetadata(result) {
+    return !!(result.metadata && Object.values(result.metadata.categories).some(function(counts) {
+      return counts.unavailable || counts.failed || counts.not_attempted;
+    }));
   }
 
   /**
@@ -88,8 +117,9 @@ var VireoExportJob = (function() {
     if (errors.length) {
       message += '. ' + photos(errors.length) + ' failed: ' + errorDetail(errors);
     }
+    message += metadataDetail(result);
     var type = errors.length ? 'error'
-      : done.status === 'cancelled' ? 'warning'
+      : done.status === 'cancelled' || missingMetadata(result) ? 'warning'
       : exported ? 'success' : 'warning';
     return {message: message, type: type};
   }
