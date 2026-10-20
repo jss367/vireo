@@ -549,7 +549,9 @@ class DetectionsRepository:
         """Every photo ``workspace_id`` can see, with the inputs a miss
         derivation reads: the stored miss flags and quality signals, the best
         animal detection at or above ``detector_confidence``
-        (``detection_conf``) and the best prediction (``max_prediction_conf``).
+        (``detection_conf``) and the best current-label-set prediction (``max_prediction_conf``).
+        The classifier override deliberately includes below-floor boxes and
+        full-image predictions so strong species evidence can rescue a miss.
         """
         return self.conn.execute(
             "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
@@ -567,7 +569,12 @@ class DetectionsRepository:
             "         AS detection_conf, "
             "       (SELECT MAX(pr.confidence) FROM predictions pr "
             "        JOIN detections d2 ON d2.id = pr.detection_id "
-            "        WHERE d2.photo_id = p.id) "
+            "        WHERE d2.photo_id = p.id "
+            "          AND pr.labels_fingerprint = ("
+            "              SELECT pr2.labels_fingerprint FROM predictions pr2 "
+            "              WHERE pr2.detection_id = pr.detection_id "
+            "                AND pr2.classifier_model = pr.classifier_model "
+            "              ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)) "
             "         AS max_prediction_conf "
             "FROM photos p "
             "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "

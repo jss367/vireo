@@ -150,13 +150,15 @@ def _load_top_predictions(db, photo_ids, pause_callback):
     # photo_embeddings we read for that photo — clustering vectors across
     # model spaces is meaningless, so the photo's embedding must come from
     # the same model that named its species.
+    import config as cfg
+    detector_floor = db.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
     predictions = {}
     from species_identity import SpeciesResolver
     species_resolver = SpeciesResolver(db=db)
     for pid in photo_ids:
         if pause_callback:
             pause_callback()
-        pred = db.culling.top_prediction(pid)
+        pred = db.culling.top_prediction(pid, detector_floor)
         if pred:
             identity = species_resolver.prediction(pred)
             predictions[pid] = {
