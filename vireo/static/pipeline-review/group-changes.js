@@ -399,7 +399,7 @@ function grmRemoveFromGroup(photoIds) {
 /* --- Apply & Close --- */
 
 // Confirm species for the burst. Pipeline bursts go through the same endpoint
-// the grid uses (persists confirmation + auto-detach). Browse-selection ad-hoc
+// the grid uses (preview + explicit confirmation). Browse-selection ad-hoc
 // sets have no encounter, so just tag the keyword on all members.
 /** @param {string} species @param {number[]} memberIds */
 async function grmConfirmSpeciesCall(species, memberIds) {
@@ -427,6 +427,43 @@ async function grmConfirmSpeciesCall(species, memberIds) {
   if (resp && resp.encounters) {
     currentReviewResults().encounters = resp.encounters;
     if (resp.summary) currentReviewResults().summary = resp.summary;
+  }
+}
+
+/** @param {ReviewGroupChecks} checks @param {string} species */
+async function grmApplySpeciesBeforeFlags(checks, species) {
+  if (!checks.species) return true;
+  var burstExists = grmState.source === 'browse-selection' ||
+    currentReviewResults().encounters[grmState.encIdx ?? -1]?.bursts?.[grmState.burstIdx ?? -1];
+  if (!burstExists) return true;
+  // A staged removal is excluded from species only when flags will commit it.
+  var members = grmSpeciesMemberItems(checks).map(function(photo) { return photo.id; });
+  if (!members.length) return true;
+  if (await grmConfirmSpeciesCall(species, members) === false) return false;
+  // An explicit species transition can insert a leading encounter or split
+  // the source burst. Locate pending removals in the authoritative response,
+  // rather than sending the flags request with obsolete encounter indices.
+  if (grmState.source !== 'browse-selection') grmRelocatePendingRemovalSource();
+  return true;
+}
+
+function grmRelocatePendingRemovalSource() {
+  var pending = Array.from(grmState.removed).filter(function(id) {
+    return grmState.appliedRemovalSessionId !== grmState.sessionId ||
+      !(grmState.appliedRemovalIds || []).includes(id);
+  });
+  if (!pending.length) return;
+  var encounters = currentReviewResults().encounters;
+  for (var encIdx = 0; encIdx < encounters.length; encIdx++) {
+    var bursts = requireReviewValue(encounters[encIdx]).bursts || [];
+    for (var burstIdx = 0; burstIdx < bursts.length; burstIdx++) {
+      var ids = requireReviewValue(bursts[burstIdx]).photo_ids;
+      if (pending.every(id => ids.includes(id))) {
+        grmState.encIdx = encIdx;
+        grmState.burstIdx = burstIdx;
+        return;
+      }
+    }
   }
 }
 
@@ -489,6 +526,11 @@ async function grmApply() {
       });
     }
 
+    // Preview and confirm species before any flag/removal write. Cancel or
+    // stale-preview failure therefore leaves every staged cull change pending.
+    if (await grmApplySpeciesBeforeFlags(checks, species) === false) return false;
+    if (!sessionIsActive()) return false;
+
     // --- Flags side (picks/rejects/candidates + removed→detach) ---
     // Only committed when the "Apply picks/rejects" box is checked. Removals are
     // part of "cull changes", so the removed→detach block is gated here too.
@@ -501,7 +543,7 @@ async function grmApply() {
         })
         .map(function(p) { return p.id; });
 
-      // Persist flags to the database first. If this fails we abort so the local
+      // Persist flags before updating local flag state. On failure, the local
       // pipeline cache and the DB can't drift apart — the prior fire-and-forget
       // save-cache + no-DB-write was the bug behind this whole change.
       /** @type {ReviewGroupApplyResponse | undefined} */ var applyResp;
@@ -617,35 +659,6 @@ async function grmApply() {
       grmState.appliedRemovalIds = Array.from(grmState.removed);
     }
   }
-
-  // Group Apply has already saved flags and removals from its canonical cache.
-  // Species confirmation below reads that committed structure.
-
-  // --- Species side ---
-  // Server-owned now: tag all remaining (non-removed) burst frames + mark the
-  // burst confirmed via the unified endpoint. Removed photos are excluded so
-  // they aren't tagged. Skip when the burst no longer exists (emptied by the
-  // detach above) or has no members left.
-    if (checks.species) {
-      var burstExists = grmState.source === 'browse-selection' ||
-        (currentReviewResults().encounters[grmState.encIdx ?? -1] &&
-         requireReviewValue(currentReviewResults().encounters[grmState.encIdx ?? -1]).bursts &&
-         requireReviewValue(currentReviewResults().encounters[grmState.encIdx ?? -1]).bursts[grmState.burstIdx ?? -1]);
-      if (burstExists) {
-        // Post-apply burst members carry the species. Uses the same rule as the
-        // label/tooltip (grmSpeciesMemberItems): a removed photo is excluded only
-        // when its removal actually committed (checks.flags); otherwise it stays a
-        // member and gets tagged.
-        var memberIds = grmSpeciesMemberItems(checks).map(function(p) { return p.id; });
-        // A species-call failure intentionally throws out of grmApply *before*
-        // close, leaving the modal open so the user can retry. Any flags were
-        // already committed idempotently above, so a retry re-runs only the
-        // species side. No try/catch — propagating the throw is the desired
-        // "keep modal open" behavior.
-        if (memberIds.length && await grmConfirmSpeciesCall(species, memberIds) === false) return false;
-        if (!sessionIsActive()) return false;
-      }
-    }
 
     // Browse-selection is a one-shot handoff: drop it on close regardless of
     // which side was committed, so a reload degrades to normal review instead

@@ -821,3 +821,78 @@ def test_detached_burst_preserves_mixed_authoritative_override(live_server, page
     detached = next(b for b in bursts if b["photo_ids"] == [second_pid])
     assert detached["species_override"] == mixed, detached["species_override"]
     assert _photos_with_species(live_server, photo_ids, encounter_species) == set()
+
+
+def test_combined_apply_cancel_preserves_flags_membership_and_species(live_server, page):
+    """Cancel the preview before either side of the combined apply writes."""
+    photo_ids = live_server['data']['photos'][:3]
+    _write_single_burst_cache(live_server, photo_ids)
+    _open_burst_modal(page, live_server)
+    assert page.evaluate('grmState.selected') == photo_ids[0]
+    page.keyboard.press('x')
+    assert photo_ids[0] in page.evaluate('Array.from(grmState.rejects)')
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{photo_ids[1]}"]').click()
+    page.locator('#grmRemoveBtn').click()
+    page.locator('#grmSpecies').fill('Northern Goshawk')
+    expect(page.locator('#grmApplyFlagsChk')).to_be_checked()
+    expect(page.locator('#grmConfirmSpeciesChk')).to_be_checked()
+    db = live_server['db']
+    before_flags = _photo_flags(live_server, photo_ids)
+    before_species = db.photo_species.get_species_for_photos(photo_ids)
+    before_cache = _read_cache(live_server)
+    before_history = db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0]
+    writes = []
+    page.on('request', lambda request: writes.append(request.url)
+            if request.method == 'POST' and (
+                '/api/pipeline/group/apply' in request.url or
+                '/api/encounters/species' in request.url and not request.post_data_json.get('preview')
+            ) else None)
+    page.locator('#grmApplyBtn').click()
+    preview = page.locator('#speciesConfirmationPreview')
+    expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    preview.locator('.species-preview-cancel').click()
+    expect(preview).to_have_count(0)
+    expect(page.locator('#grmApplyBtn')).to_be_enabled()
+    assert writes == []
+    assert _photo_flags(live_server, photo_ids) == before_flags
+    assert db.photo_species.get_species_for_photos(photo_ids) == before_species
+    assert _read_cache(live_server) == before_cache
+    assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == before_history
+    page.locator('#grmOverlay .grm-close').click()
+    expect(page.locator('#grmOverlay')).not_to_have_class(re.compile(r'\bopen\b'))
+    assert _photo_flags(live_server, photo_ids) == before_flags
+    assert _read_cache(live_server) == before_cache
+
+
+def test_combined_apply_species_split_relocates_pending_removal(live_server, page):
+    """The confirmed leading frame can move before the source burst is culled."""
+    ids = live_server['data']['photos'][:4]
+    _write_single_burst_cache(live_server, ids)
+    _open_burst_modal(page, live_server)
+    assert page.evaluate('grmState.selected') == ids[0]
+    page.keyboard.press('x')
+    assert ids[0] in page.evaluate('Array.from(grmState.rejects)')
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{ids[2]}"]').click()
+    page.locator('#grmRemoveBtn').click()
+    page.locator('#grmSpecies').fill('Northern Goshawk')
+    page.locator('#grmApplyBtn').click()
+    preview = page.locator('#speciesConfirmationPreview')
+    expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    expect(preview.locator('tbody tr')).to_have_count(3)
+    for pid in (ids[1], ids[3]):
+        preview.locator(f'input[data-photo-id="{pid}"]').uncheck()
+        expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    preview.locator('.species-preview-split').check()
+    expect(preview.locator('.species-preview-apply')).to_be_enabled()
+    with page.expect_response('**/api/pipeline/group/apply') as response:
+        preview.locator('.species-preview-apply').click()
+    assert response.value.status == 200
+    assert ids[0] in response.value.request.post_data_json['rejects'], response.value.request.post_data_json
+    expect(page.locator('#grmOverlay')).not_to_have_class(re.compile(r'\bopen\b'))
+    cache = _read_cache(live_server)
+    assert [enc['photo_ids'] for enc in cache['encounters']] == [ids[:1], ids[1:]]
+    assert {tuple(burst['photo_ids']) for burst in cache['encounters'][1]['bursts']} == {
+        (ids[1], ids[3]), (ids[2],),
+    }
+    assert _photo_flags(live_server, ids)[ids[0]] == 'rejected'
+    assert _photos_with_species(live_server, ids, 'Northern Goshawk') == {ids[0]}
