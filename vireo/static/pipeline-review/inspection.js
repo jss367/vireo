@@ -55,16 +55,6 @@ function openInspect(photoId) {
   inspectPhotoId = photoId;
 
   var label = (photo.label || '').toLowerCase();
-  var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
-
-  // Score components
-  /** @type {{key: 'focus_score' | 'exposure_score' | 'composition_score' | 'area_score' | 'noise_score'; name: string; weight: number; cls: string}[]} */ var scores = [
-    {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
-    {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
-    {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
-    {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
-    {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
-  ];
 
   var html = '<button class="inspect-close" onclick="closeInspect()">&times;</button>';
   html += '<div class="inspect-title">' + escapeHtml(photo.filename || 'Photo ' + photoId) + '</div>';
@@ -88,7 +78,7 @@ function openInspect(photoId) {
   if (photo.reject_reasons && photo.reject_reasons.length > 0) {
     html += '<div class="reject-reasons">';
     photo.reject_reasons.forEach(function(r) {
-      html += '<div class="reject-reason">&#9888; ' + r + '</div>';
+      html += '<div class="reject-reason">&#9888; ' + escapeHtml(describeReviewRejectReason(r)) + '</div>';
     });
     html += '</div>';
   }
@@ -102,22 +92,7 @@ function openInspect(photoId) {
     : [];
   html += buildSpeciesPredictionsHtml(photo, buildBurstConsensus(encPhotos), 'Encounter consensus', minConfidence / 100);
 
-  // Score waterfall
-  if (q !== null) {
-    html += '<div class="score-waterfall">';
-    html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
-    scores.forEach(function(s) {
-      var val = Number(requireReviewValue(photo)[s.key]) || 0;
-      var weighted = val * s.weight;
-      var pct = Math.round(val * 100);
-      html += '<div class="score-waterfall-row">';
-      html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
-      html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
-      html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
-      html += '</div>';
-    });
-    html += '</div>';
-  }
+  html += buildQualityEvidenceHtml(photo);
 
   // Encounter context filmstrip. Under a Folder/Collection scope, omit
   // thumbnails for photos outside it; openInspect() would refuse them anyway.

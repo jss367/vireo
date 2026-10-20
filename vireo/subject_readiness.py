@@ -75,6 +75,7 @@ def mark_analysis_readiness(photo: dict[str, Any]) -> bool:
     photo["analysis_reasons"] = readiness["reasons"]
     photo["selection_eligible"] = readiness["eligible"]
     if not readiness["eligible"]:
+        photo.pop("focus_evidence", None)
         for field in SCORE_FIELDS:
             photo[field] = None
         photo["reject_reasons"] = []

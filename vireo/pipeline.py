@@ -1016,7 +1016,7 @@ def _clear_derived_scores(photos):
         "focus_score", "exposure_score", "composition_score",
         "area_score", "noise_score", "quality_composite",
         "reject_reasons", "label", "rarity_protected",
-        "analysis_status", "analysis_reasons", "selection_eligible", "eye_focus_score",
+        "analysis_status", "analysis_reasons", "selection_eligible", "eye_focus_score", "focus_evidence",
     ]
     for p in photos:
         for k in derived_keys:
@@ -1447,6 +1447,8 @@ def _serialize_encounter(enc, prior_empty_photo_ids):
     # pipeline-review sidebar can show how each encounter was formed).
     if "trace" in enc:
         s_enc["trace"] = enc["trace"]
+    if "focus_cohorts" in enc:
+        s_enc["focus_cohorts"] = enc["focus_cohorts"]
     if "bursts" in enc:
         s_enc["bursts"] = []
         for burst in enc["bursts"]:

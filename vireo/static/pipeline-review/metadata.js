@@ -216,7 +216,6 @@ function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, t
 function buildPipelineMetadataHtml(photo) {
   var enc = currentReviewResults().encounters[grmState.encIdx ?? -1];
   var label = (photo.label || '').toLowerCase();
-  var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
 
   var html = '';
 
@@ -230,7 +229,7 @@ function buildPipelineMetadataHtml(photo) {
   if (photo.reject_reasons && photo.reject_reasons.length > 0) {
     html += '<div class="reject-reasons">';
     photo.reject_reasons.forEach(function(r) {
-      html += '<div class="reject-reason">&#9888; ' + r + '</div>';
+      html += '<div class="reject-reason">&#9888; ' + escapeHtml(describeReviewRejectReason(r)) + '</div>';
     });
     html += '</div>';
   }
@@ -282,29 +281,7 @@ function buildPipelineMetadataHtml(photo) {
   var consRows = buildBurstConsensus(_grmVisibleItems());
   html += buildSpeciesPredictionsHtml(photo, consRows, 'Burst consensus', 0);
 
-  // Score waterfall
-  /** @type {{name: string; key: 'focus_score' | 'exposure_score' | 'composition_score' | 'area_score' | 'noise_score'; weight: number; cls: string}[]} */ var scores = [
-    {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
-    {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
-    {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
-    {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
-    {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
-  ];
-  if (q !== null) {
-    html += '<div class="score-waterfall">';
-    html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
-    scores.forEach(function(s) {
-      var val = photo[s.key] || 0;
-      var weighted = val * s.weight;
-      var pct = Math.round(val * 100);
-      html += '<div class="score-waterfall-row">';
-      html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
-      html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
-      html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
-      html += '</div>';
-    });
-    html += '</div>';
-  }
+  html += buildQualityEvidenceHtml(photo);
 
   // Raw feature table
   html += '<table class="feature-table">';
@@ -329,4 +306,75 @@ function buildPipelineMetadataHtml(photo) {
   html += '</table>';
 
   return html;
+}
+
+/** @param {ReviewPhoto} photo */
+function buildQualityEvidenceHtml(photo) {
+  var html = '';
+  if (hasQualityScore(photo)) {
+    /** @type {{name: string; key: 'focus_score' | 'exposure_score' | 'composition_score' | 'area_score' | 'noise_score'; weight: number; cls: string}[]} */ var scores = [
+      {name: 'Relative focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
+      {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
+      {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
+      {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
+      {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
+    ];
+    html += '<div class="score-waterfall"><div>Quality ranking score: ' + Number(photo.quality_composite).toFixed(3) + '</div>';
+    scores.forEach(function(s) {
+      var val = Number(photo[s.key]) || 0;
+      html += '<div class="score-waterfall-row"><span class="score-wf-label">' + s.name + ' (' + (s.weight * 100) + '%)</span>';
+      html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + Math.round(val * 100) + '%"></div></div>';
+      html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + (val * s.weight).toFixed(3) + ')</span></div>';
+    });
+    html += '</div>';
+  }
+  return html + buildRelativeFocusHtml(photo);
+}
+
+/** @param {ReviewPhoto} photo */
+function buildRelativeFocusHtml(photo) {
+  var evidence = photo.focus_evidence;
+  var html = '<section class="relative-focus-evidence" aria-label="Relative focus evidence"><strong>Relative focus evidence</strong>';
+  if (!evidence) {
+    html += '<p>Measurement basis and comparison group were not recorded for this saved score. Rerun scoring to inspect them.</p>';
+    if (photo.eye_tenengrad != null) html += '<p>Cached eye Tenengrad: ' + Number(photo.eye_tenengrad).toFixed(2) + '</p>';
+  } else {
+    var basis = evidence.basis === 'eye' ? 'Eye window (multiple scales)' : 'Subject mask (multiple scales)';
+    html += '<p>Measurement basis: ' + basis + '. Raw Tenengrad: ' + evidence.measurement.toFixed(2) + ' (mean squared image gradients).</p>';
+    html += '<p>Within-group percentile: ' + (evidence.percentile * 100).toFixed(2) + '% among ' + evidence.cohort_size +
+      ' photos with current subject analysis and the same measurement basis in the encounter, including this photo.</p>';
+    html += evidence.method === 'eye_percentile'
+      ? '<p>Relative focus score equals the eye percentile. Ties receive their midpoint rank; a single photo receives 50%.</p>'
+      : '<p>Relative focus score = 70% subject percentile + 30% subject / (subject + background) Tenengrad. Background Tenengrad: ' +
+        Number(evidence.background_measurement).toFixed(2) + '. Measured zero subject gradients receive a score of 0. Ties receive their midpoint rank; a single photo receives 50%.</p>';
+    html += buildFocusCohortHtml(photo, evidence);
+  }
+  html += '<p>Absolute sharpness: unvalidated. Relative scores and raw gradients do not establish that a photo is out of focus. ' +
+    'Regrouping can change rank; exposure, texture, noise, processing and the selected region can change Tenengrad. Inspect the image before deciding.</p></section>';
+  return html;
+}
+
+/** @param {ReviewPhoto} photo @param {ReviewFocusEvidence} evidence */
+function buildFocusCohortHtml(photo, evidence) {
+  var encounter = findEncounterForPhoto(photo.id);
+  var cohort = encounter && encounter.focus_cohorts && encounter.focus_cohorts[evidence.cohort_key];
+  if (!cohort || cohort.size !== evidence.cohort_size || cohort.photo_ids.indexOf(photo.id) < 0) {
+    return '<p>Exact comparison membership is unavailable in this saved review. Rerun scoring to refresh it.</p>';
+  }
+  var names = cohort.photo_ids.map(function(id) {
+    var peer = findPhotoInResults(id);
+    return escapeHtml(peer ? peer.filename : 'Photo') + ' (photo ' + id + ')';
+  });
+  var html = '<details><summary>Comparison group: ' + cohort.size + ' encounter photos</summary><p>' + names.join(', ') + '</p>';
+  if (cohort.unidentified_count) html += '<p>' + cohort.unidentified_count + ' additional measurements have no photo identifier.</p>';
+  return html + '</details>';
+}
+
+/** @param {string} reason */
+function describeReviewRejectReason(reason) {
+  if (/^(out_of_focus|eye_soft)\b/.test(reason)) {
+    return 'Saved relative-focus warning: absolute defocus was not validated. Rerun scoring to refresh this suggestion.';
+  }
+  if (reason.startsWith('low_quality_without_focus')) return reason.replace('low_quality_without_focus', 'Quality floor with relative focus replaced by a neutral midpoint');
+  return reason;
 }

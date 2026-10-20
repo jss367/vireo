@@ -558,7 +558,7 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:12px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Quality Scoring Weights</div>
       <div class="setting-row">
-        <div class="setting-label">Focus</div>
+        <div class="setting-label">Relative focus rejection (inactive)<small>Relative rank cannot establish absolute defocus.</small></div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWFocus" min="0" max="100" value="45"
                  style="width:120px;accent-color:var(--accent);"
@@ -614,9 +614,9 @@
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Focus</div>
+        <div class="setting-label">Relative focus rejection (inactive)<small>Relative rank cannot establish absolute defocus.</small></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectFocus" min="0" max="100" value="35"
+          <input type="range" id="cfgRejectFocus" disabled min="0" max="100" value="35"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectFocusVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectFocusVal">35%</span>
@@ -645,7 +645,7 @@
       <div class="setting-row">
         <div class="setting-label">
           Enable miss detection
-          <small>After regrouping, flag frames where no subject was detected, the subject is clipped/tiny, or the subject is out of focus. Surfaced on the /misses page and in pipeline review.</small>
+          <small>After regrouping, flag frames where no subject was detected, the subject is clipped/tiny, or image gradients suggest focus review. Surfaced on the /misses page and in pipeline review.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="checkbox" id="cfgMissEnabled" checked
@@ -678,8 +678,8 @@
       </div>
       <div class="setting-row">
         <div class="setting-label">
-          OOF ratio (subject / background)
-          <small>When the subject's Tenengrad is below this ratio of the background's, flag as "out of focus".</small>
+          Focus review ratio (subject / background)
+          <small>When subject Tenengrad is below this ratio of background Tenengrad, suggest focus review. This heuristic does not establish absolute defocus.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgMissOofRatio" min="30" max="80" step="5" value="50"
@@ -738,11 +738,11 @@
       </div>
       <div class="setting-row">
         <div class="setting-label">
-          Eye-soft reject threshold
-          <small>Photos where the eye is confidently localized but ranks below this percentile within the encounter are rejected as 'sharp body, soft eye'.</small>
+          Relative eye rejection (inactive)
+          <small>This saved legacy setting is inactive. Eye percentile ranks do not establish absolute defocus.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectEyeFocus" min="0" max="100" value="35"
+          <input type="range" id="cfgRejectEyeFocus" disabled min="0" max="100" value="35"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectEyeFocusVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectEyeFocusVal">35%</span>

@@ -222,7 +222,8 @@ def test_reject_highlight_clipping():
 def test_reject_low_composite():
     from scoring import hard_reject_reasons
 
-    photo = _make_base_photo(crop_complete=0.8)
+    photo = _make_base_photo(crop_complete=0.8, exposure_score=0., composition_score=0.,
+                             area_score=0., noise_score=0.)
     reasons = hard_reject_reasons(photo, 0.3)
     assert any("low_quality" in r for r in reasons)
 
@@ -421,8 +422,8 @@ def test_body_only_focus_not_diluted_by_eye_capable_peers():
     )
 
 
-def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
-    """reject_eye_soft rule: eye is the weak link even if body is sharp."""
+def test_relative_eye_rank_is_not_an_absolute_reject_signal():
+    """A lower eye rank does not establish absolute defocus."""
     from scoring import score_encounter
 
     soft_eye = _make_base_photo(
@@ -438,7 +439,7 @@ def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
         config={"eye_detect_enabled": True, "reject_eye_focus": 0.35},
     )
 
-    assert any("eye_soft" in r for r in soft_eye.get("reject_reasons", []))
+    assert soft_eye["reject_reasons"] == []
     assert not any("eye_soft" in r for r in sharp_eye.get("reject_reasons", []))
 
 
@@ -554,12 +555,8 @@ def test_score_encounter_nested_pipeline_disables_eye_when_false():
     assert "eye_focus_score" not in b
 
 
-def test_score_encounter_nested_pipeline_reject_thresholds():
-    """A user-configured ``reject_eye_focus`` nested under ``pipeline``
-    must reach scoring the same way the flat shape does. Otherwise
-    the batch-review paths silently apply DEFAULTS on the reject rule
-    despite the workspace's tuning.
-    """
+def test_legacy_nested_focus_threshold_cannot_reject_by_percentile():
+    """Legacy saved thresholds remain compatible but cannot reject by rank."""
     from scoring import score_encounter
 
     soft_eye = _make_base_photo(
@@ -567,9 +564,6 @@ def test_score_encounter_nested_pipeline_reject_thresholds():
     )
     enc = {"photos": [soft_eye]}
 
-    # Set threshold high so eye_focus_score (percentile rank in a single-
-    # photo cohort = 0.5) reliably falls below it — proves the value
-    # from the nested pipeline dict actually reached scoring.
     score_encounter(
         enc,
         config={"pipeline": {
@@ -578,9 +572,5 @@ def test_score_encounter_nested_pipeline_reject_thresholds():
         }},
     )
 
-    assert any(
-        "eye_soft" in r for r in soft_eye.get("reject_reasons", [])
-    ), (
-        f"nested reject_eye_focus threshold must reach scoring; got "
-        f"reasons={soft_eye.get('reject_reasons')!r}"
-    )
+    assert soft_eye["eye_focus_score"] == 0.5
+    assert soft_eye["reject_reasons"] == []
