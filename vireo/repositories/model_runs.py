@@ -823,6 +823,19 @@ class ModelRunsRepository:
             (photo_id,),
         ).fetchone()
 
+    def detector_run_box_count(self, photo_id: int, detector_model: str) -> int | None:
+        """Persisted box count; None means no completed run was recorded.
+
+        Callers compare this with actual raw boxes before treating zero as
+        a completed detector result. A positive count with absent rows is
+        incomplete persistence, not a completed negative detection.
+        """
+        row = self.conn.execute(
+            "SELECT box_count FROM detector_runs WHERE photo_id=? AND detector_model=?",
+            (photo_id, detector_model),
+        ).fetchone()
+        return row["box_count"] if row else None
+
     def detector_runtime_fingerprint(
         self, photo_id: int, detector_model: str,
     ) -> str | None:

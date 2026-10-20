@@ -574,3 +574,25 @@ def test_score_encounter_nested_pipeline_reject_thresholds():
         f"nested reject_eye_focus threshold must reach scoring; got "
         f"reasons={soft_eye.get('reject_reasons')!r}"
     )
+
+
+
+def test_cached_selected_masks_follow_file_mask_focus_rejection_policy():
+    """Cache-backed subject and eye evidence must obey the same rejection gates."""
+    from scoring import score_encounter
+    for eye_enabled in (False, True):
+        baseline = [
+            _make_base_photo(subject_tenengrad=1000, bg_tenengrad=50000, eye_tenengrad=1000 if eye_enabled else None),
+            _make_base_photo(subject_tenengrad=50000, eye_tenengrad=50000 if eye_enabled else None),
+        ]
+        cached = [{**photo, "mask_path": None, "subject_mask_available": True} for photo in baseline]
+        config = {"eye_detect_enabled": eye_enabled}
+        score_encounter({"photos": baseline}, config=config)
+        score_encounter({"photos": cached}, config=config)
+        assert cached[0]["label"] == "REJECT"
+        assert any(r.startswith("out_of_focus") for r in cached[0]["reject_reasons"])
+        assert any(r.startswith("eye_soft") for r in cached[0]["reject_reasons"]) == eye_enabled
+        for actual, expected in zip(cached, baseline, strict=True):
+            assert actual["reject_reasons"] == expected["reject_reasons"]
+            assert actual["focus_score"] == expected["focus_score"]
+            assert actual["label"] == expected["label"]

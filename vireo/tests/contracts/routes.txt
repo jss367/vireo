@@ -432,6 +432,7 @@ POST         /api/storage/retention
 POST         /api/sync/discard
 POST         /api/sync/location-writes
 POST         /api/system/install-exiftool
+POST         /api/system/mcp-check
 POST         /api/undo
 POST         /api/v1/batch/flag
 POST         /api/v1/encounters/species

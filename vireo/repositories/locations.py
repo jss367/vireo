@@ -916,6 +916,24 @@ class LocationRepository:
 
     # -- reverse-geocode cache -----------------------------------------------
 
+    def cached_place_details(self, place_ids):
+        """Newest cached response per exact place id, without a network lookup.
+
+        Export uses only typed components that also match the current catalog
+        hierarchy; a cache entry's coordinates never replace effective GPS.
+        """
+        result = {}
+        for chunk in self._chunks(list(dict.fromkeys(place_ids))):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT place_id, response FROM place_reverse_geocode_cache "
+                f"WHERE place_id IN ({placeholders}) ORDER BY fetched_at DESC, rowid DESC",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                result.setdefault(row["place_id"], row["response"])
+        return result
+
     def reverse_geocode_cache_get(self, lat_grid, lng_grid):
         """Return ``{"place_id", "response"}`` cached at a grid cell, or None."""
         row = self.conn.execute(
