@@ -2197,10 +2197,7 @@ class ImportService:
         the exact same scope for their chained pipeline job.
         """
         collection_name = "Import " + datetime.now().strftime("%Y-%m-%d %H:%M")
-        collection_id = thread_db.collections.add(
-            collection_name,
-            json.dumps([{"field": "photo_ids", "value": photo_ids}]),
-        )
+        collection_id = thread_db.collections.add_import(collection_name, photo_ids)
         return collection_id, collection_name
 
     def _record_import_collection(

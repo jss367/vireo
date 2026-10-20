@@ -16,6 +16,7 @@ import config as cfg
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
 from services import browse_queries, workspace_config
+from services.collection_coverage import collection_coverage
 from services.visual_scope import (
     collection_row,
     collection_rules_state,
@@ -201,7 +202,7 @@ def _collection_photos_page(
     return photos, total, stack_count
 
 
-def create_collections_blueprint(get_db, json_error):
+def create_collections_blueprint(get_db, json_error, *, missing_originals_payload=None):
     """Build the collections blueprint.
 
     ``MAX_PER_PAGE`` is the page-size cap shared with the ``/api/photos``
@@ -209,6 +210,22 @@ def create_collections_blueprint(get_db, json_error):
     to the same bound.
     """
     blueprint = Blueprint("collections", __name__)
+
+    @blueprint.route("/api/collections/<int:collection_id>/coverage")
+    def api_collection_coverage(collection_id):
+        if collection_id > 9223372036854775807:
+            return json_error("collection_id is outside SQLite's signed 64-bit integer range", 400)
+        db = get_db()
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
+        if err is not None:
+            return err
+        snapshot = missing_originals_payload(db, None) if missing_originals_payload else {}
+        try:
+            return jsonify(collection_coverage(db, collection_id, snapshot))
+        except LookupError as exc:
+            return json_error(str(exc), 404)
+        except ValueError as exc:
+            return json_error(f"Collection rules cannot be resolved: {exc}", 400)
 
     @blueprint.route("/api/collections")
     def api_collections():
