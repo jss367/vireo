@@ -2,11 +2,12 @@
 // to carry inline handlers and the delegated card clicks, then loads the batch.
 // ES module.
 
+import { bindFocusControls } from './focus.js';
 import { byId, state } from './state.js';
 import { analyzeSubjects, changeSubject, startComparison } from './subjects.js';
 import { bindCardClicks } from './render.js';
 import {
-  flagBest, flagBestRejectRest, loadBatch, openInspectedLightbox, openReviewBurst,
+  flagBest, flagBestRejectRest, loadBatch, openReviewBurst,
 } from './actions.js';
 
 /** @param {string} id @param {() => unknown} action */
@@ -18,7 +19,7 @@ onClick('backToBrowseBtn', function() { window.location.href = '/browse'; });
 onClick('reviewBtn', openReviewBurst);
 onClick('flagBtn', flagBest);
 onClick('rejectBtn', flagBestRejectRest);
-onClick('inspectImg', openInspectedLightbox);
+bindFocusControls();
 onClick('compareSubjectsBtn', startComparison);
 onClick('analyzeSubjectsBtn', analyzeSubjects);
 byId('subjectChoices').addEventListener('change', changeSubject);

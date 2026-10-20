@@ -447,7 +447,7 @@ def _working_copy(app, db, pid, size=(3000, 2000), color=(40, 90, 160)):
     return path
 
 
-def test_focus_crop_centres_on_the_eye_at_native_scale(app_and_db):
+def test_focus_crop_manual_native_scale_does_not_trust_unbound_eye(app_and_db):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid)
@@ -457,11 +457,13 @@ def test_focus_crop_centres_on_the_eye_at_native_scale(app_and_db):
     )
     db.conn.commit()
 
+    db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .2, "h": .2}, "confidence": .9, "category": "animal"}], detector_model="MDV6")
     client = app.test_client()
-    resp = client.get(f"/photos/{pid}/focus-crop?size=256&basis=eye")
+    assert client.get(f"/photos/{pid}/focus-crop?size=256&basis=eye").status_code == 404
+    resp = client.get(f"/photos/{pid}/focus-crop?size=256&center=.5,.5")
     assert resp.status_code == 200
     assert resp.content_type == "image/jpeg"
-    assert resp.headers["X-Vireo-Focus-Basis"] == "eye"
+    assert resp.headers["X-Vireo-Focus-Basis"] == "point"
     assert resp.headers["X-Vireo-Focus-Center"] == "0.5000,0.5000"
     assert resp.headers["X-Vireo-Focus-Scale"] == "1"
     assert resp.headers["X-Vireo-Focus-Mask"] == "0"
@@ -530,7 +532,9 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
             mask.putpixel((x, y), 255)
     mask_path = os.path.join(masks_dir, f"{pid}.png")
     mask.save(mask_path)
-    db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", (mask_path, pid))
+    db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .2, "h": .2}, "confidence": .9, "category": "animal"}], detector_model="MDV6")
+    db.masks_features.upsert_mask(pid, "test", mask_path, "MDV6", (.4, .4, .2, .2))
+    db.conn.execute("UPDATE photos SET mask_path = ?, active_mask_variant='test' WHERE id = ?", (mask_path, pid))
     db.conn.commit()
 
     client = app.test_client()
@@ -545,6 +549,7 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
     assert left < 110
 
     # A mask path outside the masks directory is never read.
+    db.masks_features.upsert_mask(pid, "test", "/etc/hosts", "MDV6", (.4, .4, .2, .2))
     db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("/etc/hosts", pid))
     db.conn.commit()
     resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1")
@@ -587,7 +592,15 @@ def test_v1_aliases_cover_the_burst_endpoints(app_and_db):
     assert client.get(f"/api/v1/photos/{pids[0]}/burst-evidence", headers=headers).status_code == 200
     assert client.get(f"/api/v1/folders/{folder_id}/bursts", headers=headers).status_code == 200
     _working_copy(app, db, pids[0])
-    resp = client.get(f"/api/v1/photos/{pids[0]}/focus-crop?size=128", headers=headers)
+    # Quality fixtures now carry a current mask prompt and detection.
+    automatic = client.get(f"/api/v1/photos/{pids[0]}/focus-crop?size=128", headers=headers)
+    assert automatic.status_code == 200
+    assert automatic.headers["X-Vireo-Focus-Basis"] == "subject"
+    db.conn.execute("UPDATE photo_masks SET prompt_x=.2 WHERE photo_id=?", (pids[0],))
+    db.commit()
+    # Invalidating that prompt must still reject automatic evidence via the alias.
+    assert client.get(f"/api/v1/photos/{pids[0]}/focus-crop?size=128", headers=headers).status_code == 404
+    resp = client.get(f"/api/v1/photos/{pids[0]}/focus-crop?size=128&center=.5,.5", headers=headers)
     assert resp.status_code == 200
     assert resp.content_type == "image/jpeg"
     body = client.post(
