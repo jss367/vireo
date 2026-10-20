@@ -251,3 +251,20 @@ def test_preview_binds_inferred_taxon_when_target_keyword_has_not_been_created(a
     db.commit()
     assert apply(client, body, preview).status_code == 409
     assert db.keywords.species_confirmation_target('Eared Grebe')['keyword'] is None
+
+
+def test_v1_species_confirmation_alias_preserves_undo_contract(app_and_db):
+    app, db = app_and_db
+    ids, _ = seed(app, db, 'Western Grebe')
+    client = app.test_client()
+    body = {'species': 'Eared Grebe', 'photo_ids': ids, 'add': True}
+    headers = {'X-Vireo-Token': 'test-token-123'}
+    preview = client.post('/api/v1/encounters/species', json={**body, 'preview': True}, headers=headers)
+    assert preview.status_code == 200, preview.get_json()
+    result = client.post('/api/v1/encounters/species', json={
+        **body, 'preview_token': preview.get_json()['preview_token'],
+    }, headers=headers)
+    assert result.status_code == 200, result.get_json()
+    assert all('Eared Grebe' in names for names in db.photo_species.get_species_for_photos(ids).values())
+    assert client.post('/api/undo').status_code == 200
+    assert all(names == ['Western Grebe'] for names in db.photo_species.get_species_for_photos(ids).values())
