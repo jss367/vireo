@@ -118,6 +118,31 @@ test('watch points to the jobs panel when the stream drops', () => {
   same(toasts, [['Could not follow the export to the end. Its result is in the jobs panel.', 'warning']]);
 });
 
+test('metadata-free exports are explicitly identified', () => {
+  const result = outcome({status: 'completed', result: {exported: 1,
+    metadata: {metadata_free: true, categories: {}}}});
+  assert.match(result.message, /Metadata: none selected \(metadata-free export\)/);
+  assert.equal(result.type, 'success');
+});
+
+test('metadata counts distinguish writes, unavailable values and failures', () => {
+  const result = outcome({status: 'completed', result: {exported: 2,
+    metadata: {metadata_free: false, categories: {
+      location: {requested: 4, written: 1, unavailable: 1, failed: 1, not_attempted: 1},
+    }}}});
+  assert.match(result.message, /Location \(GPS\) 1\/4 written, 1 unavailable, 1 failed, 1 not attempted/);
+  assert.equal(result.type, 'warning');
+});
+
+test('successful metadata writes are shown separately from image counts', () => {
+  const result = outcome({status: 'completed', result: {exported: 2,
+    metadata: {metadata_free: false, categories: {
+      species: {requested: 2, written: 2, unavailable: 0, failed: 0, not_attempted: 0},
+    }}}});
+  assert.match(result.message, /Species keywords 2\/2 written/);
+  assert.equal(result.type, 'success');
+});
+
 let failed = 0;
 for (const [name, body] of tests) {
   try { body(); console.log('ok - ' + name); }
