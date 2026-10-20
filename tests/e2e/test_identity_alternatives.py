@@ -86,3 +86,19 @@ def test_failed_save_keeps_evidence_and_can_retry(live_server, page):
     page.unroute('**/api/identity-alternatives')
     page.locator('#identitySave').click()
     expect(page.locator('#identityAlternativesGroups article')).to_have_count(1)
+
+
+def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page):
+    ids = open_panel(live_server, page)
+    db = live_server['db']
+    kid = db.add_keyword('Tropical Kingbird', is_species=True)
+    db.tag_photo(ids[0], kid)
+    before = db.photo_species.get_species_for_photos(ids)
+    other = db.create_workspace('Another shared workspace')
+    db.add_workspace_folder(other, db.photos.get(ids[0])['folder_id'])
+    db.workspaces.update(other, last_opened_at='2099-01-01T00:00:00')
+    page.locator('#identitySave').click()
+    expect(page.locator('#identityAlternativesStatus')).to_contain_text('The active workspace changed')
+    expect(page.locator('#identitySave')).to_be_disabled()
+    assert db.identity_alternatives.photo_ids() == set()
+    assert db.photo_species.get_species_for_photos(ids) == before

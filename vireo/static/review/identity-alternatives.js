@@ -5,6 +5,8 @@
   /** @type {IdentityGroup[]} */ var groups = [];
   var epoch = 0;
   var busy = false;
+  /** @type {number|null} */ var workspaceId = null;
+  var workspaceChanged = false;
   /** @type {string|null} */ var editing = null;
 
   /** @param {string} id */
@@ -65,7 +67,7 @@
     var el = document.createElement('button');
     el.type = 'button';
     el.textContent = label;
-    el.disabled = busy;
+    el.disabled = busy || workspaceChanged;
     el.addEventListener('click', action);
     return el;
   }
@@ -76,7 +78,7 @@
     var selection = document.createElement('select');
     selection.multiple = true;
     selection.size = Math.min(6, group.photo_ids.length);
-    selection.disabled = busy;
+    selection.disabled = busy || workspaceChanged;
     group.photo_ids.forEach(function(id) {
       var option = document.createElement('option');
       option.value = String(id);
@@ -97,7 +99,7 @@
     function update() {
       var selected = selection.selectedOptions.length;
       count.textContent = selected + ' of ' + group.photo_ids.length + ' photos selected to resolve. Other frames remain unresolved.';
-      actions.forEach(function(action) { action.disabled = busy || selected === 0; });
+      actions.forEach(function(action) { action.disabled = busy || workspaceChanged || selected === 0; });
     }
     selection.addEventListener('change', update);
     article.appendChild(button('Select all frames to resolve', function() {
@@ -140,8 +142,16 @@
   async function load() {
     var requestEpoch = ++epoch;
     try {
-      var result = /** @type {{groups:IdentityGroup[],photo_count:number}} */ (await safeFetch('/api/identity-alternatives', {}, {toast: false}));
+      var result = /** @type {{groups:IdentityGroup[],photo_count:number,workspace_id:number}} */ (await safeFetch('/api/identity-alternatives', {}, {toast: false}));
       if (requestEpoch !== epoch) return;
+      if (workspaceId !== null && result.workspace_id !== workspaceId) {
+        workspaceChanged = true;
+        status('The active workspace changed. Reload this page before editing identification.');
+        /** @type {HTMLButtonElement} */ (element('identitySave')).disabled = true;
+        render();
+        return;
+      }
+      workspaceId = result.workspace_id;
       groups = result.groups;
       element('identityAlternativesCount').textContent = '(' + result.photo_count + ' photos in workspace)';
       render();
@@ -151,7 +161,7 @@
   }
   /** @param {string} url @param {Record<string,unknown>} body */
   async function write(url, body) {
-    if (busy) return;
+    if (busy || workspaceChanged || workspaceId === null) return;
     busy = true;
     ++epoch;
     /** @type {HTMLButtonElement} */ (element('identitySave')).disabled = true;
@@ -159,7 +169,8 @@
     status('Saving identification…');
     try {
       var result = /** @type {{warning?:string}} */ (await safeFetch(url, {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({}, body, {observed_workspace_id: workspaceId})),
       }));
       reset();
       /** @type {HTMLDetailsElement} */ (element('identityAlternativesEditor')).open = false;

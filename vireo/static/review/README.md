@@ -91,7 +91,8 @@ changing this code:
 The independent `identity-alternatives.js` panel loads workspace-wide review
 groups from `GET /api/identity-alternatives`, including when classification
 has no prediction rows. Each group contains `group_id`, `photo_ids`,
-`candidates`, `reason`, and `missing_evidence`. The form's photo chooser takes
+`candidates`, `reason`, and `missing_evidence`; the response also names its
+`workspace_id`. The form's photo chooser takes
 the displayed cards and their burst members within the current collection;
 the user explicitly selects the frames before saving.
 
@@ -102,6 +103,10 @@ through `POST /api/identity-alternatives/resolve` sends that group ID, a
 no frames selected; candidate buttons become available after selecting frames.
 The explicit Select all frames to resolve button includes the whole group.
 Unselected frames retain their alternatives and evidence in unresolved review.
+Both writes carry `observed_workspace_id`; under the writer lock the request
+checks both its cached workspace and the persisted latest activation. A switch
+in another tab returns 409 without touching tags or review state. The page pins
+its initial workspace and disables edits if a refresh detects a switch.
 Both writes use the shared decision lock and regroup lock. The catalog's `identity_alternatives` edit
 history action replays the uncertainty and candidate-keyword delta together,
 including XMP keyword intents and original association provenance. Other

@@ -17,14 +17,23 @@ def create_identity_alternatives_blueprint(get_db, json_error, db_path):
 
     @blueprint.route('/api/identity-alternatives')
     def api_identity_alternatives():
-        groups = identities.groups_for_review(get_db())
-        return jsonify(groups=groups, photo_count=sum(len(group['photo_ids']) for group in groups))
+        db = get_db()
+        groups = identities.groups_for_review(db)
+        return jsonify(groups=groups, photo_count=sum(len(group['photo_ids']) for group in groups),
+                       workspace_id=db.require_workspace_id())
 
     def _write(resolve):
         db = get_db()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return json_error('request body must be a JSON object')
+        observed_workspace = body.get('observed_workspace_id')
+        if type(observed_workspace) is not int:
+            return json_error('observed_workspace_id is required from the reviewed workspace')
+        if observed_workspace != db.require_workspace_id() or (
+            observed_workspace != db.workspaces.most_recently_opened_id()
+        ):
+            return json_error('The active workspace changed; reload this page before editing identification', 409)
         ids = body.get('photo_ids')
         if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_SELECTION_PHOTOS:
             return json_error(f'photo_ids must contain 1 to {MAX_SELECTION_PHOTOS} ids')

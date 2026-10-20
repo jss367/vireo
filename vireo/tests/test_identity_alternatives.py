@@ -10,20 +10,24 @@ CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
 def save(client, ids, **changes):
+    workspace_id = client.get('/api/identity-alternatives').get_json()['workspace_id']
     return client.post('/api/identity-alternatives', json={
         'photo_ids': ids, 'candidates': CANDIDATES,
+        'observed_workspace_id': workspace_id,
         'reason': 'Still photos do not distinguish the pair reliably',
         'missing_evidence': 'A recording of the call', **changes,
     })
 
 
 def current_group(client):
-    return client.get('/api/identity-alternatives').get_json()['groups'][0]
+    payload = client.get('/api/identity-alternatives').get_json()
+    return {**payload['groups'][0], 'observed_workspace_id': payload['workspace_id']}
 
 
 def resolve(client, group, **changes):
     return client.post('/api/identity-alternatives/resolve', json={
         'photo_ids': group['photo_ids'], 'group_id': group['group_id'],
+        'observed_workspace_id': group['observed_workspace_id'],
         'species': CANDIDATES[0], **changes,
     })
 
@@ -276,3 +280,41 @@ def test_process_cache_and_summary_do_not_claim_unresolved_candidates(app_and_db
     assert client.post('/api/undo').status_code == 200
     restored = load_results_raw(str(tmp_path), db.active_workspace_id)
     assert restored['photos'][0]['confirmed_species_list'] == [CANDIDATES[0]]
+
+
+@pytest.mark.parametrize('operation', ['create', 'resolve'])
+def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_db, tmp_path, monkeypatch, operation):
+    from db import Database
+    from services import prediction_decisions
+    app, db = app_and_db
+    client = app.test_client()
+    original_ws = db.require_workspace_id()
+    kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.tag_photo(1, kid)
+    group = None
+    if operation == 'resolve':
+        assert save(client, [1]).status_code == 200
+        group = current_group(client)
+    other_ws = db.create_workspace('Shared alternate workspace')
+    db.add_workspace_folder(other_ws, db.photos.get(1)['folder_id'])
+    before_species = db.photo_species.get_species_for_photos([1])
+    before_state = db.identity_alternatives.for_photos([1])
+    history_before = db.edit_history.latest_undoable()
+    original_begin = prediction_decisions.begin_prediction_decision
+
+    def switch_before_lock(request_db, *, json_error):
+        assert request_db.require_workspace_id() == original_ws
+        with Database(str(tmp_path / 'test.db')) as other:
+            other.workspaces.update(other_ws, last_opened_at='2099-01-01T00:00:00')
+        # The request connection still caches the old id here. The writer
+        # must read persisted activation after BEGIN IMMEDIATE, too.
+        assert request_db.require_workspace_id() == original_ws
+        return original_begin(request_db, json_error=json_error)
+
+    monkeypatch.setattr(prediction_decisions, 'begin_prediction_decision', switch_before_lock)
+    response = resolve(client, group) if group else save(client, [1])
+    assert response.status_code == 409
+    assert 'workspace changed' in response.get_json()['error'].lower()
+    assert db.photo_species.get_species_for_photos([1]) == before_species
+    assert db.identity_alternatives.for_photos([1]) == before_state
+    assert db.edit_history.latest_undoable() == history_before
