@@ -29,6 +29,9 @@ separate implementations: a fix in one does not reach the other.
 | `group-loupe.js` | Loupe lock, eye crosshair, hover zoom, align drags, card transforms, and strip 1:1 |
 | `group-cards.js` | Card pan drags, selection clicks, offset resets, and box sharpness |
 | `group-changes.js` | Zone moves, the Apply label, applying the burst, and the modal's keyboard |
+| `queue-state.js` | Browser-local, workspace-and-filter-scoped resume state; unique-photo inspection progress, separate from catalog flags |
+| `queue-focus.js` | Upright full-frame/manual center and native 512-pixel crop inspection; source and pixel-scale headers |
+| `queue.js` | Sequential per-photo inspection, retained subjects and explicit conflict-checked catalog flag changes |
 | `boot.js` | The shortcut config fetch, the bootstrap requests and filter bar, and every listener |
 
 Load `boot.js` last. The other files declare functions and initialize state;
@@ -107,3 +110,40 @@ clipboard completion and native-menu adapters.
 `tests/e2e/test_review_photo_actions.py` covers real grid, Group Review, lightbox
 and native-menu entry points, failed requests and retry recovery in Chromium
 and WebKit.
+
+## Resumable photo inspection
+
+The optional side-by-side inspection panel includes every matching photo,
+including burst members that the grid collapses. A photo with several matching
+predictions is counted once. `rqScopeKey()` includes workspace, collection,
+model, status tab, confidence, label fingerprint, deep-linked photo and the
+universal filter's effective rules and visual clause. Sort changes retain the
+photo anchor. The universal filter already persists its expression per workspace;
+`vireo:review-view:<workspace>` remembers the additional Review controls and
+the effective filter expression alongside the photo anchor. Explicit filter
+deep links take precedence over that snapshot.
+
+`vireo:review-queue:<workspace>:<scope JSON>` stores the selected photo and
+per-photo inspection/follow-up, subject and normalized manual center. It never
+stores flag or prediction decisions. These notes are explicitly local to this
+browser and scope, not a durable library-wide review ledger. Storage failure is
+visible. Merely entering or navigating the queue does not count as inspection;
+Mark inspected, Needs follow-up, or a successful explicit flag write does.
+Decided counts catalog keep/reject flags at the last refresh; follow-up remains
+independent and can overlap prior decisions.
+
+Subjects are retained detector boxes, with a local selection that leaves the
+saved primary unchanged. The crop uses the chosen box's center or a manual
+center in the upright, unedited source frame. It does not run or imply new RAW
+analysis. A native crop is not enlarged or fitted; a narrow panel scrolls.
+Source, decoded raster dimensions and decoded-to-original scale come from the
+existing focus-crop response headers; cached box analysis is described as cached,
+without claiming current analysis availability. Missing subjects/crop pixels
+are visible and manual centering remains available with a usable full frame.
+
+Flag changes reuse the normal undoable single-photo endpoint with
+`observed_flag` and `observed_workspace_id`. The flag baseline is compared under
+the existing writer lock; a stale change returns 409 and the user must refresh
+before choosing again. Every filter/catalog reload invalidates in-flight
+inspection responses. Response epochs also prevent a late crop from replacing
+the current photo.

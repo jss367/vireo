@@ -1,13 +1,13 @@
 // Review page payloads, edit state, and shared-script dependencies.
 interface ReviewRecipe {rotation?:number;crop?:{x?:number;y?:number;w?:number;h?:number}}
-interface ReviewPrediction {id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
+interface ReviewPrediction {flag?:string;id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
 interface ReviewGroupState {groupId:string|null;model:string|null;items:ReviewPrediction[];picks:Set<number>;rejects:Set<number>;removed:Set<number>;selected:number|string|null;selectedIds:Set<number|string>;selectionAnchor:number|string|null;upgraded:boolean}
 interface ReviewOffsetTarget {card:HTMLElement;photoId:string;origTx:number;origTy:number}
 interface ReviewDrag {card:HTMLElement;photoId:string;targets:ReviewOffsetTarget[];startX:number;startY:number;moved:boolean}
 interface ReviewAlignDrag {targets:ReviewOffsetTarget[];startX:number;startY:number;moved:boolean}
 interface ReviewMenuItem {label?:string;title?:string;disabled?:boolean;disabledHint?:string;onClick?:()=>unknown;separator?:boolean;chips?:ReviewMenuItem[]}
 interface ReviewRule {field?:string;rules?:ReviewRule[]}
-interface ReviewFilterController {getRules():ReviewRule[]|{rules?:ReviewRule[]};getVisual():unknown;setResultTotal(count:number):void;setVisualInfo(info:unknown):void;hasFilters():boolean;init(options:{page:string;root:HTMLElement|null;scopeLabel:string;onChange:()=>unknown;getScope:()=>{folder_id:null;collection_id:number|null}}):Promise<void>}
+interface ReviewFilterController {loadExpression(rules:ReviewRule[]|{rules?:ReviewRule[]},visual:unknown):void;getRules():ReviewRule[]|{rules?:ReviewRule[]};getVisual():unknown;setResultTotal(count:number):void;setVisualInfo(info:unknown):void;hasFilters():boolean;init(options:{page:string;root:HTMLElement|null;scopeLabel:string;onChange:()=>unknown;getScope:()=>{folder_id:null;collection_id:number|null}}):Promise<void>}
 declare const VireoFilter:ReviewFilterController;
 declare const VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
 declare const Vireo:VireoPageHookRegistry&{predictions:{decidedPredictionIds(value:unknown):number[];groupedDecisionTracker():{alreadyDecided(id:number):boolean;record(value:unknown):number[]}}};
@@ -27,3 +27,9 @@ interface Window {VireoFilter?:ReviewFilterController;VIREO_REVEAL_LABEL:string;
 interface DocumentEventMap {'lightbox:renderchanged':CustomEvent<{photoIds?:number[]}>;'lifelist:changed':CustomEvent<{species?:string;photoId?:number}>;'vireo:edit-history-changed':CustomEvent<unknown>;'vireo:photo-render-changed':CustomEvent<{photo_ids?:number[]}>}
 
 declare function checkPendingSync():void;
+
+interface ReviewQueueItemState {inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null}
+interface ReviewQueueSession {photoId:number|null;items:Record<string,ReviewQueueItemState>;followUpOnly:boolean}
+interface ReviewQueuePhoto {id:number;flag?:string;flag_note?:{description?:string}|null}
+interface ReviewQueueSubject {id:number;box_x:number;box_y:number;box_w:number;box_h:number;is_primary?:boolean;analysis?:unknown}
+interface ReviewQueueState {savedRules:ReviewRule[]|{rules?:ReviewRule[]}|null;savedVisual:unknown;workspace:number|null;key:string;session:ReviewQueueSession;enabled:boolean;items:ReviewPrediction[];current:ReviewQueuePhoto|null;subjects:ReviewQueueSubject[];sequence:number;cropSequence:number;source:string;manual:boolean;busy:boolean;storageError:boolean}

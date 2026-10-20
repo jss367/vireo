@@ -46,6 +46,10 @@ def flag_note(db: Database, photo_id: int, current_flag: str | None) -> JsonDict
     return note
 
 
+class FlagConflict(ValueError):
+    """The flag displayed by a reviewer is no longer current."""
+
+
 class PhotoReviewService:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -68,8 +72,12 @@ class PhotoReviewService:
 
     def set_flag(
         self, photo_id: int, flag: str, *, source: str | None = None, reason: str | None = None,
+        observed_flag: str | None = None,
     ) -> None:
-        self._write_flags([photo_id], flag, source=source, reason=reason, is_batch=False)
+        self._write_flags(
+            [photo_id], flag, source=source, reason=reason, is_batch=False,
+            observed_flags={photo_id: observed_flag} if observed_flag is not None else None,
+        )
 
     def set_ratings(self, photo_ids: Sequence[int], rating: int) -> int:
         photos_map = self.db.photos.get_by_ids(photo_ids)
@@ -106,6 +114,7 @@ class PhotoReviewService:
 
     def _write_flags(
         self, photo_ids: Sequence[int], flag: str, *, source: str | None, reason: str | None, is_batch: bool,
+        observed_flags: dict[int, str] | None = None,
     ) -> int:
         with self.db.photo_review.flag_write() as owns_transaction:
             photos = self.db.photos.get_by_ids(photo_ids)
@@ -114,6 +123,10 @@ class PhotoReviewService:
                 if not is_batch:
                     raise ValueError("Photo not in active workspace")
                 return 0
+            if observed_flags is not None and any(
+                (old_values.get(pid) or "none") != observed for pid, observed in observed_flags.items()
+            ):
+                raise FlagConflict("This photo's flag changed elsewhere. Reload it before changing the flag.")
             valid_ids = list(old_values)
             description = flag_description(
                 flag, count=len(photo_ids) if is_batch else None, source=source, reason=reason,
