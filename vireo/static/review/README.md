@@ -118,6 +118,10 @@ to update the remaining workspaces. The catalog's `identity_alternatives` edit
 history action replays the uncertainty and candidate-keyword delta together,
 including XMP keyword intents and original association provenance. Other
 confirmed species and flags are outside that delta.
+Keyword intents are reconciled in every workspace containing the photo, so
+syncing a sibling workspace cannot replay an older opposite decision. Each
+queue retains an explicit final intent, with captured-write compensation and
+immutable-token cleanup handled by the normal pending-change helpers.
 
 Candidates and evidence are workspace review state in the catalog, like
 prediction review decisions; they are not written as confirmed species

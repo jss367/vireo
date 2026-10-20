@@ -73,6 +73,21 @@ def _snapshot(identity: dict[str, Any] | None, links: list[dict[str, Any]]) -> s
     return json.dumps({'identity': identity, 'links': links}, sort_keys=True)
 
 
+def _queue_shared_keyword(db: Database, photo_id: int, name: str, *, present: bool) -> None:
+    """Every workspace sync must converge the shared sidecar to this decision."""
+    workspaces = {db.require_workspace_id()}
+    workspaces.update(row['id'] for row in db.photo_visibility.affected_workspaces([photo_id]))
+    queue = queue_keyword_add if present else queue_keyword_remove
+    kind = 'keyword_add' if present else 'keyword_remove'
+    for workspace_id in sorted(workspaces):
+        # Keep captured-write compensation and token protection in the normal
+        # cancellation path, then retain the explicit desired state even if an
+        # unclaimed opposite was cancelled. A sibling sync may run first and
+        # its sidecar may already contain that older value.
+        queue(db, photo_id, name, workspace_id=workspace_id, _commit=False)
+        db.queue_change(photo_id, kind, name, workspace_id=workspace_id, _commit=False)
+
+
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:
     """Apply a recorded delta in either direction, including sidecar intents."""
     before, after = json.loads(previous), json.loads(replacement)
@@ -80,15 +95,17 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
-        name = db.keywords.name_of(kid)
         db.untag_photo(photo_id, kid, _commit=False)
-        if name:
-            queue_keyword_remove(db, photo_id, name, _commit=False)
     for kid in new_links.keys() - old_links.keys():
         name = db.keywords.name_of(kid)
         if name:
             db.tag_photo(photo_id, kid, source=keyword_source_max(new_links[kid]['source']), _commit=False)
-            queue_keyword_add(db, photo_id, name, _commit=False)
+    # Include retained target links: an existing confirmation can still have
+    # an obsolete pending removal in another workspace.
+    for kid in old_links.keys() | new_links.keys():
+        name = db.keywords.name_of(kid)
+        if name:
+            _queue_shared_keyword(db, photo_id, name, present=kid in new_links)
     db.identity_alternatives.set_state(photo_id, after['identity'])
 
 

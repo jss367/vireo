@@ -10,6 +10,148 @@ from services import photo_ingest
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
+@pytest.mark.parametrize('operation', ['save', 'resolve', 'resolve_retained'])
+@pytest.mark.parametrize('sync_started', [False, True])
+def test_shared_keyword_intents_follow_identity_history_and_real_sidecar_sync(
+    app_and_db, tmp_path, operation, sync_started,
+):
+    from sync import sync_from_xmp, sync_to_xmp
+    from test_sync import _setup_photo_with_xmp
+    from xmp import read_keywords
+
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared sync')
+    initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'save' else {'Unrelated note'}
+    pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
+    db.add_workspace_folder(second, db.photos.get(pid)['folder_id'])
+    switch = _workspace_switcher(db)
+    switch(first)
+    kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    if operation == 'save':
+        db.tag_photo(pid, kid, source='accept')
+    else:
+        assert save(client, [pid]).status_code == 200
+        if operation == 'resolve_retained':
+            db.tag_photo(pid, kid)
+    db.photo_review.set_flag(pid, 'rejected')
+    opposite = 'keyword_add' if operation == 'save' else 'keyword_remove'
+    db.queue_change(pid, opposite, CANDIDATES[0], workspace_id=second)
+    rating_token = db.queue_change(pid, 'rating', '4', workspace_id=second)
+    db.conn.execute(
+        'UPDATE pending_changes SET sync_started=? WHERE photo_id=? AND change_type=? AND workspace_id=?',
+        (int(sync_started), pid, opposite, second),
+    )
+    db.commit()
+    response = save(client, [pid]) if operation == 'save' else resolve(client, current_group(client))
+    assert response.status_code == 200
+    expected = operation != 'save'
+    for action in (None, 'undo', 'redo'):
+        switch(first)
+        if action:
+            assert client.post('/api/' + action).status_code == 200
+            if operation != 'resolve_retained':
+                expected = not expected
+        desired = 'keyword_add' if expected else 'keyword_remove'
+        rows = db.conn.execute(
+            'SELECT id, change_type FROM pending_changes WHERE photo_id=? AND value=? AND workspace_id=?',
+            (pid, CANDIDATES[0], second),
+        ).fetchall()
+        assert rows and {row['change_type'] for row in rows} == {desired}
+        assert db.conn.execute('SELECT 1 FROM pending_changes WHERE change_token=?', (rating_token,)).fetchone()
+        switch(second)
+        result = sync_to_xmp(db, change_ids=[row['id'] for row in rows])
+        assert result['failed'] == 0, result
+        assert (CANDIDATES[0] in read_keywords(path)) is expected
+        assert 'Unrelated note' in read_keywords(path)
+        sync_from_xmp(db, [pid])
+        assert (CANDIDATES[0] in db.photo_species.get_species_for_photos([pid]).get(pid, [])) is expected
+        assert db.photos.get(pid)['flag'] == 'rejected'
+        if operation == 'save' and action == 'undo':
+            assert db.conn.execute(
+                'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (pid, kid),
+            ).fetchone()[0] == 'accept'
+
+
+def test_shared_intent_reconciliation_rolls_back_with_failed_batch(app_and_db, monkeypatch):
+    from repositories.identity_alternatives import IdentityAlternativesRepository
+
+    app, db = app_and_db
+    client = app.test_client()
+    second = db.create_workspace('Other pending changes')
+    db.photo_visibility.grant(second, [1, 2])
+    kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    for pid in (1, 2):
+        db.tag_photo(pid, kid, source='accept')
+        db.queue_change(pid, 'keyword_add', CANDIDATES[0], workspace_id=second)
+        db.queue_change(pid, 'rating', '4', workspace_id=second)
+    before = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+    original = IdentityAlternativesRepository.set_state
+
+    def fail_second(repository, photo_id, state):
+        if photo_id == 2:
+            raise sqlite3.OperationalError('injected failure after shared intents changed')
+        return original(repository, photo_id, state)
+
+    monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', fail_second)
+    assert save(client, [1, 2]).status_code == 500
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == before
+    assert db.photo_species.get_species_for_photos([1, 2]) == {1: [CANDIDATES[0]], 2: [CANDIDATES[0]]}
+    assert not db.identity_alternatives.photo_ids()
+    assert not db.edit_history.latest_undoable()
+
+
+@pytest.mark.parametrize('operation', ['save', 'resolve'])
+def test_identity_decision_repairs_sibling_sync_already_publishing(app_and_db, tmp_path, monkeypatch, operation):
+    import xmp
+    from sync import sync_from_xmp, sync_to_xmp
+    from test_sync import _setup_photo_with_xmp
+
+    app, db = app_and_db
+    client = app.test_client()
+    first = db.require_workspace_id()
+    second = db.create_workspace('Captured sibling writer')
+    initial = {CANDIDATES[0], 'Unrelated note'} if operation == 'resolve' else {'Unrelated note'}
+    pid, path = _setup_photo_with_xmp(tmp_path, db, keywords=initial)
+    db.add_workspace_folder(second, db.photos.get(pid)['folder_id'])
+    kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    if operation == 'save':
+        db.tag_photo(pid, kid, source='accept')
+    else:
+        assert save(client, [pid]).status_code == 200
+    opposite = 'keyword_add' if operation == 'save' else 'keyword_remove'
+    old_token = db.queue_change(pid, opposite, CANDIDATES[0], workspace_id=second)
+    # The sync connection uses B, while new HTTP requests still open A.
+    db.set_active_workspace(second)
+    publish = xmp.document._write_tree_atomic
+    decisions = []
+
+    def decide_before_publish(tree, target):
+        response = save(client, [pid]) if operation == 'save' else resolve(client, current_group(client))
+        assert response.status_code == 200
+        decisions.append(True)
+        return publish(tree, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(xmp.document, '_write_tree_atomic', decide_before_publish)
+        assert sync_to_xmp(db)['failed'] == 0
+    assert decisions == [True]
+    desired = 'keyword_remove' if operation == 'save' else 'keyword_add'
+    repair = db.conn.execute(
+        'SELECT change_token, sync_started FROM pending_changes WHERE photo_id=? AND workspace_id=? AND change_type=? AND value=?',
+        (pid, second, desired, CANDIDATES[0]),
+    ).fetchone()
+    assert repair and repair['change_token'] != old_token
+    assert repair['sync_started']
+    assert sync_to_xmp(db)['failed'] == 0
+    assert (CANDIDATES[0] in xmp.read_keywords(path)) is (operation == 'resolve')
+    assert 'Unrelated note' in xmp.read_keywords(path)
+    sync_from_xmp(db, [pid])
+    assert (CANDIDATES[0] in db.photo_species.get_species_for_photos([pid]).get(pid, [])) is (operation == 'resolve')
+    db.set_active_workspace(first)
+
+
 @pytest.mark.parametrize('operation', ['merge', 'rename'])
 @pytest.mark.parametrize('history_state', ['live', 'undone', 'resolved'])
 def test_keyword_names_follow_live_and_empty_link_identity_history(app_and_db, operation, history_state):
