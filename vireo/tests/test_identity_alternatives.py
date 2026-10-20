@@ -282,6 +282,73 @@ def test_process_cache_and_summary_do_not_claim_unresolved_candidates(app_and_db
     assert restored['photos'][0]['confirmed_species_list'] == [CANDIDATES[0]]
 
 
+def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_and_db, tmp_path):
+    from pipeline import load_results_raw, save_results_raw
+    app, db = app_and_db
+    client = app.test_client()
+    active_ws = db.require_workspace_id()
+    folder_shared = db.create_workspace('Shared folder')
+    photo_shared = db.create_workspace('Shared photo only')
+    db.add_workspace_folder(folder_shared, db.photos.get(1)['folder_id'])
+    db.photo_visibility.grant(photo_shared, [1])
+    db.commit()
+    kid = db.add_keyword(CANDIDATES[0], is_species=True)
+    db.tag_photo(1, kid)
+    workspaces = [active_ws, folder_shared, photo_shared]
+    for ws_id in workspaces:
+        save_results_raw({
+            'photos': [{'id': 1, 'confirmed_species': CANDIDATES[0], 'confirmed_species_list': [CANDIDATES[0]]}],
+            'encounters': [{'photo_ids': [1], 'confirmed_species': CANDIDATES[0],
+                            'confirmed_species_list': [CANDIDATES[0]], 'species_confirmed': True,
+                            'bursts': [{'photo_ids': [1], 'species_override': {'species': CANDIDATES[0], 'confirmed': True}}]}],
+        }, str(tmp_path), ws_id)
+
+    def assert_species(names):
+        for ws_id in workspaces:
+            cache = load_results_raw(str(tmp_path), ws_id)
+            assert cache['photos'][0]['confirmed_species_list'] == names, ws_id
+            assert cache['encounters'][0]['confirmed_species_list'] == names, ws_id
+            assert cache['encounters'][0]['species_confirmed'] == bool(names), ws_id
+
+    assert save(client, [1]).status_code == 200
+    assert_species([])
+    assert client.post('/api/undo').status_code == 200
+    assert_species([CANDIDATES[0]])
+    assert client.post('/api/redo').status_code == 200
+    assert_species([])
+    group = current_group(client)
+    assert resolve(client, group, species=CANDIDATES[1]).status_code == 200
+    assert_species([CANDIDATES[1]])
+    assert client.post('/api/undo').status_code == 200
+    assert_species([])
+    assert client.post('/api/redo').status_code == 200
+    assert_species([CANDIDATES[1]])
+
+
+def test_shared_cache_failure_still_attempts_other_workspaces_after_commit(app_and_db, monkeypatch):
+    import pipeline
+    app, db = app_and_db
+    client = app.test_client()
+    second = db.create_workspace('Second')
+    third = db.create_workspace('Third')
+    db.photo_visibility.grant(second, [1])
+    db.photo_visibility.grant(third, [1])
+    db.commit()
+    calls = []
+
+    def refresh(cache_dir, workspace_id, species):
+        calls.append(workspace_id)
+        if workspace_id == second:
+            raise OSError('read-only shared cache')
+
+    monkeypatch.setattr(pipeline, 'refresh_cache_species_for_photos', refresh)
+    response = save(client, [1])
+    assert response.status_code == 200
+    assert response.get_json()['pipeline_cache_stale']
+    assert calls == [db.require_workspace_id(), second, third]
+    assert db.identity_alternatives.photo_ids() == {1}
+
+
 @pytest.mark.parametrize('operation', ['create', 'resolve'])
 def test_workspace_switch_before_writer_lock_rejects_shared_photo_edits(app_and_db, tmp_path, monkeypatch, operation):
     from db import Database

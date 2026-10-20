@@ -72,20 +72,16 @@ def create_identity_alternatives_blueprint(get_db, json_error, db_path):
         # Persisted Process groups must not retain the candidates as confirmed.
         # As with undo's cache refresh, a saved catalog edit stands on failure.
         try:
-            from pipeline import refresh_cache_species_for_photos
-            species = db.photo_species.get_species_for_photos(ids)
-            for pid in ids:
-                species.setdefault(pid, [])
-            refresh_cache_species_for_photos(os.path.dirname(db_path), db.active_workspace_id, species)
+            failed = identities.refresh_species_caches(db, os.path.dirname(db_path), ids)
         except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
             log.exception('Failed to refresh Process Review after an unresolved identity edit')
+            failed = [db.require_workspace_id()]
+        if failed:
             response.update(pipeline_cache_stale=True, warning='Species edit saved, but Process Review could not refresh. Recompute Process results before reviewing species.')
 
     def _locked_write(resolve):
-        from pipeline_locks import acquire_workspace_regroup
         db = get_db()
-        with acquire_workspace_regroup(db.require_workspace_id()):
-            return prediction_decisions.under_prediction_decision_lock(db, lambda: _write(resolve), json_error=json_error)
+        return prediction_decisions.under_prediction_decision_lock(db, lambda: _write(resolve), json_error=json_error)
 
     @blueprint.route('/api/identity-alternatives', methods=['POST'])
     def api_save_identity_alternatives():

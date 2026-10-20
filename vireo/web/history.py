@@ -103,6 +103,9 @@ def create_history_blueprint(
         if not photo_ids:
             return True
         try:
+            if action == "identity_alternatives":
+                from services.identity_alternatives import refresh_species_caches
+                return not refresh_species_caches(db, os.path.dirname(db_path), photo_ids)
             species_by_photo = db.photo_species.get_species_for_photos(photo_ids)
             # Photos with no surviving species tags must still be included so
             # the cache clears their confirmed_species_list — get_species_
@@ -117,7 +120,7 @@ def create_history_blueprint(
             # changed them.
             refresh_cache_species_for_photos(
                 cache_dir, db.active_workspace_id, species_by_photo,
-                photos_only=action != "identity_alternatives",
+                photos_only=True,
             )
         except Exception:  # broad: the undo already committed; a stale pipeline cache must not fail it
             log.exception(

@@ -9,6 +9,8 @@ because their serialized JSON contains both identities and keyword metadata.
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from db import Database
+
+log = logging.getLogger(__name__)
 
 
 def normalize_candidates(value: object) -> list[str]:
@@ -125,3 +129,30 @@ def groups_for_review(db: Database) -> list[dict[str, Any]]:
         group = groups.setdefault(state['group_id'], {**state, 'photo_ids': []})
         group['photo_ids'].append(pid)
     return list(groups.values())
+
+
+def refresh_species_caches(db: Database, cache_dir: str, photo_ids: Sequence[int]) -> list[int]:
+    """Refresh every workspace affected by catalog-wide species associations.
+
+    Call after committing the photo edit, without holding a workspace regroup
+    lock. Each cache has its own lock; no operation holds two workspace locks
+    or waits on regroup while retaining SQLite's writer lock. Read species
+    inside each lock so a queued refresh cannot publish an older tag snapshot.
+    """
+    from pipeline import refresh_cache_species_for_photos
+    from pipeline_locks import acquire_workspace_regroup
+
+    workspace_ids = {db.require_workspace_id()}
+    workspace_ids.update(row['id'] for row in db.photo_visibility.affected_workspaces(photo_ids))
+    failed = []
+    for workspace_id in sorted(workspace_ids):
+        try:
+            with acquire_workspace_regroup(workspace_id):
+                species = db.photo_species.get_species_for_photos(photo_ids)
+                for pid in photo_ids:
+                    species.setdefault(pid, [])
+                refresh_cache_species_for_photos(cache_dir, workspace_id, species)
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+            log.exception('Failed to refresh species in Process Review for workspace %s', workspace_id)
+            failed.append(workspace_id)
+    return failed

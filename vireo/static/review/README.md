@@ -107,7 +107,11 @@ Both writes carry `observed_workspace_id`; under the writer lock the request
 checks both its cached workspace and the persisted latest activation. A switch
 in another tab returns 409 without touching tags or review state. The page pins
 its initial workspace and disables edits if a refresh detects a switch.
-Both writes use the shared decision lock and regroup lock. The catalog's `identity_alternatives` edit
+Catalog mutations use the shared decision lock. After commit, the refresh
+visits every workspace containing the affected photos (including photo-only
+grants), takes only that cache's regroup lock, and rereads global species.
+Undo and redo use the same refresh; a failed cache does not prevent attempts
+to update the remaining workspaces. The catalog's `identity_alternatives` edit
 history action replays the uncertainty and candidate-keyword delta together,
 including XMP keyword intents and original association provenance. Other
 confirmed species and flags are outside that delta.
