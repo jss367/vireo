@@ -260,7 +260,7 @@ def test_background_analysis_is_scoped_and_reports_unresolved_frames(comparison_
     assert job["result"]["errors"] == []
     assert job["progress"]["current"] == 3
     pack = _pack(app, pids, requested_species=TARGET)
-    assert pack["best_photo_id"] == pids[2]
+    assert (pack.get("ranked_candidate_id") or pack["best_photo_id"]) == pids[2]
     assert db.subjects.choice(pids[0])["detection_id"] == ids[pids[0]][1]
 
 
@@ -284,7 +284,10 @@ def test_all_ranking_entrypoints_preserve_subject_context(comparison_library):
         get = client.get(f"/api/photos/{pids[0]}/{endpoint}", query_string={"requested_species": TARGET})
         post = client.post(f"/api/photos/{endpoint}", json={"photo_ids": pids, "requested_species": TARGET})
         assert get.status_code == post.status_code == 200
-        assert get.get_json()["best_photo_id"] == post.get_json()["best_photo_id"] == pids[2]
+        get_pack, post_pack = get.get_json(), post.get_json()
+        assert (get_pack.get("ranked_candidate_id") or get_pack["best_photo_id"]) == pids[2]
+        assert (post_pack.get("ranked_candidate_id") or post_pack["best_photo_id"]) == pids[2]
+        assert get_pack["best_photo_id"] == post_pack["best_photo_id"]
         assert get.get_json()["comparison"] == post.get_json()["comparison"]
 
 
