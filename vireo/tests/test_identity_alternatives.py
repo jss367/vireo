@@ -9,6 +9,40 @@ from services import photo_ingest
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
+@pytest.mark.parametrize('operation', ['merge', 'rename'])
+@pytest.mark.parametrize('history_state', ['live', 'undone', 'resolved'])
+def test_keyword_names_follow_live_and_empty_link_identity_history(app_and_db, operation, history_state):
+    app, db = app_and_db
+    client = app.test_client()
+    source = db.add_keyword(CANDIDATES[0], is_species=True)
+    target_name = CANDIDATES[1] if operation == 'merge' else 'Renamed Kingbird'
+    survivor = db.add_keyword(target_name, is_species=True) if operation == 'merge' else source
+    assert save(client, [1]).status_code == 200
+    if history_state == 'undone':
+        assert client.post('/api/undo').status_code == 200
+    elif history_state == 'resolved':
+        assert resolve(client, current_group(client)).status_code == 200
+    assert client.put(f'/api/keywords/{source}', json={'name': target_name}).status_code == 200
+    if history_state == 'undone':
+        assert client.post('/api/redo').status_code == 200
+    elif history_state == 'resolved':
+        assert client.post('/api/undo').status_code == 200
+    expected = [target_name] if operation == 'merge' else [target_name, CANDIDATES[1]]
+    group = current_group(client)
+    assert group['candidates'] == expected
+    assert group['missing_evidence'] == 'A recording of the call'
+    assert resolve(client, group, species=target_name).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [target_name]}
+    assert db.conn.execute('SELECT id FROM keywords WHERE name=?', (CANDIDATES[0],)).fetchone() is None
+    assert db.conn.execute(
+        'SELECT 1 FROM photo_keywords WHERE photo_id=1 AND keyword_id=?', (survivor,),
+    ).fetchone() is not None
+    assert client.post('/api/undo').status_code == 200
+    assert current_group(client)['candidates'] == expected
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [target_name]}
+
+
 @pytest.mark.parametrize('merge_after_undo', [False, True])
 @pytest.mark.parametrize('operation', ['save', 'resolve'])
 @pytest.mark.parametrize('preexisting_survivor', [False, True])

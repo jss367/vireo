@@ -14,6 +14,63 @@ from keyword_normalization import keyword_match_key
 from sql_chunks import chunked
 
 
+def _renamed_candidates(value: object, old_name: str, new_name: str) -> list[str] | None:
+    """Rewrite name-only candidates, retaining order and one canonical target."""
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        return None
+    old_key, new_key = keyword_match_key(old_name), keyword_match_key(new_name)
+    if not any(keyword_match_key(name) == old_key for name in value):
+        return None
+    result = []
+    seen = set()
+    for name in value:
+        if keyword_match_key(name) in (old_key, new_key):
+            name = new_name
+        key = keyword_match_key(name)
+        if key not in seen:
+            result.append(name)
+            seen.add(key)
+    return result
+
+
+def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: str) -> None:
+    """Carry species renames through live uncertainty and both history sides.
+
+    Candidate names are evidence independent of attached keyword links, so
+    an empty links array must not prevent this rewrite. Caller commits.
+    A pair converging to one name stays unresolved until explicitly resolved.
+    """
+    if not old_name or not new_name or old_name == new_name:
+        return
+    for row in conn.execute('SELECT workspace_id, photo_id, candidates FROM photo_identity_alternatives').fetchall():
+        candidates = _renamed_candidates(json.loads(row['candidates']), old_name, new_name)
+        if candidates is not None:
+            conn.execute(
+                'UPDATE photo_identity_alternatives SET candidates=? WHERE workspace_id=? AND photo_id=?',
+                (json.dumps(candidates), row['workspace_id'], row['photo_id']),
+            )
+    rows = conn.execute(
+        'SELECT i.id, i.old_value, i.new_value FROM edit_history_items i '
+        "JOIN edit_history e ON e.id=i.edit_id WHERE e.action_type='identity_alternatives'",
+    ).fetchall()
+    for row in rows:
+        for column in ('old_value', 'new_value'):
+            try:
+                data = json.loads(row[column])
+            except (TypeError, ValueError):
+                continue
+            identity = data.get('identity') if isinstance(data, dict) else None
+            if not isinstance(identity, dict):
+                continue
+            candidates = _renamed_candidates(identity.get('candidates'), old_name, new_name)
+            if candidates is not None:
+                identity['candidates'] = candidates
+                conn.execute(
+                    f'UPDATE edit_history_items SET {column}=? WHERE id=?',
+                    (json.dumps(data, sort_keys=True), row['id']),
+                )
+
+
 class IdentityAlternativesRepository:
     def __init__(self, conn: sqlite3.Connection, workspace_id: Callable[[], int]) -> None:
         self.conn = conn

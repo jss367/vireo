@@ -267,6 +267,9 @@ def _retarget_source_spelling(
         src_name = src["name"]
         dst_name = dst["name"]
         if src_name and dst_name and src_name != dst_name:
+            if src['is_species'] or src['type'] == 'taxonomy':
+                from repositories.identity_alternatives import retarget_candidate_names
+                retarget_candidate_names(conn, src_name, dst_name)
             _retarget_pending_changes(
                 conn, src_name, dst_name, src_id, dst_id,
                 pending_source_only=pending_source_only, chunks=chunks,
