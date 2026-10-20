@@ -24,6 +24,7 @@ from canonical_schema import (
     JOB_HISTORY_WORKSPACE_OBJECTS,
     create_current_flag_attribution,
     create_formerly_lazy_objects,
+    create_subject_ranking_analysis,
     job_history_columns,
 )
 from db import Database, IncompatibleDatabaseError
@@ -226,6 +227,7 @@ MIGRATIONS = (
         create_current_flag_attribution, _validate_current_flag_attribution,
     ),
     Migration(21, "pending_sidecar_import", _add_xmp_import_pending),
+    Migration(22, "subject_ranking_analysis", create_subject_ranking_analysis),
 )
 
 

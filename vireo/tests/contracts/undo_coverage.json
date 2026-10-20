@@ -182,6 +182,7 @@
       "POST /api/selection/keyword-suggestions",
       "POST /api/selection/prediction-suggestions",
       "POST /api/selection/wildlife-state",
+      "POST /api/system/mcp-check",
       "POST /api/v1/photos/burst-evidence",
       "POST /api/workspaces/active/local-folders/preflight",
       "POST /api/workspaces/active/new-images/recheck"

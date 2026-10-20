@@ -69,6 +69,10 @@ AMBIGUITY_CODES = (
     "subject_touches_edge",
     "multiple_subjects",
     "all_rejected",
+    "subject_identity_uncertain",
+    "subject_identity_conflict",
+    "multiple_matching_subjects",
+    "subject_analysis_missing",
 )
 
 
@@ -216,13 +220,19 @@ def assess_ambiguity(cards, coverage, *, eye_detect_enabled, margin=DEFAULT_CLOS
         reasons.append({
             "code": "unanalyzed_frames",
             "detail": (
-                f"{missing} of {photos} frames have no quality features; "
+                f"{missing} of {photos} frames have no current quality analysis; "
                 "the ranking covers only the analyzed ones"
             ),
         })
 
     cards = list(cards or [])
-    ranked = [c for c in cards if c.get("label") != "REJECT"]
+    for card in cards:
+        status = card.get("evidence_status")
+        if status and status != "ready":
+            reasons.append({"code": status, "detail": f"{card.get('filename')}: {status.replace('_', ' ')}"})
+    ranked = [c for c in cards if c.get("label") != "REJECT" and c.get("selection_eligible") is not False
+              and c.get("evidence_status", "ready") == "ready"
+              and ("evidence_status" not in c or c.get("rank") is not None)]
     # Scoring stores only hard failures in reject_reasons. Rarity protection
     # can promote REJECT to REVIEW while retaining those failures.
     if cards and all(c.get("label") == "REJECT" or c.get("reject_reasons") for c in cards):
@@ -264,7 +274,7 @@ def assess_ambiguity(cards, coverage, *, eye_detect_enabled, margin=DEFAULT_CLOS
                     f"(crop_complete {crop_complete:.2f})"
                 ),
             })
-        if (best.get("detection_count") or 0) >= 2:
+        if (best.get("detection_count") or 0) >= 2 and not best.get("subject"):
             reasons.append({
                 "code": "multiple_subjects",
                 "detail": (
@@ -296,8 +306,9 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE, mask_va
 
 def _attach_evidence(card, evidence, focus_size):
     card["has_mask"] = bool(evidence["has_mask"]) if evidence else False
-    card["has_quality"] = bool(evidence["has_quality"]) if evidence else False
-    card["has_eye"] = bool(evidence["has_eye"]) if evidence else False
+    eligible = card.get("selection_eligible") is not False
+    card["has_quality"] = bool(evidence["has_quality"]) and eligible if evidence else False
+    card["has_eye"] = bool(evidence["has_eye"]) and eligible if evidence else False
     card["detection_count"] = int(evidence["detection_count"] or 0) if evidence else 0
     if evidence:
         card.setdefault("crop_complete", evidence["crop_complete"])
@@ -328,7 +339,7 @@ def _scoring_settings(effective_cfg, margin):
 
 def build_evidence_pack(
     db, seed_photo_id, rows, *, effective_cfg, margin=DEFAULT_CLOSE_CALL_MARGIN,
-    focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None,
+    focus_size=DEFAULT_FOCUS_CROP_SIZE, evidence_rows=None, comparison=None,
 ):
     """The evidence pack for the burst ``rows`` (Best Batch scope rows).
 
@@ -345,11 +356,10 @@ def build_evidence_pack(
     rows = list(rows)
     photo_ids = [row["id"] for row in rows]
     scoring = _scoring_settings(effective_cfg, margin)
+    if comparison is not None:
+        return _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin, focus_size)
     if evidence_rows is None:
         evidence_rows = db.photos.analysis_evidence_rows(photo_ids, scoring["detector_confidence"])
-    evidence = [evidence_rows[pid] for pid in photo_ids if pid in evidence_rows]
-    coverage = coverage_counts(evidence)
-    coverage["photos"] = len(photo_ids)
 
     result, error = build_best_batch_response(db, seed_photo_id, rows)
     if error:
@@ -361,6 +371,7 @@ def build_evidence_pack(
                 "rank": None,
                 "role": None,
                 "label": None,
+                "selection_eligible": False,
                 "quality": None,
                 "quality_pct": None,
                 "focus": None,
@@ -397,6 +408,8 @@ def build_evidence_pack(
         for card in pack["cards"]:
             _attach_evidence(card, evidence_rows.get(card["id"]), focus_size)
 
+    coverage = coverage_counts(pack["cards"])
+    coverage["photos"] = len(photo_ids)
     pack["coverage"] = coverage
     pack["ambiguity"] = assess_ambiguity(
         pack["cards"], coverage,
@@ -407,6 +420,19 @@ def build_evidence_pack(
         pack["ambiguity"]["reasons"].append({
             "code": "positive_keep_not_validated", "detail": pack["keep_review_message"],
         })
+    pack["scoring"] = scoring
+    return pack
+
+
+def _subject_evidence_pack(db, seed_photo_id, rows, comparison, scoring, margin, focus_size):
+    from subject_ranking import subject_urls
+    pack, _ = build_best_batch_response(db, seed_photo_id, rows, comparison=comparison)
+    for card in pack["cards"]:
+        card.update(subject_urls(card["id"], card["subject"], focus_size))
+    pack["coverage"] = coverage_counts(pack["cards"])
+    pack["coverage"]["with_selected_subject"] = sum(c["subject"]["detection_id"] is not None for c in pack["cards"])
+    pack["ambiguity"] = assess_ambiguity(pack["cards"], pack["coverage"],
+                                         eye_detect_enabled=scoring["eye_detect_enabled"], margin=margin)
     pack["scoring"] = scoring
     return pack
 

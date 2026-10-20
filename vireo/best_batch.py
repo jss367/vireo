@@ -210,7 +210,7 @@ def _best_batch_reasons(photo, photos, is_best=False):
 
 
 @review_ranked_response
-def build_best_batch_response(db, seed_photo_id, rows):
+def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
     import config as cfg
     from pipeline import (
         load_photo_features,
@@ -223,6 +223,10 @@ def build_best_batch_response(db, seed_photo_id, rows):
     loaded = load_photo_features(db, config=effective_cfg, photo_ids=photo_ids)
     by_id = {p["id"]: p for p in loaded}
     photos = [by_id[pid] for pid in photo_ids if pid in by_id]
+    if comparison is not None:
+        from subject_ranking import build_subject_comparison
+        photos = [by_id.get(row["id"], dict(row)) for row in rows]
+        return build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cfg), None
     if len(photos) < 2:
         return None, "At least two batch photos with pipeline features are required"
     if not any(
@@ -314,6 +318,7 @@ def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
         "crop_complete": photo.get("crop_complete"),
         "subject_size": photo.get("subject_size"),
         "reject_reasons": list(photo.get("reject_reasons") or []),
+        "selection_eligible": photo.get("selection_eligible", False),
         "analysis_status": photo.get("analysis_status"),
         "analysis_reasons": photo.get("analysis_reasons", []),
         "flag": photo.get("flag") or "none",

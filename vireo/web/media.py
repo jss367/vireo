@@ -2412,6 +2412,35 @@ def _focus_mask_bytes(db_path, db, photo_id):
     return _read_mask_bytes(abs_mask) if inside else None
 
 
+def _comparison_media_subject(db, photo, args, effective):
+    """Validate selected-subject media without falling back to primary evidence."""
+    from subject_ranking import SubjectComparison, cached_analysis, resolve_subject
+    try:
+        detection_id = int(args.get("detection_id", ""))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid detection_id") from None
+    detection, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection_id}))
+    if detection is None:
+        raise ValueError("Selected subject identity is unresolved; refresh the comparison")
+    key, analysis = cached_analysis(db, photo, detection, effective)
+    requested_key = args.get("analysis_key")
+    if not requested_key or analysis is None or key != requested_key:
+        raise ValueError("Selected subject analysis is unavailable or stale; refresh the comparison")
+    return detection, analysis
+
+
+def _validated_focus_source(config, db, photo, args, effective, source_choice):
+    """Decoding may outlive a source replacement; revalidate pinned evidence."""
+    img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
+    if img is not None and args.get("detection_id") is not None:
+        try:
+            _comparison_media_subject(db, photo, args, effective)
+        except ValueError:
+            img.close()
+            raise
+    return img, source
+
+
 def _focus_source_image(config, photo, folder, source_choice):
     """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
 
@@ -3052,6 +3081,20 @@ def create_media_blueprint(
         """
         if not _MASK_VARIANT_RE.match(variant):
             return "", 404
+        if request.args.get("detection_id") is not None:
+            import config as cfg
+            db = get_db()
+            photo = db.photos.get(pid, verify_workspace=True)
+            if photo is None:
+                return "", 404
+            try:
+                _, analysis = _comparison_media_subject(db, photo, request.args, db.get_effective_config(cfg.load()))
+            except ValueError as exc:
+                return json_error(str(exc), 404)
+            response = Response(analysis["mask_png"], mimetype="image/png")
+            response.cache_control.private = True
+            response.cache_control.max_age = 0
+            return response
         for _attempt in range(3):
             db = get_db()
             if db.photos.get(pid, verify_workspace=True) is None:
@@ -3218,18 +3261,28 @@ def create_media_blueprint(
             focus_subject_detections(db, photo_id)
             if point is None and basis in {"auto", "subject"} else []
         )
+        selected_analysis = None
+        if request.args.get("detection_id") is not None:
+            try:
+                detection, selected_analysis = _comparison_media_subject(db, photo, request.args, effective)
+            except ValueError as exc:
+                return json_error(str(exc), 404)
+            photo = {**dict(photo), **selected_analysis["features"]}
+            boxes = [detection]
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
+            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice)
         except ValueError as exc:
             return json_error(str(exc), 404)
-        img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
         if img is None:
             if source_choice in {"working", "original"}:
                 return json_error(f"The {source_choice} image is not available", 404)
             return "Could not load image", 500
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
-        mask_bytes = _focus_mask_bytes(db_path, db, photo_id) if request.args.get("mask") == "1" else None
+        mask_bytes = None
+        if request.args.get("mask") == "1":
+            mask_bytes = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(db_path, db, photo_id)
         if mask_bytes is not None:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
         buf = io.BytesIO()
@@ -3239,6 +3292,9 @@ def create_media_blueprint(
             used, center, window, img.size, source, mask_bytes is not None,
             scale=original_scale(img.size, photo),
         ))
+        if selected_analysis:
+            response.headers["X-Vireo-Detection-Id"] = str(detection["id"])
+            response.headers["X-Vireo-Analysis-Key"] = request.args["analysis_key"]
         response.cache_control.private = True
         response.cache_control.max_age = 0
         return response
