@@ -183,7 +183,8 @@ def test_assess_ambiguity_all_rejected():
 def test_ambiguity_codes_are_the_documented_set():
     assert set(AMBIGUITY_CODES) == {
         "unanalyzed_frames", "close_call", "no_eye_located",
-        "subject_touches_edge", "multiple_subjects", "all_rejected",
+        "subject_touches_edge", "multiple_subjects", "all_rejected", "subject_identity_uncertain", "subject_identity_conflict",
+        "multiple_matching_subjects", "subject_analysis_missing",
     }
     assert DEFAULT_CLOSE_CALL_MARGIN == 0.10
 

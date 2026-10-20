@@ -207,7 +207,7 @@ def _best_batch_reasons(photo, photos, is_best=False):
     return reasons[:4]
 
 
-def build_best_batch_response(db, seed_photo_id, rows):
+def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
     import config as cfg
     from pipeline import (
         load_photo_features,
@@ -220,6 +220,10 @@ def build_best_batch_response(db, seed_photo_id, rows):
     loaded = load_photo_features(db, config=effective_cfg, photo_ids=photo_ids)
     by_id = {p["id"]: p for p in loaded}
     photos = [by_id[pid] for pid in photo_ids if pid in by_id]
+    if comparison is not None:
+        from subject_ranking import build_subject_comparison
+        photos = [by_id.get(row["id"], dict(row)) for row in rows]
+        return build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cfg), None
     if len(photos) < 2:
         return None, "At least two batch photos with pipeline features are required"
     if not any(

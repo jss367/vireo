@@ -746,13 +746,17 @@ def create_system_blueprint(
 
     @blueprint.route("/api/system/mcp-config")
     def api_system_mcp_config():
-        """How to connect an MCP client (Claude Code, Claude Desktop) to
-        this install: the server command, the Claude Code one-liner and the
-        Claude Desktop JSON. Settings renders it so nobody guesses the path
-        to the sidecar binary."""
+        """Client setup for this install, retaining the original Claude fields."""
         from mcp_server import connect_info
 
         return jsonify(connect_info())
+
+    @blueprint.post("/api/system/mcp-check")
+    def api_system_mcp_check():
+        """Probe stdio and read the discovered catalog, never client status."""
+        from mcp_diagnostics import check_connection
+
+        return jsonify(check_connection())
 
     @blueprint.route("/api/scan/status")
     def api_scan_status():

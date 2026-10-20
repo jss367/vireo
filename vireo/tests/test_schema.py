@@ -530,3 +530,19 @@ def test_fresh_catalog_needs_no_formerly_lazy_table_migration(tmp_path):
         schema._add_formerly_lazy_tables(db.conn)
         schema._validate_formerly_lazy_tables(db.conn)
         assert db.conn.execute('SELECT type, name, sql FROM sqlite_master ORDER BY name').fetchall() == before
+
+
+def test_subject_comparison_cache_migrates_without_changing_photographer_choices(tmp_path):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE subject_ranking_analysis")
+        conn.execute("PRAGMA user_version=21")
+        conn.execute("INSERT INTO db_meta(key,value) VALUES ('photographer_choice_test','preserved')")
+    schema.ensure_schema(path)
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute("SELECT value FROM db_meta WHERE key='photographer_choice_test'").fetchone()[0] == 'preserved'
+        assert [r[1] for r in conn.execute("PRAGMA table_info(subject_ranking_analysis)")] == [
+            "detection_id", "source_key", "features", "mask_png"]

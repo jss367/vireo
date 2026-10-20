@@ -2,6 +2,7 @@
 // ranked list, and the large preview of the inspected frame.
 // ES module.
 
+import { renderSubject } from './subjects.js';
 import { byId, state } from './state.js';
 import { escapeAttr, escapeHtml } from './shared.js';
 import {
@@ -12,6 +13,10 @@ import {
 export function setStatus(message) {
   var status = byId('bestStatus');
   var content = byId('bestContent');
+  state.bestBatchData = null;
+  ['flagBtn', 'rejectBtn', 'reviewBtn', 'analyzeSubjectsBtn'].forEach(function(id) {
+    /** @type {HTMLButtonElement} */ (byId(id)).disabled = true;
+  });
   status.textContent = message;
   status.style.display = '';
   content.style.display = 'none';
@@ -39,6 +44,7 @@ export function inspectPhoto(photoId) {
   if (!card) return;
   state.inspectedId = card.id;
   showInspectImage(card);
+  renderSubject(card);
 
   var role = byId('inspectRole');
   role.className = 'role ' + (card.role || '');
@@ -59,8 +65,8 @@ export function inspectPhoto(photoId) {
 function focusCardHtml(card) {
   var hasEye = hasEyeKeypoint(card);
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-    '<div class="focus-crop ' + (hasEye ? 'eye' : 'subject') + '">' +
-      '<img src="' + previewUrl(card.id, 1920) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + escapeAttr(focusImageStyle(card)) + '">' +
+    '<div class="focus-crop ' + (card.subject ? 'native' : hasEye ? 'eye' : 'subject') + '">' +
+      '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + escapeAttr(card.subject ? '' : focusImageStyle(card)) + '">' +
       (hasEye ? '<span class="crosshair"></span>' : '') +
     '</div>' +
     '<div class="focus-meta">' +
@@ -95,22 +101,31 @@ export function renderBatch(data) {
     return;
   }
 
+  var notice = byId('comparisonNotice');
+  notice.hidden = !data.comparison;
+  var unresolved = cards.filter(function(c) { return c.evidence_status !== 'ready'; }).length;
+  notice.textContent = data.unscored_reason || (unresolved ? unresolved + ' frames need a subject choice or analysis. Ranking covers the ready subjects.' :
+    !data.best_photo_id && data.scored ? 'No frame passed the current scoring checks for a suggested best.' : 'Inspect the selected subject and full-frame context before deciding.');
   byId('bestStatus').style.display = 'none';
   byId('bestContent').style.display = '';
   byId('bestSubtitle').textContent =
-    data.count + ' photos' + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
+    data.count + ' photos' + (data.comparison ? ' · Comparing ' + (data.comparison.requested_species || 'chosen subjects') + ' · ' + cards.filter(function(c) { return c.rank != null; }).length + ' ranked' : '') + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
 
-  byId('focusNote').textContent = cards.some(hasEyeKeypoint)
+  byId('focusNote').textContent = data.comparison ? 'Native focus windows show the selected subject. Unanalyzed subjects show a context crop; inspect the full frame for pose and obstructions.' : cards.some(hasEyeKeypoint)
     ? 'Eye crops are centered on detected keypoints. Click a crop to inspect the full frame.'
     : 'No eye keypoints found for this batch; focus evidence falls back to subject/full-frame context.';
 
+  byId('focusGrid').classList.toggle('comparison', !!data.comparison);
   byId('focusGrid').innerHTML = cards.map(focusCardHtml).join('');
   byId('rankList').innerHTML = cards.map(rankCardHtml).join('');
 
-  /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !data.photo_ids || data.photo_ids.length < 2;
+  /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !!data.comparison || !data.photo_ids || data.photo_ids.length < 2;
+  byId('reviewBtn').title = data.comparison ? 'Review the selected subjects with the comparison controls below.' : '';
+  /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison;
   /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = !data.best_photo_id;
   /** @type {HTMLButtonElement} */ (byId('rejectBtn')).disabled = !data.best_photo_id;
-  inspectPhoto(best.id);
+  var inspected = cards.find(function(c) { return c.id === state.inspectedId; });
+  inspectPhoto(inspected ? inspected.id : best.id);
 }
 
 /** A click on a focus crop or ranked frame inspects it; delegated so re-rendering keeps it bound. */

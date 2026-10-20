@@ -21,7 +21,6 @@ import ipaddress
 import json
 import os
 import shlex
-import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -586,18 +585,30 @@ def server_command():
     return [sys.executable, app_path, "--mcp"]
 
 
-def connect_info():
-    """What a user pastes to connect Claude Code or Claude Desktop."""
-    command = server_command()
+def _shell_command(command):
+    """Copyable argv for POSIX shells or Windows PowerShell."""
     if sys.platform == "win32":
-        quoted = subprocess.list2cmdline(command)
-    else:
-        quoted = shlex.join(command)
+        return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in command)
+    return shlex.join(command)
+
+
+def connect_info():
+    """Client setup for this install; existing Claude fields stay available."""
+    command = server_command()
     return {
         "command": command,
-        "claude_code": f"claude mcp add {SERVER_NAME} -- {quoted}",
+        "shell": "PowerShell" if sys.platform == "win32" else "a terminal",
+        "claude_code": _shell_command(["claude", "mcp", "add", SERVER_NAME, "--", *command]),
         "claude_desktop": {
             "mcpServers": {SERVER_NAME: {"command": command[0], "args": command[1:]}}
+        },
+        "codex": {
+            "command": _shell_command(["codex", "mcp", "add", SERVER_NAME, "--", *command]),
+            "config_toml": (
+                f"[mcp_servers.{SERVER_NAME}]\n"
+                f"command = {json.dumps(command[0], ensure_ascii=False)}\n"
+                f"args = {json.dumps(command[1:], ensure_ascii=False)}\n"
+            ),
         },
     }
 

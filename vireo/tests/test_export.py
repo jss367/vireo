@@ -742,6 +742,153 @@ def test_export_photos_uses_bulk_location_lookup(export_env, monkeypatch):
     assert result["errors"] == []
 
 
+@pytest.mark.parametrize("output_format", ["jpg", "png", "tiff"])
+def test_export_preserves_matching_capture_offset_and_place(export_env, output_format):
+    """Issue 2256: verify actual derivative tags, including edited geometry."""
+    from metadata import exiftool_available, extract_metadata
+
+    if not exiftool_available():
+        pytest.skip("ExifTool is not available")
+    env = export_env
+    db, pid = env["db"], env["p1"]
+    source_metadata = {"EXIF": {
+        "DateTimeOriginal": "2026:10:17 09:27:50", "SubSecTimeOriginal": "24", "OffsetTimeOriginal": "-07:00",
+        "ExifImageWidth": 6000, "ExifImageHeight": 4000, "Orientation": 6,
+    }}
+    # Give the source real EXIF too: none of its geometry may leak to output.
+    source = Image.new("RGB", (800, 600), "red")
+    exif = source.getexif()
+    exif[0x0112] = 6
+    source.save(str(env["src"] / "bird1.jpg"), exif=exif)
+    db.conn.execute("UPDATE photos SET timestamp=?, exif_data=?, latitude=?, longitude=?, width=?, height=? WHERE id=?",
+                    ("2026-10-17T09:27:50.240000", json.dumps(source_metadata), 32.761, -117.209, 800, 600, pid))
+    details = {"place_id": "river", "name": "San Diego River", "lat": 33.0, "lng": -118.0,
+               "address_components": [
+                   {"name": "United States", "types": ["country"]},
+                   {"name": "California", "types": ["administrative_area_level_1"]},
+                   {"name": "San Diego County", "types": ["administrative_area_level_2"]},
+                   {"name": "San Diego", "types": ["locality"]},
+               ]}
+    leaf = db.upsert_place_chain(details)
+    db.set_photo_location(pid, leaf)
+    db.reverse_geocode_cache_put(32.761, -117.209, "river", json.dumps(details))
+    db.set_photo_edit_recipe(pid, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
+    db.commit()
+    result = export_photos(db, env["vireo_dir"], [pid], env["dest"], options={
+        "format": output_format, "max_size": 200, "collect_files": True,
+        "metadata_fields": ["capture_date", "capture_time", "location", "camera"],
+    })
+    assert result["errors"] == []
+    assert result["exported"] == 1
+    path = result["files"][0]
+    metadata = extract_metadata([path])[path]
+    assert metadata["EXIF"]["DateTimeOriginal"] == "2026:10:17 09:27:50"
+    assert metadata["EXIF"]["CreateDate"] == "2026:10:17 09:27:50"
+    assert str(metadata["EXIF"]["SubSecTimeOriginal"]) == "240000"
+    assert str(metadata["EXIF"]["SubSecTimeDigitized"]) == "240000"
+    assert metadata["EXIF"]["OffsetTimeOriginal"] == "-07:00"
+    assert metadata["EXIF"]["OffsetTimeDigitized"] == "-07:00"
+    for tag in ("DateTimeOriginal", "CreateDate", "DateCreated"):
+        assert metadata["XMP"][tag] == "2026:10:17 09:27:50.240000-07:00"
+    assert metadata["IPTC"]["TimeCreated"] == "09:27:50-07:00"
+    assert metadata["IPTC"]["DateCreated"] == "2026:10:17"
+    assert metadata["XMP"]["Location"] == "San Diego River"
+    assert metadata["XMP"]["City"] == metadata["IPTC"]["City"] == "San Diego"
+    assert metadata["XMP"]["State"] == metadata["IPTC"]["Province-State"] == "California"
+    assert metadata["XMP"]["Country"] == metadata["IPTC"]["Country-PrimaryLocationName"] == "United States"
+    assert metadata["XMP"]["HierarchicalSubject"] == "United States|California|San Diego County|San Diego|San Diego River"
+    assert metadata["Composite"]["GPSPosition"] == "32.761 -117.209"  # photo GPS, never the place center
+    with Image.open(path) as rendered:
+        assert rendered.size == (75, 200)
+    assert metadata["EXIF"].get("Orientation", 1) == 1
+    assert "ExifImageWidth" not in metadata["EXIF"]
+    assert "ExifImageHeight" not in metadata["EXIF"]
+    report = result["metadata_details"][0]
+    assert report["photo_id"] == pid and report["path"] == path
+    assert report["fields"]["capture_offset"] == "source_exif"
+    assert result["metadata_summary"]["location_coordinates"] == {"catalog_exif": 1}
+    assert result["metadata_summary"]["location_city"] == {"cached_place": 1}
+
+
+@pytest.mark.parametrize("timestamp", ["2026-10-17T09:27:50.240000", "2026-10-17T10:27:50.240000"])
+def test_export_missing_or_stale_capture_offset_stays_unknown(export_env, timestamp):
+    from metadata import exiftool_available, extract_metadata
+
+    if not exiftool_available():
+        pytest.skip("ExifTool is not available")
+    env = export_env
+    changed = "T10:" in timestamp
+    original = {"DateTimeOriginal": "2026:10:17 09:27:50", "SubSecTimeOriginal": "24"}
+    if changed:
+        original["OffsetTimeOriginal"] = "-07:00"
+    env["db"].conn.execute("UPDATE photos SET timestamp=?, exif_data=? WHERE id=?",
+                           (timestamp, json.dumps({"EXIF": original}), env["p1"]))
+    env["db"].commit()
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"], options={
+        "metadata_fields": ["capture_date", "capture_time"], "collect_files": True,
+    })
+    assert result["errors"] == []
+    path = result["files"][0]
+    metadata = extract_metadata([path])[path]
+    assert "OffsetTimeOriginal" not in metadata["EXIF"]
+    assert "TimeCreated" not in metadata["IPTC"]  # ExifTool must not add the host timezone
+    assert metadata["XMP"]["DateTimeOriginal"] == timestamp.replace("-", ":", 2).replace("T", " ")
+    reason = "timestamp_changed" if changed else "missing_source_offset"
+    assert result["metadata_summary"]["capture_offset"] == {"unavailable:" + reason: 1}
+
+
+@pytest.mark.parametrize("selected", [[], ["location"], ["capture_date"], ["capture_time"]])
+def test_export_metadata_categories_remain_independent(export_env, selected):
+    from metadata import exiftool_available, extract_metadata
+
+    if not exiftool_available():
+        pytest.skip("ExifTool is not available")
+    env = export_env
+    location = env["db"].add_keyword("Réserve", kw_type="location")
+    env["db"].set_photo_location(env["p1"], location)
+    env["db"].conn.execute("UPDATE photos SET exif_data=?, latitude=?, longitude=? WHERE id=?", (
+        json.dumps({"EXIF": {"DateTimeOriginal": "2024:06:15 14:30:22", "OffsetTimeOriginal": "-07:00"}}),
+        32.7, -117.2, env["p1"],
+    ))
+    env["db"].commit()
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"], options={
+        "metadata_fields": selected, "collect_files": True,
+    })
+    assert result["errors"] == []
+    path = result["files"][0]
+    metadata = extract_metadata([path])[path]
+    assert ("GPSLatitude" in metadata.get("EXIF", {})) == ("location" in selected)
+    assert ("Location" in metadata.get("XMP", {})) == ("location" in selected)
+    assert ("DateCreated" in metadata.get("IPTC", {})) == ("capture_date" in selected)
+    assert ("TimeCreated" in metadata.get("IPTC", {})) == ("capture_time" in selected)
+    assert "DateTimeOriginal" not in metadata.get("EXIF", {})
+    if "location" in selected:
+        assert metadata["XMP"]["Location"] == metadata["IPTC"]["Sub-location"] == "Réserve"
+        assert result["metadata_summary"]["location_city"] == {"unavailable:untyped_or_missing": 1}
+    if not selected:
+        assert "metadata_summary" not in result
+
+
+def test_export_long_location_keeps_complete_name_without_silent_iptc_truncation(export_env):
+    from metadata import exiftool_available, extract_metadata
+
+    if not exiftool_available():
+        pytest.skip("ExifTool is not available")
+    env = export_env
+    name = "Réserve naturelle nationale des oiseaux"
+    leaf = env["db"].get_or_create_text_location(name)
+    env["db"].set_photo_location(env["p1"], leaf)
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"], options={
+        "metadata_fields": ["location"], "collect_files": True,
+    })
+    assert result["errors"] == []
+    path = result["files"][0]
+    metadata = extract_metadata([path])[path]
+    assert metadata["XMP"]["Location"] == name
+    assert "Sub-location" not in metadata.get("IPTC", {})
+    assert result["metadata_summary"]["iptc_location_place_name"] == {"unavailable:exceeds_32_bytes": 1}
+
+
 def test_export_metadata_batch_uses_utf8_input(tmp_path, monkeypatch):
     import export as export_module
     import metadata
@@ -3971,11 +4118,14 @@ def test_export_does_not_report_renames_for_failed_metadata(export_env, monkeypa
     monkeypatch.setattr(export_mod, "_write_export_metadata_batch",
                         lambda jobs, **_: export_mod._fail_export_metadata_jobs(jobs, reason))
     result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"],
-                           {"naming_template": "{original}", "metadata_fields": ["species"]})
+                           {"naming_template": "{original}", "metadata_fields": ["species", "capture_date", "capture_time"],
+                            "collect_files": True})
     assert result["exported"] == 0
     assert result["errors"]
     assert result["renamed"] == 0
     assert result["renames"] == []
+    assert result["metadata_summary"] == {}
+    assert result["metadata_details"] == []
     assert not (occupied.parent / "bird1_2.jpg").exists()
     assert occupied.read_bytes() == b"existing"
 
