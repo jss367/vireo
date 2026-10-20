@@ -3420,7 +3420,9 @@ class Database:
     def identity_alternatives(self) -> IdentityAlternativesRepository:
         """Unresolved candidate identities; never confirmed species keywords."""
         from repositories.identity_alternatives import IdentityAlternativesRepository
-        return IdentityAlternativesRepository(self.conn, self._ws_id)
+        return IdentityAlternativesRepository(
+            self.conn, self._ws_id, lookup_taxon_id=self._lookup_taxon_id_for_keyword,
+        )
 
     def _photo_species_repository(self) -> PhotoSpeciesRepository:
         """Build the photo-species reads on this connection.

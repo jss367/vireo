@@ -479,6 +479,72 @@ def test_export_uses_unknown_name_and_does_not_write_candidate_species(app_and_d
     assert not any('Kingbird' in arg for arg in written_args)
 
 
+@pytest.mark.parametrize('mixed_species', [False, True])
+def test_taxonomy_only_common_candidate_removes_alias_from_catalog_cache_and_export(
+    app_and_db, tmp_path, monkeypatch, mixed_species,
+):
+    import export as export_module
+    from PIL import Image
+    from pipeline import load_results_raw, save_results_raw
+
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO taxa(id, inat_id, name, common_name, rank) VALUES (90001, 90001, 'Tyrannus melancholicus', 'Legacy kingbird', 'species')",
+    )
+    db.conn.execute('INSERT INTO taxa_common_names(taxon_id,name) VALUES (90001,?)', (CANDIDATES[0],))
+    source = tmp_path / 'alias-source'
+    source.mkdir()
+    Image.new('RGB', (16, 16), 'green').save(source / 'bird.jpg')
+    folder = db.add_folder(str(source))
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename='bird.jpg', extension='.jpg', file_size=100, file_mtime=1)
+    alias = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.tag_photo(pid, alias, source='accept')
+    expected = []
+    if mixed_species:
+        other = db.add_keyword('Great Egret', is_species=True)
+        db.tag_photo(pid, other)
+        expected = ['Great Egret']
+    before = db.photo_species.get_species_for_photos([pid])[pid]
+    assert db.conn.execute('SELECT id FROM keywords WHERE name=? COLLATE NOCASE', (CANDIDATES[0],)).fetchone() is None
+    db.photo_review.set_flag(pid, 'rejected')
+    save_results_raw({
+        'photos': [{'id': pid, 'confirmed_species_list': before, 'confirmed_species': before[0]}],
+        'encounters': [{'photo_ids': [pid], 'confirmed_species_list': before, 'confirmed_species': before[0],
+                        'species_confirmed': True, 'bursts': [{'photo_ids': [pid]}]}],
+    }, str(tmp_path), db.require_workspace_id())
+    assert save(client, [pid]).status_code == 200
+    assert db.photo_species.get_species_for_photos([pid]).get(pid, []) == expected
+    cache = load_results_raw(str(tmp_path), db.require_workspace_id())
+    assert cache['photos'][0]['confirmed_species_list'] == expected
+    assert cache['encounters'][0]['confirmed_species_list'] == expected
+    assert cache['summary']['confirmed_count'] == int(mixed_species)
+    written_args = []
+
+    def metadata(jobs, cancel_check=None):
+        written_args.extend(arg for _, _, args in jobs for arg in args)
+        return len(jobs), [], [out for out, _, _ in jobs]
+
+    monkeypatch.setattr(export_module, '_write_export_metadata_batch', metadata)
+    result = export_module.export_photos(
+        db=db, vireo_dir=str(tmp_path), photo_ids=[pid], destination=str(tmp_path / 'alias-export'),
+        options={'naming_template': '{species}-{original}', 'metadata_fields': ['species']},
+    )
+    assert result['exported'] == 1, result
+    assert not any('kingbird' in arg.lower() or 'Tyrannus' in arg for arg in written_args)
+    if not mixed_species:
+        assert (tmp_path / 'alias-export' / 'unknown-bird.jpg').exists()
+    assert client.post('/api/undo').status_code == 200
+    assert db.photo_species.get_species_for_photos([pid])[pid] == before
+    assert db.conn.execute(
+        'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (pid, alias),
+    ).fetchone()[0] == 'accept'
+    assert load_results_raw(str(tmp_path), db.require_workspace_id())['photos'][0]['confirmed_species_list'] == before
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([pid]).get(pid, []) == expected
+    assert db.photos.get(pid)['flag'] == 'rejected'
+
+
 def test_cache_refresh_failure_reports_saved_edit_and_warning(app_and_db, monkeypatch):
     import pipeline
     app, db = app_and_db

@@ -78,9 +78,13 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
 
 
 class IdentityAlternativesRepository:
-    def __init__(self, conn: sqlite3.Connection, workspace_id: Callable[[], int]) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, workspace_id: Callable[[], int], *,
+        lookup_taxon_id: Callable[..., int | None],
+    ) -> None:
         self.conn = conn
         self._workspace_id = workspace_id
+        self._lookup_taxon_id = lookup_taxon_id
 
     def for_photos(self, photo_ids: Collection[int] | None = None) -> dict[int, dict[str, Any]]:
         """Visible unresolved photos in this workspace, optionally restricted."""
@@ -130,7 +134,12 @@ class IdentityAlternativesRepository:
         Unrelated species in a genuine mixed-species frame are left alone.
         """
         names = {keyword_match_key(name) for name in candidates}
-        taxa = set()
+        # A candidate need not have a keyword row yet: its common name may
+        # exist only in the taxonomy while the photo carries another alias.
+        taxa = {
+            taxon_id for name in candidates
+            if (taxon_id := self._lookup_taxon_id(name, species_only=True)) is not None
+        }
         for row in self.conn.execute('SELECT name, taxon_id FROM keywords WHERE is_species=1 OR type=\'taxonomy\''):
             if keyword_match_key(row['name']) in names and row['taxon_id'] is not None:
                 taxa.add(row['taxon_id'])
