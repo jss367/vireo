@@ -36,3 +36,14 @@ crop remain side by side; focus tiles use native, generation-pinned crop URLs.
 The ordinary Review Burst handoff is disabled during these comparisons because
 it cannot preserve this subject context. Editing the species invalidates action
 buttons until the comparison is refreshed. Saved primary choices are unchanged.
+
+`focus.js` owns transient focus inspection. Its manual center is read from the
+upright full frame loaded with an empty edit recipe, so saved crop and rotation
+do not change the coordinate space. Model boxes remain visible suggestions;
+weak detections are offered with their confidence for an explicit subject choice
+but never become automatic choices solely because they were offered. Manual
+inspection uses automatic source selection, including the available working
+raster when originals are offline, and never changes ranking or saved subject
+decisions. The image keeps its natural aspect ratio at every viewport size so
+its clicks, subject outlines, and center markers use the same pixel rectangle. The metadata label comes from the actual crop response, and
+stale requests are aborted and sequence-guarded before they can replace it.

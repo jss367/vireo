@@ -75,7 +75,8 @@ def test_sharp_other_species_never_promotes_soft_target(comparison_library):
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
     pack = _pack(app, pids, requested_species=TARGET)
     assert pack["scored"]
-    assert pack["best_photo_id"] == pids[2], [(c["id"], c["sharpness"], c["reject_reasons"]) for c in pack["cards"]]
+    winner = pack.get("ranked_candidate_id") or pack["best_photo_id"]
+    assert winner == pids[2], [(c["id"], c["sharpness"], c["reject_reasons"]) for c in pack["cards"]]
     soft = next(c for c in pack["cards"] if c["id"] == pids[0])
     assert soft["rank"] == 3 and soft["sharpness"] == 0
     assert soft["focus_evidence"]["basis"] == "subject"
@@ -259,7 +260,7 @@ def test_background_analysis_is_scoped_and_reports_unresolved_frames(comparison_
     assert job["result"]["errors"] == []
     assert job["progress"]["current"] == 3
     pack = _pack(app, pids, requested_species=TARGET)
-    assert pack["best_photo_id"] == pids[2]
+    assert (pack.get("ranked_candidate_id") or pack["best_photo_id"]) == pids[2]
     assert db.subjects.choice(pids[0])["detection_id"] == ids[pids[0]][1]
 
 
@@ -283,7 +284,10 @@ def test_all_ranking_entrypoints_preserve_subject_context(comparison_library):
         get = client.get(f"/api/photos/{pids[0]}/{endpoint}", query_string={"requested_species": TARGET})
         post = client.post(f"/api/photos/{endpoint}", json={"photo_ids": pids, "requested_species": TARGET})
         assert get.status_code == post.status_code == 200
-        assert get.get_json()["best_photo_id"] == post.get_json()["best_photo_id"] == pids[2]
+        get_pack, post_pack = get.get_json(), post.get_json()
+        assert (get_pack.get("ranked_candidate_id") or get_pack["best_photo_id"]) == pids[2]
+        assert (post_pack.get("ranked_candidate_id") or post_pack["best_photo_id"]) == pids[2]
+        assert get_pack["best_photo_id"] == post_pack["best_photo_id"]
         assert get.get_json()["comparison"] == post.get_json()["comparison"]
 
 
@@ -456,6 +460,94 @@ def test_new_analysis_insert_and_pruning_roll_back_together(comparison_library):
     assert db.subjects.ranking_analysis(did, "second") is None
     assert db.subjects.ranking_analysis(did, "first")["mask_png"] == b"first"
 
+def test_explicit_subject_can_recover_a_weak_detection_without_changing_primary(comparison_library):
+    app, db, pids, ids = comparison_library
+    pid, did = pids[0], ids[pids[0]][0]
+    db.conn.execute('UPDATE detections SET detector_confidence=.052 WHERE id=?', (did,))
+    db.commit()
+    automatic = _pack(app, pids, requested_species=TARGET)
+    card = next(c for c in automatic['cards'] if c['id'] == pid)
+    assert card['subject']['detection_id'] is None
+    assert any(c['detection_id'] == did for c in card['subject']['candidates'])
+    explicit = _pack(app, pids, requested_species=TARGET, subject_overrides={str(pid): did})
+    card = next(c for c in explicit['cards'] if c['id'] == pid)
+    assert card['subject']['detection_id'] == did
+    assert card['evidence_status'] == 'subject_analysis_missing'
+    assert db.subjects.choice(pid)['detection_id'] == ids[pid][1]
+    assert app.test_client().get(card['crop_url']).status_code == 200
+
+
+def test_focus_eye_uses_detection_generation_and_rejects_changed_identity(comparison_library, monkeypatch):
+    app, db, pids, ids = comparison_library
+    import config as cfg
+    monkeypatch.setattr('subject_analysis.measure_eye', lambda *args: {
+        'eye_x': .2, 'eye_y': .5, 'eye_conf': .9, 'eye_tenengrad': 123, 'eye_status': 'measured',
+    })
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    card = _pack(app, pids, requested_species=TARGET)['cards'][0]
+    url = card['focus_crop_url'] + '&basis=eye'
+    response = app.test_client().get(url)
+    assert response.status_code == 200
+    assert response.headers['X-Vireo-Focus-Basis'] == 'eye'
+    assert response.headers['X-Vireo-Focus-Center'] == '0.2000,0.5000'
+    prediction = db.conn.execute('SELECT id FROM predictions WHERE detection_id=?', (ids[card['id']][0],)).fetchone()
+    db.update_prediction_status(prediction['id'], 'rejected')
+    assert app.test_client().get(url).status_code == 404
+
+
+def test_selected_generation_provenance_and_unavailable_ranking_policy(comparison_library, monkeypatch):
+    app, db, pids, _ = comparison_library
+    import config as cfg
+    import scoring
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    original = scoring.score_encounter
+    def readiness_policy(encounter, config):
+        for photo in encounter['photos']:
+            assert photo['analysis_provenance'] == {
+                'detection': {'status': 'complete', 'current': True, 'no_qualifying_subject': False},
+                'segmentation': {'status': 'complete', 'current': True},
+            }
+            assert photo['subject_mask_available']
+        original(encounter, config=config)
+        unavailable = next(p for p in encounter['photos'] if p['id'] == pids[2])
+        unavailable.update(selection_eligible=False, quality_composite=None, focus_score=None,
+                           analysis_status='incomplete', analysis_reasons=['missing_subject_tenengrad'])
+    monkeypatch.setattr(scoring, 'score_encounter', readiness_policy)
+    pack = _pack(app, pids, requested_species=TARGET)
+    unavailable = next(c for c in pack['cards'] if c['id'] == pids[2])
+    assert unavailable['rank'] is None and unavailable['role'] == 'review'
+    assert unavailable['quality'] is None and not unavailable['has_quality']
+    assert unavailable['reasons'][0] == 'Subject analysis needs review: missing subject tenengrad'
+    assert pids[2] not in [pack['best_photo_id'], *pack['alternate_ids'], *pack['suggested_reject_ids']]
+
+
+def test_weak_identity_conflicts_do_not_block_a_clean_retained_target(comparison_library):
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    target_id, weak_id = ids[pid]
+    db.predictions.add(weak_id, TARGET, .9, 'conflicting-model', status='accepted')
+    db.conn.execute('UPDATE detections SET detector_confidence=.052 WHERE id=?', (weak_id,))
+    db.commit()
+    selected, selection = resolve_subject(db, pid, SubjectComparison(TARGET))
+    assert selected is not None and selected['id'] == target_id
+    assert selection['selection'] == 'confirmed'
+    weak = next(candidate for candidate in selection['candidates'] if candidate['detection_id'] == weak_id)
+    assert weak['detector_confidence'] == .052 and len(weak['confirmed_keys']) == 2
+    explicit, explicit_selection = resolve_subject(db, pid, SubjectComparison(TARGET, {pid: weak_id}))
+    assert explicit is None and explicit_selection['selection'] == 'subject_identity_conflict'
+    import config as cfg
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    pack = _pack(app, pids, requested_species=TARGET)
+    card = next(card for card in pack['cards'] if card['id'] == pid)
+    assert card['evidence_status'] == 'ready' and card['rank'] is not None
+    assert card['subject']['detection_id'] == target_id
+    assert f'detection_id={target_id}' in card['focus_crop_url']
+    # Once it qualifies for automatic selection, the same conflicting identity blocks it.
+    db.conn.execute('UPDATE detections SET detector_confidence=.3 WHERE id=?', (weak_id,))
+    db.commit()
+    selected, selection = resolve_subject(db, pid, SubjectComparison(TARGET))
+    assert selected is None and selection['selection'] == 'subject_identity_conflict'
+    assert db.subjects.choice(pid)['detection_id'] == weak_id
 
 def test_partial_selected_generation_stays_unranked_and_out_of_peer_scores(comparison_library, monkeypatch):
     import config as cfg
