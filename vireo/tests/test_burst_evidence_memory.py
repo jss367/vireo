@@ -196,7 +196,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         events.append(("gate", pid))
         return photo
 
-    boxes = [dict(category="animal", detector_model="invented", box_x=0.1, box_y=0.2, box_w=0.2, box_h=0.2)]
+    boxes = [dict(category="animal", detector_model="invented", box_x=0.1, box_y=0.2, box_w=0.8, box_h=0.6)]
     cfg = types.SimpleNamespace(load=lambda: {"pipeline": {"eye_detect_enabled": enabled}, "preview_quality": 90})
 
     def loader(*a, **kw):
@@ -261,11 +261,11 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         folders=types.SimpleNamespace(get=lambda fid: {"path": "/invented"}),
         get_effective_config=lambda cfg: cfg,
         masks_features=types.SimpleNamespace(
-            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt
+            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt or (boxes[0] if mask_path else None)
         ),
     )
     ns["get_db"] = lambda: db
-    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image", "_validated_focus_source"})
+    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image", "_validated_focus_source", "_focus_geometry_error"})
     return ns["serve_focus_crop"](1), events
 
 
@@ -279,14 +279,14 @@ def focus_checks():
     photo = dict(
         id=1, folder_id=1, filename="invented.jpg", eye_x=0.25, eye_y=0.75, eye_tenengrad=40, width=3000, height=2000
     )
-    res, _ = focus(photo=photo, args={"size": "256"}, size=(2000, 3000))
+    res, _ = focus(photo=photo, args={"size": "256", "center": "0.25,0.75"}, size=(2000, 3000))
     assert res.headers["X-Vireo-Focus-Window"] == "372,2122,628,2378"
     res, _ = focus(args={"size": "1024"}, size=(900, 600))
     assert res.headers["X-Vireo-Focus-Window"] == "0,0,900,600"
     photo["eye_x"] = photo["eye_y"] = None
     res, _ = focus(photo=photo, args={"size": "128"})
     assert res.headers["X-Vireo-Focus-Basis"] == "subject"
-    assert res.headers["X-Vireo-Focus-Window"] == "536,536,664,664"
+    assert res.headers["X-Vireo-Focus-Window"] == "1436,936,1564,1064"
     res, events = focus(args={"mask": "1"}, mask_path="/invented/catalog/masks/1.png")
     assert res.headers["X-Vireo-Focus-Mask"] == "1"
     assert ("resize", (3000, 2000), 0) in events
@@ -310,7 +310,7 @@ def focus_checks():
     res, _ = focus(photo=no_measurement, enabled=True)
     assert res.headers["X-Vireo-Focus-Basis"] == "subject"
     res, _ = focus(enabled=False, args={"basis": "eye"})
-    assert res.headers["X-Vireo-Focus-Basis"] == "eye"
+    assert res[1] == 404
     res, _ = focus(photo=dict(id=1, folder_id=1, filename="invented.jpg", eye_x=math.nan, eye_y=0.5, eye_tenengrad=40))
     assert res.headers["X-Vireo-Focus-Basis"] == "subject"
     print("PASS workspace eye scoring, explicit override, finite coordinates and raster provenance")

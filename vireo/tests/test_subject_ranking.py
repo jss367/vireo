@@ -451,3 +451,18 @@ def test_new_analysis_insert_and_pruning_roll_back_together(comparison_library):
     db.rollback()
     assert db.subjects.ranking_analysis(did, "second") is None
     assert db.subjects.ranking_analysis(did, "first")["mask_png"] == b"first"
+
+def test_explicit_subject_can_recover_a_weak_detection_without_changing_primary(comparison_library):
+    app, db, pids, ids = comparison_library
+    pid, did = pids[0], ids[pids[0]][0]
+    db.conn.execute('UPDATE detections SET detector_confidence=.052 WHERE id=?', (did,))
+    db.commit()
+    automatic = _pack(app, pids, requested_species=TARGET)
+    card = next(c for c in automatic['cards'] if c['id'] == pid)
+    assert card['subject']['detection_id'] is None
+    assert any(c['detection_id'] == did for c in card['subject']['candidates'])
+    explicit = _pack(app, pids, requested_species=TARGET, subject_overrides={str(pid): did})
+    card = next(c for c in explicit['cards'] if c['id'] == pid)
+    assert card['subject']['detection_id'] == did
+    assert card['evidence_status'] == 'subject_analysis_missing'
+    assert db.subjects.choice(pid)['detection_id'] == ids[pid][1]

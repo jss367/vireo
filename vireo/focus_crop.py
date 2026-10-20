@@ -8,7 +8,30 @@ from services import detection_store
 def focus_subject_detections(db, photo_id):
     """Prefer the subject whose active mask supplied the stored quality."""
     prompt = db.masks_features.active_prompt_detection(photo_id)
-    return [prompt] if prompt is not None else detection_store.get_detections(db, photo_id)
+    if prompt is None and db.masks_features.photo_mask_path(photo_id):
+        raise ValueError("Active subject association is stale; choose a subject or manual center")
+    boxes = [prompt] if prompt is not None else detection_store.get_detections(db, photo_id)
+    animals = [box for box in boxes if box["category"] == "animal" and box["detector_model"] != "full-image"]
+    if animals and not valid_subject_box(animals[0]):
+        raise ValueError("Primary subject coordinates are invalid; choose a subject or manual center")
+    return animals
+
+
+def valid_subject_box(box):
+    """Detection coordinates belong to the upright, unedited normalized frame."""
+    try:
+        x, y, w, h = (float(box["box_" + k]) for k in "xywh")
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+    return (all(math.isfinite(v) for v in (x, y, w, h)) and 0 <= x < 1 and 0 <= y < 1
+            and w > 0 and h > 0 and x + w <= 1.000001 and y + h <= 1.000001)
+
+
+def point_in_subject(center, box):
+    if not valid_subject_box(box):
+        return False
+    x, y, w, h = (float(box["box_" + k]) for k in "xywh")
+    return x <= center[0] <= x + w and y <= center[1] <= y + h
 
 
 def parse_center(raw):
@@ -41,11 +64,12 @@ def focus_point(photo, detections, basis, *, eye_enabled, point=None):
     use_eye = basis == "eye" or (basis == "auto" and eye_enabled and photo["eye_tenengrad"] is not None)
     if use_eye and photo["eye_x"] is not None and photo["eye_y"] is not None:
         center = (float(photo["eye_x"]), float(photo["eye_y"]))
-        if all(math.isfinite(v) for v in center):
+        if (all(math.isfinite(v) and 0 <= v <= 1 for v in center)
+                and (not detections or point_in_subject(center, detections[0]))):
             return center, "eye"
     if basis in {"auto", "subject"}:
         for box in detections:
-            if box["category"] != "animal" or box["detector_model"] == "full-image":
+            if box["category"] != "animal" or box["detector_model"] == "full-image" or not valid_subject_box(box):
                 continue
             center = (box["box_x"] + box["box_w"] / 2, box["box_y"] + box["box_h"] / 2)
             if all(math.isfinite(v) for v in center):
@@ -53,6 +77,20 @@ def focus_point(photo, detections, basis, *, eye_enabled, point=None):
     if basis in {"eye", "subject"}:
         raise ValueError(f"No {basis} location recorded for this photo")
     return (0.5, 0.5), "frame"
+
+
+def validate_raster_geometry(image_size, photo):
+    """A differently cropped raster cannot use stored normalized source locations."""
+    try:
+        width, height = photo["width"], photo["height"]
+    except (KeyError, IndexError, TypeError):
+        return
+    if not width or not height:
+        return
+    expected = max(width, height) / min(width, height)
+    actual = max(image_size) / min(image_size)
+    if abs(actual / expected - 1) > 0.02:
+        raise ValueError("Source raster geometry differs from the catalog; place a manual center")
 
 
 def focus_window(image_size, center, size):
@@ -93,6 +131,10 @@ def original_scale(image_size, photo):
     Compared on the longest side, so a raster the loader rotated upright
     still measures against the right catalog edge.
     """
+    try:
+        validate_raster_geometry(image_size, photo)
+    except ValueError:
+        return None
     long_side = _catalog_long_side(photo)
     if not long_side:
         return None

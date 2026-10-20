@@ -2,11 +2,12 @@
 // ranked list, and the large preview of the inspected frame.
 // ES module.
 
+import { renderFocus } from './focus.js';
 import { renderSubject } from './subjects.js';
 import { byId, state } from './state.js';
 import { escapeAttr, escapeHtml } from './shared.js';
 import {
-  focusImageStyle, hasEyeKeypoint, previewUrl, roleLabel, scoreText, thumbnailUrl,
+  hasEyeKeypoint, previewUrl, roleLabel, scoreText, thumbnailUrl,
 } from './helpers.js';
 
 /** @param {string} message */
@@ -29,11 +30,12 @@ function showInspectImage(card) {
   var fallback = function() {
     img.removeEventListener('error', fallback);
     state.inspectImgFallback = null;
-    img.src = thumbnailUrl(card);
+    img.removeAttribute('src');
+    byId('focusRasterStatus').textContent = 'Full frame unavailable; manual placement requires the upright source image.';
   };
   state.inspectImgFallback = fallback;
   img.addEventListener('error', fallback);
-  img.src = previewUrl(card.id, 1920);
+  img.src = '/photos/' + card.id + '/edit-preview?size=1920&recipe=%7B%7D';
   img.alt = card.filename || '';
 }
 
@@ -45,6 +47,7 @@ export function inspectPhoto(photoId) {
   state.inspectedId = card.id;
   showInspectImage(card);
   renderSubject(card);
+  renderFocus(card);
 
   var role = byId('inspectRole');
   role.className = 'role ' + (card.role || '');
@@ -63,13 +66,14 @@ export function inspectPhoto(photoId) {
 
 /** @param {BestBatchCard} card */
 function focusCardHtml(card) {
-  var hasEye = hasEyeKeypoint(card);
+  var hasEye = Boolean(card.subject && card.focus_crop_url && hasEyeKeypoint(card));
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
-    '<div class="focus-crop ' + (card.subject ? 'native' : hasEye ? 'eye' : 'subject') + '">' +
-      '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + escapeAttr(card.subject ? '' : focusImageStyle(card)) + '">' +
+    '<div class="focus-crop ' + 'native' + '">' +
+      '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy" style="' + '' + '">' +
       (hasEye ? '<span class="crosshair"></span>' : '') +
     '</div>' +
     '<div class="focus-meta">' +
+      '<div class="score">' + (card.focus_crop_url ? 'Native source window' : 'Context preview · inspect focus below') + '</div>' +
       '<div class="role ' + escapeAttr(card.role || '') + '">' + (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
@@ -111,9 +115,7 @@ export function renderBatch(data) {
   byId('bestSubtitle').textContent =
     data.count + ' photos' + (data.comparison ? ' · Comparing ' + (data.comparison.requested_species || 'chosen subjects') + ' · ' + cards.filter(function(c) { return c.rank != null; }).length + ' ranked' : '') + (data.sequence_range ? ' · #' + data.sequence_range[0] + '-' + data.sequence_range[1] : '');
 
-  byId('focusNote').textContent = data.comparison ? 'Native focus windows show the selected subject. Unanalyzed subjects show a context crop; inspect the full frame for pose and obstructions.' : cards.some(hasEyeKeypoint)
-    ? 'Eye crops are centered on detected keypoints. Click a crop to inspect the full frame.'
-    : 'No eye keypoints found for this batch; focus evidence falls back to subject/full-frame context.';
+  byId('focusNote').textContent = 'Verify the model box in the full frame. Use manual placement when the suggested subject is wrong; source and scale are shown in the inspection panel.';
 
   byId('focusGrid').classList.toggle('comparison', !!data.comparison);
   byId('focusGrid').innerHTML = cards.map(focusCardHtml).join('');

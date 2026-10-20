@@ -63,13 +63,15 @@ def requested_identity(resolver, name):
 def resolve_subject(db, photo_id, comparison):
     resolver = SpeciesResolver(db=db)
     target = requested_identity(resolver, comparison.requested_species) if comparison.requested_species else None
+    from focus_crop import valid_subject_box
     detections = retained(db, photo_id)
+    candidates_detections = [d for d in retained(db, photo_id, min_conf=0) if valid_subject_box(d)]
     predictions = db.subjects.visible_predictions(db.require_workspace_id(), photo_id, 0)
     candidates = []
-    for detection in detections:
+    for detection in candidates_detections:
         rows = [dict(p) for p in predictions if p["detection_id"] == detection["id"]]
         confirmed = {resolver.prediction(p).key for p in rows if p["status"] == "accepted"}
-        candidates.append({"detection_id": detection["id"], "box": {k: detection["box_" + k] for k in "xywh"},
+        candidates.append({"detection_id": detection["id"], "detector_confidence": detection["detector_confidence"], "box": {k: detection["box_" + k] for k in "xywh"},
                            "predictions": [{"species": resolver.prediction(p).display_name, "status": p["status"],
                                             "prediction_id": p["id"], "species_key": resolver.prediction(p).key,
                                             "confidence": p["confidence"], "classifier_model": p["classifier_model"],
@@ -78,7 +80,7 @@ def resolve_subject(db, photo_id, comparison):
     override = comparison.subject_overrides.get(photo_id)
     selected, state = None, "subject_identity_uncertain"
     if override is not None:
-        selected = next((d for d in detections if d["id"] == override), None)
+        selected = next((d for d in candidates_detections if d["id"] == override), None)
         if selected is None:
             raise ValueError(f"Detection {override} is not a retained animal in photo {photo_id}")
         candidate = next(c for c in candidates if c["detection_id"] == override)
@@ -87,16 +89,17 @@ def resolve_subject(db, photo_id, comparison):
         else:
             state = "selected"
     elif target:
-        matches = [c for c in candidates if c["confirmed_keys"] == [target.key]]
+        matches = [c for c in candidates if c["confirmed_keys"] == [target.key]
+                   and c["detection_id"] in {d["id"] for d in detections}]
         conflicts = any(target.key in c["confirmed_keys"] and len(c["confirmed_keys"]) > 1 for c in candidates)
         if conflicts:
             state = "subject_identity_conflict"
         elif len(matches) == 1:
-            selected = next(d for d in detections if d["id"] == matches[0]["detection_id"])
+            selected = next(d for d in candidates_detections if d["id"] == matches[0]["detection_id"])
             state = "confirmed"
         elif len(matches) > 1:
             state = "multiple_matching_subjects"
-    elif detections:
+    elif detections and valid_subject_box(detections[0]):
         selected, state = detections[0], "primary"
     if selected:
         confirmations = next(c["confirmed_keys"] for c in candidates if c["detection_id"] == selected["id"])

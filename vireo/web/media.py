@@ -2414,6 +2414,7 @@ def _focus_mask_bytes(db_path, db, photo_id):
 
 def _comparison_media_subject(db, photo, args, effective):
     """Validate selected-subject media without falling back to primary evidence."""
+    from focus_crop import valid_subject_box
     from subject_ranking import SubjectComparison, cached_analysis, resolve_subject
     try:
         detection_id = int(args.get("detection_id", ""))
@@ -2422,6 +2423,9 @@ def _comparison_media_subject(db, photo, args, effective):
     detection, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection_id}))
     if detection is None:
         raise ValueError("Selected subject identity is unresolved; refresh the comparison")
+
+    if not valid_subject_box(detection):
+        raise ValueError("Selected subject coordinates are invalid")
     key, analysis = cached_analysis(db, photo, detection, effective)
     requested_key = args.get("analysis_key")
     if not requested_key or analysis is None or key != requested_key:
@@ -2429,7 +2433,7 @@ def _comparison_media_subject(db, photo, args, effective):
     return detection, analysis
 
 
-def _validated_focus_source(config, db, photo, args, effective, source_choice):
+def _validated_focus_source(config, db, photo, args, effective, source_choice, boxes=()):
     """Decoding may outlive a source replacement; revalidate pinned evidence."""
     img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
     if img is not None and args.get("detection_id") is not None:
@@ -2438,7 +2442,27 @@ def _validated_focus_source(config, db, photo, args, effective, source_choice):
         except ValueError:
             img.close()
             raise
+    if img is not None and args.get("detection_id") is None and args.get("center") is None and args.get("basis") != "frame":
+        from focus_crop import focus_subject_detections
+        try:
+            current = focus_subject_detections(db, photo["id"])
+            if [dict(box) for box in current] != [dict(box) for box in boxes]:
+                raise ValueError("Subject association changed while decoding; refresh the inspection")
+        except ValueError:
+            img.close()
+            raise
     return img, source
+
+
+def _focus_geometry_error(img, photo, used, args):
+    from focus_crop import validate_raster_geometry
+    if used in {"eye", "subject"} or args.get("mask") == "1":
+        try:
+            validate_raster_geometry(img.size, photo)
+        except ValueError as exc:
+            img.close()
+            return str(exc)
+    return None
 
 
 def _focus_source_image(config, photo, folder, source_choice):
@@ -3201,18 +3225,7 @@ def create_media_blueprint(
 
     @blueprint.route("/photos/<int:photo_id>/focus-crop")
     def serve_focus_crop(photo_id):
-        """An unresampled window around the scorer's focus point.
-
-        Auto follows workspace eye scoring, then the primary subject or frame;
-        ``center=x,y`` uses normalized coordinates in the unedited upright
-        source raster, before any crop/rotation recipe. ``source`` picks the pixels: ``auto``
-        (default) serves the working copy unless it is downsized against the
-        catalog dimensions and the original can be decoded, ``working`` keeps
-        the working copy, ``original`` insists on the original (404 when it
-        is not on disk). Scale 1 means pixels of the decoded upright raster;
-        ``X-Vireo-Focus-Original-Scale`` says how those relate to the
-        original when the catalog knows its dimensions.
-        """
+        """Native upright-source window; eyes require detection/generation binding."""
         import io
 
         import config as cfg
@@ -3257,10 +3270,12 @@ def create_media_blueprint(
                 return json_error(str(exc))
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
-        boxes = (
-            focus_subject_detections(db, photo_id)
-            if point is None and basis in {"auto", "subject"} else []
-        )
+        boxes = []
+        if point is None and basis != "frame" and request.args.get("detection_id") is None:
+            try:
+                boxes = focus_subject_detections(db, photo_id)
+            except ValueError as exc:
+                return json_error(str(exc), 404)
         selected_analysis = None
         if request.args.get("detection_id") is not None:
             try:
@@ -3269,19 +3284,27 @@ def create_media_blueprint(
                 return json_error(str(exc), 404)
             photo = {**dict(photo), **selected_analysis["features"]}
             boxes = [detection]
+        if selected_analysis is None:
+            if basis == "eye" and point is None:
+                return json_error("Eye evidence has no subject/generation binding; analyze the selected subject", 404)
+            # Legacy eyes have no detection/mask-generation binding, even when boxes overlap.
+            photo = {**dict(photo), "eye_x": None, "eye_y": None, "eye_tenengrad": None}
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
-            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice)
+            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice, boxes)
         except ValueError as exc:
             return json_error(str(exc), 404)
         if img is None:
             if source_choice in {"working", "original"}:
                 return json_error(f"The {source_choice} image is not available", 404)
             return "Could not load image", 500
+        geometry_error = _focus_geometry_error(img, photo, used, request.args)
+        if geometry_error:
+            return json_error(geometry_error, 404)
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
         mask_bytes = None
-        if request.args.get("mask") == "1":
+        if request.args.get("mask") == "1" and (selected_analysis or (point is None and boxes)):
             mask_bytes = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(db_path, db, photo_id)
         if mask_bytes is not None:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
