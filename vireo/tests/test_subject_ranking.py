@@ -302,3 +302,18 @@ def test_analysis_generations_are_immutable_and_cascade_with_detection(compariso
     assert db.subjects.ranking_analysis(did, "generation") == {"features": {"eye_x": .2}, "mask_png": b"first"}
     detection_store.delete_detections_by_ids(db, [did])
     assert db.subjects.ranking_analysis(did, "generation") is None
+
+
+def test_focus_refuses_source_replaced_while_decoding(comparison_library, monkeypatch):
+    app, db, pids, _ = comparison_library
+    import config as cfg
+    from subject_ranking import source_path
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    card = _pack(app, pids, requested_species=TARGET)["cards"][0]
+    def replacing_decoder(*args):
+        Image.new("RGB", (320, 160), "black").save(source_path(db, db.photos.get(card["id"])))
+        return Image.new("RGB", (320, 160), "black"), "original"
+    monkeypatch.setattr("web.media._focus_source_image", replacing_decoder)
+    response = app.test_client().get(card["focus_crop_mask_url"])
+    assert response.status_code == 404
+    assert "stale" in response.get_json()["error"]

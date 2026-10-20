@@ -52,6 +52,9 @@ def test_species_comparison_selects_ambiguous_bird_and_analyzes_it(page, live_se
     expect(page.locator('#focusGrid .native img').first).to_have_attribute('src', re.compile('detection_id=.*analysis_key='))
     expect(page.locator('#comparisonStatus')).to_contain_text('2 analyzed')
     expect(page.locator('#rankList')).not_to_contain_text('#null')
+    page.locator('#compareSubjectsBtn').click()
+    expect(page.locator('#bestSubtitle')).to_contain_text('2 ranked')
+    expect(page.locator('#subjectChoices')).to_have_value(str(dids[0][0]))
     assert db.subjects.choice(pids[0]) is None
     page.screenshot(path=str(Path(__file__).resolve().parents[2] / '.context' / 'subject-comparison.png'), full_page=True)
     page.locator('#requestedSpecies').fill('Sparrow')

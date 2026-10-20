@@ -265,7 +265,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         ),
     )
     ns["get_db"] = lambda: db
-    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image"})
+    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image", "_validated_focus_source"})
     return ns["serve_focus_crop"](1), events
 
 

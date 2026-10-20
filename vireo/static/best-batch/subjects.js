@@ -5,7 +5,6 @@ import { loadBatch } from './actions.js';
 
 export function startComparison() {
   state.comparisonActive = true;
-  state.subjectOverrides = {};
   loadBatch();
 }
 

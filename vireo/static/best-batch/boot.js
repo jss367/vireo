@@ -24,6 +24,7 @@ onClick('analyzeSubjectsBtn', analyzeSubjects);
 byId('subjectChoices').addEventListener('change', changeSubject);
 byId('requestedSpecies').addEventListener('input', function() {
   state.requestSequence++;
+  state.subjectOverrides = {};
   state.bestBatchData = null;
   ['flagBtn', 'rejectBtn', 'reviewBtn'].forEach(function(id) {
     /** @type {HTMLButtonElement} */ (byId(id)).disabled = true;

@@ -2427,6 +2427,18 @@ def _comparison_media_subject(db, photo, args, effective):
     return detection, analysis
 
 
+def _validated_focus_source(config, db, photo, args, effective, source_choice):
+    """Decoding may outlive a source replacement; revalidate pinned evidence."""
+    img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
+    if img is not None and args.get("detection_id") is not None:
+        try:
+            _comparison_media_subject(db, photo, args, effective)
+        except ValueError:
+            img.close()
+            raise
+    return img, source
+
+
 def _focus_source_image(config, photo, folder, source_choice):
     """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
 
@@ -3257,9 +3269,9 @@ def create_media_blueprint(
             boxes = [detection]
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
+            img, source = _validated_focus_source(config, db, photo, request.args, effective, source_choice)
         except ValueError as exc:
             return json_error(str(exc), 404)
-        img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
         if img is None:
             if source_choice in {"working", "original"}:
                 return json_error(f"The {source_choice} image is not available", 404)
