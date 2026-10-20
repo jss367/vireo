@@ -433,6 +433,12 @@ async function grmConfirmSpeciesCall(species, memberIds) {
 /** @param {ReviewGroupChecks} checks @param {string} species */
 async function grmApplySpeciesBeforeFlags(checks, species) {
   if (!checks.species) return true;
+  // Species already committed earlier in this modal session: a prior Apply
+  // click reached the server with the species request but then failed on
+  // /api/pipeline/group/apply below. A retry needs to re-run only the
+  // flag/removal half; reopening the preview dialog and re-POSTing
+  // /api/encounters/species would show a stale snapshot and could 409.
+  if (grmState.appliedSpeciesSessionId === grmState.sessionId) return true;
   var burstExists = grmState.source === 'browse-selection' ||
     currentReviewResults().encounters[grmState.encIdx ?? -1]?.bursts?.[grmState.burstIdx ?? -1];
   if (!burstExists) return true;
@@ -440,11 +446,24 @@ async function grmApplySpeciesBeforeFlags(checks, species) {
   var members = grmSpeciesMemberItems(checks).map(function(photo) { return photo.id; });
   if (!members.length) return true;
   if (await grmConfirmSpeciesCall(species, members) === false) return false;
+  grmState.appliedSpeciesSessionId = grmState.sessionId;
   // An explicit species transition can insert a leading encounter or split
   // the source burst. Locate pending removals in the authoritative response,
   // rather than sending the flags request with obsolete encounter indices.
   if (grmState.source !== 'browse-selection') grmRelocatePendingRemovalSource();
   return true;
+}
+
+/** @param {unknown} error @param {number} applySessionId */
+function grmReportFlagsApplyFailure(error, applySessionId) {
+  console.error('Pipeline group apply failed:', error);
+  // safeFetch already surfaced the raw transport/server error. When species
+  // was committed earlier in this Apply click, add the partial-state context
+  // so the user knows closing the modal would lose only the flag/removal
+  // half — and that clicking Apply again retries just that half.
+  if (grmState.appliedSpeciesSessionId === applySessionId) {
+    showToast('Species confirmed; flag/removal changes could not be saved. Click Apply to retry.', 'error');
+  }
 }
 
 function grmRelocatePendingRemovalSource() {
@@ -567,7 +586,7 @@ async function grmApply() {
           }),
         });
       } catch (e) {
-        console.error('Pipeline group apply failed:', e);
+        grmReportFlagsApplyFailure(e, applySessionId);
         return;
       }
       if (!sessionIsActive()) return false;
