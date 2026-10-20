@@ -679,9 +679,16 @@ def test_split_discards_membership_bound_cohorts_without_changing_confirmation_m
     ids, path = seed(app, db, 'Western Grebe')
     cached = json.load(open(path))
     enc = cached['encounters'][0]
+    cohorts = {'subject': {'scope': 'encounter', 'basis': 'subject', 'size': len(ids),
+                           'photo_ids': ids, 'unidentified_count': 0}}
     enc.update(species=['Saved classifier candidate', .8], trace=[{'pair': ids[:2]}],
-               focus_cohorts={'body': ids})
-    enc['bursts'][0].update(trace=[{'pair': ids[:2]}], focus_cohorts={'body': ids})
+               focus_cohorts=cohorts)
+    enc['bursts'][0].update(trace=[{'pair': ids[:2]}], focus_cohorts=cohorts)
+    for photo in cached['photos']:
+        photo.update(subject_tenengrad=20., focus_score=.4,
+                     focus_evidence={'basis': 'subject', 'measurement': 20., 'cohort_key': 'subject',
+                                     'cohort_size': len(ids), 'cohort_scope': 'encounter',
+                                     'absolute_status': 'not_validated'})
     with open(path, 'w') as handle:
         json.dump(cached, handle)
     client = app.test_client()
@@ -698,9 +705,14 @@ def test_split_discards_membership_bound_cohorts_without_changing_confirmation_m
             assert group['species'] == [None, 0.0]
             assert all('trace' not in burst and 'focus_cohorts' not in burst for burst in group['bursts'])
         else:
-            assert group['focus_cohorts'] == {'body': ids}
-            assert group['bursts'][0]['focus_cohorts'] == {'body': ids}
+            assert group['focus_cohorts'] == cohorts
+            assert group['bursts'][0]['focus_cohorts'] == cohorts
             assert group['species'] == ['Saved classifier candidate', .8]
     actual = db.photo_species.get_species_for_photos(ids)
     assert set(actual[ids[0]]) == {'Western Grebe', 'Eared Grebe'}
     assert actual[ids[1]] == actual[ids[2]] == ['Western Grebe']
+    # Splitting invalidates group membership, not its saved measurements or
+    # historical score evidence. Main's inspector handles unavailable cohorts.
+    for before, after in zip(cached['photos'], json.load(open(path))['photos'], strict=True):
+        for key in ('subject_tenengrad', 'focus_score', 'focus_evidence'):
+            assert before[key] == after[key]
