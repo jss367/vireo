@@ -772,25 +772,46 @@ def test_pipeline_results_refresh_species_from_database_after_confirm_and_undo(a
     assert all(p['confirmed_species'] == 'Cardinal' for p in client.get('/api/pipeline/results').json['photos'])
 
 
-def test_group_flags_leave_pipeline_suggestions_unchanged(app_and_db):
+def test_group_flag_history_keeps_cached_scores_until_read_refresh(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     ids, cached = _seed(db)
     cached['photos'][0]['label'] = 'KEEP'
     cached['photos'][1]['label'] = 'REJECT'
     save_results_raw(cached, os.path.dirname(db._db_path), db._ws_id())
-    expected = {p['id']: p['label'] for p in cached['photos']}
+    expected_cached = {p['id']: p['label'] for p in cached['photos']}
     assert client.post('/api/pipeline/group/apply', json={
         'picks': [ids[1]], 'rejects': [ids[0]], 'candidates': [],
     }).status_code == 200
+    predictions = None
+    membership = [(enc['photo_ids'], [burst['photo_ids'] for burst in enc['bursts']]) for enc in cached['encounters']]
     for operation in (None, '/api/undo', '/api/redo'):
         if operation:
             assert client.post(operation).status_code == 200
-        assert {p['id']: p['label'] for p in _load(db)['photos']} == expected
+        # Flag replay itself still does not rewrite classifier/quality suggestions.
+        assert {p['id']: p['label'] for p in _load(db)['photos']} == expected_cached
+        expected_flags = {pid: 'none' for pid in ids}
+        if operation != '/api/undo':
+            expected_flags.update({ids[0]: 'rejected', ids[1]: 'flagged'})
+        assert {pid: db.photos.get(pid)['flag'] for pid in ids} == expected_flags
+        expected_labels = {pid: {'flagged': 'KEEP', 'rejected': 'REJECT', 'none': 'REVIEW'}[flag]
+                           for pid, flag in expected_flags.items()}
         for endpoint in ('/api/pipeline/results', '/api/pipeline/page-init'):
             result = client.get(endpoint).json
-            photos = result['results']['photos'] if 'results' in result else result['photos']
-            assert {p['id']: p['label'] for p in photos} == expected
+            refreshed = result.get('results', result)
+            photos = refreshed['photos']
+            # Saved-review reads deliberately recover from current authoritative flags.
+            assert {p['id']: p['label'] for p in photos} == expected_labels
+            assert {p['id']: p['flag'] for p in photos} == expected_flags
+            current_predictions = {p['id']: p.get('species_top5', []) for p in photos}
+            if predictions is None:
+                predictions = current_predictions
+            assert current_predictions == predictions
+            assert [(enc['photo_ids'], [burst['photo_ids'] for burst in enc['bursts']])
+                    for enc in refreshed['encounters']] == membership
+        expected_cached = expected_labels
+        assert client.get('/api/undo/status').json['count'] == (0 if operation == '/api/undo' else 1)
+        assert client.get('/api/redo/status').json['available'] == (operation == '/api/undo')
 
 
 @pytest.mark.parametrize('undo', [False, True])
