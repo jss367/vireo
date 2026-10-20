@@ -9,13 +9,15 @@ from services import photo_ingest
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
 
 
+@pytest.mark.parametrize('merge_after_undo', [False, True])
 @pytest.mark.parametrize('operation', ['save', 'resolve'])
 @pytest.mark.parametrize('preexisting_survivor', [False, True])
 def test_keyword_merge_retargets_identity_history_without_removing_existing_survivor(
-    app_and_db, operation, preexisting_survivor,
+    app_and_db, operation, preexisting_survivor, merge_after_undo,
 ):
     app, db = app_and_db
     client = app.test_client()
+    db.photo_review.set_flag(1, 'rejected')
     source = db.add_keyword(CANDIDATES[0], is_species=True)
     survivor = db.add_keyword('Surviving Kingbird', is_species=True)
     if preexisting_survivor:
@@ -25,8 +27,12 @@ def test_keyword_merge_retargets_identity_history_without_removing_existing_surv
     assert save(client, [1]).status_code == 200
     if operation == 'resolve':
         assert resolve(client, current_group(client)).status_code == 200
+    if merge_after_undo:
+        assert client.post('/api/undo').status_code == 200
     db._merge_keyword_into(source, survivor)
     db.commit()
+    if merge_after_undo:
+        assert client.post('/api/redo').status_code == 200
 
     assert client.post('/api/undo').status_code == 200
     expected = ['Surviving Kingbird'] if operation == 'save' or preexisting_survivor else []
@@ -41,9 +47,11 @@ def test_keyword_merge_retargets_identity_history_without_removing_existing_surv
     expected = ['Surviving Kingbird'] if operation == 'resolve' or preexisting_survivor else []
     assert db.photo_species.get_species_for_photos([1]).get(1, []) == expected
     assert db.identity_alternatives.photo_ids() == ({1} if operation == 'save' else set())
+    assert db.photos.get(1)['flag'] == 'rejected'
 
 
-def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db):
+@pytest.mark.parametrize('merge_after_undo', [False, True])
+def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db, merge_after_undo):
     app, db = app_and_db
     client = app.test_client()
     source = db.add_keyword(CANDIDATES[0], is_species=True)
@@ -51,8 +59,12 @@ def test_keyword_merge_folds_converged_identity_snapshot_provenance(app_and_db):
     db.tag_photo(1, source)
     db.tag_photo(1, survivor, source='accept')
     assert save(client, [1]).status_code == 200
+    if merge_after_undo:
+        assert client.post('/api/undo').status_code == 200
     db._merge_keyword_into(source, survivor)
     db.commit()
+    if merge_after_undo:
+        assert client.post('/api/redo').status_code == 200
     assert client.post('/api/undo').status_code == 200
     assert db.photo_species.get_species_for_photos([1]) == {1: [CANDIDATES[1]]}
     assert db.conn.execute(

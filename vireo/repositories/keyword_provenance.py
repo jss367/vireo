@@ -439,12 +439,18 @@ def _retarget_identity_history(conn, src_id, dst_id, preexisting, source_max):
             continue
         if not all(isinstance(data, dict) and isinstance(data.get('links'), list) for data in (before, after)):
             continue
-        if not any(link.get('keyword_id') == src_id for data in (before, after) for link in data['links']):
+        links = [link for data in (before, after) for link in data['links']]
+        if not all(isinstance(link, dict) and 'keyword_id' in link and 'source' in link for link in links):
             continue
+        if not any(link['keyword_id'] == src_id for link in links):
+            continue
+        owns_survivor = any(link['keyword_id'] == dst_id for link in links)
         for data in (before, after):
             _rewrite_identity_links(data, src_id, dst_id, source_max)
-            if row['photo_id'] in preexisting:
-                # Keeping dst in both snapshots removes only that tag delta;
+            if row['photo_id'] in preexisting and not owns_survivor:
+                # A survivor already recorded in this edit belongs to its delta,
+                # including when the edit was undone before the keyword merge.
+                # Keeping an independent dst in both snapshots removes only that tag delta;
                 # undo/redo must still restore the uncertainty/evidence state.
                 source = conn.execute(
                     'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
