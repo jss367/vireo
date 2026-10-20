@@ -286,7 +286,7 @@ def hard_reject_reasons(photo, q_score, config=None):
     reasons = []
 
     # Rule 1: No mask (no bird detected)
-    if not photo.get("mask_path"):
+    if not photo.get("mask_path") and not photo.get("subject_mask_available", False):
         reasons.append("no_subject_mask")
 
     # Rule 2: Subject severely clipped

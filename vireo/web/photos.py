@@ -1149,6 +1149,20 @@ def create_photos_blueprint(
             photo_ids.append(raw)
         return jsonify({"count": db.photos.count_with_companions(photo_ids)})
 
+    def _comparison_args(db, values, rows):
+        from subject_ranking import parse_comparison, resolve_subject
+        try:
+            comparison = parse_comparison(values)
+            if comparison:
+                ids = {r["id"] for r in rows}
+                if set(comparison.subject_overrides) - ids:
+                    raise ValueError("subject_overrides must refer to photos in this comparison")
+                for pid in comparison.subject_overrides:
+                    resolve_subject(db, pid, comparison)
+        except ValueError as exc:
+            return None, json_error(str(exc))
+        return comparison, None
+
     @blueprint.route("/api/photos/<int:photo_id>/best-batch")
     def api_photo_best_batch(photo_id):
         """Find neighboring burst frames and rank the best photo in that batch."""
@@ -1167,7 +1181,10 @@ def create_photos_blueprint(
         if rows is None:
             return json_error(method_or_error, 404)
 
-        result, error = build_best_batch_response(db, photo_id, rows)
+        comparison, err = _comparison_args(db, request.args, rows)
+        if err is not None:
+            return err
+        result, error = build_best_batch_response(db, photo_id, rows, comparison=comparison)
         if error:
             return json_error(error, 404)
         result["scope_method"] = method_or_error
@@ -1182,6 +1199,8 @@ def create_photos_blueprint(
         accept exactly the same selection: at most 500 integer ids, at least
         two of which the workspace can see in an online folder.
         """
+        if not isinstance(body, dict):
+            return None, None, json_error("request body must be a JSON object")
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
             return None, None, json_error("photo_ids required")
@@ -1216,7 +1235,10 @@ def create_photos_blueprint(
         if err is not None:
             return err
 
-        result, error = build_best_batch_response(db, photo_ids[0], rows)
+        comparison, err = _comparison_args(db, body, rows)
+        if err is not None:
+            return err
+        result, error = build_best_batch_response(db, photo_ids[0], rows, comparison=comparison)
         if error:
             return json_error(error, 404)
         result["scope_method"] = "selected_photos"
@@ -1261,16 +1283,20 @@ def create_photos_blueprint(
         )
         if rows is None:
             return json_error(method_or_error, 404)
+        comparison, err = _comparison_args(db, request.args, rows)
+        if err is not None:
+            return err
         pack = build_evidence_pack(
             db, photo_id, rows,
             effective_cfg=db.get_effective_config(cfg.load()),
-            margin=margin, focus_size=focus_size,
+            margin=margin, focus_size=focus_size, comparison=comparison,
         )
         pack["scope_method"] = method_or_error
         return jsonify(pack)
 
     @blueprint.route("/api/photos/burst-evidence", methods=["POST"])
-    def api_selected_photos_burst_evidence():
+    @background_job
+    def api_selected_photos_burst_evidence(ctx):
         """The evidence pack for an explicit selection (``{"photo_ids": [...]}``).
 
         Same selection contract as ``POST /api/photos/best-batch``; same pack
@@ -1285,10 +1311,23 @@ def create_photos_blueprint(
         photo_ids, rows, err = _selected_best_batch_rows(db, body)
         if err is not None:
             return err
+        comparison, err = _comparison_args(db, body, rows)
+        if err is not None:
+            return err
+        if "analyze" in body and not isinstance(body["analyze"], bool):
+            return json_error("analyze must be a boolean")
+        if body.get("analyze"):
+            if comparison is None:
+                return json_error("A species or subject selection is required for comparison analysis")
+            from subject_analysis import analyze_comparison
+            ids = [row["id"] for row in rows]
+            effective = db.get_effective_config(cfg.load())
+            return ctx.start("analyze-subjects", lambda job: analyze_comparison(ctx, job, ids, comparison, effective),
+                             config={"photo_ids": ids, "requested_species": comparison.requested_species})
         pack = build_evidence_pack(
             db, photo_ids[0], rows,
             effective_cfg=db.get_effective_config(cfg.load()),
-            margin=margin, focus_size=focus_size,
+            margin=margin, focus_size=focus_size, comparison=comparison,
         )
         pack["scope_method"] = "selected_photos"
         return jsonify(pack)

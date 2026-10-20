@@ -2,7 +2,8 @@
 // to carry inline handlers and the delegated card clicks, then loads the batch.
 // ES module.
 
-import { byId } from './state.js';
+import { byId, state } from './state.js';
+import { analyzeSubjects, changeSubject, startComparison } from './subjects.js';
 import { bindCardClicks } from './render.js';
 import {
   flagBest, flagBestRejectRest, loadBatch, openInspectedLightbox, openReviewBurst,
@@ -18,6 +19,17 @@ onClick('reviewBtn', openReviewBurst);
 onClick('flagBtn', flagBest);
 onClick('rejectBtn', flagBestRejectRest);
 onClick('inspectImg', openInspectedLightbox);
+onClick('compareSubjectsBtn', startComparison);
+onClick('analyzeSubjectsBtn', analyzeSubjects);
+byId('subjectChoices').addEventListener('change', changeSubject);
+byId('requestedSpecies').addEventListener('input', function() {
+  state.requestSequence++;
+  state.bestBatchData = null;
+  ['flagBtn', 'rejectBtn', 'reviewBtn'].forEach(function(id) {
+    /** @type {HTMLButtonElement} */ (byId(id)).disabled = true;
+  });
+  byId('comparisonStatus').textContent = 'Species changed. Compare subjects to refresh the ranking.';
+});
 bindCardClicks();
 
 loadBatch();
