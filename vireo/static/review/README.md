@@ -205,3 +205,32 @@ reconciliation with an explicit error and roll back its photo changes; neither
 row's evidence is silently chosen or discarded. Matching uses the same taxonomy
 aliases and source identities as normal species decisions. Unrelated species
 and their pending writes remain independent. Review both rows before retrying.
+
+### Identity integration audit: photo removal and collapse
+
+All production `photos` deletes pass through `PhotoRowDeletion.delete`; its
+static contract test rejects additional direct deletion sites. Identity state
+and history-item photo foreign keys cascade on a genuine deletion. A survivor
+mapping instead keeps live identity revisions/evidence and retargets history;
+only identical batch items deduplicate. Current candidate associations are
+carried from live rows, never reconstructed blindly from audit snapshots.
+
+| Entry point | Identity integration invariant |
+| --- | --- |
+| `folders._fold_source_photos` / `_drop_merged_photos` | Validate both rows before copying tags; carry current candidate provenance (including redo-only history), move candidate intents and remap history before association deletion. Identity conflicts roll back the folder fold savepoint while preserving the caller's transaction. |
+| `moves_merge._drop_staged_photo` | Real and intra-staged collisions validate before copying/deleting, reconcile dated keyword edits, carry compatible species, visibility and pending work, then use the shared deletion point. |
+| `moves_merge._replace_phantom_target` | Apply the same identity/review/intent contract with the staged photo as survivor; genuine phantoms without a survivor cascade normally. |
+| `scanner.companions._merge_companion_into_primary` / `_delete_companion_row` | Validate live identities before metadata/tag transfer; preserve candidate provenance, move and retoken candidate intents before deleting JPEG links; retain the existing scan transaction and deferred filesystem cleanup. |
+| `photos.delete_photos` (also folder/trash deletion) | Map to no survivor: remove only deleted photos' live states, pending work and history items through the existing foreign keys. Other batch items remain replayable. |
+| `audit.remove_orphan_rows` | Same genuine-deletion contract in the repair caller's transaction. |
+| Folder relocation, `batch_update_photo_folder`, and ordinary file moves | Retain the photo ID; identity rows/history do not need reassignment. Staged collision branches above handle the cases that collapse IDs. |
+
+A previously drained source queue does not prove the destination sidecar has
+its confirmed species. Generic collapse therefore queues the retained catalog
+identity for every visible survivor workspace. Relevant moved intents keep
+captured-write flags but receive fresh tokens: an old-path writer cannot clear
+the replacement work. Existing unresolved/candidate, homonym and distinct-revision
+conflicts remain explicit refusals. Regression coverage exercises actual folder
+and RAW/JPEG collapse, pending and drained queues, stale acknowledgments, shared
+workspace sync/re-import, undo/redo, redo-only decisions, provenance, flags,
+visibility, genuine deletion and conflict rollback.

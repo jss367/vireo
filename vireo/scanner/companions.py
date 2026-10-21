@@ -604,6 +604,7 @@ def _merge_companion_into_primary(
     # remove either row. Skip before writes or deferred filesystem actions.
     if primary_full is None or companion_full is None:
         return False
+    db.companion_pairing.validate_identity_merge(primary["id"], companion["id"])
     _keep_companion_import_identity(db, primary, companion)
     _fill_primary_metadata_gaps(
         db, primary, primary_full, companion_full,

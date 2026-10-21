@@ -196,6 +196,8 @@ def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live
     expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text=description).locator('button')).to_have_count(1)
     expect(page.locator('#bpHistoryList .bp-history-row').filter(has_text='Superseded identification:').locator('button')).to_have_count(0)
     assert db.photos.get(pid)['rating'] == changed_rating
-    undo.click()
+    with page.expect_response(lambda response: response.url.endswith('/api/undo') and response.request.method == 'POST') as final:
+        undo.click()
+    assert final.value.status == 200
     expect(page.locator('#undoMsg')).not_to_contain_text(description)
     assert db.photos.get(pid)['rating'] == original_rating

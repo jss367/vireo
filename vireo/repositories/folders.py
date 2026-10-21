@@ -17,6 +17,11 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 
 import os
 
+from repositories.identity_alternatives import (
+    IdentityMergeConflict,
+    identity_merge_associations,
+    remap_photo_identities,
+)
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
@@ -660,6 +665,7 @@ class FolderRepository:
                 (target_folder_id, photo["filename"]),
             ).fetchone()
             if existing:
+                identity_keywords = identity_merge_associations(self.conn, photo["id"], existing["id"])
                 transfer_gps_review(photo["id"], existing["id"])
                 # Move the embedded-offered suppression onto the surviving
                 # row so a user's keyword removal is not resurrected by a
@@ -679,8 +685,9 @@ class FolderRepository:
                 # silently downgraded to an unknown by the import's stamp.
                 from keyword_identity import embedded_keyword_associations_for_merge
 
-                for keyword in embedded_keyword_associations_for_merge(
-                        self.conn, photo["id"], existing["id"]):
+                carried = list(embedded_keyword_associations_for_merge(self.conn, photo["id"], existing["id"]))
+                carried.extend(identity_keywords)
+                for keyword in carried:
                     self.conn.execute(
                         "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
                         "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
@@ -705,6 +712,7 @@ class FolderRepository:
         # Delete duplicate photos and their associated data
         if drop_ids:
             remap_photo_visibility(self.conn, collection_remap)
+            remap_photo_identities(self.conn, collection_remap)
             ph = ",".join("?" for _ in drop_ids)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(
@@ -739,8 +747,24 @@ class FolderRepository:
                     (link["workspace_id"], target_folder_id),
                 )
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True):
+    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
+        """Retain the caller's transaction while rolling back rejected identity folds."""
+        if not self.conn.in_transaction:
+            self.conn.execute('BEGIN')
+        self.conn.execute('SAVEPOINT identity_folder_merge')
+        try:
+            result = self._merge_into_existing_body(source_folder_id, target_folder_id, new_path, commit=False)
+        except IdentityMergeConflict:
+            self.conn.execute('ROLLBACK TO identity_folder_merge')
+            self.conn.execute('RELEASE identity_folder_merge')
+            raise
+        self.conn.execute('RELEASE identity_folder_merge')
+        if commit:
+            self.conn.commit()
+        return result
+
+    def _merge_into_existing_body(self, source_folder_id, target_folder_id, new_path, *,
+                                  commit=True):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source

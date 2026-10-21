@@ -15,6 +15,7 @@ from typing import Any
 from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key
 from repositories.species_taxon_lookup import lookup_taxon_id as lookup_species_taxon_id
+from repositories.sync import SyncRepository
 from sql_chunks import chunked
 
 
@@ -84,6 +85,80 @@ class IdentityMergeConflict(ValueError):
     """Two photo rows have distinct decisions that cannot be chosen implicitly."""
 
 
+def merge_candidate_names(conn: sqlite3.Connection, losing: int, survivor: int) -> list[str]:
+    """Include redo-only decisions; read actual links rather than restoring snapshots."""
+    names = set()
+    for row in conn.execute('SELECT candidates FROM photo_identity_alternatives WHERE photo_id IN (?, ?)', (losing, survivor)):
+        names.update(json.loads(row['candidates']))
+    for row in conn.execute(
+        'SELECT i.old_value,i.new_value FROM edit_history_items i JOIN edit_history e ON e.id=i.edit_id '
+        "WHERE i.photo_id IN (?, ?) AND e.action_type='identity_alternatives'", (losing, survivor),
+    ):
+        for value in row:
+            data = json.loads(value)
+            if data.get('identity'):
+                names.update(data['identity']['candidates'])
+    return sorted(names)
+
+
+def validate_identity_photo_merge(conn: sqlite3.Connection, losing: int, survivor: int) -> list[str]:
+    """Check both live rows before a caller copies or deletes their associations."""
+    rows = conn.execute('SELECT group_id,candidates,reason,missing_evidence,status FROM photo_identity_alternatives WHERE photo_id IN (?, ?)', (losing, survivor)).fetchall()
+    if len(rows) == 2 and tuple(rows[0]) != tuple(rows[1]):
+        raise IdentityMergeConflict('Photo collision has conflicting identity decisions; reconcile both photos before merging')
+    names = merge_candidate_names(conn, losing, survivor)
+    if names:
+        state = dict(rows[0]) if rows else {'candidates': json.dumps(names), 'status': 'resolved'}
+        _check_merge_confirmations(conn, losing, survivor, state)
+    return names
+
+
+def identity_merge_associations(conn: sqlite3.Connection, losing: int, survivor: int) -> list[dict[str, Any]]:
+    """Current candidate links that must travel before deleting the losing row."""
+    names = validate_identity_photo_merge(conn, losing, survivor)
+    return [{'id': link['keyword_id'], 'source': link['source']} for link in candidate_links(
+        conn, [losing], names, lookup_taxon_id=partial(lookup_species_taxon_id, conn),
+    ).get(losing, [])] if names else []
+
+
+def remap_identity_keyword_intents(conn: sqlite3.Connection, losing: int, survivor: int, names: list[str]) -> dict[str | tuple[str, int], str]:
+    """Retain captured-write flags; an old-path writer cannot acknowledge the new owner."""
+    moved = {}
+    keys = {keyword_match_key(name) for name in names}
+    lookup = partial(lookup_species_taxon_id, conn)
+    identities = candidate_identities(conn, names, lookup_taxon_id=lookup)
+    for row in conn.execute(
+        "SELECT id,value,change_token FROM pending_changes WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')", (losing,),
+    ).fetchall():
+        name = row['value'] or ''
+        if keyword_match_key(name) in keys or identities & candidate_identities(conn, [name], lookup_taxon_id=lookup):
+            token = str(uuid.uuid4())
+            conn.execute('UPDATE pending_changes SET photo_id=?,change_token=? WHERE id=?', (survivor, token, row['id']))
+            moved[row['change_token'] or ('id', row['id'])] = token
+    return moved
+
+
+def _repair_identity_merge_sidecar(conn: sqlite3.Connection, survivor: int, names: list[str]) -> None:
+    """A drained source queue does not prove the destination sidecar is current."""
+    if not names:
+        return
+    # Catalog-only merges have no Database queue callback. Use the queue's own
+    # normalization/token writer with explicit visible owners and no commit.
+    queue = SyncRepository(conn, lambda: 0)
+    current = {keyword_match_key(row['name']): row['name'] for row in conn.execute(
+        'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id WHERE pk.photo_id=?', (survivor,),
+    )}
+    ancestors = {keyword_match_key(name) for name in queue.retained_keyword_ancestor_names(survivor)}
+    workspaces = [row['workspace_id'] for row in conn.execute(
+        'SELECT workspace_id FROM photo_workspace_visibility WHERE photo_id=?', (survivor,),
+    )]
+    for name in names:
+        key = keyword_match_key(name)
+        kind = 'keyword_add' if key in current else ('keyword_remove_flat' if key in ancestors else 'keyword_remove')
+        for workspace in workspaces:
+            queue.queue(survivor, kind, current.get(key, name), workspace_id=workspace, _commit=False)
+
+
 def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | None]) -> None:
     """Carry shared identity and its audit before duplicate-photo deletion.
 
@@ -95,6 +170,7 @@ def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | No
     for losing, survivor in mapping.items():
         if survivor is None or losing == survivor:
             continue
+        names = merge_candidate_names(conn, losing, survivor)
         source = conn.execute('SELECT group_id, candidates, reason, missing_evidence, status FROM photo_identity_alternatives WHERE photo_id=?', (losing,)).fetchone()
         target = conn.execute('SELECT group_id, candidates, reason, missing_evidence, status FROM photo_identity_alternatives WHERE photo_id=?', (survivor,)).fetchone()
         if source is not None and target is not None and tuple(source) != tuple(target):
@@ -114,6 +190,8 @@ def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | No
             conn.execute('UPDATE photo_identity_alternatives SET photo_id=? WHERE photo_id=?', (survivor, losing))
         if state is not None:
             _check_merge_identity_intents(conn, losing, survivor, json.loads(state['candidates']))
+        remap_identity_keyword_intents(conn, losing, survivor, names)
+        _repair_identity_merge_sidecar(conn, survivor, names)
         _remap_identity_history(conn, losing, survivor)
 
 
@@ -256,7 +334,7 @@ def _remap_identity_history(conn: sqlite3.Connection, losing_id: int, survivor_i
         twins = conn.execute('SELECT * FROM edit_history_items WHERE edit_id=? AND photo_id=?',
                              (row['edit_id'], survivor_id)).fetchall()
         if any((t['old_value'], t['new_value']) != (row['old_value'], row['new_value']) for t in twins):
-            raise ValueError('Photo collision has conflicting identity history; review both photos before archiving')
+            raise IdentityMergeConflict('Photo collision has conflicting identity history; review both photos before archiving')
         if twins:
             conn.execute('DELETE FROM edit_history_items WHERE id=?', (row['id'],))
         else:

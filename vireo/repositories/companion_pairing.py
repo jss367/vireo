@@ -28,6 +28,11 @@ transaction, and the scanner owns the commit.
 import sqlite3
 
 from metadata import EXIF_SUMMARY_COLUMNS
+from repositories.identity_alternatives import (
+    merge_candidate_names,
+    remap_identity_keyword_intents,
+    validate_identity_photo_merge,
+)
 from repositories.photo_row_deletion import photo_row_deletion
 
 # The columns a merge may carry from companion to primary.
@@ -53,6 +58,10 @@ _TRANSFER_COLUMNS = (
 class CompanionPairingRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+
+    def validate_identity_merge(self, primary_id: int, companion_id: int) -> None:
+        """Validate live associations before pairing copies or deletes them."""
+        validate_identity_photo_merge(self.conn, companion_id, primary_id)
 
     # -- finding pairs -------------------------------------------------------
 
@@ -198,6 +207,8 @@ class CompanionPairingRepository:
         )
 
     def transfer_pending_changes(self, primary_id: int, companion_id: int) -> None:
+        names = merge_candidate_names(self.conn, companion_id, primary_id)
+        remap_identity_keyword_intents(self.conn, companion_id, primary_id, names)
         self.conn.execute(
             "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
             (primary_id, companion_id),
