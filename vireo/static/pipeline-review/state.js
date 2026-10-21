@@ -2,6 +2,8 @@
 // Classic page script; shared globals are initialized before boot.js runs.
 
 /** @type {ReviewResults | null} */ var pipelineResults = null;
+// Bind actions to the workspace that supplied the displayed review.
+/** @type {number | null} */ var pipelineReviewWorkspaceId = null;
 var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';

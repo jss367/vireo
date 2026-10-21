@@ -14,8 +14,9 @@ def _open_review(live_server, page):
     return ids
 
 
-def _install_retry(live_server, page, ids, *, failed=False, held=False, workspace_mismatch=False, delay_refresh=False):
-    state = {"submitted": [], "polls": 0, "terminal": False, "cancelled": False, "refresh_held": []}
+def _install_retry(live_server, page, ids, *, failed=False, held=False, workspace_mismatch=False,
+                   delay_refresh=False, preview_workspace_mismatch=False):
+    state = {"submitted": [], "polls": 0, "terminal": False, "cancelled": False, "refresh_held": [], "refreshes": 0}
     workspace_id = live_server["db"].active_workspace_id
 
     def readiness(route):
@@ -29,7 +30,7 @@ def _install_retry(live_server, page, ids, *, failed=False, held=False, workspac
                    "last_attempt": {"photo_id": pid, "status": "failed", "stage": "segmentation",
                                     "error": "Mask could not be produced"} if failed and state["terminal"] else None,
                    "provenance": {}} for pid in selected]
-        route.fulfill(json={"workspace_id": workspace_id, "count": len(photos),
+        route.fulfill(json={"workspace_id": workspace_id + 100 if preview_workspace_mismatch else workspace_id, "count": len(photos),
                             "max_selected_photos": 200, "photos": photos})
 
     def submit(route):
@@ -49,6 +50,7 @@ def _install_retry(live_server, page, ids, *, failed=False, held=False, workspac
         route.fulfill(json={"cancelled": True})
 
     def refresh(route):
+        state["refreshes"] += 1
         response = route.fetch()
         data = response.json()
         data["workspace_id"] = workspace_id + 100 if workspace_mismatch else workspace_id
@@ -178,3 +180,40 @@ def test_read_only_regrouped_view_can_explain_but_cannot_start_retry(live_server
     expect(page.locator("#analysisRetryStatus")).to_contain_text("regrouped view is read-only")
     expect(page.locator("#analysisRetryStart")).to_be_disabled()
     assert state["submitted"] == []
+
+
+def test_preview_cannot_adopt_another_workspace_for_shared_photos(live_server, page):
+    ids = _open_review(live_server, page)
+    state = _install_retry(live_server, page, ids, preview_workspace_mismatch=True)
+    page.locator("#grmAnalysisRetryAction").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("active workspace changed")
+    expect(page.locator("#analysisRetryStart")).to_be_disabled()
+    assert page.evaluate("reviewAnalysisRetry.workspaceId") == live_server["db"].active_workspace_id
+    assert state["submitted"] == []
+
+
+def test_scope_change_while_submission_pending_does_not_overlay_regrouped_scores(live_server, page):
+    ids = _open_review(live_server, page)
+    state = _install_retry(live_server, page, ids)
+    pending = []
+    page.route("**/api/photos/analysis-retry", lambda route: pending.append(route))
+    page.locator("#grmAnalysisRetryAction").click()
+    with page.expect_request("**/api/photos/analysis-retry"):
+        page.locator("#analysisRetryStart").click()
+    page.locator("#analysisRetryClose").click()
+    page.evaluate("""pid => {
+        closeGroupReview(true);
+        pipelineResults = structuredClone(pipelineResults);
+        reviewScopeRegrouped = true;
+        reviewScopeRequestSeq++;
+        const photo = findPhotoInResults(pid);
+        photo.subject_tenengrad = 999;
+        photo.quality_composite = .123;
+        photo.label = 'REJECT';
+    }""", ids[0])
+    pending[0].fulfill(json={"job_id": "selected-analysis-test", "photo_ids": [ids[0]]})
+    expect(page.locator("#analysisRetryBanner")).to_contain_text("view changed during analysis")
+    assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 999
+    assert page.evaluate("pid => findPhotoInResults(pid).quality_composite", ids[0]) == .123
+    assert page.evaluate("pid => findPhotoInResults(pid).label", ids[0]) == "REJECT"
+    assert state["refreshes"] == 0

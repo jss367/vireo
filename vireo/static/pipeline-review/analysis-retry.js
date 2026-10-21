@@ -26,7 +26,8 @@ async function openAnalysisRetry(photoIds) {
   if (ids.length > 200) { showToast('Select at most 200 photos for analysis retry.', 'warning'); return; }
   reviewAnalysisRetry.ids = ids.slice();
   reviewAnalysisRetry.readiness = null;
-  reviewAnalysisRetry.workspaceId = null;
+  var workspaceId = pipelineReviewWorkspaceId;
+  reviewAnalysisRetry.workspaceId = workspaceId;
   var sequence = ++reviewAnalysisRetry.sequence;
   analysisRetryElement('analysisRetryPhotos').replaceChildren();
   /** @type {HTMLButtonElement} */ (analysisRetryElement('analysisRetryStart')).disabled = true;
@@ -38,7 +39,9 @@ async function openAnalysisRetry(photoIds) {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({photo_ids: ids}),
     }, {toast: false});
     if (sequence !== reviewAnalysisRetry.sequence || !dialog.open) return;
-    reviewAnalysisRetry.workspaceId = data.workspace_id;
+    if (workspaceId === null || data.workspace_id !== workspaceId || pipelineReviewWorkspaceId !== workspaceId) {
+      throw new Error('The active workspace changed. Reload the intended workspace before retrying analysis.');
+    }
     renderAnalysisReadiness(data);
     setAnalysisRetryStatus(isScopedReviewView() ?
       'This regrouped view is read-only. Switch the scope to Saved review results, or open these photos from Browse, to retry analysis.' :
@@ -70,7 +73,8 @@ function renderAnalysisReadiness(data) {
 async function startAnalysisRetry() {
   if (reviewAnalysisRetry.jobId || reviewAnalysisRetry.submitting || !reviewAnalysisRetry.readiness) return;
   var ids = photoIdsInReviewScope(reviewAnalysisRetry.ids);
-  if (isScopedReviewView() || (grmState && grmState.applying) || ids.length !== reviewAnalysisRetry.ids.length) {
+  if (isScopedReviewView() || (grmState && grmState.applying) || ids.length !== reviewAnalysisRetry.ids.length ||
+      reviewAnalysisRetry.workspaceId !== pipelineReviewWorkspaceId) {
     setAnalysisRetryStatus('The selection or view changed. Close this dialog and select the photos again.'); return;
   }
   /** @type {HTMLButtonElement} */ (analysisRetryElement('analysisRetryStart')).disabled = true;
