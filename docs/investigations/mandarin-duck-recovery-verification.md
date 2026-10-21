@@ -95,9 +95,9 @@ All original/copy/sidecar content hashes and nanosecond modification times remai
 
 The model still does not provide a qualifying animal for these 61 frames. Recovery infrastructure now reports that result honestly and preserves REVIEW instead of treating unavailable subject measurements as evidence to reject a photograph. No real catalog repair, corrected detector behavior, automatic keep validation, focus calibration, or live-library mutation is claimed.
 
-## Final publication regression check
+## Atomic publication regression check
 
-The final [selected-photo retry implementation, PR 2278](https://github.com/jss367/vireo/pull/2278), is commit `ba35023692e888bf72d16ffc365dc2f5a5e8e595`. A fresh scratch fixture captured the source/copy/sidecar hashes and selected live catalog-row digest **before** execution. The bounded three-frame pilot was repeated against a frozen archive of that exact commit, adding a deliberately incomplete, matching-key ranking cache generation for frame 216713:
+An earlier publication check used the [selected-photo retry implementation, PR 2278](https://github.com/jss367/vireo/pull/2278), at commit `ba35023692e888bf72d16ffc365dc2f5a5e8e595`. A fresh scratch fixture captured the source/copy/sidecar hashes and selected live catalog-row digest **before** execution. The bounded three-frame pilot was repeated against a frozen archive of that exact commit, adding a deliberately incomplete, matching-key ranking cache generation for frame 216713:
 
 ```sh
 python scripts/run_subject_retry_verification.py \
@@ -107,8 +107,32 @@ python scripts/run_subject_retry_verification.py \
   --concurrent-decision 216713 --report-name final-publication
 ```
 
-This final delta completed in **11.0839 seconds**. Detection took 3.8015 seconds and kept 216692 in REVIEW. Genuine SAM2 inference took 6.7922 seconds and repaired the incomplete generation for 216713, publishing complete mask/quality evidence. The concurrent scratch reject/rating 2, existing keep, every unselected photo row and grouping all survived. This exercises recovery of a provably incomplete generation rather than merely bypassing a valid cached result.
+This publication delta completed in **11.0839 seconds**. Detection took 3.8015 seconds and kept 216692 in REVIEW. Genuine SAM2 inference took 6.7922 seconds and repaired the incomplete generation for 216713, publishing complete mask/quality evidence. The concurrent scratch reject/rating 2, existing keep, every unselected photo row and grouping all survived. This exercises recovery of a provably incomplete generation rather than merely bypassing a valid cached result.
 
-The supplied-box positive fixture was also repeated on the final code, completing in **6.8684 seconds** (6.4803 seconds inside the SAM2 call). It produced complete analysis and quality 0.6542, while the suggested label stayed REVIEW. The mask pixels exactly match the previously visually inspected duck mask. The already valid ranking generation from 216713 remained byte-for-byte unchanged during this separate operation.
+The supplied-box positive fixture was also repeated on that code, completing in **6.8684 seconds** (6.4803 seconds inside the SAM2 call). It produced complete analysis and quality 0.6542, while the suggested label stayed REVIEW. The mask pixels exactly match the previously visually inspected duck mask. The already valid ranking generation from 216713 remained byte-for-byte unchanged during this separate operation.
 
-Final checks passed for every original/copy/sidecar hash and modification time, all live flags/ratings, and the pre-run selected live catalog-row digest. No live catalog, source, sidecar, configuration or cache writes occurred. Seven focused preparer/guard tests pass, and Ruff plus whitespace checks pass. The independent verification tools import the retry API only when the runner is explicitly invoked with the implementation checkout; their safety tests and report do not duplicate the production changes in PR 2278.
+Final checks passed for every original/copy/sidecar hash and modification time, all live flags/ratings, and the pre-run selected live catalog-row digest. No live catalog, source, sidecar, configuration or cache writes occurred. The initial seven focused preparer/guard tests passed, as did Ruff and whitespace checks. The independent verification tools import the retry API only when the runner is explicitly invoked with the implementation checkout; their safety tests and report do not duplicate the production changes in PR 2278.
+
+
+## Reviewed runtime and saved-review regression check
+
+After detector-runtime identity binding, saved encounter identity matching, species-mode analysis refresh, bounded cleanup, and cancellation-aware publication changes, the bounded replay was repeated against frozen implementation **`4111fb4aae8ff286674a640ab476997c323532e0`** (retry-service SHA-256 `a4ed3a67a42525b1bfdc02a42661aef5bdedaa4355f21a80c299b2aa3bc8d65e`). This is the latest actual-model verification recorded here, distinct from the historical full-sequence commit above.
+
+A newly prepared canonical 71-photo fixture captured all source/copy/sidecar hashes, modification times, live decisions and the selected catalog-row digest **before** any inference. Preparation took 3.109 seconds and foreign-key checks passed. The same three selected frames and intentionally incomplete matching-key ranking generation were exercised:
+
+| Frame | Actual model work | Observed result |
+| --- | --- | --- |
+| 216692 | Detector, 3.8772 s | Still no qualifying animal; only detection ran; stays REVIEW with no fabricated quality. |
+| 216716 | None | Existing current analysis and photographer KEEP survive. |
+| 216713 | SAM2, 7.0308 s, then quality computation | The deliberately incomplete ranking generation is repaired and usable measurements are published. Its pre-existing animal box still selects background. |
+
+The three-frame operation completed in **11.4161 seconds**, without inference errors. A separate scratch connection changed 216713 to reject/rating 2 during the detector call; that decision, every unselected photo row, one encounter and five bursts were preserved. The saved review was 1 KEEP / 69 REVIEW / 1 explicit simulated REJECT.
+
+The agent-selected duck-box positive was then replayed in that same seeded directory, retaining its simulated reject. It completed in **6.9183 seconds** (actual SAM2 call 6.5405 seconds), without another detector invocation. Quality was 0.6542, analysis was eligible, and the suggestion remained REVIEW. Its mask pixels exactly equal the previously visually inspected duck mask; the valid ranking generation for 216713 remained byte-for-byte unchanged. This supplied-box intervention remains distinct from successful automatic detection or a user-confirmed annotation.
+
+Post-run checks again passed for every source/copy/sidecar content hash and nanosecond modification time, all live flags/ratings, and the pre-run selected live catalog-row digest `a4fa3442b31bf84caf3ea575324e3bbb04d2f7cf8bf84449d5a5cc8aa88f0728`. All inference processes exited.
+
+The verification tools now use explicit runtime errors for preservation failures, so optimized Python cannot remove them and publish a false success report. Five subprocess regressions run those failure checks with `python -O`. Scratch review rows and flag-attribution notes are limited to the copied workspace; photographer flags/ratings themselves remain intact even when an attribution note originated elsewhere. Canonical foreign-key checks run before preparation commits. **Fifteen focused safety regressions pass**, including multiple-workspace prediction reviews and attribution notes, alongside Ruff and whitespace checks.
+
+
+A subsequent guard-only change at `62185d0face1f060eb8cab134369bb790200fd27` compares the retained detector run's stored source-input fingerprint as well as its runtime identity before allowing segmentation of reviewed boxes. Its two focused pinned/unpinned stale-source regressions passed independently (`python -m pytest -o addopts='' vireo/tests/test_analysis_retry.py -k changed_source_with_same_runtime -q`). They verify rejection before SAM, rather than claiming another real-model replay. This change does not alter the detector algorithm; the actual-model timings and outputs above remain specifically attributable to `4111fb4aae8ff286674a640ab476997c323532e0`.
