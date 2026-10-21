@@ -241,6 +241,14 @@ promotes the chosen keyword before that phase begins; no cache survives into
 a later service call, even in the same transaction. Live per-photo visibility,
 revision and association/provenance checks still run for every item. An offline
 20-photo/2,000-species regression measured full keyword scans dropping from
-61/62/60/60 to 1/2/1/1 for save/resolve/undo/redo. Higher-rank keywords cannot
+61/62/60/60 to 3/2/1/1 for save/resolve/undo/redo (including authoritative alias validation). Higher-rank keywords cannot
 claim a candidate spelling and suppress species-only common-name fallback;
 their own photo associations remain independent metadata.
+
+
+Candidate aliases that share a known authoritative species identity are rejected
+before photo associations, evidence, history or XMP intents change. The core save
+service applies normalized-name and count validation as well as taxon validation,
+so API and direct callers share the same rule. Genuinely unknown distinct names
+remain valid; an existing unresolved group collapsed to one candidate by taxonomy
+maintenance stays editable and still requires explicit confirmation.

@@ -201,3 +201,27 @@ def test_retired_identity_conflict_refreshes_undo_tooltip_before_next_click(live
     assert final.value.status == 200
     expect(page.locator('#undoMsg')).not_to_contain_text(description)
     assert db.photos.get(pid)['rating'] == original_rating
+
+
+def test_same_species_aliases_are_rejected_without_losing_form_or_confirmation(live_server, page):
+    ids = open_panel(live_server, page)
+    db = live_server['db']
+    db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (88001,88001,'Tyrannus melancholicus','Tropical Kingbird','species')")
+    scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.tag_photo(ids[0], scientific, source='accept')
+    db.photo_review.set_flag(ids[0], 'rejected')
+    history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items')]
+    page.locator('#identityCandidates').fill('Tropical Kingbird\nTyrannus melancholicus')
+    with page.expect_response(lambda response: response.url.endswith('/api/identity-alternatives') and response.request.method == 'POST') as response:
+        page.locator('#identitySave').click()
+    assert response.value.status == 400
+    assert 'same species' in response.value.json()['error']
+    expect(page.locator('#identityAlternativesStatus')).to_contain_text('Could not confirm the save')
+    expect(page.locator('#identityCandidates')).to_have_value('Tropical Kingbird\nTyrannus melancholicus')
+    expect(page.locator('#identityReason')).to_have_value('Still photos do not identify this pair reliably')
+    expect(page.locator('#identityEvidence')).to_have_value('A recording of the call')
+    expect(page.locator('#identitySave')).to_be_enabled()
+    expect(page.locator('#identityAlternativesGroups article')).to_have_count(0)
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (ids[0], scientific)).fetchone()[0] == 'accept'
+    assert db.photos.get(ids[0])['flag'] == 'rejected'
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items')] == history

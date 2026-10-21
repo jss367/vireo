@@ -224,8 +224,10 @@ def save_alternatives(
 ) -> int:
     """Replace candidate confirmations with one unresolved group, atomically."""
     batch = _IdentityBatch(db)
-    _validate_candidate_identities(batch, candidates)
     states = db.identity_alternatives.for_photos(photo_ids, include_resolved=True)
+    editable_group = bool(photo_ids) and all(states.get(pid, {}).get('status') == 'unresolved' for pid in photo_ids)
+    candidates = normalize_candidates(candidates, minimum=1 if editable_group else 2)
+    _validate_candidate_identities(batch, candidates)
     prior_groups: dict[tuple[str, ...], list[int]] = {}
     for pid in photo_ids:
         prior = states.get(pid, {})
