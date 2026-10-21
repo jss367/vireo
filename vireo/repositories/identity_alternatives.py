@@ -174,14 +174,21 @@ def _repair_identity_merge_sidecar(conn: sqlite3.Connection, survivor: int, name
     # Catalog-only merges have no Database queue callback. Use the queue's own
     # normalization/token writer with explicit visible owners and no commit.
     queue = SyncRepository(conn, lambda: 0)
-    current = {keyword_match_key(row['name']): row['name'] for row in conn.execute(
-        'SELECT k.name FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id WHERE pk.photo_id=?', (survivor,),
+    current_names = {row['id']: row['name'] for row in conn.execute(
+        'SELECT k.id,k.name FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id WHERE pk.photo_id=?', (survivor,),
     )}
+    current = {keyword_match_key(name): name for name in current_names.values()}
+    affected = {keyword_match_key(name): name for name in names}
+    # Confirmed aliases may not use any candidate spelling. Repair the names
+    # actually carried, just as the service reconciliation does after replay.
+    for link in candidate_links(conn, [survivor], names, lookup_taxon_id=partial(lookup_species_taxon_id, conn)).get(survivor, []):
+        name = current_names[link['keyword_id']]
+        affected[keyword_match_key(name)] = name
     ancestors = {keyword_match_key(name) for name in queue.retained_keyword_ancestor_names(survivor)}
     workspaces = [row['workspace_id'] for row in conn.execute(
         'SELECT workspace_id FROM photo_workspace_visibility WHERE photo_id=?', (survivor,),
     )]
-    for name in names:
+    for name in affected.values():
         key = keyword_match_key(name)
         kind = 'keyword_add' if key in current else ('keyword_remove_flat' if key in ancestors else 'keyword_remove')
         for workspace in workspaces:

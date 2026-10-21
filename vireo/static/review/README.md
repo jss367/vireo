@@ -264,3 +264,10 @@ Resolved collision comparisons fetch authoritative identities only for the
 union of linked keyword IDs, using bounded parameter chunks and primary-key
 searches. Pending-intent remapping performs no identity scan with empty candidate
 names and reuses duplicate pending-name lookups only within that call.
+
+Generic collision sidecar repair includes the survivor's actual candidate-linked
+keyword names, not just the group's candidate spellings. This matches service
+reconciliation and repairs carried scientific/common/source-only aliases even
+when the source queue already synced and drained. Coverage includes staged,
+phantom, intra-staged, folder and companion paths, visible shared workspaces,
+destination sync/re-import, history/provenance, and retained higher-rank metadata.
