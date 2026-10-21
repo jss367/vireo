@@ -1797,7 +1797,6 @@ def test_push_event_mirrors_progress_onto_job(tmp_path):
     polling clients (which don't subscribe to SSE) see the latest phase
     and current_file."""
     import threading
-    import time
 
     from db import Database
     from jobs import JobRunner
@@ -1806,6 +1805,7 @@ def test_push_event_mirrors_progress_onto_job(tmp_path):
     runner = JobRunner(db=db)
 
     gate = threading.Event()
+    progress_ready = threading.Event()
 
     def work(job):
         runner.push_event(job["id"], "progress", {
@@ -1814,29 +1814,27 @@ def test_push_event_mirrors_progress_onto_job(tmp_path):
             "total": 843,
             "current_file": "Computing label embeddings (150/843)...",
         })
+        progress_ready.set()
         gate.wait(timeout=synchronization_timeout(2))
         return {}
 
     job_id = runner.start("test", work, workspace_id=1)
 
-    # Read progress while the job is still running — this is what the UI does.
-    deadline = time.time() + 2
-    while time.time() < deadline:
+    try:
+        # Observe the actual publication checkpoint before polling the mirrored
+        # fields; worker startup/persistence can exceed two seconds on Windows.
+        assert progress_ready.wait(synchronization_timeout(2)), "progress was never published"
         j = runner.get(job_id)
-        if j and j["progress"].get("phase"):
-            break
-        time.sleep(0.02)
-
-    j = runner.get(job_id)
-    assert j["progress"]["phase"] == "Step 3/5: Computing embeddings"
-    assert j["progress"]["current"] == 150
-    assert j["progress"]["total"] == 843
-    assert j["progress"]["current_file"] == "Computing label embeddings (150/843)..."
-    # 'steps' must not leak into the stored progress (it is injected only
-    # onto the outbound event payload).
-    assert "steps" not in j["progress"]
-
-    gate.set()
+        assert j["progress"]["phase"] == "Step 3/5: Computing embeddings"
+        assert j["progress"]["current"] == 150
+        assert j["progress"]["total"] == 843
+        assert j["progress"]["current_file"] == "Computing label embeddings (150/843)..."
+        # 'steps' belongs only to the outbound payload, not stored progress.
+        assert "steps" not in j["progress"]
+    finally:
+        gate.set()
+        assert wait_for_job_via_runner(runner, job_id, wait_for_history=True)["status"] == "completed"
+        db.close()
 
 
 def _history_row(db, job_id):
