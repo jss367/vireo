@@ -139,7 +139,9 @@ def prepare(args: argparse.Namespace) -> None:
     prediction_ids = tuple(row[0] for row in target.execute("SELECT id FROM predictions"))
     if prediction_ids:
         prediction_marks = ",".join("?" for _ in prediction_ids)
-        copy_rows(source, target, "prediction_review", f"prediction_id IN ({prediction_marks})", prediction_ids)
+        copy_rows(source, target, "prediction_review",
+                  f"workspace_id=? AND prediction_id IN ({prediction_marks})",
+                  (args.workspace, *prediction_ids))
     catalog_baseline = catalog_snapshot(source, ids)
     originals = []
     copies = []
