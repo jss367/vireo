@@ -169,7 +169,7 @@ def test_concurrent_flag_and_rating_survive_inference_and_refresh(retry_library,
 def test_api_rejects_unbounded_malformed_and_foreign_selection(retry_library, endpoint):
     app, db, ids, _ = retry_library
     client = app.test_client()
-    for values in ([], [True], ["1"], ids * 70, [10**12]):
+    for values in ([], [True], ["1"], ids * 70, [10**12], [2**64]):
         assert client.post(f"/api/photos/{endpoint}", json={"photo_ids": values}).status_code == 400
     other = db.create_workspace("Foreign")
     assert client.post(f"/api/workspaces/{other}/activate").status_code == 200

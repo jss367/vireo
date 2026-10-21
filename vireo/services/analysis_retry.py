@@ -29,7 +29,7 @@ class RetryContext(Protocol):
 
 def selected_ids(db: Database, values: object) -> list[int]:
     if (not isinstance(values, list) or not 1 <= len(values) <= MAX_SELECTED_PHOTOS
-            or any(type(pid) is not int or pid <= 0 for pid in values)):
+            or any(type(pid) is not int or not 0 < pid <= 2**63 - 1 for pid in values)):
         raise ValueError(f"Choose 1–{MAX_SELECTED_PHOTOS} positive integer photo IDs")
     ids = list(dict.fromkeys(values))
     if db.active_workspace_id is None:
