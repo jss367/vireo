@@ -140,6 +140,16 @@ class PipelineFeaturesRepository:
             (workspace_id,),
         ).fetchall()
 
+    def selected_folder_context(self, workspace_id: int) -> list[sqlite3.Row]:
+        """Lightweight visible neighbors for contextual weak runs of staged photos."""
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.timestamp FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id=p.id
+               WHERE wf.workspace_id=? AND p.folder_id IN (
+                   SELECT folder_id FROM photos WHERE id IN (SELECT id FROM pipeline_scope_ids))""",
+            (workspace_id,),
+        ).fetchall()
+
     @staticmethod
     def _detection_floor(min_conf: float, weak_confidence: float | None) -> tuple[str, tuple[Any, ...]]:
         """The detector-confidence predicate and its parameters.

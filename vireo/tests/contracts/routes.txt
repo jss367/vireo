@@ -374,6 +374,8 @@ POST         /api/photos/<int:photo_id>/location/text
 POST         /api/photos/<int:photo_id>/rating
 POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
+POST         /api/photos/analysis-readiness
+POST         /api/photos/analysis-retry
 POST         /api/photos/best-batch
 POST         /api/photos/burst-evidence
 POST         /api/photos/by-ids
@@ -441,6 +443,8 @@ POST         /api/undo
 POST         /api/v1/batch/flag
 POST         /api/v1/encounters/species
 POST         /api/v1/photos/<int:photo_id>/flag
+POST         /api/v1/photos/analysis-readiness
+POST         /api/v1/photos/analysis-retry
 POST         /api/v1/photos/burst-evidence
 POST         /api/v1/shutdown
 POST         /api/v1/workspaces/<int:ws_id>/activate

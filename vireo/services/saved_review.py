@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from services.service_types import JsonDict
 
 
-def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
+def refresh_saved_suggestions(db: Database, data: JsonDict, *, effective_config: JsonDict | None = None) -> None:
     """Re-score the saved members without inference or catalog/sidecar writes."""
     import config as cfg
     from pipeline import (
@@ -28,7 +28,7 @@ def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
     # Identify/species-only reviews deliberately do not run quality triage.
     if data.get("review_mode") == "species":
         return
-    effective = db.get_effective_config(cfg.load())
+    effective = effective_config if effective_config is not None else db.get_effective_config(cfg.load())
     ids = [p["id"] for p in data.get("photos", [])]
     current = load_photo_features(
         db, photo_ids=ids, config=effective, effective_config=effective,
@@ -122,3 +122,25 @@ def _current_groups(data: JsonDict, photos: dict[int, JsonDict]) -> list[JsonDic
                       "burst_count": 1, "bursts": [{"photo_ids": remainder}]})
     data["encounters"] = saved
     return groups
+
+
+def refresh_selected_suggestions(db: Database, data: JsonDict, photo_ids: list[int], effective: JsonDict) -> None:
+    """Refresh complete affected cohorts, retaining other saved groups unchanged."""
+    from copy import deepcopy
+
+    from pipeline import refresh_serialized_summary
+
+    selected = set(photo_ids)
+    groups = [group for group in data.get("encounters", []) if selected.intersection(group.get("photo_ids", []))]
+    members = {pid for group in groups for pid in group.get("photo_ids", [])} | selected
+    subset = {**data, "encounters": deepcopy(groups),
+              "photos": [deepcopy(photo) for photo in data.get("photos", []) if photo["id"] in members]}
+    if not subset["photos"]:
+        return
+    refresh_saved_suggestions(db, subset, effective_config=effective)
+    updated = {photo["id"]: photo for photo in subset["photos"]}
+    data["photos"] = [updated.get(photo["id"], photo) for photo in data.get("photos", [])]
+    for original, current in zip(groups, subset["encounters"], strict=False):
+        original.clear()
+        original.update(current)
+    refresh_serialized_summary(data)

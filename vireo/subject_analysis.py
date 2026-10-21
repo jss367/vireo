@@ -41,13 +41,13 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     return result
 
 
-def analyze_detection(db, photo, detection, effective_cfg, checkpoint):
+def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=False, existing_mask_path=None):
     from image_loader import load_image
     from masking import crop_completeness, generate_mask
     from quality import compute_all_quality_features
 
     key, cached = cached_analysis(db, photo, detection, effective_cfg)
-    if cached:
+    if cached and not force:
         return False
     path = source_path(db, photo)
     key = analysis_key(path, detection, effective_cfg)
@@ -56,8 +56,12 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint):
     if image is None:
         raise ValueError("Could not decode original for subject analysis")
     try:
-        mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
-                             variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
+        if existing_mask_path:
+            with Image.open(existing_mask_path) as saved_mask:
+                mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
+        else:
+            mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
+                                 variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         if mask is None or not np.any(mask):
             raise ValueError("No subject mask was produced")
         checkpoint()

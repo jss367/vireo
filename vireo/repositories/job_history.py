@@ -85,6 +85,13 @@ class JobHistoryRepository:
             (*statuses, limit),
         ).fetchall()
 
+    def analysis_retry_results(self, workspace_id: int) -> list[sqlite3.Row]:
+        """Recent bounded selected-analysis attempts, including persisted partial outcomes."""
+        return self.conn.execute(
+            "SELECT id, result FROM job_history WHERE type='analysis-retry' AND workspace_id=? "
+            "AND result IS NOT NULL ORDER BY started_at DESC LIMIT 50", (workspace_id,),
+        ).fetchall()
+
     def last_completed_with_result(self, job_type: str) -> sqlite3.Row | None:
         """Newest completed ``job_type`` row that stored a result, or None.
 

@@ -757,6 +757,7 @@ def create_pipeline_blueprint(
         taxonomy_available = get_taxonomy_info()["available"]
 
         return jsonify({
+            "workspace_id": db.active_workspace_id,
             "total_photos": total_photos,
             "taxonomy_available": taxonomy_available,
             "pipeline_config": {
@@ -816,6 +817,7 @@ def create_pipeline_blueprint(
         )
         attach_edit_recipes(db, results.get("photos", []))
         results["source"] = "browse-selection"
+        results["workspace_id"] = db.active_workspace_id
         return jsonify(results)
 
     @blueprint.route("/api/pipeline/scope-photos")
