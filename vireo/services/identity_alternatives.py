@@ -209,11 +209,22 @@ def replay_identity_batch(db: Database, items: Sequence[dict[str, Any]], *, undo
         replay_identity_edit(db, item['photo_id'], item[previous], item[replacement], batch)
 
 
+def _validate_candidate_identities(batch: _IdentityBatch, candidates: list[str]) -> None:
+    """Aliases of one known species cannot stand for different alternatives."""
+    seen = set()
+    for name in candidates:
+        identities = batch.identities([name])
+        if identities & seen:
+            raise ValueError('These alternatives refer to the same species. Use one name for each possible species.')
+        seen.update(identities)
+
+
 def save_alternatives(
     db: Database, photo_ids: Sequence[int], candidates: list[str], reason: str, missing_evidence: str,
 ) -> int:
     """Replace candidate confirmations with one unresolved group, atomically."""
     batch = _IdentityBatch(db)
+    _validate_candidate_identities(batch, candidates)
     states = db.identity_alternatives.for_photos(photo_ids, include_resolved=True)
     prior_groups: dict[tuple[str, ...], list[int]] = {}
     for pid in photo_ids:

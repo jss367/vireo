@@ -571,6 +571,44 @@ def test_taxonomy_candidate_without_keyword_removes_confirmed_scientific_alias(a
     assert db.photos.get(1)['flag'] == 'rejected'
 
 
+@pytest.mark.parametrize('source_only', [False, True])
+@pytest.mark.parametrize('editing', [False, True])
+def test_equivalent_candidate_aliases_rejected_without_catalog_changes(app_and_db, source_only, editing):
+    app, db = app_and_db
+    client = app.test_client()
+    if not source_only:
+        db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(101,501,'Tyrannus melancholicus','Tropical Kingbird','species')")
+    source = 999999999 if source_only else None
+    common = db.add_keyword('Tropical Kingbird', parent_id=db.add_keyword('Common names'), is_species=True, source_taxon_id=source)
+    scientific = db.add_keyword('Tyrannus melancholicus', parent_id=db.add_keyword('Scientific names'), is_species=True, source_taxon_id=source)
+    db.tag_photo(1, scientific, source='accept')
+    db.photo_review.set_flag(1, 'rejected')
+    group_id = None
+    if editing:
+        assert save(client, [1]).status_code == 200
+        group_id = current_group(client)['group_id']
+    tables = ['photo_identity_alternatives', 'photo_keywords', 'pending_changes', 'edit_history', 'edit_history_items']
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY rowid')] for table in tables}
+    response = save(client, [1], group_id=group_id, candidates=[db.keywords.name_of(common), db.keywords.name_of(scientific), 'Unknown distinct candidate'])
+    assert response.status_code == 400
+    assert 'same species' in response.get_json()['error']
+    assert {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY rowid')] for table in tables} == before
+    assert db.photos.get(1)['flag'] == 'rejected'
+
+
+def test_known_candidate_and_unknown_alternative_remain_distinct(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(101,501,'Tyrannus melancholicus','Tropical Kingbird','species')")
+    scientific = db.add_keyword('Tyrannus melancholicus', is_species=True)
+    db.tag_photo(1, scientific, source='accept')
+    assert save(client, [1], candidates=['Tropical Kingbird', 'Unknown alternative']).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {}
+    assert current_group(client)['candidates'] == ['Tropical Kingbird', 'Unknown alternative']
+    assert client.post('/api/undo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [db.keywords.name_of(scientific)]}
+
+
 @pytest.mark.parametrize('rank', ['genus', 'family'])
 @pytest.mark.parametrize('explicit_source', [False, True])
 def test_higher_rank_homonym_does_not_mask_species_candidate_alias(app_and_db, rank, explicit_source):
