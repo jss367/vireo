@@ -245,3 +245,44 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
     assert result["ok"] and result["photos"][0]["status"] == "complete"
     assert calls["detection"] == [] and len(calls["segmentation"]) == 1
     assert result["requested_photo_ids"] == [ids[1]]
+
+
+def test_visibility_removed_during_inference_never_publishes(retry_library, tmp_path, monkeypatch):
+    _, db, ids, _ = retry_library
+    original = __import__("masking").generate_mask
+    folder_id = db.photos.get(ids[0])["folder_id"]
+    def hide_during_analysis(*args, **kwargs):
+        pixels = original(*args, **kwargs)
+        db.remove_workspace_folder(db.require_workspace_id(), folder_id)
+        return pixels
+    monkeypatch.setattr("masking.generate_mask", hide_during_analysis)
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert not result["ok"] and "visible" in result["errors"][0]["error"]
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0] is None
+    assert result["readiness"]["photos"] == []
+
+
+def test_job_captures_submission_workspace_even_after_switch(retry_library, monkeypatch):
+    from wait import wait_for_job_via_client
+    app, db, ids, calls = retry_library
+    client = app.test_client()
+    original = __import__("detector").detect_animals
+    entered, release = threading.Event(), threading.Event()
+    def gated(path):
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+        return original(path)
+    monkeypatch.setattr("detector.detect_animals", gated)
+    workspace = db.require_workspace_id()
+    response = client.post("/api/photos/analysis-retry", json={"photo_ids": [ids[0]], "expected_workspace_id": workspace})
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        other = db.create_workspace("Other tab")
+        assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    finally:
+        release.set()
+    job = wait_for_job_via_client(client, response.json["job_id"], wait_for_history=True)
+    assert job["status"] == "completed" and job["workspace_id"] == workspace
+    assert job["result"]["readiness"]["workspace_id"] == workspace
+    assert calls["detection"] == ["duck-0.jpg"]
+    assert client.get("/api/pipeline/page-init").json["workspace_id"] == other
