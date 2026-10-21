@@ -206,3 +206,18 @@ Path(sys.argv[3]).write_text('success')
                                 json.dumps(payload), str(success), fault], capture_output=True, text=True)
     assert completed.returncode != 0 and message in completed.stderr
     assert not success.exists()
+
+
+@pytest.mark.parametrize("attribution_workspace", [5, 6])
+def test_prepare_scopes_flag_attribution_without_changing_decisions(tmp_path, attribution_workspace):
+    args = fixture_arguments(tmp_path)
+    with sqlite3.connect(args.catalog) as conn:
+        conn.execute("INSERT INTO workspaces(id,name) VALUES(6,'Other workspace')")
+        conn.execute("""INSERT INTO current_flag_attribution(photo_id,workspace_id,flag,source,description)
+                        VALUES(7,?,'flagged','photographer','Existing decision')""", (attribution_workspace,))
+    fixture.prepare(args)
+    with sqlite3.connect(args.output / "catalog.db") as conn:
+        assert conn.execute("SELECT flag,rating FROM photos WHERE id=7").fetchone() == ("flagged", 4)
+        assert conn.execute("SELECT workspace_id FROM current_flag_attribution").fetchall() == (
+            [(5,)] if attribution_workspace == 5 else [])
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

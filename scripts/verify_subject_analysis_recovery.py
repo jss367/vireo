@@ -118,8 +118,10 @@ def prepare(args: argparse.Namespace) -> None:
     copy_rows(source, target, "folders", f"id IN ({folder_marks})", tuple(folder_ids))
     copy_rows(source, target, "workspace_folders", f"workspace_id=? AND folder_id IN ({folder_marks})", (args.workspace, *folder_ids))
     copy_rows(source, target, "photos", f"id IN ({marks})", parameters)
-    for table in ("detections", "detector_runs", "photo_masks", "photo_subject_choices", "photo_subject_state", "current_flag_attribution"):
+    for table in ("detections", "detector_runs", "photo_masks", "photo_subject_choices", "photo_subject_state"):
         copy_rows(source, target, table, f"photo_id IN ({marks})", parameters)
+    copy_rows(source, target, "current_flag_attribution",
+              f"workspace_id=? AND photo_id IN ({marks})", (args.workspace, *ids))
     detection_ids = tuple(r[0] for r in target.execute("SELECT id FROM detections"))
     if detection_ids:
         detection_marks = ",".join("?" for _ in detection_ids)
