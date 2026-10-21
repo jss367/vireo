@@ -48,7 +48,9 @@ import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
 
-from keyword_normalization import keyword_match_key, normalize_keyword_display
+from keyword_normalization import normalize_keyword_display
+from repositories.species_taxon_lookup import lookup_taxon_id as _lookup_species_taxon_id
+from repositories.species_taxon_lookup import species_preferring_taxon_match as _species_taxon_match
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
@@ -333,82 +335,14 @@ class KeywordTaxonRepository:
         taxon), and ``is_keyword_species`` already filters those out via
         ``taxon_rank`` for species-specific readers.
         """
-        from species_identity import COMMON_NAME_CORRECTIONS
-        correction = COMMON_NAME_CORRECTIONS.get(keyword_match_key(name))
-        if correction:
-            target = self.conn.execute(
-                "SELECT id FROM taxa WHERE inat_id = ? AND name = ? AND rank = 'species'",
-                (correction["taxon_id"], correction["scientific_name"]),
-            ).fetchone()
-            return target["id"] if target else None
-        for variant in self._taxon_lookup_variants(name):
-            if prefer_species or species_only:
-                taxon_id = self._species_preferring_taxon_match(
-                    variant, species_only,
-                )
-                if taxon_id is not None:
-                    return taxon_id
-            else:
-                taxon = self.conn.execute(
-                    """SELECT t.id FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (variant, variant),
-                ).fetchone()
-                if taxon:
-                    return taxon["id"]
-                taxon = self.conn.execute(
-                    """SELECT t.taxon_id AS id FROM taxa_common_names t
-                       WHERE t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (variant,),
-                ).fetchone()
-                if taxon:
-                    return taxon["id"]
-        return None
+        return _lookup_species_taxon_id(self.conn, name, prefer_species, species_only, variants=self._taxon_lookup_variants)
 
 
     def _species_preferring_taxon_match(
         self, variant: str, species_only: bool,
     ) -> int | None:
         """``lookup_taxon_id``'s species-preferring match for one variant."""
-        direct = self.conn.execute(
-            """SELECT t.id, t.rank FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-            (variant, variant),
-        ).fetchone()
-        if direct and direct["rank"] == "species":
-            return direct["id"]
-        # Direct match (if any) is not species-rank. Consult the
-        # common-names index for a species-rank alternate before
-        # returning the higher-rank direct hit.
-        common = self.conn.execute(
-            """SELECT tcn.taxon_id AS id, t.rank FROM taxa_common_names tcn
-                       JOIN taxa t ON t.id = tcn.taxon_id
-                       WHERE tcn.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-            (variant,),
-        ).fetchone()
-        if common and common["rank"] == "species":
-            return common["id"]
-        if species_only:
-            # Reject the higher-rank fallback: an explicit
-            # species add would stamp is_species=1 on this row
-            # and every rank reader would then hide the tag.
-            return None
-        # No species-rank match on this variant; prefer the direct
-        # (higher-rank) hit, otherwise fall back to the common-name
-        # hit if one exists.
-        if direct:
-            return direct["id"]
-        if common:
-            return common["id"]
-        return None
+        return _species_taxon_match(self.conn, variant, species_only)
 
 
     def relink_source_species(self) -> None:

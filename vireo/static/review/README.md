@@ -29,6 +29,7 @@ separate implementations: a fix in one does not reach the other.
 | `group-loupe.js` | Loupe lock, eye crosshair, hover zoom, align drags, card transforms, and strip 1:1 |
 | `group-cards.js` | Card pan drags, selection clicks, offset resets, and box sharpness |
 | `group-changes.js` | Zone moves, the Apply label, applying the burst, and the modal's keyboard |
+| `identity-alternatives.js` | Catalog-backed unresolved identities, evidence, and reversible single-species resolution; independently binds after DOMContentLoaded |
 | `queue-state.js` | Browser-local, workspace-and-filter-scoped resume state; unique-photo inspection progress, separate from catalog flags |
 | `queue-focus.js` | Upright full-frame/manual center and native 512-pixel crop inspection; source and pixel-scale headers |
 | `queue.js` | Sequential per-photo inspection, retained subjects and explicit conflict-checked catalog flag changes |
@@ -87,6 +88,53 @@ changing this code:
   included. The Group Review handler (`group-changes.js`) acts only while
   `#grmOverlay` is open and the lightbox is not. Boot registers the A/S handler
   first; keep both guard lists and that order.
+
+## Unresolved species alternatives
+
+The independent `identity-alternatives.js` panel loads workspace-wide review
+groups from `GET /api/identity-alternatives`, including when classification
+has no prediction rows. Each group contains `group_id`, `photo_ids`,
+`candidates`, `reason`, and `missing_evidence`; the response also names its
+`workspace_id`. The form's photo chooser takes
+the displayed cards and their burst members within the current collection;
+the user explicitly selects the frames before saving.
+
+`POST /api/identity-alternatives` creates a group. Updating an existing group
+also sends its observed `group_id`; stale membership returns 409. Resolving
+through `POST /api/identity-alternatives/resolve` sends that group ID, a
+`photo_ids` subset, and one candidate `species`. Each group's resolution chooser starts with
+no frames selected; candidate buttons become available after selecting frames.
+The explicit Select all frames to resolve button includes the whole group.
+Unselected frames retain their alternatives and evidence in unresolved review.
+Both writes carry `observed_workspace_id`; under the writer lock the request
+checks both its cached workspace and the persisted latest activation. A switch
+in another tab returns 409 without touching tags or review state. The page pins
+its initial workspace and disables edits if a refresh detects a switch.
+Catalog mutations use the shared decision lock. After commit, the refresh
+visits every workspace containing the affected photos (including photo-only
+grants), takes only that cache's regroup lock, and rereads global species.
+Undo and redo use the same refresh; a failed cache does not prevent attempts
+to update the remaining workspaces. The catalog's `identity_alternatives` edit
+history action replays the uncertainty and candidate-keyword delta together,
+including XMP keyword intents and original association provenance. Other
+confirmed species and flags are outside that delta.
+Keyword intents are reconciled in every workspace containing the photo, so
+syncing a sibling workspace cannot replay an older opposite decision. Each
+queue retains an explicit final intent, with captured-write compensation and
+immutable-token cleanup handled by the normal pending-change helpers.
+An identity history entry superseded by a newer decision or candidate-tag
+change is retired after replay rolls back; the request returns 409 and the
+user reviews the next history action. Visibility loss and transient failures
+retain the entry for retry.
+Duplicate-photo collapse transfers identity and its audit to the survivor.
+Distinct decisions on both rows abort the catalog merge and ask for explicit
+reconciliation in Review, preserving both sets of evidence.
+
+Candidates and evidence are shared catalog identity state, visible wherever
+the photo appears; they are not written as confirmed species keywords. Use the panel's explicit Resolve controls to close the uncertainty.
+Its groups stay separate from the prediction status tabs and genuine
+multi-species confirmations. The script binds itself after DOMContentLoaded,
+refetches after edit-history changes, and drops stale GET responses.
 
 ## Photo action feedback
 
@@ -147,3 +195,72 @@ the existing writer lock; a stale change returns 409 and the user must refresh
 before choosing again. Every filter/catalog reload invalidates in-flight
 inspection responses. Response epochs also prevent a late crop from replacing
 the current photo.
+
+
+Archive collision reconciliation carries alternative candidates, evidence,
+revision markers and identity undo/redo items onto the surviving photo before
+removing the duplicate row. Identical batch snapshots collapse to one item.
+Conflicting identity revisions, candidate confirmations or snapshots stop catalog
+reconciliation with an explicit error and roll back its photo changes; neither
+row's evidence is silently chosen or discarded. Matching uses the same taxonomy
+aliases and source identities as normal species decisions. Unrelated species
+and their pending writes remain independent. Review both rows before retrying.
+
+### Identity integration audit: photo removal and collapse
+
+All production `photos` deletes pass through `PhotoRowDeletion.delete`; its
+static contract test rejects additional direct deletion sites. Identity state
+and history-item photo foreign keys cascade on a genuine deletion. A survivor
+mapping instead keeps live identity revisions/evidence and retargets history;
+only identical batch items deduplicate. Current candidate associations are
+carried from live rows, never reconstructed blindly from audit snapshots.
+
+| Entry point | Identity integration invariant |
+| --- | --- |
+| `folders._fold_source_photos` / `_drop_merged_photos` | Validate both rows before copying tags; carry current candidate provenance (including redo-only history), move candidate intents and remap history before association deletion. Identity conflicts roll back the folder fold savepoint while preserving the caller's transaction. |
+| `moves_merge._drop_staged_photo` | Real and intra-staged collisions validate before copying/deleting, reconcile dated keyword edits, carry compatible species, visibility and pending work, then use the shared deletion point. |
+| `moves_merge._replace_phantom_target` | Apply the same identity/review/intent contract with the staged photo as survivor; genuine phantoms without a survivor cascade normally. |
+| `scanner.companions._merge_companion_into_primary` / `_delete_companion_row` | Validate live identities before metadata/tag transfer; preserve candidate provenance, move and retoken candidate intents before deleting JPEG links; retain the existing scan transaction and deferred filesystem cleanup. |
+| `photos.delete_photos` (also folder/trash deletion) | Map to no survivor: remove only deleted photos' live states, pending work and history items through the existing foreign keys. Other batch items remain replayable. |
+| `audit.remove_orphan_rows` | Same genuine-deletion contract in the repair caller's transaction. |
+| Folder relocation, `batch_update_photo_folder`, and ordinary file moves | Retain the photo ID; identity rows/history do not need reassignment. Staged collision branches above handle the cases that collapse IDs. |
+
+A previously drained source queue does not prove the destination sidecar has
+its confirmed species. Generic collapse therefore queues the retained catalog
+identity for every visible survivor workspace. Relevant moved intents keep
+captured-write flags but receive fresh tokens: an old-path writer cannot clear
+the replacement work. Existing unresolved/candidate, homonym and distinct-revision
+conflicts remain explicit refusals. Regression coverage exercises actual folder
+and RAW/JPEG collapse, pending and drained queues, stale acknowledgments, shared
+workspace sync/re-import, undo/redo, redo-only decisions, provenance, flags,
+visibility, genuine deletion and conflict rollback.
+
+Identity name resolution is reused only within one save, resolution replay
+phase, or history batch under the writer transaction. Resolution creates or
+promotes the chosen keyword before that phase begins; no cache survives into
+a later service call, even in the same transaction. Live per-photo visibility,
+revision and association/provenance checks still run for every item. An offline
+20-photo/2,000-species regression measured full keyword scans dropping from
+61/62/60/60 to 3/2/1/1 for save/resolve/undo/redo (including authoritative alias validation). Higher-rank keywords cannot
+claim a candidate spelling and suppress species-only common-name fallback;
+their own photo associations remain independent metadata.
+
+
+Candidate aliases that share a known authoritative species identity are rejected
+before photo associations, evidence, history or XMP intents change. The core save
+service applies normalized-name and count validation as well as taxon validation,
+so API and direct callers share the same rule. Genuinely unknown distinct names
+remain valid; an existing unresolved group collapsed to one candidate by taxonomy
+maintenance stays editable and still requires explicit confirmation.
+
+Automatic RAW/JPEG pairing keeps an identity-conflicting pair separate and logs
+both photo IDs with the reconciliation reason. Each attempt has a savepoint;
+rollback also discards that pair's pending collection remap and deferred
+filesystem actions. Unrelated pairs and the scan continue. Non-domain failures
+still abort the batch, and explicit folder/archive merges retain their atomic
+rejection contract. Collection rewriting stays batched across successful pairs.
+
+Resolved collision comparisons fetch authoritative identities only for the
+union of linked keyword IDs, using bounded parameter chunks and primary-key
+searches. Pending-intent remapping performs no identity scan with empty candidate
+names and reuses duplicate pending-name lookups only within that call.

@@ -58,6 +58,15 @@ class SyncRepository:
         self._resolve_workspace_id = resolve_workspace_id
         self.chunk_size = chunk_size
 
+    def remap_photo_keyword_intents(self, losing: int, survivor: int) -> None:
+        """Retain each workspace's keyword work before a photo-row collapse."""
+        for row in self.conn.execute(
+            "SELECT id FROM pending_changes WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')",
+            (losing,),
+        ).fetchall():
+            self.conn.execute('UPDATE pending_changes SET photo_id=?, change_token=? WHERE id=?',
+                              (survivor, str(uuid.uuid4()), row['id']))
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""
@@ -420,6 +429,41 @@ class SyncRepository:
                 claimed.update({(c["id"], c["change_token"]): c for c in rows})
         return [claimed[key] for c in changes
                 if (key := (c["id"], c["change_token"])) in claimed]
+
+    def keyword_intents_for_photo(self, photo_id: int) -> list[sqlite3.Row]:
+        """All workspace keyword intents for a shared photo, including detached scopes."""
+        return self.conn.execute(
+            "SELECT * FROM pending_changes WHERE photo_id=? AND change_type IN "
+            "('keyword_add', 'keyword_remove', 'keyword_remove_flat') ORDER BY id", (photo_id,),
+        ).fetchall()
+
+    def retained_keyword_ancestor_names(self, photo_id: int) -> set[str]:
+        """Ancestor labels needed by still-attached keyword hierarchies."""
+        return {row['name'] for row in self.conn.execute(
+            "WITH RECURSIVE ancestors(id, name, parent_id) AS ("
+            "SELECT p.id, p.name, p.parent_id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id=pk.keyword_id JOIN keywords p ON p.id=k.parent_id "
+            "WHERE pk.photo_id=? UNION "
+            "SELECT p.id, p.name, p.parent_id FROM keywords p JOIN ancestors a ON p.id=a.parent_id"
+            ") SELECT name FROM ancestors", (photo_id,),
+        )}
+
+    def retire_keyword_intents(self, photo_id: int, values: Collection[str]) -> list[sqlite3.Row]:
+        """Retire selected spellings globally; caller retains captured-write repair work.
+
+        Must run in the caller's writer transaction. Returning the old tokens
+        and claim state lets a domain decision replace them in authorized
+        visible scopes without letting an old sync acknowledge the new rows.
+        """
+        removed = []
+        for chunk in self._chunks(list(dict.fromkeys(values))):
+            marks = ','.join('?' for _ in chunk)
+            removed.extend(self.conn.execute(
+                "DELETE FROM pending_changes WHERE photo_id=? AND change_type IN "
+                "('keyword_add', 'keyword_remove', 'keyword_remove_flat') "
+                f"AND value IN ({marks}) RETURNING *", [photo_id, *chunk],
+            ).fetchall())
+        return removed
 
     def flat_keyword_removals(self, photo_id: int, value: str) -> list[dict[str, Any]]:
         """The queued ``keyword_remove_flat`` rows for one photo and keyword.

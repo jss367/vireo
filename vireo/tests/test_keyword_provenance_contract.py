@@ -58,6 +58,8 @@ PROVENANCE_NEUTRAL_WRITERS = {
 # value is computed, so this test can't read it statically — the allowlist is
 # the review gate instead.
 PROVENANCE_CARRYING_WRITERS = {
+    ("db.py", "_carry_keyword_associations_for_merge"): "forwards the winning source association's existing stamp",
+    ("services/identity_alternatives.py", "replay_identity_edit"): "identity history restores original candidate association stamps",
     ("db.py", "_edit_set_photo_location"): "history restores the original location stamps",
     ("db.py", "_apply_winner_loser_merge"): "duplicate merge carries the losers' stamps",
 }
@@ -82,6 +84,7 @@ PROVENANCE_FOLD_SYMBOLS = {
 # ``_absorb_into_canonical_place`` helper).
 _PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
+    ("repositories/identity_alternatives.py", "remap_identity_for_photo_merge"): "identity collision carries candidate stamps through the shared fold",
     (_PROVENANCE_MODULE, "tag"): "re-tag folds against the row already there",
     (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
     (_PROVENANCE_MODULE, "_absorb_into_canonical_place"): "place link repoints rows onto canonical",

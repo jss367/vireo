@@ -16,17 +16,28 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 """
 
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 
+from repositories.identity_alternatives import identity_merge_transaction
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
+
+
+@dataclass(frozen=True)
+class FolderMergeHooks:
+    """The coordinated carries a folder collapse performs in its transaction."""
+
+    transfer_gps_review: Callable[[int, int], object] | None
+    transfer_embedded_offered: Callable[[int, int], object] | None
+    prepare_identity_merge: Callable[[int, int], None] | None = None
 
 
 class FolderRepository:
     def __init__(self, conn, resolve_workspace_id, *, commit_with_retry,
                  path_for_subtree_match, stored_parent_path, subtree_prefix,
                  subtree_relative, join_subtree_path, chunk_size=800,
-                 transfer_gps_review, transfer_embedded_offered,
-                 keyword_source_conflict_sql):
+                 merge_hooks: FolderMergeHooks, keyword_source_conflict_sql):
         self.conn = conn
         # ``Database._ws_id``, uncalled: only the workspace-scoped reads
         # resolve it, so the catalog-wide methods work with no workspace set.
@@ -50,9 +61,10 @@ class FolderRepository:
         # CONFLICT clause the ``photo_keywords`` carry uses so a losing row's
         # keyword that lands on an existing survivor association keeps the
         # stronger of the two provenance stamps.
-        self.transfer_gps_review = transfer_gps_review
-        self.transfer_embedded_offered = transfer_embedded_offered
+        self.transfer_gps_review = merge_hooks.transfer_gps_review
+        self.transfer_embedded_offered = merge_hooks.transfer_embedded_offered
         self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
+        self.prepare_identity_merge = merge_hooks.prepare_identity_merge
 
     @property
     def workspace_id(self):
@@ -660,6 +672,8 @@ class FolderRepository:
                 (target_folder_id, photo["filename"]),
             ).fetchone()
             if existing:
+                if self.prepare_identity_merge:
+                    self.prepare_identity_merge(photo["id"], existing["id"])
                 transfer_gps_review(photo["id"], existing["id"])
                 # Move the embedded-offered suppression onto the surviving
                 # row so a user's keyword removal is not resurrected by a
@@ -739,8 +753,16 @@ class FolderRepository:
                     (link["workspace_id"], target_folder_id),
                 )
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True):
+    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
+        """Collapse folder duplicates atomically, preserving shared identity."""
+        with identity_merge_transaction(self.conn):
+            result = self._merge_into_existing(source_folder_id, target_folder_id, new_path, commit=False)
+        if commit:
+            self.conn.commit()
+        return result
+
+    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
+                             commit=True):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source

@@ -1046,6 +1046,18 @@
   ],
   [
    "table",
+   "photo_identity_alternatives",
+   "photo_identity_alternatives",
+   "CREATE TABLE photo_identity_alternatives (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        group_id TEXT NOT NULL,\n        candidates TEXT NOT NULL,\n        reason TEXT NOT NULL,\n        missing_evidence TEXT NOT NULL DEFAULT '',\n        status TEXT NOT NULL DEFAULT 'unresolved' CHECK (status IN ('unresolved', 'resolved'))\n    )"
+  ],
+  [
+   "index",
+   "idx_identity_alternatives_group",
+   "photo_identity_alternatives",
+   "CREATE INDEX idx_identity_alternatives_group ON photo_identity_alternatives(group_id)"
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"

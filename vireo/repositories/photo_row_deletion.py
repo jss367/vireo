@@ -21,6 +21,7 @@ import contextlib
 import logging
 
 from repositories.collections import remap_collection_photo_ids
+from repositories.identity_alternatives import identity_merge_transaction, remap_photo_identities
 from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
@@ -42,11 +43,29 @@ class PhotoRowDeletion:
         collection's rules, so doing it per row would make a loop of N merges
         cost N passes over every collection.
         """
+        remap_photo_identities(self.conn, mapping)
         ids = list(dict.fromkeys(mapping))
         for chunk in chunked(ids):
             marks = ",".join("?" for _ in chunk)
             self.conn.execute(f"DELETE FROM photos WHERE id IN ({marks})", chunk)
         self._collection_remap.update(mapping)
+
+    @contextlib.contextmanager
+    def atomic_merge(self, losing_id):
+        """Rollback one automatic pair and its deferred collection mapping."""
+        was_mapped = losing_id in self._collection_remap
+        previous = self._collection_remap.get(losing_id)
+        completed = False
+        try:
+            with identity_merge_transaction(self.conn):
+                yield
+            completed = True
+        finally:
+            if not completed:
+                if was_mapped:
+                    self._collection_remap[losing_id] = previous
+                else:
+                    self._collection_remap.pop(losing_id, None)
 
     def _rewrite_collections(self):
         remap, self._collection_remap = self._collection_remap, {}

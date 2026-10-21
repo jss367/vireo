@@ -561,7 +561,7 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
         untagged.append((a, k)), real_untag(*a, **k))[1])
 
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
-    assert tagged == [((survivor, heron), {"_commit": False})]
+    assert tagged == [((survivor, heron), {"source": "manual", "_commit": False})]
     assert untagged == [((survivor, egret), {"_commit": False})]
     assert _kw_ids(db, survivor) == [heron]
 
@@ -957,6 +957,207 @@ def _collision_tree(db, tmp_path, *, same_hash=True):
             "stage_day": stage_day, "staged": staged, "fresh": fresh,
             "new_leaf": new_leaf, "newer": newer}
 
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('status', ['unresolved', 'resolved'])
+def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_path, same_hash, status):
+    from services.identity_alternatives import resolve_alternatives, save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared review')
+    db.photo_visibility.grant(first, [losing, survivor])
+    db.photo_visibility.grant(second, [losing])
+    keyword = db.add_keyword('Tropical Kingbird', is_species=True)
+    db.tag_photo(losing, keyword)
+    db.tag_photo(survivor, keyword)
+    _queue(db, survivor, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=first)
+    _queue(db, losing, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=second)
+    unrelated = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(survivor, unrelated)
+    db.photo_review.set_flag(survivor, 'rejected')
+    with db._commits_held():
+        edit_id = save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Uncertain call', 'Audio')
+        if status == 'resolved':
+            edit_id = resolve_alternatives(db, [losing], 'Tropical Kingbird')
+    state = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]
+    if status == 'resolved':
+        # A synced decision still owns real confirmations after its queue drained.
+        db.conn.execute('DELETE FROM pending_changes')
+        db.commit()
+    counts = db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert losing in counts['dropped_photo_ids']
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit_id,)).fetchone()[0] == survivor
+    assert not db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (losing,)).fetchone()
+    if status == 'unresolved':
+        assert db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (survivor,)).fetchone()
+    assert unrelated in _kw_ids(db, survivor)
+    assert db.photos.get(survivor)['flag'] == 'rejected'
+    assert db.undo_last_edit()['id'] == edit_id
+    assert db.redo_last_undo()['id'] == edit_id
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert unrelated in _kw_ids(db, survivor)
+    assert db.photos.get(survivor)['flag'] == 'rejected'
+    db.set_active_workspace(second)
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert set(db.identity_alternatives.for_photos()) == ({survivor} if status == 'unresolved' else set())
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('difference', ['reason', 'revision', 'status'])
+def test_duplicate_merge_rejects_distinct_identity_decisions_atomically(db, tmp_path, same_hash, difference):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    state = {'group_id': 'shared', 'candidates': ['Tropical Kingbird', "Couch's Kingbird"],
+             'reason': 'Original reason', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(t['staged'], state)
+    db.identity_alternatives.set_state(t['survivor'], {**state, difference if difference != 'revision' else 'group_id':
+                                                      {'reason': 'New reason', 'revision': 'other', 'status': 'resolved'}[difference]})
+    _queue(db, t['staged'], 'rating', '5', '2026-01-01', token='preserve')
+    tables = ['photos', 'folders', 'photo_identity_alternatives', 'pending_changes', 'photo_keywords']
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
+              for table in tables}
+    with pytest.raises(IdentityMergeConflict, match='Reconcile their alternatives and evidence in Review'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert not db.conn.in_transaction
+    for table in tables:
+        after = [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
+        assert after == before[table]
+
+
+@pytest.mark.parametrize('owner', ['survivor', 'both'])
+def test_duplicate_merge_keeps_existing_equal_identity_decision(db, tmp_path, owner):
+    t = _collision_tree(db, tmp_path)
+    state = {'group_id': 'shared', 'candidates': ['Tropical Kingbird', "Couch's Kingbird"],
+             'reason': 'Original reason', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(t['survivor'], state)
+    if owner == 'both':
+        db.identity_alternatives.set_state(t['staged'], state)
+    db.commit()
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos()[t['survivor']] == state
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('alias', ['common', 'scientific', 'alternate_common', 'source_only'])
+@pytest.mark.parametrize('identity_owner', ['losing', 'survivor'])
+def test_duplicate_merge_rejects_synced_candidate_confirmation_aliases(db, tmp_path, same_hash, alias, identity_owner):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    candidate = 'Tropical Kingbird'
+    if alias == 'source_only':
+        parent = db.add_keyword('First hierarchy')
+        other = db.add_keyword('Second hierarchy')
+        common = db.add_keyword(candidate, parent_id=parent, is_species=True, source_taxon_id=999999)
+        keyword = db.add_keyword('Tyrannus melancholicus', parent_id=other, is_species=True, source_taxon_id=999999)
+        candidate = db.keywords.name_of(common)
+    else:
+        db.conn.execute("INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (91001, 999999, 'Tyrannus melancholicus', 'Tropical Kingbird', 'species')")
+        db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (91001,'Yellow Kingbird')")
+        keyword = db.add_keyword('Tyrannus melancholicus' if alias != 'common' else candidate, is_species=True)
+        if alias == 'alternate_common':
+            candidate = 'yellow kingbird'
+    identity_photo, confirmed_photo = (losing, survivor) if identity_owner == 'losing' else (survivor, losing)
+    db.tag_photo(confirmed_photo, keyword)
+    state = {'group_id': 'saved', 'candidates': [candidate, "Couch's Kingbird"],
+             'reason': 'Need call evidence', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(identity_photo, state)
+    db.commit()
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+    with pytest.raises(IdentityMergeConflict, match='Reconcile the species confirmation in Review'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.photos.get(losing) is not None
+    assert db.photos.get(survivor) is not None
+    assert keyword in _kw_ids(db, confirmed_photo)
+    assert db.conn.execute('SELECT reason FROM photo_identity_alternatives WHERE photo_id=?', (identity_photo,)).fetchone()[0] == state['reason']
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+def test_survivor_uncertainty_keeps_unrelated_synced_source_species_and_provenance(db, tmp_path, same_hash):
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [survivor])
+    with db._commits_held():
+        save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
+    keyword = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(losing, keyword, source='manual')
+    db.tag_photo(survivor, keyword, source='accept')
+    db.conn.execute('DELETE FROM pending_changes')
+    db.commit()
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos()[survivor]['reason'] == 'Need calls'
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+def test_identity_merge_carry_respects_newer_unrelated_species_removal(db, tmp_path, same_hash):
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [survivor])
+    with db._commits_held():
+        save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
+    keyword = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(losing, keyword)
+    _queue(db, losing, 'keyword_add', 'American Robin', '2020-01-01')
+    _queue(db, survivor, 'keyword_remove', 'American Robin', '2099-01-01')
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert keyword not in _kw_ids(db, survivor)
+    assert db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_remove' AND value='American Robin'", (survivor,)).fetchone()
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('metadata_owner', ['losing', 'survivor'])
+def test_identity_merge_preserves_higher_rank_taxonomy_without_confirming_candidate(db, tmp_path, same_hash, metadata_owner):
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [losing])
+    db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (92001,55555,'Puma','Puma','genus')")
+    keyword = db.add_keyword('Puma', kw_type='taxonomy')
+    db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
+    photo = losing if metadata_owner == 'losing' else survivor
+    db.tag_photo(photo, keyword, source='manual')
+    with db._commits_held():
+        save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Need species evidence', 'A clearer view')
+    assert keyword in _kw_ids(db, photo)
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert keyword in _kw_ids(db, survivor)
+    assert db.identity_alternatives.for_photos()[survivor]['status'] == 'unresolved'
+    assert not db.identity_alternatives.candidate_links([survivor], ['Puma', 'Bobcat'])
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('edited_candidates', [False, True])
+def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_higher_taxon(db, tmp_path, same_hash, edited_candidates):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [losing])
+    db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES (92001,55555,'Puma','Puma','genus')")
+    keyword = db.add_keyword('Puma', kw_type='taxonomy')
+    db.conn.execute('UPDATE keywords SET taxon_id=92001 WHERE id=?', (keyword,))
+    db.tag_photo(survivor, keyword)
+    with db._commits_held():
+        save_alternatives(db, [losing], ['Puma', 'Bobcat'], 'Uncertain species', 'A clearer view')
+        if edited_candidates:
+            save_alternatives(db, [losing], ['Heron', 'Egret'], 'Updated alternatives', 'A call recording')
+    state = db.identity_alternatives.for_photos()
+    pending = _pending(db, losing, survivor)
+    history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
+    with pytest.raises(IdentityMergeConflict, match='higher-rank taxonomy metadata'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos() == state
+    assert _pending(db, losing, survivor) == pending
+    assert [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')] == history
+    assert db.photos.get(losing) is not None
+    assert keyword in _kw_ids(db, survivor)
 
 def test_merge_commits_counts_and_invalidates_after_reparent(
         db, tmp_path, monkeypatch):
@@ -1950,3 +2151,280 @@ def test_move_module_reaches_sql_only_through_the_accessor():
         for node in ast.walk(ast.parse(module.read_text()))
         if isinstance(node, ast.Attribute) and node.attr == "conn"
     ]
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_collision_preserves_identity_decision_history_and_sharing(db, tmp_path, same_hash, resolved):
+    from services.identity_alternatives import resolve_alternatives, save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    ws = db._active_workspace_id
+    sharing = db.create_workspace("Identity sharing")
+    db.set_active_workspace(ws)
+    db.add_workspace_folder(ws, t["stage_root"])
+    db.add_workspace_folder(sharing, t["stage_root"])
+    loser, survivor = ((t["staged"], t["survivor"]) if same_hash
+                       else (t["survivor"], t["staged"]))
+    with db._commits_held():
+        save_alternatives(db, [loser], ["Heron", "Egret"], "Distant silhouette", "Bill shape")
+        if resolved:
+            resolve_alternatives(db, [loser], "Heron")
+    before = db.identity_alternatives.for_photos([loser], include_resolved=True)[loser]
+    links_before = _kw_ids(db, loser)
+    history_id = db._edit_history_repository().latest_undoable()["id"]
+    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
+    assert _kw_ids(db, survivor) == links_before
+    if resolved:
+        assert db.conn.execute("SELECT source FROM photo_keywords WHERE photo_id=?", (survivor,)).fetchone()[0] == "manual"
+    assert db.conn.execute("SELECT photo_id FROM edit_history_items WHERE edit_id=?", (history_id,)).fetchone()[0] == survivor
+    db.set_active_workspace(sharing)
+    # The phantom archive row was never visible here, but the real staged
+    # survivor was; a real collision carries staged visibility to the archive.
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
+    db.set_active_workspace(ws)
+    assert db.undo_last_edit() is not None
+    if resolved:
+        assert db.identity_alternatives.for_photos([survivor])[survivor]["status"] == "unresolved"
+    else:
+        assert db.identity_alternatives.for_photos([survivor], include_resolved=True) == {}
+    assert db.redo_last_undo() is not None
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == before
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+@pytest.mark.parametrize("conflict", ["decision", "confirmation"])
+def test_collision_refuses_conflicting_identity_without_losing_evidence(db, tmp_path, same_hash, conflict):
+    from services.identity_alternatives import save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    loser, survivor = ((t["staged"], t["survivor"]) if same_hash
+                       else (t["survivor"], t["staged"]))
+    with db._commits_held():
+        save_alternatives(db, [loser], ["Heron", "Egret"], "Original evidence", "Bill")
+        if conflict == "decision":
+            save_alternatives(db, [survivor], ["Heron", "Ibis"], "Other evidence", "Wings")
+        else:
+            kid = db.add_keyword("Heron", is_species=True, _commit=False)
+            db.tag_photo(survivor, kid, source="manual", _commit=False)
+    before = db.identity_alternatives.for_photos(include_resolved=True)
+    history = [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")]
+    pending = _pending(db, loser, survivor)
+    with pytest.raises(ValueError, match="conflicting"):
+        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    assert db.identity_alternatives.for_photos(include_resolved=True) == before
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM edit_history_items")] == history
+    assert _pending(db, loser, survivor) == pending
+    assert db.conn.execute("SELECT COUNT(*) FROM photos WHERE id IN (?, ?)", (loser, survivor)).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+@pytest.mark.parametrize("undone", [False, True])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_collision_deduplicates_batch_identity_history_and_preserves_redo(db, tmp_path, same_hash, undone, resolved):
+    from services.identity_alternatives import resolve_alternatives, save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    loser, survivor = ((t["staged"], t["survivor"]) if same_hash
+                       else (t["survivor"], t["staged"]))
+    with db._commits_held():
+        edit = save_alternatives(db, [loser, survivor], ["Heron", "Egret"], "Shared evidence", "Bill")
+        if resolved:
+            edit = resolve_alternatives(db, [loser, survivor], "Heron")
+    if undone:
+        db.undo_last_edit()
+    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    assert [r[0] for r in db.conn.execute("SELECT photo_id FROM edit_history_items WHERE edit_id=?", (edit,))] == [survivor]
+    if undone:
+        db.redo_last_undo()
+    else:
+        db.undo_last_edit()
+        db.redo_last_undo()
+    state = db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]
+    assert state["reason"] == "Shared evidence"
+    assert state['status'] == ('resolved' if resolved else 'unresolved')
+
+
+def test_intra_staged_collision_preserves_identity_evidence(db, tmp_path, monkeypatch):
+    from services.identity_alternatives import save_alternatives
+
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    _folder(db, str(arch), root=True)
+    stage = _folder(db, str(tmp_path / "stage"), root=True)
+    first = _photo(db, stage, "A.raf")
+    second = _photo(db, stage, "a.raf")
+    with db._commits_held():
+        save_alternatives(db, [second], ["Heron", "Egret"], "Case alias evidence", "Bill")
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda path: True)
+    counts = db.merge_staged_tree_into_archive(stage, str(arch))
+    assert second in counts["dropped_photo_ids"]
+    assert db.identity_alternatives.for_photos([first])[first]["reason"] == "Case alias evidence"
+    db.undo_last_edit()
+    assert db.identity_alternatives.for_photos([first]) == {}
+    db.redo_last_undo()
+    assert first in db.identity_alternatives.for_photos()
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+def test_collision_rolls_back_when_pending_edit_conflicts_with_identity(db, tmp_path, same_hash):
+    from services.identity_alternatives import save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    loser, survivor = ((t["staged"], t["survivor"]) if same_hash
+                       else (t["survivor"], t["staged"]))
+    db.add_keyword("Heron", is_species=True)
+    with db._commits_held():
+        save_alternatives(db, [loser], ["Heron", "Egret"], "Uncertain", "Bill")
+    _queue(db, survivor, "keyword_add", "Heron", "2099-01-01 00:00:00")
+    before = db.identity_alternatives.for_photos()
+    pending = _pending(db, loser, survivor)
+    with pytest.raises(ValueError, match="conflicting species"):
+        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    assert db.identity_alternatives.for_photos() == before
+    assert _pending(db, loser, survivor) == pending
+    assert _kw_ids(db, survivor) == []
+
+
+def test_collision_preserves_incompatible_batch_history_by_rolling_back(db, tmp_path):
+    from services.identity_alternatives import save_alternatives
+
+    t = _collision_tree(db, tmp_path)
+    db.add_workspace_folder(db._active_workspace_id, t["stage_root"])
+    kid = db.add_keyword("Heron", is_species=True)
+    db.tag_photo(t["staged"], kid, source="manual")
+    with db._commits_held():
+        edit = save_alternatives(db, [t["staged"], t["survivor"]], ["Heron", "Egret"], "Same evidence", "Bill")
+    before = db.identity_alternatives.for_photos()
+    with pytest.raises(ValueError, match="conflicting identity history"):
+        db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+    assert db.identity_alternatives.for_photos() == before
+    assert db.conn.execute("SELECT COUNT(*) FROM edit_history_items WHERE edit_id=?", (edit,)).fetchone()[0] == 2
+    db.undo_last_edit()
+    assert _kw_ids(db, t["staged"]) == [kid]
+    assert _kw_ids(db, t["survivor"]) == []
+    db.redo_last_undo()
+    assert db.identity_alternatives.for_photos() == before
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('undone', [False, True])
+def test_same_resolution_batch_collapses_with_deduplicated_replay(db, tmp_path, same_hash, undone):
+    from services.identity_alternatives import resolve_alternatives, save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    db.add_workspace_folder(db.require_workspace_id(), t['stage_root'])
+    ids = [t['staged'], t['survivor']]
+    survivor = t['survivor'] if same_hash else t['staged']
+    with db._commits_held():
+        saved = save_alternatives(db, ids, ['Heron', 'Egret'], 'Same silhouette', 'Bill')
+        resolved = resolve_alternatives(db, ids, 'Heron')
+    if undone:
+        db.undo_last_edit()
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    for edit in (saved, resolved):
+        assert [r[0] for r in db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit,))] == [survivor]
+    if undone:
+        assert db.redo_last_undo()['id'] == resolved
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]['status'] == 'resolved'
+    assert db.undo_last_edit()['id'] == resolved
+    assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Same silhouette'
+    assert db.undo_last_edit()['id'] == saved
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True) == {}
+    assert db.redo_last_undo()['id'] == saved
+    assert db.redo_last_undo()['id'] == resolved
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor]['status'] == 'resolved'
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('rank', ['genus', 'family'])
+@pytest.mark.parametrize('tag_owner', ['losing', 'survivor'])
+def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_path, same_hash, rank, tag_owner):
+    from services.identity_alternatives import save_alternatives
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    db.add_workspace_folder(db.require_workspace_id(), t['stage_root'])
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    tagged = losing if tag_owner == 'losing' else survivor
+    identity_photo = survivor if tag_owner == 'losing' else losing
+    db.conn.execute('INSERT INTO taxa (id, name, rank) VALUES (91002, ?, ?)', ('Ardea', rank))
+    keyword = db.add_keyword('Ardea', kw_type='taxonomy')
+    db.conn.execute('UPDATE keywords SET taxon_id=? WHERE id=?', (91002, keyword))
+    db.tag_photo(tagged, keyword, source='manual')
+    with db._commits_held():
+        edit = save_alternatives(db, [identity_photo], ['Heron', 'Egret'], 'Uncertain species', 'Bill')
+    assert keyword in _kw_ids(db, tagged)
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos([survivor])[survivor]['reason'] == 'Uncertain species'
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
+    assert db.undo_last_edit()['id'] == edit
+    assert keyword in _kw_ids(db, survivor)
+    assert db.redo_last_undo()['id'] == edit
+    assert keyword in _kw_ids(db, survivor)
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('rank', ['genus', 'family'])
+@pytest.mark.parametrize('identity_owner', ['losing', 'survivor'])
+@pytest.mark.parametrize('edited_away', [False, True])
+def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tmp_path, same_hash, rank, identity_owner, edited_away):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    from services.identity_alternatives import save_alternatives
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_keywords, write_sidecar
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    ws = db.require_workspace_id()
+    db.add_workspace_folder(ws, t['stage_root'])
+    sharing = db.create_workspace('Homonym sync sharing')
+    db.set_active_workspace(ws)
+    db.add_workspace_folder(sharing, t['stage_root'])
+    db.add_workspace_folder(sharing, t['base'])
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    identity_photo, metadata_photo = ((losing, survivor) if identity_owner == 'losing' else (survivor, losing))
+    paths = {t['staged']: tmp_path / 'stage/day/dup.xmp', t['survivor']: tmp_path / 'arch/day/dup.xmp'}
+    for pid, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.with_suffix('.raf').write_bytes(b'bytes')
+        write_sidecar(str(path), flat_keywords={'Unrelated note'} | ({'Ardea'} if pid == metadata_photo else set()), hierarchical_keywords=set())
+    db.conn.execute('INSERT INTO taxa (id, name, rank) VALUES (93001, ?, ?)', ('Ardea', rank))
+    higher = db.add_keyword('Ardea', kw_type='taxonomy')
+    db.conn.execute('UPDATE keywords SET taxon_id=93001 WHERE id=?', (higher,))
+    note = db.add_keyword('Unrelated note')
+    for pid in paths:
+        db.tag_photo(pid, note, source='manual')
+    db.tag_photo(metadata_photo, higher, source='manual')
+    with db._commits_held():
+        edit = save_alternatives(db, [identity_photo], ['Ardea', 'Egret'], 'Uncertain silhouette', 'Bill')
+        if edited_away:
+            edit = save_alternatives(db, [identity_photo], ['Heron', 'Ibis'], 'Uncertain silhouette', 'Bill')
+    db.conn.execute("UPDATE pending_changes SET sync_started=1 WHERE photo_id=? AND value='Ardea'", (identity_photo,))
+    db.commit()
+    state = db.identity_alternatives.for_photos()
+    pending = [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+    history = [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
+    with pytest.raises(IdentityMergeConflict, match='higher-rank taxonomy metadata'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos() == state
+    assert [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
+    assert [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')] == history
+    for action in (None, 'undo', 'redo'):
+        db.set_active_workspace(ws)
+        if action:
+            result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+            assert result['id'] == edit
+        db.set_active_workspace(sharing)
+        assert sync_to_xmp(db)['failed'] == 0
+        sync_from_xmp(db, list(paths))
+        assert 'Ardea' in read_keywords(str(paths[metadata_photo]))
+        assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (metadata_photo, higher)).fetchone()[0] == 'manual'
+        assert not db.identity_alternatives.candidate_links([metadata_photo], ['Ardea', 'Egret'])
+        for pid in paths:
+            assert 'Unrelated note' in read_keywords(str(paths[pid]))
+            assert note in _kw_ids(db, pid)
+    assert db.identity_alternatives.for_photos()[identity_photo]['reason'] == 'Uncertain silhouette'

@@ -6,7 +6,6 @@ import logging
 import os
 import sqlite3
 import time
-import unicodedata
 from typing import TYPE_CHECKING
 
 from keyword_identity import resolve_import_alias
@@ -15,6 +14,7 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images import get_shared_cache
+from repositories.species_taxon_lookup import taxon_lookup_variants
 
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from repositories.edits import EditsRepository
     from repositories.exif_search import ExifSearchRepository
     from repositories.folders import FolderRepository
+    from repositories.identity_alternatives import IdentityAlternativesRepository
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
@@ -238,39 +239,9 @@ class MissingPhotosCancelled(RuntimeError):
     """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
-_TAXON_LOOKUP_TRANSLATION = str.maketrans({
-    "’": "'",
-    "‘": "'",
-    "`": "'",
-    "´": "'",
-    "ʼ": "'",
-    "ʹ": "'",
-    "‛": "'",
-    "“": '"',
-    "”": '"',
-    "„": '"',
-    "‟": '"',
-    "‐": "-",
-    "‑": "-",
-    "‒": "-",
-    "–": "-",
-    "—": "-",
-    "―": "-",
-})
-
-
 def _taxon_lookup_variants(name: str) -> list[str]:
-    """Return ordered taxon-name variants for punctuation-tolerant lookup."""
-    stripped = str(name).strip()
-    variants = []
-    for variant in (
-        stripped,
-        unicodedata.normalize("NFKC", stripped).translate(_TAXON_LOOKUP_TRANSLATION),
-    ):
-        collapsed = " ".join(variant.split())
-        if collapsed and collapsed not in variants:
-            variants.append(collapsed)
-    return variants
+    """Return the normal punctuation-tolerant species lookup variants."""
+    return taxon_lookup_variants(name)
 
 
 def _path_for_subtree_match(value: str) -> str:
@@ -1966,7 +1937,8 @@ class Database:
         moved SQL. The merge's carries into other domains (the GPS-review
         transfer and the embedded-keyword offers) are bound here too.
         """
-        from repositories.folders import FolderRepository
+        from repositories.folders import FolderMergeHooks, FolderRepository
+        from services.identity_alternatives import prepare_photo_merge
 
         return FolderRepository(
             self.conn,
@@ -1978,8 +1950,11 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            transfer_gps_review=self.moves_merge.transfer_gps_review,
-            transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
+            merge_hooks=FolderMergeHooks(
+                transfer_gps_review=self.moves_merge.transfer_gps_review,
+                transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
+                prepare_identity_merge=lambda losing, survivor: prepare_photo_merge(self, losing, survivor),
+            ),
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
@@ -2237,7 +2212,9 @@ class Database:
                 # the sync rather than guessing a keyword by name.
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         losing_id, match_key):
-                    self.tag_photo(surviving_id, kw_id, _commit=False)
+                    source = keyword_source_max(
+                        self.moves_merge.photo_keyword_source(losing_id, kw_id))
+                    self.tag_photo(surviving_id, kw_id, source=source, _commit=False)
             elif newest_loser["change_type"] == "keyword_remove":
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
@@ -3415,6 +3392,15 @@ class Database:
         """
         return self._photo_keyword_repository()
 
+    @property
+    def identity_alternatives(self) -> IdentityAlternativesRepository:
+        """Unresolved candidate identities; never confirmed species keywords."""
+        from repositories.identity_alternatives import IdentityAlternativesRepository
+        return IdentityAlternativesRepository(
+            self.conn, self._ws_id, lookup_taxon_id=self._lookup_taxon_id_for_keyword,
+            keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
+        )
+
     def _photo_species_repository(self) -> PhotoSpeciesRepository:
         """Build the photo-species reads on this connection.
 
@@ -3463,6 +3449,7 @@ class Database:
             keyword_source_manual=KEYWORD_SOURCE_MANUAL,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
             keyword_source_max_sql=keyword_source_max_sql,
+            keyword_source_max=keyword_source_max,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )
@@ -4175,7 +4162,7 @@ class Database:
         )
 
     def tag_photo(
-        self, photo_id, keyword_id, source=KEYWORD_SOURCE_MANUAL, _commit=True,
+        self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
     ):
         """Associate a keyword with a photo.
 
@@ -5178,6 +5165,7 @@ class Database:
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
+        'identity_alternatives_superseded',
         'prediction_reject', 'discard',
         # Legacy rows lack the before-state required for a lossless replay.
         # New assignments use photo_location; new reject/review decisions
@@ -5239,6 +5227,8 @@ class Database:
                     'That grouping or species action was superseded by newer analysis. '
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
+        elif entry['action_type'] == 'identity_alternatives':
+            self._replay_identity_history(entry, items, undo=True)
         else:
             with self._commits_held():
                 self._apply_undo(entry, items)
@@ -5292,11 +5282,37 @@ class Database:
                     'That grouping or species action was superseded by newer analysis. '
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
+        elif entry['action_type'] == 'identity_alternatives':
+            self._replay_identity_history(entry, items, undo=False)
         else:
             with self._commits_held():
                 self._apply_redo(entry, items)
                 history.mark_redone(entry['id'])
         return entry
+
+    def _replay_identity_history(self, entry, items, *, undo):
+        """Retire exactly this stale action while retaining the writer lock."""
+        from services.identity_alternatives import IdentityHistoryStale
+
+        history = self._edit_history_repository()
+        stale = False
+        with self._commits_held():
+            try:
+                with history.identity_replay():
+                    if undo:
+                        self._apply_undo(entry, items)
+                        history.mark_undone(entry['id'])
+                    else:
+                        self._apply_redo(entry, items)
+                        history.mark_redone(entry['id'])
+            except IdentityHistoryStale:
+                history.retire_superseded_identity_entry(entry['id'])
+                stale = True
+        if stale:
+            raise IdentityHistoryStale(
+                'That identification was changed elsewhere. History has been refreshed; '
+                'review the next action before trying again.'
+            ) from None
 
     @contextlib.contextmanager
     def _commits_held(self):
@@ -5348,6 +5364,10 @@ class Database:
 
     def _apply_edit_items(self, entry, items, *, undo):
         action = entry['action_type']
+        if action == 'identity_alternatives':
+            from services.identity_alternatives import replay_identity_batch
+            replay_identity_batch(self, items, undo=undo)
+            return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
         handler = handlers.get(action)
@@ -5692,6 +5712,14 @@ class Database:
             )
         self._reject_edit_prediction(old_meta)
 
+    def _undo_identity_alternatives(self, entry, item):
+        from services.identity_alternatives import replay_identity_edit
+        replay_identity_edit(self, item['photo_id'], item['new_value'], item['old_value'])
+
+    def _redo_identity_alternatives(self, entry, item):
+        from services.identity_alternatives import replay_identity_edit
+        replay_identity_edit(self, item['photo_id'], item['old_value'], item['new_value'])
+
     _EDIT_FIELD_SETTERS = {
         'flag': _edit_set_flag,
         'wildlife_excluded': _edit_set_wildlife_excluded,
@@ -5706,6 +5734,7 @@ class Database:
         'prediction_accept': _undo_keyword_add,
         'keyword_remove': _undo_keyword_remove,
         'species_replace': _undo_species_replace,
+        'identity_alternatives': _undo_identity_alternatives,
     }
     _REDO_HANDLERS = {
         'rating': _redo_rating,
@@ -5713,6 +5742,7 @@ class Database:
         'prediction_accept': _redo_keyword_add,
         'keyword_remove': _redo_keyword_remove,
         'species_replace': _redo_species_replace,
+        'identity_alternatives': _redo_identity_alternatives,
     }
 
     def _edit_old_value_meta(self, old_value):

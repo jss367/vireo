@@ -16,7 +16,9 @@ from preview_cache import (
     catalog_masks_directory,
     cleanup_cached_files_for_deleted_photos,
 )
+from repositories.identity_alternatives import IdentityMergeConflict
 from scanner.cache_invalidation import _invalidate_derived_caches, _invalidate_raw_display_cache
+from services.identity_alternatives import prepare_photo_merge
 
 if TYPE_CHECKING:
     import sqlite3
@@ -604,6 +606,7 @@ def _merge_companion_into_primary(
     # remove either row. Skip before writes or deferred filesystem actions.
     if primary_full is None or companion_full is None:
         return False
+    prepare_photo_merge(db, companion["id"], primary["id"])
     _keep_companion_import_identity(db, primary, companion)
     _fill_primary_metadata_gaps(
         db, primary, primary_full, companion_full,
@@ -664,6 +667,26 @@ class _MergedPhotoIds(dict[int, int]):
         self.companions: dict[int, PhotoIdentity] = {}
 
 
+def _try_automatic_companion_merge(
+    db: Database, primary: PairingRow, companion: PairingRow, vireo_dir: StrPath | None,
+    thumb_cache_dir: StrPath | None, post_commit_fs_actions: list[Callable[[], None]],
+    photo_rows: PhotoRowDeletion,
+) -> bool:
+    """Keep a domain-conflicting pair separate without stopping unrelated work."""
+    pair_actions: list[Callable[[], None]] = []
+    try:
+        with photo_rows.atomic_merge(companion['id']):
+            paired = _merge_companion_into_primary(
+                db, primary, companion, vireo_dir, thumb_cache_dir, pair_actions, photo_rows,
+            )
+    except IdentityMergeConflict as exc:
+        log.warning('Keeping RAW photo %s and JPEG photo %s separate: %s', primary['id'], companion['id'], exc)
+        return False
+    if paired:
+        post_commit_fs_actions.extend(pair_actions)
+    return paired
+
+
 def _pair_raw_jpeg_companions(
     db: Database, vireo_dir: StrPath | None = None, thumb_cache_dir: StrPath | None = None,
 ) -> _MergedPhotoIds:
@@ -673,8 +696,9 @@ def _pair_raw_jpeg_companions(
     keep the raw as the primary photo and set companion_path to the JPEG filename.
     Delete the duplicate JPEG-only photo record.
 
-    All pairs share one transaction; filesystem changes run only after it
-    commits (see ``post_commit_fs_actions`` below).
+    Successful pairs share one transaction; conflicting identities leave that
+    pair separate with a warning. Other errors abort the batch. Filesystem
+    changes run only after commit (see ``post_commit_fs_actions`` below).
 
     Returns ``{companion_id: primary_id}`` for the JPEG rows merged away.
     Callers that count indexed photos must discount these: both files were
@@ -720,7 +744,7 @@ def _pair_raw_jpeg_companions(
     with db.companion_pairing.row_deletion() as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-                if not _merge_companion_into_primary(
+                if not _try_automatic_companion_merge(
                     db, primary, companion, vireo_dir, thumb_cache_dir,
                     post_commit_fs_actions, photo_rows,
                 ):

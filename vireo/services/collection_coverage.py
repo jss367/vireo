@@ -66,7 +66,7 @@ def _coverage_snapshot(db: Database, collection_id: int, missing_snapshot: JsonD
             "without_species_count": counts["total"] - identified,
             "identification_definition": "Species-rank keywords currently attached to the photo; absence does not prove the photo was inspected or has wildlife",
             "unresolved_identity_count": _explicitly_unresolved_count(db, collection_id),
-            "unresolved_definition": "Photos explicitly retained with unresolved identity alternatives in this workspace; may also carry an unrelated confirmed species. Unknown when that review workflow is unavailable",
+            "unresolved_definition": "Visible photos in the current collection with shared catalog identity marked unresolved; may also carry an unrelated confirmed species. Unknown when that review workflow is unavailable",
         },
     }
 

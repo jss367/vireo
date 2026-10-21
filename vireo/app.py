@@ -73,6 +73,7 @@ from web.export import create_export_blueprint
 from web.folders import create_folders_blueprint
 from web.highlights import create_highlights_blueprint
 from web.history import create_history_blueprint
+from web.identity_alternatives import create_identity_alternatives_blueprint
 from web.imports import create_imports_blueprint
 from web.inat import InatTokenGeneration, create_inat_blueprint
 from web.job_launchers import create_job_launchers_blueprint
@@ -2082,6 +2083,7 @@ def _register_browse_blueprints(app, w):
         )
     )
     app.register_blueprint(create_encounters_blueprint(_get_db, json_error, db_path))
+    app.register_blueprint(create_identity_alternatives_blueprint(_get_db, json_error, db_path))
     # Registered before the /api/v1 alias loop, which aliases two of
     # these endpoints by their ``collections.``-qualified names.
     app.register_blueprint(create_collections_blueprint(

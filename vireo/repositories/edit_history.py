@@ -25,9 +25,10 @@ Callers reach it as ``db.edit_history`` (a fresh repository per access, see
 id-keyed lookups; recording, undo and redo stay on ``Database``.
 """
 
+import contextlib
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 
@@ -122,7 +123,8 @@ class EditHistoryRepository:
         ws = self.workspace_id
         # Clear redo stack — new edit invalidates undone entries
         self.conn.execute(
-            "DELETE FROM edit_history WHERE workspace_id = ? AND undone = 1",
+            "DELETE FROM edit_history WHERE workspace_id = ? AND undone = 1 "
+            "AND action_type != 'identity_alternatives_superseded'",
             (ws,),
         )
         cur = self.conn.execute(
@@ -277,6 +279,29 @@ class EditHistoryRepository:
         self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry_id,))
         self.conn.commit()
 
+    @contextlib.contextmanager
+    def identity_replay(self) -> Iterator[None]:
+        """Rollback a failed replay without releasing its SQLite writer lock."""
+        if not self.conn.in_transaction:
+            self.conn.execute('BEGIN IMMEDIATE')
+        self.conn.execute('SAVEPOINT identity_history_replay')
+        succeeded = False
+        try:
+            yield
+            succeeded = True
+        finally:
+            if not succeeded:
+                self.conn.execute('ROLLBACK TO identity_history_replay')
+            self.conn.execute('RELEASE identity_history_replay')
+
+    def retire_superseded_identity_entry(self, entry_id: int) -> None:
+        """Skip a stale action on both cursors while retaining its complete audit."""
+        self.conn.execute(
+            "UPDATE edit_history SET action_type='identity_alternatives_superseded', "
+            "description='Superseded identification: ' || description "
+            "WHERE id=? AND action_type='identity_alternatives'", (entry_id,),
+        )
+
     def retire_stale_grouping_entry(self, entry_id: int) -> None:
         """Retire stale cache state while retaining any reversible photo edit.
 
@@ -305,6 +330,7 @@ class EditHistoryRepository:
                 )
                 return
         self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry_id,))
+
 
     def action_and_new_value(self, entry_id: int) -> sqlite3.Row | None:
         """Row (``action_type``, ``new_value``) of one entry, or None."""

@@ -1,0 +1,32 @@
+<details id="identityAlternativesPanel">
+  <summary>Unresolved species alternatives <span id="identityAlternativesCount"></span></summary>
+  <p>Record possible identities for the same animal. These alternatives do not count as confirmed species.
+    Identification is shared wherever a photo appears; saving or resolving updates every workspace containing it.
+    Use the usual species confirmation controls when multiple species are actually present.</p>
+  <details id="identityAlternativesEditor">
+  <summary>Create an unresolved species group</summary>
+  <form id="identityAlternativesForm">
+    <div><button type="button" id="identityLoadPhotos">Choose photos from displayed cards</button>
+      <button type="button" id="identitySelectPhotos">Select all listed photos</button></div>
+    <label>Photos (displayed cards and their burst members within this collection)
+      <select id="identityPhotos" multiple size="6" required></select>
+    </label>
+    <span id="identityPhotoCount" aria-live="polite">No photos selected</span>
+    <label>Alternative species (one name per line)
+      <textarea id="identityCandidates" rows="3" required maxlength="4000" placeholder="Tropical Kingbird&#10;Couch's Kingbird"></textarea>
+    </label>
+    <label>Why identification remains uncertain
+      <textarea id="identityReason" rows="2" required maxlength="2000"></textarea>
+    </label>
+    <label>Missing evidence needed to resolve it
+      <textarea id="identityEvidence" rows="2" maxlength="2000" placeholder="For example: a recording of the bird's call"></textarea>
+    </label>
+    <p>Saving removes existing confirmations of the listed alternatives from these photos.
+      Other species, ratings, and flags stay as they are. Undo restores the previous identification.</p>
+    <div><button type="submit" id="identitySave">Save unresolved group</button>
+      <button type="button" id="identityCancelEdit" hidden>Cancel group edit</button></div>
+  </form>
+  </details>
+  <p id="identityAlternativesStatus" role="status" aria-live="polite"></p>
+  <div id="identityAlternativesGroups"></div>
+</details>

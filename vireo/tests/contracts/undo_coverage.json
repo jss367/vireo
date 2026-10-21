@@ -19,6 +19,8 @@
       "POST /api/encounters/species",
       "POST /api/highlights/confirm",
       "POST /api/highlights/relabel",
+      "POST /api/identity-alternatives",
+      "POST /api/identity-alternatives/resolve",
       "POST /api/misses/<int:photo_id>/unflag",
       "POST /api/misses/reject",
       "POST /api/photos/<int:photo_id>/color_label",

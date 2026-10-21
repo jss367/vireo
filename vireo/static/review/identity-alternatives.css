@@ -1,0 +1,45 @@
+#identityAlternativesPanel {
+  margin: 12px 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  scroll-margin-top: 110px;
+}
+#identityAlternativesPanel summary { cursor: pointer; font-weight: 600; }
+#identityAlternativesPanel > summary { font-size: 14px; }
+#identityAlternativesPanel p { margin: 10px 0; max-width: 900px; }
+#identityAlternativesCount { color: var(--text-muted); font-weight: 400; }
+#identityAlternativesEditor { margin: 12px 0; }
+#identityAlternativesForm { display: grid; gap: 12px; max-width: 800px; margin-top: 12px; }
+#identityAlternativesForm label { display: grid; gap: 4px; font-weight: 500; }
+#identityAlternativesPanel textarea,
+#identityAlternativesPanel select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+}
+#identityAlternativesPanel textarea { resize: vertical; }
+#identityAlternativesPanel button {
+  padding: 6px 10px;
+  margin: 4px 6px 4px 0;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+#identityAlternativesPanel button:hover { border-color: var(--accent); }
+#identityAlternativesPanel button:disabled { opacity: 0.6; cursor: wait; }
+#identityAlternativesPanel :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#identityAlternativesPanel article { padding: 14px 0 6px; border-top: 1px solid var(--border-primary); }
+#identityAlternativesPanel h3 { font-size: 15px; font-weight: 600; }
+#identityAlternativesPanel article details { margin-bottom: 10px; }
+#identityAlternativesPanel article a { display: inline-block; margin-right: 12px; color: var(--accent); }

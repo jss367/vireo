@@ -17,7 +17,7 @@ function harness() {
   const hooks = {}, requests = [], toasts = [], applied = [];
   const replies = [], state = {refreshError: null};
   const ctx = vm.createContext({
-    document: {getElementById: id => nodes[id], querySelector: () => null, dispatchEvent() {}},
+    document: {getElementById: id => nodes[id], querySelector: () => null, querySelectorAll: () => [], dispatchEvent() {}},
     escapeHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
     Vireo: {registerPageHooks: value => Object.assign(hooks, value), pageHook: key => hooks[key]},
     reviewScopeRequestSeq: 0, pipelineReviewGroupFlagInFlight: {},

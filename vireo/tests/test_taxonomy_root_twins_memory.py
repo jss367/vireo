@@ -1,4 +1,4 @@
-"""Selected AST only; SQLite :memory: only; no application imports or real data."""
+"""Selected AST and pure lookup helpers; SQLite :memory: only; no real data."""
 
 import __future__
 
@@ -10,6 +10,7 @@ import logging
 import sqlite3
 import types
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,7 @@ def setup():
     conn.executescript("""CREATE TABLE taxa(id INTEGER PRIMARY KEY, inat_id INTEGER, name TEXT, common_name TEXT, rank TEXT);
  CREATE TABLE taxa_common_names(taxon_id INTEGER,name TEXT);
  CREATE TABLE keywords(id INTEGER PRIMARY KEY,name TEXT,parent_id INTEGER REFERENCES keywords(id),type TEXT DEFAULT 'general',is_species INTEGER DEFAULT 0,taxon_id INTEGER REFERENCES taxa(id),source_taxon_id INTEGER,place_id TEXT,latitude REAL,longitude REAL,UNIQUE(name,parent_id));
+ CREATE TABLE photo_identity_alternatives(photo_id INTEGER,group_id TEXT,candidates TEXT);
  CREATE TABLE photo_keywords(photo_id INTEGER,keyword_id INTEGER REFERENCES keywords(id),source TEXT,PRIMARY KEY(photo_id,keyword_id));
  CREATE TABLE keyword_import_aliases(path_key TEXT PRIMARY KEY,path_json TEXT,keyword_id INTEGER REFERENCES keywords(id) ON DELETE CASCADE);
  CREATE TABLE pending_changes(id INTEGER PRIMARY KEY,photo_id INTEGER,workspace_id INTEGER,change_type TEXT,value TEXT);
@@ -53,9 +55,13 @@ def setup():
  CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY,edit_id INTEGER REFERENCES edit_history(id),photo_id INTEGER,new_value TEXT,old_value TEXT);
  INSERT INTO taxa VALUES(1,101,'Inventus avis','Invented bird','species'),(2,202,'Inventus','Other species','genus');
  """)
+    from repositories.species_taxon_lookup import lookup_taxon_id, species_preferring_taxon_match
     ns = {
         "__builtins__": {**vars(builtins), "__import__": forbidden},
         "json": json,
+        "_lookup_species_taxon_id": lookup_taxon_id,
+        "_species_taxon_match": species_preferring_taxon_match,
+        "uuid": uuid,
         "sqlite3": sqlite3,
         "log": logging.getLogger("invented"),
         "contextmanager": contextlib.contextmanager,
@@ -72,7 +78,7 @@ def setup():
         "db.py",
         ns,
         methods={"Database": {"merge_taxonomy_root_twins", "transaction", "in_transaction", "begin_immediate"}},
-        functions={"keyword_source_rank_sql", "keyword_source_max_sql"},
+        functions={"keyword_source_rank", "keyword_source_max", "keyword_source_rank_sql", "keyword_source_max_sql"},
     )
     load(
         "repositories/keywords.py",
@@ -105,6 +111,7 @@ def setup():
         methods={"KeywordTreeRepository": {"taxonomy_root_twins"}},
         functions=set(),
     )
+    load("repositories/identity_alternatives.py", ns)
     load("repositories/keyword_provenance.py", ns, methods={"KeywordProvenanceRepository": {"merge_keyword_into"}})
     # One stand-in object answers for the three keyword repositories the
     # selected methods are split across.
@@ -146,6 +153,7 @@ def setup():
     prov.rename_species_highlights_species = forbidden
     prov.rename_photo_preferences_species = forbidden
     prov.keyword_source_max_sql = ns["keyword_source_max_sql"]
+    prov.keyword_source_max = ns["keyword_source_max"]
     prov._merge_keyword_into = prov.merge_keyword_into
     prov._reparent_disambiguated = forbidden
     db._merge_keyword_into = prov.merge_keyword_into

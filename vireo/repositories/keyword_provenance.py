@@ -76,6 +76,7 @@ from keyword_identity import (
     keywords_claim_different_taxa,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories.identity_alternatives import retarget_candidate_names
 
 log = logging.getLogger(__name__)
 
@@ -267,6 +268,8 @@ def _retarget_source_spelling(
         src_name = src["name"]
         dst_name = dst["name"]
         if src_name and dst_name and src_name != dst_name:
+            if src['is_species'] or src['type'] == 'taxonomy':
+                retarget_candidate_names(conn, src_name, dst_name)
             _retarget_pending_changes(
                 conn, src_name, dst_name, src_id, dst_id,
                 pending_source_only=pending_source_only, chunks=chunks,
@@ -377,7 +380,7 @@ def _retarget_species_curation(
             )
 
 
-def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids):
+def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids, source_max):
     """Retarget edit_history entries that name ``src_id`` onto ``dst_id``.
 
     Undo/redo then lands on the survivor instead of a deleted row. Without
@@ -411,6 +414,63 @@ def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids)
     )
     _retarget_bare_history_ids(conn, src_str, dst_str)
     _retarget_history_json_payloads(conn, src_id, dst_id, preexisting_dst_photos)
+    _retarget_identity_history(conn, src_id, dst_id, set(preexisting_dst_photos), source_max)
+
+
+def _rewrite_identity_links(data, src_id, dst_id, source_max):
+    """Retarget a snapshot's links, folding converged provenance as tags do."""
+    links = {}
+    for link in data['links']:
+        kid = dst_id if link['keyword_id'] == src_id else link['keyword_id']
+        source = link['source']
+        if kid in links:
+            source = source_max(links[kid]['source'], source)
+        links[kid] = {**link, 'keyword_id': kid, 'source': source}
+    data['links'] = list(links.values())
+
+
+def _retarget_identity_history(conn, src_id, dst_id, preexisting, source_max):
+    """Preserve uncertainty replay while retiring mutations of existing dst tags."""
+    rows = conn.execute(
+        "SELECT i.id, i.photo_id, i.old_value, i.new_value FROM edit_history_items i "
+        "JOIN edit_history e ON e.id=i.edit_id WHERE e.action_type='identity_alternatives'",
+    ).fetchall()
+    for row in rows:
+        try:
+            before, after = json.loads(row['old_value']), json.loads(row['new_value'])
+        except (TypeError, ValueError):
+            continue
+        if not all(isinstance(data, dict) and isinstance(data.get('links'), list) for data in (before, after)):
+            continue
+        links = [link for data in (before, after) for link in data['links']]
+        if not all(isinstance(link, dict) and 'keyword_id' in link and 'source' in link for link in links):
+            continue
+        if not any(link['keyword_id'] == src_id for link in links):
+            continue
+        owns_survivor = any(link['keyword_id'] == dst_id for link in links)
+        protect_survivor = row['photo_id'] in preexisting and not owns_survivor
+        if protect_survivor:
+            # Retirement preserves the association's actual post-merge stamp.
+            # A removed historical source must not upgrade an independent tag;
+            # a source still attached now participates in the real merge fold.
+            destination = conn.execute(
+                'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                (row['photo_id'], dst_id),
+            ).fetchone()
+            source = conn.execute(
+                'SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                (row['photo_id'], src_id),
+            ).fetchone()
+            protected_source = source_max(destination[0], source[0] if source else None)
+        for data in (before, after):
+            _rewrite_identity_links(data, src_id, dst_id, source_max)
+            if protect_survivor:
+                data['links'] = [link for link in data['links'] if link['keyword_id'] != dst_id]
+                data['links'].append({'keyword_id': dst_id, 'source': protected_source})
+        conn.execute(
+            'UPDATE edit_history_items SET old_value=?, new_value=? WHERE id=?',
+            (json.dumps(before, sort_keys=True), json.dumps(after, sort_keys=True), row['id']),
+        )
 
 
 def _retire_tag_mutations(conn, rows, edit_prediction_ids):
@@ -991,6 +1051,7 @@ class KeywordProvenanceRepository:
         keyword_source_manual,
         keyword_source_conflict_sql,
         keyword_source_max_sql,
+        keyword_source_max,
         decided_prediction_statuses,
         facade,
     ):
@@ -1004,6 +1065,7 @@ class KeywordProvenanceRepository:
         self.KEYWORD_SOURCE_MANUAL = keyword_source_manual
         self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
         self.keyword_source_max_sql = keyword_source_max_sql
+        self.keyword_source_max = keyword_source_max
         # ``Database`` class attributes, kept under their class names.
         self.DECIDED_PREDICTION_STATUSES = decided_prediction_statuses
         # The ``Database`` itself, for the two helpers the moved bodies hand
@@ -1113,6 +1175,7 @@ class KeywordProvenanceRepository:
         _retarget_edit_history(
             self.conn, src_id, dst_id,
             chunks=self._chunks, edit_prediction_ids=self._edit_prediction_ids,
+            source_max=self.keyword_source_max,
         )
         # Preserve durable authorship before collapsing association conflicts.
         # UPDATE OR IGNORE below leaves the destination row untouched when a

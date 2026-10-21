@@ -344,6 +344,56 @@ def test_newest_registry_migration_is_the_version_create_tables_stamps():
     assert schema._latest_version() == SCHEMA_VERSION
 
 
+def test_migration_versions_are_unique_and_strictly_increasing():
+    versions = [migration.version for migration in schema.MIGRATIONS]
+    assert versions == sorted(set(versions))
+
+
+def test_version_23_import_catalog_gains_identity_state_without_changing_import_history(tmp_path):
+    path = str(tmp_path / 'import-v23.db')
+    with Database(path) as db:
+        fid = db.add_folder('/photos', name='Photos')
+        pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
+        cid = db.collections.add_import('Original imported photos', [pid, pid + 10])
+        original = dict(db.collections.import_provenance(cid))
+    with sqlite3.connect(path) as conn:
+        conn.execute('DROP TABLE photo_identity_alternatives')
+        conn.execute('PRAGMA user_version = 23')
+        # Exercise the registry directly before Database's idempotent schema
+        # setup can create the missing table on its own.
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
+    schema.ensure_schema(path)
+    with Database(path, initialize_schema=False) as db:
+        assert dict(db.collections.import_provenance(cid)) == original
+        assert original['original_import_count'] == 2
+        assert original['import_recorded_at']
+        assert db.identity_alternatives.photo_ids() == set()
+
+
+def test_version_22_catalog_runs_import_and_identity_registry_migrations(tmp_path):
+    path = str(tmp_path / 'pre-import-v22.db')
+    with Database(path) as db:
+        collection = db.collections.add('Historical import', '[{"field":"photo_ids","value":[1,2]}]')
+    with sqlite3.connect(path) as conn:
+        conn.execute('DROP TABLE photo_identity_alternatives')
+        conn.execute('ALTER TABLE collections DROP COLUMN original_import_count')
+        conn.execute('ALTER TABLE collections DROP COLUMN import_recorded_at')
+        conn.execute('PRAGMA user_version = 22')
+        # Run the registry before normal startup can create missing tables.
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
+        row = conn.execute(
+            'SELECT name, rules, original_import_count, import_recorded_at FROM collections WHERE id=?',
+            (collection,),
+        ).fetchone()
+        assert row == ('Historical import', '[{"field":"photo_ids","value":[1,2]}]', None, None)
+        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
 @pytest.mark.parametrize("stamped", [11, 12])
 def test_catalog_before_companion_mtime_gains_the_column(tmp_path, stamped):
     """A v11/v12 catalog's companion_identities has no file_mtime; the

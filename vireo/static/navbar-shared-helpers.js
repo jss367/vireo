@@ -1332,7 +1332,11 @@ async function changeHistory(operation, btn) {
     await refreshHistoryLightbox();
     return true;
   } catch (e) {
-    // safeFetch reports the error. The server retains the history entry.
+    // A permanent conflict can retire an action while preserving its audit.
+    // Invalidate stale row actions immediately; a list reload can be slow or fail.
+    document.querySelectorAll('#bpHistoryList .bp-history-row button, #bpHistoryList .bp-history-redo button').forEach(function(button) { button.remove(); });
+    historyStatus = {undo: {available: false}, redo: {available: false}};
+    loadEditHistory();
     return false;
   } finally {
     await refreshHistoryControls();

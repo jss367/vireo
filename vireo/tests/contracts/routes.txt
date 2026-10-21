@@ -66,6 +66,7 @@ GET          /api/folders/missing
 GET          /api/health
 GET          /api/highlights
 GET          /api/highlights/bucket
+GET          /api/identity-alternatives
 GET          /api/import/<job_id>/recovery-options
 GET          /api/import/folder-preview/thumbnail
 GET          /api/import/orphaned-staging
@@ -277,6 +278,8 @@ POST         /api/folders/reveal
 POST         /api/highlights/confirm
 POST         /api/highlights/relabel
 POST         /api/highlights/save
+POST         /api/identity-alternatives
+POST         /api/identity-alternatives/resolve
 POST         /api/import/check-duplicates
 POST         /api/import/collection-preview
 POST         /api/import/destination-preview

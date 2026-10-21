@@ -155,6 +155,12 @@ class PhotoVisibilityRepository:
                 chunk,
             )
 
+    def workspace_ids_for_photo(self, photo_id: int) -> set[int]:
+        """Catalog-wide visible scopes, without consulting the active workspace."""
+        return {row['workspace_id'] for row in self.conn.execute(
+            'SELECT workspace_id FROM photo_workspace_visibility WHERE photo_id=?', (photo_id,),
+        )}
+
     def affected_workspaces(self, photo_ids: Iterable[int]) -> list[dict[str, Any]]:
         """Other workspaces that can see any of these photos, with how many each sees."""
         active_workspace = self.workspace_id_fn()
