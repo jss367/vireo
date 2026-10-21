@@ -580,3 +580,40 @@ def test_visibility_lost_between_validation_and_feature_read_does_not_abort_batc
     assert "no longer visible" in result["photos"][0]["error"]
     assert calls["detection"].count("duck-1.jpg") == 1
     assert [photo["photo_id"] for photo in result["readiness"]["photos"]] == [ids[1]]
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_changed_source_with_same_runtime_never_remasks_retained_reviewed_boxes(retry_library, tmp_path, pinned):
+    from computation_cache import source_input
+    from services.detection_store import write_detection_batch
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    previous_input = source_input("a" * 64, "vireo-detector-source-v1")[1]
+    current_input = source_input("b" * 64, "vireo-detector-source-v1")[1]
+    did = write_detection_batch(db, pid, "megadetector-v6", [
+        {"box": {"x": .2, "y": .2, "w": .5, "h": .5}, "confidence": .9, "category": "animal"}], "legacy", previous_input)[0]
+    db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
+    pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (did,)).fetchone()[0]
+    if pinned:
+        db.set_review_status(pred_id, db.require_workspace_id(), "accepted")
+    db.photo_review.set_flag(pid, "rejected")
+    db.photo_review.set_rating(pid, 2)
+    before_boxes = [tuple(row) for row in db.conn.execute("SELECT * FROM detections WHERE photo_id=?", (pid,))]
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", ("b" * 64, pid))
+    db.commit()
+    result, _ = execute(db, [pid], tmp_path)
+    stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
+    assert calls["detection"] == ["duck-0.jpg"] and stored["runtime_fingerprint"] == "legacy"
+    assert (db.photos.get(pid)["flag"], db.photos.get(pid)["rating"]) == ("rejected", 2)
+    if pinned:
+        assert not result["ok"] and result["errors"][0]["stage"] == "detection"
+        assert "reviewed detector result was retained" in result["errors"][0]["error"]
+        assert calls["segmentation"] == [] and stored["input_fingerprint"] == previous_input
+        assert [tuple(row) for row in db.conn.execute("SELECT * FROM detections WHERE photo_id=?", (pid,))] == before_boxes
+        assert db.conn.execute("SELECT status FROM prediction_review WHERE prediction_id=? AND workspace_id=?", (pred_id, db.require_workspace_id())).fetchone()[0] == "accepted"
+        assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+        assert result["readiness"]["photos"][0]["reasons"] == ["detection_stale"]
+    else:
+        assert result["ok"] and len(calls["segmentation"]) == 1
+        assert stored["input_fingerprint"] == current_input
+        assert result["photos"][0]["status"] == "complete"
