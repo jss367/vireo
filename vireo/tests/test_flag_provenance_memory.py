@@ -13,7 +13,7 @@ def load(file, names=(), classes=()):
     nodes = [n for n in ast.parse((ROOT / file).read_text(encoding="utf-8")).body
              if (isinstance(n, ast.FunctionDef) and n.name in names)
              or (isinstance(n, ast.ClassDef) and n.name in classes)]
-    ns = {"json": json, "contextmanager": contextlib.contextmanager}
+    ns = {"json": json, "contextlib": contextlib, "contextmanager": contextlib.contextmanager}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert>", "exec",
                  flags=__import__("__future__").annotations.compiler_flag), ns)
     return ns
