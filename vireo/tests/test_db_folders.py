@@ -1516,13 +1516,13 @@ def test_folder_repository_imports_no_db_code():
 
 
 def test_folder_repository_chunks_by_its_chunk_size(db):
-    from repositories.folders import FolderRepository
+    from repositories.folders import FolderMergeHooks, FolderRepository
 
     repo = FolderRepository(
         db.conn, None, commit_with_retry=None, path_for_subtree_match=None,
         stored_parent_path=None, subtree_prefix=None, subtree_relative=None,
-        join_subtree_path=None, chunk_size=2, transfer_gps_review=None,
-        transfer_embedded_offered=None, keyword_source_conflict_sql="",
+        join_subtree_path=None, chunk_size=2, merge_hooks=FolderMergeHooks(None, None),
+        keyword_source_conflict_sql="",
     )
     assert list(repo._chunks(range(5))) == [[0, 1], [2, 3], [4]]
     assert list(repo._chunks([])) == []

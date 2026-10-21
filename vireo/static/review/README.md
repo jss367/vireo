@@ -234,3 +234,13 @@ conflicts remain explicit refusals. Regression coverage exercises actual folder
 and RAW/JPEG collapse, pending and drained queues, stale acknowledgments, shared
 workspace sync/re-import, undo/redo, redo-only decisions, provenance, flags,
 visibility, genuine deletion and conflict rollback.
+
+Identity name resolution is reused only within one save, resolution replay
+phase, or history batch under the writer transaction. Resolution creates or
+promotes the chosen keyword before that phase begins; no cache survives into
+a later service call, even in the same transaction. Live per-photo visibility,
+revision and association/provenance checks still run for every item. An offline
+20-photo/2,000-species regression measured full keyword scans dropping from
+61/62/60/60 to 1/2/1/1 for save/resolve/undo/redo. Higher-rank keywords cannot
+claim a candidate spelling and suppress species-only common-name fallback;
+their own photo associations remain independent metadata.

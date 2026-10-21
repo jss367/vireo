@@ -1937,7 +1937,7 @@ class Database:
         moved SQL. The merge's carries into other domains (the GPS-review
         transfer and the embedded-keyword offers) are bound here too.
         """
-        from repositories.folders import FolderRepository
+        from repositories.folders import FolderMergeHooks, FolderRepository
         from services.identity_alternatives import prepare_photo_merge
 
         return FolderRepository(
@@ -1950,10 +1950,12 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
-            transfer_gps_review=self.moves_merge.transfer_gps_review,
-            transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
+            merge_hooks=FolderMergeHooks(
+                transfer_gps_review=self.moves_merge.transfer_gps_review,
+                transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
+                prepare_identity_merge=lambda losing, survivor: prepare_photo_merge(self, losing, survivor),
+            ),
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
-            prepare_identity_merge=lambda losing, survivor: prepare_photo_merge(self, losing, survivor),
         )
 
     @property
@@ -5362,6 +5364,10 @@ class Database:
 
     def _apply_edit_items(self, entry, items, *, undo):
         action = entry['action_type']
+        if action == 'identity_alternatives':
+            from services.identity_alternatives import replay_identity_batch
+            replay_identity_batch(self, items, undo=undo)
+            return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
         handler = handlers.get(action)

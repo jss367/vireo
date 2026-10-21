@@ -20,7 +20,7 @@ from repositories.identity_alternatives import IdentityMergeConflict
 from services.pending_changes import mark_sync_started, queue_keyword_add, queue_keyword_remove
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from db import Database
 
@@ -35,13 +35,39 @@ class IdentityHistoryStale(IdentityHistoryConflict):
     """A newer catalog decision permanently superseded this history action."""
 
 
-def _check_replay_state(db: Database, photo_id: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+class _IdentityBatch:
+    """Resolve names once during a phase that only edits photo associations.
+
+    Never retain this across service calls or keyword creation/promotion.
+    Resolution creates its species keyword before constructing this object;
+    history replay only restores existing keyword IDs. Photo links, provenance
+    and visibility remain live queries on every replay item.
+    """
+
+    def __init__(self, db: Database) -> None:
+        # Direct service callers share the HTTP/history transaction contract:
+        # no other writer may change taxonomy while this phase reuses it.
+        db.identity_alternatives.begin_batch()
+        self.db = db
+        self._identities: dict[frozenset[str], set[str]] = {}
+
+    def identities(self, names: Collection[str]) -> set[str]:
+        key = frozenset(keyword_match_key(name) for name in names)
+        if key not in self._identities:
+            self._identities[key] = self.db.identity_alternatives.candidate_identities(names)
+        return self._identities[key]
+
+    def links(self, photo_ids: Collection[int], names: Collection[str]) -> dict[int, list[dict[str, Any]]]:
+        return self.db.identity_alternatives.candidate_links(photo_ids, names, identities=self.identities(names))
+
+
+def _check_replay_state(db: Database, photo_id: int, before: dict[str, Any], after: dict[str, Any], batch: _IdentityBatch) -> None:
     if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
         raise IdentityHistoryConflict('This photo is no longer visible in the reviewed workspace. Restore access before retrying history.')
     current = db.identity_alternatives.for_photos([photo_id], include_resolved=True).get(photo_id)
     names = [name for data in (before, after) if data['identity']
              and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
-    links = db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, [])
+    links = batch.links([photo_id], names).get(photo_id, [])
     expected_links = {link['keyword_id']: link['source'] for link in before['links']}
     actual_links = {link['keyword_id']: link['source'] for link in links}
     if current != before['identity'] or actual_links != expected_links:
@@ -103,16 +129,17 @@ def _queue_shared_keyword(
             mark_sync_started(db, photo_id, workspace_id, kind, name)
 
 
-def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) -> None:
+def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str], batch: _IdentityBatch | None = None) -> None:
     """Reconcile candidate spellings even when no catalog attachment changed."""
-    identities = db.identity_alternatives.candidate_identities(names)
+    batch = batch or _IdentityBatch(db)
+    identities = batch.identities(names)
     affected = {keyword_match_key(name): name for name in names}
     pending = db.pending_changes.keyword_intents_for_photo(photo_id)
     selected = []
     for row in pending:
         name = row['value']
         if (keyword_match_key(name) in affected
-                or identities & db.identity_alternatives.candidate_identities([name])):
+                or identities & batch.identities([name])):
             affected[keyword_match_key(name)] = name
             selected.append(name)
     removed = db.pending_changes.retire_keyword_intents(photo_id, selected)
@@ -122,7 +149,7 @@ def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) ->
     ancestors = {keyword_match_key(name) for name in db.pending_changes.retained_keyword_ancestor_names(photo_id)}
     # Retained aliases are real confirmations, while an obsolete queued alias
     # absent from the catalog needs removal rather than a second confirmation.
-    for link in db.identity_alternatives.candidate_links([photo_id], names).get(photo_id, []):
+    for link in batch.links([photo_id], names).get(photo_id, []):
         name = db.keywords.name_of(link['keyword_id'])
         if name:
             affected[keyword_match_key(name)] = name
@@ -154,10 +181,11 @@ def prepare_photo_merge(db: Database, losing: int, survivor: int) -> None:
         if link['keyword_id'] not in kept:
             db.untag_photo(losing, link['keyword_id'], _commit=False)
 
-def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:
+def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str, batch: _IdentityBatch | None = None) -> None:
     """Apply a recorded delta in either direction, including sidecar intents."""
+    batch = batch or _IdentityBatch(db)
     before, after = json.loads(previous), json.loads(replacement)
-    _check_replay_state(db, photo_id, before, after)
+    _check_replay_state(db, photo_id, before, after, batch)
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
@@ -169,14 +197,23 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     names = [name for data in (before, after) if data['identity']
              and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
     names.extend(name for kid in old_links.keys() | new_links.keys() if (name := db.keywords.name_of(kid)))
-    _reconcile_keyword_intents(db, photo_id, names)
+    _reconcile_keyword_intents(db, photo_id, names, batch)
     db.identity_alternatives.set_state(photo_id, after['identity'])
+
+
+def replay_identity_batch(db: Database, items: Sequence[dict[str, Any]], *, undo: bool) -> None:
+    """Reuse identity resolution only within this existing-keyword history replay."""
+    batch = _IdentityBatch(db)
+    previous, replacement = ('new_value', 'old_value') if undo else ('old_value', 'new_value')
+    for item in items:
+        replay_identity_edit(db, item['photo_id'], item[previous], item[replacement], batch)
 
 
 def save_alternatives(
     db: Database, photo_ids: Sequence[int], candidates: list[str], reason: str, missing_evidence: str,
 ) -> int:
     """Replace candidate confirmations with one unresolved group, atomically."""
+    batch = _IdentityBatch(db)
     states = db.identity_alternatives.for_photos(photo_ids, include_resolved=True)
     prior_groups: dict[tuple[str, ...], list[int]] = {}
     for pid in photo_ids:
@@ -185,7 +222,7 @@ def save_alternatives(
         prior_groups.setdefault(previous, []).append(pid)
     links = {}
     for previous, ids in prior_groups.items():
-        links.update(db.identity_alternatives.candidate_links(ids, [*candidates, *previous]))
+        links.update(batch.links(ids, [*candidates, *previous]))
     state = {
         'group_id': uuid.uuid4().hex, 'status': 'unresolved', 'candidates': candidates,
         'reason': reason, 'missing_evidence': missing_evidence,
@@ -194,7 +231,7 @@ def save_alternatives(
     for pid in photo_ids:
         old = _snapshot(states.get(pid), links.get(pid, []))
         new = _snapshot(state, [])
-        replay_identity_edit(db, pid, old, new)
+        replay_identity_edit(db, pid, old, new, batch)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Saved unresolved species alternatives on {len(photo_ids)} photos',
@@ -212,9 +249,10 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
         raise ValueError('Choose one of the recorded alternative species')
     # Use the normal species keyword resolver and provenance/XMP queue.
     kid = db.add_keyword(species, is_species=True, _commit=False)
+    batch = _IdentityBatch(db)
     names = [name for state in states.values() for name in state['candidates']]
-    old_links = db.identity_alternatives.candidate_links(photo_ids, names)
-    target_links = db.identity_alternatives.candidate_links(photo_ids, [species])
+    old_links = batch.links(photo_ids, names)
+    target_links = batch.links(photo_ids, [species])
     revision = uuid.uuid4().hex
     items = []
     for pid in photo_ids:
@@ -225,7 +263,7 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
         old = _snapshot(states[pid], links)
         resolved = {**states[pid], 'group_id': revision, 'status': 'resolved'}
         new = _snapshot(resolved, equivalents)
-        replay_identity_edit(db, pid, old, new)
+        replay_identity_edit(db, pid, old, new, batch)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Resolved species as "{species}" on {len(photo_ids)} photos',

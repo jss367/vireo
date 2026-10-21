@@ -16,18 +16,28 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 """
 
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from repositories.identity_alternatives import identity_merge_transaction
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
 
+@dataclass(frozen=True)
+class FolderMergeHooks:
+    """The coordinated carries a folder collapse performs in its transaction."""
+
+    transfer_gps_review: Callable[[int, int], object] | None
+    transfer_embedded_offered: Callable[[int, int], object] | None
+    prepare_identity_merge: Callable[[int, int], None] | None = None
+
+
 class FolderRepository:
     def __init__(self, conn, resolve_workspace_id, *, commit_with_retry,
                  path_for_subtree_match, stored_parent_path, subtree_prefix,
                  subtree_relative, join_subtree_path, chunk_size=800,
-                 transfer_gps_review, transfer_embedded_offered,
-                 keyword_source_conflict_sql, prepare_identity_merge=None):
+                 merge_hooks: FolderMergeHooks, keyword_source_conflict_sql):
         self.conn = conn
         # ``Database._ws_id``, uncalled: only the workspace-scoped reads
         # resolve it, so the catalog-wide methods work with no workspace set.
@@ -51,10 +61,10 @@ class FolderRepository:
         # CONFLICT clause the ``photo_keywords`` carry uses so a losing row's
         # keyword that lands on an existing survivor association keeps the
         # stronger of the two provenance stamps.
-        self.transfer_gps_review = transfer_gps_review
-        self.transfer_embedded_offered = transfer_embedded_offered
+        self.transfer_gps_review = merge_hooks.transfer_gps_review
+        self.transfer_embedded_offered = merge_hooks.transfer_embedded_offered
         self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
-        self.prepare_identity_merge = prepare_identity_merge
+        self.prepare_identity_merge = merge_hooks.prepare_identity_merge
 
     @property
     def workspace_id(self):

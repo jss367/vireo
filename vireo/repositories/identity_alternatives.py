@@ -422,17 +422,22 @@ class IdentityAlternativesRepository:
                  state['reason'], state['missing_evidence'], state.get('status', 'unresolved')),
             )
 
+    def begin_batch(self) -> None:
+        """Keep batch identity resolution inside the caller-owned writer transaction."""
+        if not self.conn.in_transaction:
+            self.conn.execute('BEGIN IMMEDIATE')
+
     def candidate_identities(self, candidates: Collection[str]) -> set[str]:
         """Resolve named candidates with the catalog's authoritative source precedence."""
         return candidate_identities(self.conn, candidates, lookup_taxon_id=self._lookup_taxon_id)
 
-    def candidate_links(self, photo_ids: Collection[int], candidates: Collection[str]) -> dict[int, list[dict[str, Any]]]:
+    def candidate_links(self, photo_ids: Collection[int], candidates: Collection[str], *, identities: Collection[str] | None = None) -> dict[int, list[dict[str, Any]]]:
         """Existing species associations matching alternatives, with provenance.
 
         Match normalized names and authoritative local/source taxon identities.
         Unrelated species in a genuine mixed-species frame are left alone.
         """
-        return candidate_links(self.conn, photo_ids, candidates, lookup_taxon_id=self._lookup_taxon_id)
+        return candidate_links(self.conn, photo_ids, candidates, lookup_taxon_id=self._lookup_taxon_id, identities=identities)
 
 
 def candidate_identities(conn: sqlite3.Connection, candidates: Collection[str], *, lookup_taxon_id: Callable[..., int | None]) -> set[str]:
@@ -460,14 +465,15 @@ def candidate_identities(conn: sqlite3.Connection, candidates: Collection[str], 
     return identities
 
 
-def candidate_links(conn: sqlite3.Connection, photo_ids: Collection[int], candidates: Collection[str], *, lookup_taxon_id: Callable[..., int | None]) -> dict[int, list[dict[str, Any]]]:
+def candidate_links(conn: sqlite3.Connection, photo_ids: Collection[int], candidates: Collection[str], *, lookup_taxon_id: Callable[..., int | None], identities: Collection[str] | None = None) -> dict[int, list[dict[str, Any]]]:
     """Existing species associations matching alternatives, with provenance.
 
     Match normalized names and authoritative local/source taxon identities.
     Unrelated species in a genuine mixed-species frame are left alone.
     """
     names = {keyword_match_key(name) for name in candidates}
-    identities = candidate_identities(conn, candidates, lookup_taxon_id=lookup_taxon_id)
+    if identities is None:
+        identities = candidate_identities(conn, candidates, lookup_taxon_id=lookup_taxon_id)
     result = {}
     for ids in chunked(list(photo_ids)):
         rows = conn.execute(
