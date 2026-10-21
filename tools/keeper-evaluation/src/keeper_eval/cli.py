@@ -28,6 +28,7 @@ def main(argv=None):
     freeze.add_argument('--bundle', type=Path, required=True)
     freeze.add_argument('--model', type=Path, required=True)
     freeze.add_argument('--producer-code', type=Path, required=True)
+    freeze.add_argument('--application-code', type=Path, required=True, help='Vireo source directory binding the selected-region recipe')
     freeze.add_argument('--focus-min', type=float, required=True)
     freeze.add_argument('--animal-min', type=float, required=True)
     freeze.add_argument('--domain', type=Path, required=True, help='JSON camera/source/recipe domain, not source IDs')
@@ -97,7 +98,8 @@ def main(argv=None):
         freeze_profile(args.bundle, args.model, args.producer_code, focus_min=args.focus_min,
                        animal_min=args.animal_min, domain=json.loads(args.domain.read_text()),
                        evaluation_plan={'maximum_false_keep_rate': args.maximum_false_keep_rate, 'confidence': args.confidence,
-                                        'minimum_positive_groups': args.minimum_positive_groups}, output=args.output)
+                                        'minimum_positive_groups': args.minimum_positive_groups},
+                       application_code=args.application_code, output=args.output)
         print('Candidate frozen. This is not calibration or runtime approval.')
     else:
         if args.output.exists() or args.output.resolve().is_relative_to(args.bundle.resolve()):

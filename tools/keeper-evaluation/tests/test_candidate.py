@@ -100,7 +100,7 @@ def test_single_photographer_development_fit_freeze_and_heldout_scores(evidence,
     code = Path(__file__).resolve().parents[1] / 'src/keeper_eval'
     freeze_profile(bundle, model, code, focus_min=0., animal_min=0., domain=domain,
                    evaluation_plan={'maximum_false_keep_rate': .99, 'confidence': .95, 'minimum_positive_groups': 1},
-                   output=profile_path)
+                   application_code=Path(__file__).resolve().parents[3] / 'vireo', output=profile_path)
     judge('holdout', profile_path)
     scored = score(bundle, features, model, profile_path, tmp_path / 'scores.json')
     report = evaluate(bundle, profile_path, scored)

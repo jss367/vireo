@@ -64,7 +64,27 @@ separately for comparison. A RAW source uses its embedded JPEG **without a
 silent demosaic or working-copy fallback**. This is a native embedded-JPEG
 raster, not newly demosaiced sensor detail. Raster dimensions, selected box,
 rounded pixel rectangle, detector provenance, exact decode recipe and asset
-hashes are frozen. Full-size source/region PNGs are not resampled; only the
+hashes are frozen.
+
+The target is the **application's selected region**, not reconstruction of the
+original detector input. `subject_analysis.analyze_detection` applies the stored
+upright normalized box to `load_image(..., max_size=1024)` with its default
+JPEG-first recipe. When an upright embedded JPEG covers that request, this tool
+uses the same raster geometry at native resolution; its bounding box uses floor
+left/top and ceil right/bottom. These are not the app's resized measurement
+pixels or its SAM mask. A legacy detector may have inferred the box on a
+different demosaiced/tiled rendition. That original input is unknown: a wrong
+region resulting from the app's current mapping is a real selected-region
+failure to judge, not evidence that the detector saw those exact pixels.
+
+A frozen profile binds this target contract and hashes of the relevant app
+source files. Fitting/freezing rejects embedded previews smaller than the app's
+1024px request and aspect mismatches rejected by the app's source geometry guard;
+it never invents a detector-to-preview transform. Requests to curate original
+unknown detector-input pixels are unsupported. Existing version-one bundles
+retain their exact selected-region target, pixels, hashes and judgments; no
+migration relabels them. The first 18 native previews cover the app's request.
+Full-size source/region PNGs are not resampled; only the
 context JPEG is reduced. Generated evidence carries no EXIF/GPS metadata.
 
 Missing originals fail explicitly. Output must be a new directory outside the
@@ -148,6 +168,7 @@ held-out scores or labels to choose the producer, features or thresholds.
 ```sh
 vireo-evaluate-keepers freeze --bundle /scratch/native-region-review \
   --model /scratch/candidate-model --producer-code tools/keeper-evaluation/src/keeper_eval \
+  --application-code vireo \
   --focus-min FOCUS_THRESHOLD --animal-min ANIMAL_THRESHOLD \
   --domain /scratch/domain.json \
   --maximum-false-keep-rate ERROR_BUDGET --confidence CONFIDENCE_LEVEL \
@@ -187,7 +208,12 @@ focus remains unvalidated even if the animal gate is perfect. Accepted uncertain
 cases prevent meeting the requirement. Minimum positive accepted groups prevent
 an always-abstain candidate from appearing useful. Out-of-domain inputs must
 abstain. Missing/nonfinite predictions cannot become measured zeroes. The same
-holdout is locked against subsequent producer selection. Statistical bounds
+holdout is locked against subsequent producer selection and exact prediction
+changes, including availability/abstention changes, before metrics are exposed.
+An identical rerun is permitted; a changed prediction digest needs fresh held-out
+encounters. Out-of-domain held-out abstentions are reported separately and
+contribute neither joint nor per-gate validation trials, positive coverage,
+judgment requirements nor in-domain strata. Statistical bounds
 assume correctly declared independent groups and accurate labels; report their
 sampling and domain limits, not just a pooled number.
 

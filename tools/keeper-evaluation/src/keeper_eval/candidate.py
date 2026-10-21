@@ -14,6 +14,7 @@ from scipy.optimize import minimize
 from .evaluate import development_digest, in_domain, read_profile, validate_domain
 from .features import FEATURE_RECIPE
 from .manifest import consensus, digest, file_digest, read_bundle, read_reviews, tree_fingerprint, write_json
+from .region_target import region_contract
 
 DETAIL_FIELDS = ('median_variance', 'median_gradient_energy', 'median_laplacian_variance',
                  'median_contrast_normalized_gradient', 'median_contrast_normalized_laplacian')
@@ -88,6 +89,7 @@ def fit_detail(rows):
 def fit(bundle, feature_path, domain, output):
     manifest = read_bundle(bundle)
     validate_domain(domain, manifest['pixel_recipe'])
+    region_contract(manifest)
     features, by_id = read_features(feature_path, manifest)
     reviews = read_reviews(bundle, manifest)
     labels = consensus(manifest, reviews)

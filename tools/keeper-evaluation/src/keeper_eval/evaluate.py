@@ -1,6 +1,7 @@
 """Evaluate frozen candidates against independent, source-disjoint native-region judgments."""
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from scipy.stats import binomtest
 
 from .manifest import consensus, digest, read_bundle, read_reviews, tree_fingerprint, write_json
+from .region_target import APP_RECIPE_FILES, freeze_region_target, region_contract
 
 
 def development_digest(manifest, reviews):
@@ -40,7 +42,7 @@ def validate_evaluation_plan(plan):
         raise ValueError('Freeze a finite false-keep budget, confidence level, and positive-group requirement before holdout review')
 
 
-def freeze_profile(bundle, model, producer_code, *, focus_min, animal_min, domain, evaluation_plan, output):
+def freeze_profile(bundle, model, producer_code, *, focus_min, animal_min, domain, evaluation_plan, application_code, output):
     manifest = read_bundle(bundle)
     reviews = read_reviews(bundle, manifest)
     holdout = {s['sample_id'] for s in manifest['samples'] if s['partition'] == 'holdout'}
@@ -57,7 +59,8 @@ def freeze_profile(bundle, model, producer_code, *, focus_min, animal_min, domai
     profile = {'schema': 'vireo-keeper-candidate-v1', 'manifest_sha256': manifest['manifest_sha256'],
                'model_artifacts': tree_fingerprint(model), 'producer_code': tree_fingerprint(producer_code),
                'pixel_recipe': manifest['pixel_recipe'], 'development_labels_sha256': development_digest(manifest, reviews),
-               'focus_min': focus_min, 'animal_min': animal_min, 'domain': domain, 'evaluation_plan': evaluation_plan,
+               'focus_min': focus_min, 'animal_min': animal_min, 'domain': domain, 'evaluation_plan': dict(evaluation_plan),
+               'application_region_target': freeze_region_target(manifest, application_code),
                'frozen_at': datetime.now(UTC).isoformat()}
     profile['profile_sha256'] = digest(profile)
     write_json(output, profile)
@@ -73,6 +76,12 @@ def read_profile(path, manifest):
         raise ValueError('Profile changed or belongs to different frozen pixel evidence')
     validate_domain(profile['domain'], manifest['pixel_recipe'])
     validate_evaluation_plan(profile.get('evaluation_plan'))
+    target = profile.get('application_region_target')
+    if (not isinstance(target, dict) or target.get('contract') != region_contract(manifest)
+            or set(target.get('application_source_sha256', {})) != set(APP_RECIPE_FILES)
+            or any(not isinstance(v, str) or not re.fullmatch(r'[a-f0-9]{64}', v)
+                   for v in target['application_source_sha256'].values())):
+        raise ValueError('Profile does not bind the supported application selected-region target and app source hashes')
     profile['profile_sha256'] = recorded
     return profile
 
@@ -162,15 +171,28 @@ def evaluate(bundle, profile_path, predictions):
     if profile['development_labels_sha256'] != development_digest(manifest, reviews):
         raise ValueError('Development judgments changed after the profile was frozen')
     accepted = decisions(predictions, manifest, profile)
+    # Commit exact outputs before exposing any held-out metrics. Same-profile
+    # predictions cannot be adapted after the first report, including abstentions.
+    lock = Path(bundle) / 'evaluation-lock.json'
+    commitment = {'schema': 'vireo-keeper-evaluation-lock-v1', 'profile_sha256': profile['profile_sha256'],
+                  'predictions_sha256': digest(predictions)}
+    if lock.exists():
+        existing = json.loads(lock.read_text())
+        if existing.get('profile_sha256') != commitment['profile_sha256']:
+            raise ValueError('Holdout already exposed to another profile; use fresh held-out encounters')
+        if existing != commitment:
+            raise ValueError('Holdout predictions already committed; changed scores or availability need fresh held-out encounters')
+    else:
+        # Exclusive creation also prevents two first evaluations from racing.
+        with lock.open('x') as stream:
+            json.dump(commitment, stream, sort_keys=True)
     labels = consensus(manifest, reviews)
-    heldout = [s for s in manifest['samples'] if s['partition'] == 'holdout']
+    all_heldout = [s for s in manifest['samples'] if s['partition'] == 'holdout']
+    heldout = [s for s in all_heldout if in_domain(s, profile)]
+    excluded = [s for s in all_heldout if not in_domain(s, profile)]
     gates = {gate: {r['sample_id']: r['status'] == 'available' and r[gate + '_score'] >= profile[gate + '_min']
                     for r in predictions['samples']} for gate in ('animal', 'focus')}
     metrics = evaluation_metrics(heldout, labels, accepted, confidence, gates)
-    lock = Path(bundle) / 'evaluation-lock.json'
-    if lock.exists() and json.loads(lock.read_text())['profile_sha256'] != profile['profile_sha256']:
-        raise ValueError('Holdout already exposed to another profile; use fresh held-out encounters')
-    write_json(lock, {'profile_sha256': profile['profile_sha256']})
     upper = metrics['false_keep_rate_upper_bound']
     minimum_reviewers = manifest['review_protocol']['minimum_human_reviewers']
     all_judged = all(labels[s['sample_id']]['human_judgments'] >= minimum_reviewers for s in heldout)
@@ -182,9 +204,13 @@ def evaluate(bundle, profile_path, predictions):
     return {'schema': 'vireo-keeper-evaluation-v1', 'evaluated_at': datetime.now(UTC).isoformat(),
             'manifest_sha256': manifest['manifest_sha256'], 'profile_sha256': profile['profile_sha256'],
             'reviews_sha256': digest(reviews), 'predictions_sha256': digest(predictions),
-            'domain': profile['domain'], 'confidence': confidence, 'maximum_false_keep_rate': maximum_false_keep_rate,
+            'domain': profile['domain'], 'application_region_target': profile['application_region_target'],
+            'confidence': confidence, 'maximum_false_keep_rate': maximum_false_keep_rate,
             'risk_definition': 'An invalid region is accepted in a known-negative encounter; denominator is known-negative encounters, not accepted keepers.',
             'minimum_positive_groups': minimum_positive_groups, 'heldout_samples': len(heldout),
+            'total_heldout_samples': len(all_heldout),
+            'out_of_domain_abstentions': [s['sample_id'] for s in excluded],
+            'out_of_domain_groups': len({s['group_id'] for s in excluded}),
             'review_protocol': manifest['review_protocol'],
             'all_heldout_independently_judged': all_judged, 'risk_requirement_met': supported,
             'runtime_approved': False, 'runtime_note': 'An offline report is not runtime authorization or a calibrated producer.',

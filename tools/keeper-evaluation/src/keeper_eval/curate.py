@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from .manifest import SCHEMA, digest, file_digest, valid_box, validate_samples, write_json
+from .region_target import TARGET
 
 PIXEL_RECIPE = 'upright-rgb-embedded-jpeg-or-raster-v1'
 RAW_EXTENSIONS = {'.nef', '.nrw', '.arw', '.cr2', '.cr3', '.dng', '.orf', '.rw2', '.raf'}
@@ -83,6 +84,8 @@ def save_assets(bundle, sid, image, box):
 
 def curate(db_path, specification, output):
     db_path, output = Path(db_path).resolve(), Path(output).resolve()
+    if specification.get('region_target', TARGET) != TARGET:
+        raise ValueError('Only the application selected-region target is supported; unknown detector-input rendition cannot be reconstructed')
     requests = specification['samples']
     if output.is_relative_to(db_path.parent):
         raise ValueError("Evidence output must be outside the live catalog directory")
@@ -132,7 +135,7 @@ def curate(db_path, specification, output):
                             'pixel_recipe': PIXEL_RECIPE, 'assets': assets})
     validate_samples(samples)
     manifest = {'schema': SCHEMA, 'created_at': datetime.now(UTC).isoformat(), 'pixel_recipe': PIXEL_RECIPE,
-                'source_catalog': str(db_path), 'label_definition': specification['label_definition'],
+                'source_catalog': str(db_path), 'region_target': TARGET, 'label_definition': specification['label_definition'],
                 'review_protocol': specification.get('review_protocol', {'minimum_human_reviewers': 1,
                     'description': 'Independent photographer, blind to model scores and flags; no adjacent-frame inference.'}),
                 'sampling_notes': specification.get('sampling_notes', ''), 'samples': samples}

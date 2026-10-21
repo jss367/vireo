@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -23,7 +24,7 @@ def frozen(evidence, tmp_path):
     (code / 'candidate.py').write_text('# Synthetic test only\n')
     profile_path = tmp_path / 'profile.json'
     profile = freeze_profile(evidence['bundle'], model, code, focus_min=.5, animal_min=.5,
-                             domain=domain(evidence), evaluation_plan=PLAN, output=profile_path)
+                             domain=domain(evidence), evaluation_plan=PLAN, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=profile_path)
     return profile, profile_path
 
 
@@ -121,7 +122,7 @@ def test_changed_profile_and_threshold_reuse_on_holdout_fail(evidence, tmp_path)
         run(evidence, path, predictions(evidence, profile))
     with pytest.raises(ValueError, match='frozen|already'):
         freeze_profile(evidence['bundle'], tmp_path / 'model', tmp_path / 'code', focus_min=.1, animal_min=.1,
-                       domain=domain(evidence), evaluation_plan=PLAN, output=tmp_path / 'second.json')
+                       domain=domain(evidence), evaluation_plan=PLAN, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=tmp_path / 'second.json')
 
 
 def test_disagreement_is_uncertain_and_cannot_justify_a_keeper(evidence, tmp_path):
@@ -139,7 +140,7 @@ def test_holdout_judgments_prevent_later_profile_selection(evidence, tmp_path):
     labels(evidence, path)
     with pytest.raises(ValueError, match='before holdout'):
         freeze_profile(evidence['bundle'], tmp_path / 'model', tmp_path / 'code', focus_min=.5, animal_min=.5,
-                       domain=domain(evidence), evaluation_plan=PLAN, output=tmp_path / 'late.json')
+                       domain=domain(evidence), evaluation_plan=PLAN, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=tmp_path / 'late.json')
 
 
 def test_source_id_allowlists_are_not_a_deployment_domain(evidence, tmp_path):
@@ -148,7 +149,7 @@ def test_source_id_allowlists_are_not_a_deployment_domain(evidence, tmp_path):
     value['source_ids'] = ['an already inspected photo']
     with pytest.raises(ValueError, match='source-ID allowlists'):
         freeze_profile(evidence['bundle'], tmp_path / 'model', tmp_path / 'code', focus_min=.5, animal_min=.5,
-                       domain=value, evaluation_plan=PLAN, output=tmp_path / 'other.json')
+                       domain=value, evaluation_plan=PLAN, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=tmp_path / 'other.json')
 
 
 def test_available_predictions_outside_declared_domain_cannot_be_used(evidence, tmp_path):
@@ -185,7 +186,7 @@ def test_invalid_evaluation_plan_cannot_be_frozen(evidence, tmp_path, field, val
     plan = dict(PLAN, **{field: value})
     with pytest.raises(ValueError, match='Freeze a finite'):
         freeze_profile(evidence['bundle'], tmp_path / 'model', tmp_path / 'code', focus_min=.5, animal_min=.5,
-                       domain=domain(evidence), evaluation_plan=plan, output=tmp_path / 'invalid.json')
+                       domain=domain(evidence), evaluation_plan=plan, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=tmp_path / 'invalid.json')
 
 
 def test_posthoc_criteria_change_cannot_reuse_exposed_holdout(evidence, tmp_path):
@@ -197,3 +198,57 @@ def test_posthoc_criteria_change_cannot_reuse_exposed_holdout(evidence, tmp_path
     write_json(path, profile)
     with pytest.raises(ValueError, match='another profile'):
         run(evidence, path, predictions(evidence, profile))
+
+
+def test_out_of_domain_abstentions_do_not_dilute_joint_or_gate_denominators(evidence, tmp_path):
+    from keeper_eval.manifest import digest
+    manifest = deepcopy(evidence['manifest'])
+    # Keep one in-domain negative per gate and one positive; unrelated camera
+    # negatives must not make the domain's exact bounds artificially tighter.
+    for index in (7, 8, 9):
+        manifest['samples'][index]['camera_model'] = 'outside-study-camera'
+    manifest['manifest_sha256'] = digest({k: v for k, v in manifest.items() if k != 'manifest_sha256'})
+    write_json(evidence['bundle'] / 'manifest.json', manifest)
+    evidence['manifest'] = manifest
+    profile, path = frozen(evidence, tmp_path)
+    labels(evidence, path)
+    values = predictions(evidence, profile)
+    for row in values['samples'][7:]:
+        row.clear()
+    for row, sample in zip(values['samples'][7:], manifest['samples'][7:], strict=True):
+        row.update(sample_id=sample['sample_id'], region_sha256=sample['assets']['region']['sha256'],
+                   status='unavailable', reason='outside_evaluated_domain')
+    result = run(evidence, path, values)
+    assert result['total_heldout_samples'] == 6
+    assert result['heldout_samples'] == 3
+    assert result['out_of_domain_groups'] == 3
+    assert len(result['out_of_domain_abstentions']) == 3
+    assert result['negative_groups'] == 2
+    assert result['gates']['animal']['negative_groups'] == 1
+    assert result['gates']['focus']['negative_groups'] == 1
+    assert result['gates']['animal']['false_accept_rate_upper_bound'] == pytest.approx(.95)
+    assert result['gates']['focus']['false_accept_rate_upper_bound'] == pytest.approx(.95)
+    assert result['risk_requirement_met'] is False
+    assert not any('outside-study-camera' in key for key in result['strata'])
+
+
+@pytest.mark.parametrize('adaptation', ['score', 'availability'])
+def test_first_holdout_evaluation_commits_exact_predictions(evidence, tmp_path, adaptation):
+    import json
+
+    from keeper_eval.manifest import digest
+    profile, path = frozen(evidence, tmp_path)
+    labels(evidence, path)
+    values = predictions(evidence, profile)
+    first = run(evidence, path, values)
+    lock = json.loads((evidence['bundle'] / 'evaluation-lock.json').read_text())
+    assert lock['predictions_sha256'] == digest(values)
+    assert run(evidence, path, deepcopy(values))['predictions_sha256'] == first['predictions_sha256']
+    changed = deepcopy(values)
+    if adaptation == 'score':
+        changed['samples'][4]['animal_score'] += .1
+    else:
+        changed['samples'][4].update(status='unavailable', reason='adapted after seeing holdout')
+    with pytest.raises(ValueError, match='predictions already committed'):
+        run(evidence, path, changed)
+    assert json.loads((evidence['bundle'] / 'evaluation-lock.json').read_text()) == lock
