@@ -1075,6 +1075,41 @@ def test_duplicate_merge_rejects_synced_candidate_confirmation_aliases(db, tmp_p
     assert db.conn.execute('SELECT reason FROM photo_identity_alternatives WHERE photo_id=?', (identity_photo,)).fetchone()[0] == state['reason']
     assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
 
+
+@pytest.mark.parametrize('same_hash', [True, False])
+def test_survivor_uncertainty_keeps_unrelated_synced_source_species_and_provenance(db, tmp_path, same_hash):
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [survivor])
+    with db._commits_held():
+        save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
+    keyword = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(losing, keyword, source='manual')
+    db.tag_photo(survivor, keyword, source='accept')
+    db.conn.execute('DELETE FROM pending_changes')
+    db.commit()
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos()[survivor]['reason'] == 'Need calls'
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (survivor, keyword)).fetchone()[0] == 'manual'
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+def test_identity_merge_carry_respects_newer_unrelated_species_removal(db, tmp_path, same_hash):
+    from services.identity_alternatives import save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    db.photo_visibility.grant(db.require_workspace_id(), [survivor])
+    with db._commits_held():
+        save_alternatives(db, [survivor], ['Tropical Kingbird', "Couch's Kingbird"], 'Need calls', 'Audio')
+    keyword = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(losing, keyword)
+    _queue(db, losing, 'keyword_add', 'American Robin', '2020-01-01')
+    _queue(db, survivor, 'keyword_remove', 'American Robin', '2099-01-01')
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert keyword not in _kw_ids(db, survivor)
+    assert db.conn.execute("SELECT 1 FROM pending_changes WHERE photo_id=? AND change_type='keyword_remove' AND value='American Robin'", (survivor,)).fetchone()
+
 def test_merge_commits_counts_and_invalidates_after_reparent(
         db, tmp_path, monkeypatch):
     t = _collision_tree(db, tmp_path)

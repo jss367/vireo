@@ -1846,9 +1846,9 @@ class _StagedTreeMerge:
         # rows that actually survive.
         self.reconcile_keyword_edits(
             pid, survivor_id)
-        # Queued edits must not turn the carried uncertainty into a
-        # confirmation (or remove a resolved confirmation) during the fold.
-        remap_identity_for_photo_merge(self.conn, pid, survivor_id, self.KEYWORD_SOURCE_CONFLICT_SQL)
+        # Carry only confirmations consistent with the surviving queued edits.
+        remap_identity_for_photo_merge(self.conn, pid, survivor_id, self.KEYWORD_SOURCE_CONFLICT_SQL,
+                                      after_reconciliation=True)
         # ``photos.rating`` / ``photos.flag`` live
         # outside the queue row, so they have to
         # travel with it or the survivor's catalog
@@ -1978,7 +1978,8 @@ class _StagedTreeMerge:
         # puts them on one photo.
         self.reconcile_keyword_edits(
             collision["id"], pid)
-        remap_identity_for_photo_merge(self.conn, collision["id"], pid, self.KEYWORD_SOURCE_CONFLICT_SQL)
+        remap_identity_for_photo_merge(self.conn, collision["id"], pid, self.KEYWORD_SOURCE_CONFLICT_SQL,
+                                      after_reconciliation=True)
         # Same carry-over of the catalog columns the
         # queue row does not hold.
         self.transfer_review_state(

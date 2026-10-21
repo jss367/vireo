@@ -119,6 +119,7 @@ def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | No
 
 def remap_identity_for_photo_merge(
     conn: sqlite3.Connection, losing_id: int, survivor_id: int, KEYWORD_SOURCE_CONFLICT_SQL: str,
+    *, after_reconciliation: bool = False,
 ) -> None:
     """Preserve decisions and replay snapshots before a collision deletes a row.
 
@@ -142,7 +143,8 @@ def remap_identity_for_photo_merge(
         raise IdentityMergeConflict('Photo collision has conflicting identity decisions. Reconcile their alternatives and evidence in Review before merging these photo rows.')
     decision = old or new
     assert decision is not None
-    _check_merge_confirmations(conn, losing_id, survivor_id, decision)
+    if not after_reconciliation:
+        _check_merge_confirmations(conn, losing_id, survivor_id, decision)
     links = {}
     for pid in (losing_id, survivor_id):
         links[pid] = {r['keyword_id']: r['source'] for r in conn.execute(
@@ -150,11 +152,25 @@ def remap_identity_for_photo_merge(
             "WHERE pk.photo_id=? AND (k.is_species=1 OR k.type='taxonomy')", (pid,),
         )}
     _remap_identity_history(conn, losing_id, survivor_id)
-    if old:
-        if not new:
-            conn.execute('UPDATE photo_identity_alternatives SET photo_id=? WHERE photo_id=?',
-                         (survivor_id, losing_id))
-        for kid, source in links[losing_id].items():
+    if old and not new:
+        conn.execute('UPDATE photo_identity_alternatives SET photo_id=? WHERE photo_id=?',
+                     (survivor_id, losing_id))
+    if not after_reconciliation:
+        return
+    pending = [(row['change_type'], keyword_match_key(row['value'])) for row in conn.execute(
+        "SELECT change_type,value FROM pending_changes WHERE photo_id IN (?, ?) "
+        "AND change_type IN ('keyword_add','keyword_remove')", (losing_id, survivor_id),
+    )]
+    removed = {name for kind, name in pending if kind == 'keyword_remove'} - {name for kind, name in pending if kind == 'keyword_add'}
+    uncertain = set()
+    if decision['status'] == 'unresolved':
+        uncertain = {link['keyword_id'] for link in candidate_links(
+            conn, [losing_id], json.loads(decision['candidates']),
+            lookup_taxon_id=partial(lookup_species_taxon_id, conn),
+        ).get(losing_id, [])}
+    for kid, source in links[losing_id].items():
+        name = keyword_match_key(conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()[0])
+        if kid not in uncertain and name not in removed:
             conn.execute('INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) '
                          + KEYWORD_SOURCE_CONFLICT_SQL, (survivor_id, kid, source))
 
