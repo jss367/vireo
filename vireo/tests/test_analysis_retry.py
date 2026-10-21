@@ -394,3 +394,48 @@ def test_quality_only_preserves_mask_and_embeddings_while_remask_invalidates(ret
     else:
         assert row["mask_path"] != old_path and tuple(row)[1:] == (None, None, None)
         assert len(calls["segmentation"]) == 1
+
+
+def test_detector_runtime_change_during_inference_publishes_nothing(retry_library, monkeypatch):
+    from services.analysis_retry import retry_detection
+    from services.detection_store import write_detection_batch
+    _, db, ids, _ = retry_library
+    pid = ids[0]
+    write_detection_batch(db, pid, "megadetector-v6", [
+        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}], "before")
+    before_run = tuple(db.conn.execute("SELECT * FROM detector_runs WHERE photo_id=?", (pid,)).fetchone())
+    before_boxes = [tuple(row) for row in db.conn.execute("SELECT * FROM detections WHERE photo_id=?", (pid,))]
+    runtime = ["before"]
+    monkeypatch.setattr("computation_cache.megadetector_runtime_fingerprint", lambda: runtime[0])
+    def changed_model(path):
+        runtime[0] = "after"
+        return []  # must not erase the old boxes or stamp an old result with the new runtime
+    monkeypatch.setattr("detector.detect_animals", changed_model)
+    with pytest.raises(ValueError, match="runtime changed"):
+        retry_detection(db, pid, lambda: None)
+    assert tuple(db.conn.execute("SELECT * FROM detector_runs WHERE photo_id=?", (pid,)).fetchone()) == before_run
+    assert [tuple(row) for row in db.conn.execute("SELECT * FROM detections WHERE photo_id=?", (pid,))] == before_boxes
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_detector_first_use_prepares_identity_before_inference(retry_library, monkeypatch, installed):
+    from services.analysis_retry import retry_detection
+    _, db, ids, calls = retry_library
+    runtime = [None]
+    prepared = []
+    monkeypatch.setattr("computation_cache.megadetector_runtime_fingerprint", lambda: runtime[0])
+    def prepare():
+        prepared.append(True)
+        if installed:
+            runtime[0] = "freshly-installed"
+    monkeypatch.setattr("detector.ensure_megadetector_weights", prepare)
+    if installed:
+        retry_detection(db, ids[0], lambda: None)
+        assert db.model_runs.detector_runtime_fingerprint(ids[0], "megadetector-v6") == "freshly-installed"
+        assert calls["detection"] == ["duck-0.jpg"]
+    else:
+        with pytest.raises(ValueError, match="identity is unavailable"):
+            retry_detection(db, ids[0], lambda: None)
+        assert calls["detection"] == []
+        assert db.model_runs.detector_runtime_fingerprint(ids[0], "megadetector-v6") is None
+    assert prepared == [True]

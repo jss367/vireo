@@ -152,22 +152,31 @@ def _photo_lock(pid: int, checkpoint: Callable[[], None]) -> Iterator[None]:
 
 def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None]) -> None:
     from computation_cache import megadetector_runtime_fingerprint, source_input
-    from detector import detect_animals
+    from detector import detect_animals, ensure_megadetector_weights
     from services.detection_store import write_detection_batch
 
     _, path, identity = _source(db, pid)
+    checkpoint()
+    runtime = megadetector_runtime_fingerprint()
+    if runtime is None:
+        ensure_megadetector_weights()  # first-use installation precedes the input snapshot
+        checkpoint()
+        runtime = megadetector_runtime_fingerprint()
+    if runtime is None:
+        raise ValueError("Detector runtime identity is unavailable after model preparation")
     checkpoint()
     detections = detect_animals(path)  # intentionally bypass completed/incomplete detector caches
     if detections is None:
         raise ValueError("Subject detection could not decode or analyze this photo")
     checkpoint()
-    runtime = megadetector_runtime_fingerprint() or "legacy"
     source = db.model_runs.detector_source_identity(pid)
     input_fp = None
     if source and source["file_hash"] and not source["companion_path"]:
         input_fp = source_input(source["file_hash"], "vireo-detector-source-v1")[1]
     with _photo_lock(pid, checkpoint):
         _unchanged(db, pid, path, identity)
+        if megadetector_runtime_fingerprint() != runtime:
+            raise ValueError("Detector runtime changed during analysis; retry with the current model")
         write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
         # The normal writer protects reviewed detector outputs. Never force away
         # those decisions merely to make recovery appear successful.
