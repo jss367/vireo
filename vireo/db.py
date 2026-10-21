@@ -6,7 +6,6 @@ import logging
 import os
 import sqlite3
 import time
-import unicodedata
 from typing import TYPE_CHECKING
 
 from keyword_identity import resolve_import_alias
@@ -15,6 +14,7 @@ from keyword_normalization import (
     normalize_keyword_display,
 )
 from new_images import get_shared_cache
+from repositories.species_taxon_lookup import taxon_lookup_variants
 
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
@@ -239,39 +239,9 @@ class MissingPhotosCancelled(RuntimeError):
     """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
-_TAXON_LOOKUP_TRANSLATION = str.maketrans({
-    "’": "'",
-    "‘": "'",
-    "`": "'",
-    "´": "'",
-    "ʼ": "'",
-    "ʹ": "'",
-    "‛": "'",
-    "“": '"',
-    "”": '"',
-    "„": '"',
-    "‟": '"',
-    "‐": "-",
-    "‑": "-",
-    "‒": "-",
-    "–": "-",
-    "—": "-",
-    "―": "-",
-})
-
-
 def _taxon_lookup_variants(name: str) -> list[str]:
-    """Return ordered taxon-name variants for punctuation-tolerant lookup."""
-    stripped = str(name).strip()
-    variants = []
-    for variant in (
-        stripped,
-        unicodedata.normalize("NFKC", stripped).translate(_TAXON_LOOKUP_TRANSLATION),
-    ):
-        collapsed = " ".join(variant.split())
-        if collapsed and collapsed not in variants:
-            variants.append(collapsed)
-    return variants
+    """Return the normal punctuation-tolerant species lookup variants."""
+    return taxon_lookup_variants(name)
 
 
 def _path_for_subtree_match(value: str) -> str:

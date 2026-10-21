@@ -958,6 +958,116 @@ def _collision_tree(db, tmp_path, *, same_hash=True):
             "new_leaf": new_leaf, "newer": newer}
 
 
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('status', ['unresolved', 'resolved'])
+def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_path, same_hash, status):
+    from services.identity_alternatives import resolve_alternatives, save_alternatives
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    first = db.require_workspace_id()
+    second = db.create_workspace('Shared review')
+    db.photo_visibility.grant(first, [losing, survivor])
+    db.photo_visibility.grant(second, [losing])
+    keyword = db.add_keyword('Tropical Kingbird', is_species=True)
+    db.tag_photo(losing, keyword)
+    db.tag_photo(survivor, keyword)
+    _queue(db, survivor, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=first)
+    _queue(db, losing, 'keyword_add', 'Tropical Kingbird', '2020-01-01', ws=second)
+    unrelated = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(survivor, unrelated)
+    db.photo_review.set_flag(survivor, 'rejected')
+    with db._commits_held():
+        edit_id = save_alternatives(db, [losing], ['Tropical Kingbird', "Couch's Kingbird"], 'Uncertain call', 'Audio')
+        if status == 'resolved':
+            edit_id = resolve_alternatives(db, [losing], 'Tropical Kingbird')
+    state = db.identity_alternatives.for_photos([losing], include_resolved=True)[losing]
+    counts = db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert losing in counts['dropped_photo_ids']
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert db.conn.execute('SELECT photo_id FROM edit_history_items WHERE edit_id=?', (edit_id,)).fetchone()[0] == survivor
+    assert not db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (losing,)).fetchone()
+    assert db.conn.execute('SELECT 1 FROM pending_changes WHERE photo_id=?', (survivor,)).fetchone()
+    assert unrelated in _kw_ids(db, survivor)
+    assert db.photos.get(survivor)['flag'] == 'rejected'
+    assert db.undo_last_edit()['id'] == edit_id
+    assert db.redo_last_undo()['id'] == edit_id
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert unrelated in _kw_ids(db, survivor)
+    assert db.photos.get(survivor)['flag'] == 'rejected'
+    db.set_active_workspace(second)
+    assert db.identity_alternatives.for_photos([survivor], include_resolved=True)[survivor] == state
+    assert set(db.identity_alternatives.for_photos()) == ({survivor} if status == 'unresolved' else set())
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('difference', ['reason', 'revision', 'status'])
+def test_duplicate_merge_rejects_distinct_identity_decisions_atomically(db, tmp_path, same_hash, difference):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    state = {'group_id': 'shared', 'candidates': ['Tropical Kingbird', "Couch's Kingbird"],
+             'reason': 'Original reason', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(t['staged'], state)
+    db.identity_alternatives.set_state(t['survivor'], {**state, difference if difference != 'revision' else 'group_id':
+                                                      {'reason': 'New reason', 'revision': 'other', 'status': 'resolved'}[difference]})
+    _queue(db, t['staged'], 'rating', '5', '2026-01-01', token='preserve')
+    tables = ['photos', 'folders', 'photo_identity_alternatives', 'pending_changes', 'photo_keywords']
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
+              for table in tables}
+    with pytest.raises(IdentityMergeConflict, match='Reconcile their alternatives and evidence in Review'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert not db.conn.in_transaction
+    for table in tables:
+        after = [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} ORDER BY id' if table not in ['photo_identity_alternatives', 'photo_keywords'] else f'SELECT * FROM {table} ORDER BY photo_id')]
+        assert after == before[table]
+
+
+@pytest.mark.parametrize('owner', ['survivor', 'both'])
+def test_duplicate_merge_keeps_existing_equal_identity_decision(db, tmp_path, owner):
+    t = _collision_tree(db, tmp_path)
+    state = {'group_id': 'shared', 'candidates': ['Tropical Kingbird', "Couch's Kingbird"],
+             'reason': 'Original reason', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(t['survivor'], state)
+    if owner == 'both':
+        db.identity_alternatives.set_state(t['staged'], state)
+    db.commit()
+    db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos()[t['survivor']] == state
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('alias', ['common', 'scientific', 'alternate_common', 'source_only'])
+def test_duplicate_merge_rejects_synced_candidate_confirmation_aliases(db, tmp_path, same_hash, alias):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    candidate = 'Tropical Kingbird'
+    if alias == 'source_only':
+        parent = db.add_keyword('First hierarchy')
+        other = db.add_keyword('Second hierarchy')
+        common = db.add_keyword(candidate, parent_id=parent, is_species=True, source_taxon_id=999999)
+        keyword = db.add_keyword('Tyrannus melancholicus', parent_id=other, is_species=True, source_taxon_id=999999)
+        candidate = db.keywords.name_of(common)
+    else:
+        db.conn.execute("INSERT INTO taxa (id, inat_id, name, common_name, rank) VALUES (91001, 999999, 'Tyrannus melancholicus', 'Tropical Kingbird', 'species')")
+        db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES (91001,'Yellow Kingbird')")
+        keyword = db.add_keyword('Tyrannus melancholicus' if alias != 'common' else candidate, is_species=True)
+        if alias == 'alternate_common':
+            candidate = 'yellow kingbird'
+    db.tag_photo(survivor, keyword)
+    state = {'group_id': 'saved', 'candidates': [candidate, "Couch's Kingbird"],
+             'reason': 'Need call evidence', 'missing_evidence': 'Audio', 'status': 'unresolved'}
+    db.identity_alternatives.set_state(losing, state)
+    db.commit()
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+    with pytest.raises(IdentityMergeConflict, match='Reconcile the species confirmation in Review'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.photos.get(losing) is not None
+    assert db.photos.get(survivor) is not None
+    assert keyword in _kw_ids(db, survivor)
+    assert db.conn.execute('SELECT reason FROM photo_identity_alternatives WHERE photo_id=?', (losing,)).fetchone()[0] == state['reason']
+    assert not db.conn.execute('SELECT 1 FROM pending_changes').fetchone()
+
 def test_merge_commits_counts_and_invalidates_after_reparent(
         db, tmp_path, monkeypatch):
     t = _collision_tree(db, tmp_path)

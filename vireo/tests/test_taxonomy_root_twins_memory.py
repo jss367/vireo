@@ -1,4 +1,4 @@
-"""Selected AST only; SQLite :memory: only; no application imports or real data."""
+"""Selected AST and pure lookup helpers; SQLite :memory: only; no real data."""
 
 import __future__
 
@@ -55,9 +55,12 @@ def setup():
  CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY,edit_id INTEGER REFERENCES edit_history(id),photo_id INTEGER,new_value TEXT,old_value TEXT);
  INSERT INTO taxa VALUES(1,101,'Inventus avis','Invented bird','species'),(2,202,'Inventus','Other species','genus');
  """)
+    from repositories.species_taxon_lookup import lookup_taxon_id, species_preferring_taxon_match
     ns = {
         "__builtins__": {**vars(builtins), "__import__": forbidden},
         "json": json,
+        "_lookup_species_taxon_id": lookup_taxon_id,
+        "_species_taxon_match": species_preferring_taxon_match,
         "uuid": uuid,
         "sqlite3": sqlite3,
         "log": logging.getLogger("invented"),

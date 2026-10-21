@@ -9,10 +9,12 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Collection
+from functools import partial
 from typing import Any
 
 from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key
+from repositories.species_taxon_lookup import lookup_taxon_id as lookup_species_taxon_id
 from sql_chunks import chunked
 
 
@@ -78,6 +80,45 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
                 )
 
 
+class IdentityMergeConflict(RuntimeError):
+    """Two photo rows have distinct decisions that cannot be chosen implicitly."""
+
+
+def remap_photo_identities(conn: sqlite3.Connection, mapping: dict[int, int | None]) -> None:
+    """Carry shared identity and its audit before duplicate-photo deletion.
+
+    Distinct decisions have no reliable chronology, so the caller must roll
+    back and let the user reconcile them. Normal deletion still cascades.
+    History snapshots contain keyword IDs and identity revisions, not photo
+    IDs; their enclosing items follow the surviving photo. Caller commits.
+    """
+    for losing, survivor in mapping.items():
+        if survivor is None or losing == survivor:
+            continue
+        source = conn.execute('SELECT group_id, candidates, reason, missing_evidence, status FROM photo_identity_alternatives WHERE photo_id=?', (losing,)).fetchone()
+        target = conn.execute('SELECT group_id, candidates, reason, missing_evidence, status FROM photo_identity_alternatives WHERE photo_id=?', (survivor,)).fetchone()
+        if source is not None and target is not None and tuple(source) != tuple(target):
+            raise IdentityMergeConflict(
+                f'Photos {losing} and {survivor} have different identification decisions. '
+                'Reconcile their alternatives and evidence in Review before merging these photo rows.'
+            )
+        state = target if target is not None else source
+        if (state is not None and state['status'] == 'unresolved'
+                and candidate_links(conn, [survivor], json.loads(state['candidates']),
+                                    lookup_taxon_id=partial(lookup_species_taxon_id, conn))):
+            raise IdentityMergeConflict(
+                f'Photo {survivor} has a confirmed candidate that conflicts with unresolved alternatives. '
+                'Reconcile the species confirmation in Review before merging these photo rows.'
+            )
+        if source is not None and target is None:
+            conn.execute('UPDATE photo_identity_alternatives SET photo_id=? WHERE photo_id=?', (survivor, losing))
+        conn.execute(
+            'UPDATE edit_history_items SET photo_id=? WHERE photo_id=? AND edit_id IN '
+            "(SELECT id FROM edit_history WHERE action_type IN ('identity_alternatives', 'identity_alternatives_superseded'))",
+            (survivor, losing),
+        )
+
+
 class IdentityAlternativesRepository:
     def __init__(
         self, conn: sqlite3.Connection, workspace_id: Callable[[], int], *,
@@ -131,26 +172,7 @@ class IdentityAlternativesRepository:
 
     def candidate_identities(self, candidates: Collection[str]) -> set[str]:
         """Resolve named candidates with the catalog's authoritative source precedence."""
-        names = {keyword_match_key(name) for name in candidates}
-        identities, linked_names = set(), set()
-        for row in self.conn.execute(
-            f"SELECT k.name, {identity_sql('k')} AS identity FROM keywords k "
-            "WHERE k.is_species=1 OR k.type='taxonomy'",
-        ):
-            key = keyword_match_key(row['name'])
-            if key in names and not row['identity'].startswith('keyword:'):
-                identities.add(row['identity'])
-                linked_names.add(key)
-        # A common name may exist only in the taxonomy. An explicitly linked
-        # keyword above owns its identity even if a name lookup would disagree.
-        for name in candidates:
-            if keyword_match_key(name) in linked_names:
-                continue
-            taxon = self._lookup_taxon_id(name, prefer_species=True, species_only=True)
-            if taxon is not None:
-                row = self.conn.execute('SELECT inat_id FROM taxa WHERE id=?', (taxon,)).fetchone()
-                identities.add(f'inat:{row["inat_id"]}' if row and row['inat_id'] is not None else f'taxon:{taxon}')
-        return identities
+        return candidate_identities(self.conn, candidates, lookup_taxon_id=self._lookup_taxon_id)
 
     def candidate_links(self, photo_ids: Collection[int], candidates: Collection[str]) -> dict[int, list[dict[str, Any]]]:
         """Existing species associations matching alternatives, with provenance.
@@ -158,21 +180,54 @@ class IdentityAlternativesRepository:
         Match normalized names and authoritative local/source taxon identities.
         Unrelated species in a genuine mixed-species frame are left alone.
         """
-        names = {keyword_match_key(name) for name in candidates}
-        identities = self.candidate_identities(candidates)
-        result = {}
-        for ids in chunked(list(photo_ids)):
-            rows = self.conn.execute(
-                f"SELECT pk.photo_id, pk.keyword_id, pk.source, k.name, {identity_sql('k')} AS identity "
-                'FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
-                'LEFT JOIN taxa t ON t.id=k.taxon_id '
-                f"WHERE pk.photo_id IN ({','.join('?' for _ in ids)}) "
-                "AND (k.is_species=1 OR k.type='taxonomy') AND (t.rank='species' OR t.rank IS NULL) "
-                'ORDER BY pk.keyword_id', ids,
-            )
-            for row in rows:
-                if keyword_match_key(row['name']) in names or row['identity'] in identities:
-                    result.setdefault(row['photo_id'], []).append({
-                        'keyword_id': row['keyword_id'], 'source': row['source'],
-                    })
-        return result
+        return candidate_links(self.conn, photo_ids, candidates, lookup_taxon_id=self._lookup_taxon_id)
+
+
+def candidate_identities(conn: sqlite3.Connection, candidates: Collection[str], *, lookup_taxon_id: Callable[..., int | None]) -> set[str]:
+    """Resolve named candidates with the catalog's authoritative source precedence."""
+    names = {keyword_match_key(name) for name in candidates}
+    identities, linked_names = set(), set()
+    for row in conn.execute(
+        f"SELECT k.name, {identity_sql('k')} AS identity FROM keywords k "
+        "WHERE k.is_species=1 OR k.type='taxonomy'",
+    ):
+        key = keyword_match_key(row['name'])
+        if key in names and not row['identity'].startswith('keyword:'):
+            identities.add(row['identity'])
+            linked_names.add(key)
+    # A common name may exist only in the taxonomy. An explicitly linked
+    # keyword above owns its identity even if a name lookup would disagree.
+    for name in candidates:
+        if keyword_match_key(name) in linked_names:
+            continue
+        taxon = lookup_taxon_id(name, prefer_species=True, species_only=True)
+        if taxon is not None:
+            row = conn.execute('SELECT inat_id FROM taxa WHERE id=?', (taxon,)).fetchone()
+            identities.add(f'inat:{row["inat_id"]}' if row and row['inat_id'] is not None else f'taxon:{taxon}')
+    return identities
+
+
+def candidate_links(conn: sqlite3.Connection, photo_ids: Collection[int], candidates: Collection[str], *, lookup_taxon_id: Callable[..., int | None]) -> dict[int, list[dict[str, Any]]]:
+    """Existing species associations matching alternatives, with provenance.
+
+    Match normalized names and authoritative local/source taxon identities.
+    Unrelated species in a genuine mixed-species frame are left alone.
+    """
+    names = {keyword_match_key(name) for name in candidates}
+    identities = candidate_identities(conn, candidates, lookup_taxon_id=lookup_taxon_id)
+    result = {}
+    for ids in chunked(list(photo_ids)):
+        rows = conn.execute(
+            f"SELECT pk.photo_id, pk.keyword_id, pk.source, k.name, {identity_sql('k')} AS identity "
+            'FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
+            'LEFT JOIN taxa t ON t.id=k.taxon_id '
+            f"WHERE pk.photo_id IN ({','.join('?' for _ in ids)}) "
+            "AND (k.is_species=1 OR k.type='taxonomy') AND (t.rank='species' OR t.rank IS NULL) "
+            'ORDER BY pk.keyword_id', ids,
+        )
+        for row in rows:
+            if keyword_match_key(row['name']) in names or row['identity'] in identities:
+                result.setdefault(row['photo_id'], []).append({
+                    'keyword_id': row['keyword_id'], 'source': row['source'],
+                })
+    return result

@@ -126,10 +126,12 @@ An identity history entry superseded by a newer decision or candidate-tag
 change is retired after replay rolls back; the request returns 409 and the
 user reviews the next history action. Visibility loss and transient failures
 retain the entry for retry.
+Duplicate-photo collapse transfers identity and its audit to the survivor.
+Distinct decisions on both rows abort the catalog merge and ask for explicit
+reconciliation in Review, preserving both sets of evidence.
 
-Candidates and evidence are workspace review state in the catalog, like
-prediction review decisions; they are not written as confirmed species
-keywords. Use the panel's explicit Resolve controls to close the uncertainty.
+Candidates and evidence are shared catalog identity state, visible wherever
+the photo appears; they are not written as confirmed species keywords. Use the panel's explicit Resolve controls to close the uncertainty.
 Its groups stay separate from the prediction status tabs and genuine
 multi-species confirmations. The script binds itself after DOMContentLoaded,
 refetches after edit-history changes, and drops stale GET responses.
