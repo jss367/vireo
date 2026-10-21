@@ -441,7 +441,8 @@ def candidate_identities(conn: sqlite3.Connection, candidates: Collection[str], 
     identities, linked_names = set(), set()
     for row in conn.execute(
         f"SELECT k.name, {identity_sql('k')} AS identity FROM keywords k "
-        "WHERE k.is_species=1 OR k.type='taxonomy'",
+        "LEFT JOIN taxa t ON t.id=k.taxon_id "
+        "WHERE (k.is_species=1 OR k.type='taxonomy') AND (t.rank='species' OR t.rank IS NULL)",
     ):
         key = keyword_match_key(row['name'])
         if key in names and not row['identity'].startswith('keyword:'):

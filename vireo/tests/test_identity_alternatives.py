@@ -571,6 +571,38 @@ def test_taxonomy_candidate_without_keyword_removes_confirmed_scientific_alias(a
     assert db.photos.get(1)['flag'] == 'rejected'
 
 
+@pytest.mark.parametrize('rank', ['genus', 'family'])
+@pytest.mark.parametrize('explicit_source', [False, True])
+def test_higher_rank_homonym_does_not_mask_species_candidate_alias(app_and_db, rank, explicit_source):
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.executemany(
+        'INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(?,?,?,?,?)',
+        [(101, 501, 'Puma concolor', 'Cougar', 'species'),
+         (102, 502, 'Puma', 'Puma', rank)],
+    )
+    db.conn.execute("INSERT INTO taxa_common_names(taxon_id,name) VALUES(101,'Puma')")
+    homonym = db.add_keyword('Puma', kw_type='taxonomy')
+    # Catalog taxonomy ancestors can retain a higher-rank link even after a
+    # species common-name alias with the same spelling becomes available.
+    db.conn.execute('UPDATE keywords SET taxon_id=102,source_taxon_id=? WHERE id=?',
+                    (502 if explicit_source else None, homonym))
+    scientific = db.add_keyword('Puma concolor', is_species=True)
+    unrelated = db.add_keyword('American Robin', is_species=True)
+    db.tag_photo(1, scientific, source='accept')
+    db.tag_photo(1, unrelated)
+    db.photo_review.set_flag(1, 'rejected')
+    assert db.identity_alternatives.candidate_identities(['pUMA']) == {'inat:501'}
+    assert save(client, [1], candidates=['pUMA', 'Bobcat']).status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [db.keywords.name_of(unrelated)]}
+    assert client.post('/api/undo').status_code == 200
+    assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=1 AND keyword_id=?',
+                           (scientific,)).fetchone()[0] == 'accept'
+    assert client.post('/api/redo').status_code == 200
+    assert db.photo_species.get_species_for_photos([1]) == {1: [db.keywords.name_of(unrelated)]}
+    assert db.photos.get(1)['flag'] == 'rejected'
+
+
 @pytest.mark.parametrize('local_taxon', [False, True])
 def test_candidate_matching_bridges_source_only_aliases_and_local_taxa(app_and_db, local_taxon):
     app, db = app_and_db

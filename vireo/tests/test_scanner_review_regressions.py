@@ -161,7 +161,7 @@ def test_stale_companion_pair_never_writes_reports_or_cleans(missing):
         events.append("write")
 
     helpers = {name: fake_write for name in [
-        "_keep_companion_import_identity", "_fill_primary_metadata_gaps", "_transfer_companion_keywords",
+        "prepare_photo_merge", "_keep_companion_import_identity", "_fill_primary_metadata_gaps", "_transfer_companion_keywords",
         "_rekey_companion_detections_onto_primary", "_transfer_companion_pending_changes",
         "_transfer_companion_inat_submissions", "_transfer_companion_edit_recipe", "_delete_companion_row",
         "_defer_primary_display_cache_invalidation"]}
