@@ -17,6 +17,7 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 
 import os
 
+from repositories.identity_alternatives import identity_merge_transaction
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
@@ -26,7 +27,7 @@ class FolderRepository:
                  path_for_subtree_match, stored_parent_path, subtree_prefix,
                  subtree_relative, join_subtree_path, chunk_size=800,
                  transfer_gps_review, transfer_embedded_offered,
-                 keyword_source_conflict_sql):
+                 keyword_source_conflict_sql, prepare_identity_merge=None):
         self.conn = conn
         # ``Database._ws_id``, uncalled: only the workspace-scoped reads
         # resolve it, so the catalog-wide methods work with no workspace set.
@@ -53,6 +54,7 @@ class FolderRepository:
         self.transfer_gps_review = transfer_gps_review
         self.transfer_embedded_offered = transfer_embedded_offered
         self.KEYWORD_SOURCE_CONFLICT_SQL = keyword_source_conflict_sql
+        self.prepare_identity_merge = prepare_identity_merge
 
     @property
     def workspace_id(self):
@@ -660,6 +662,8 @@ class FolderRepository:
                 (target_folder_id, photo["filename"]),
             ).fetchone()
             if existing:
+                if self.prepare_identity_merge:
+                    self.prepare_identity_merge(photo["id"], existing["id"])
                 transfer_gps_review(photo["id"], existing["id"])
                 # Move the embedded-offered suppression onto the surviving
                 # row so a user's keyword removal is not resurrected by a
@@ -739,8 +743,16 @@ class FolderRepository:
                     (link["workspace_id"], target_folder_id),
                 )
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True):
+    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
+        """Collapse folder duplicates atomically, preserving shared identity."""
+        with identity_merge_transaction(self.conn):
+            result = self._merge_into_existing(source_folder_id, target_folder_id, new_path, commit=False)
+        if commit:
+            self.conn.commit()
+        return result
+
+    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
+                             commit=True):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source

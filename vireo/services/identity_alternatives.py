@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from db import keyword_source_max
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from repositories.identity_alternatives import IdentityMergeConflict
 from services.pending_changes import mark_sync_started, queue_keyword_add, queue_keyword_remove
 
 if TYPE_CHECKING:
@@ -83,8 +84,9 @@ def _queue_shared_keyword(
     flat_only: bool = False,
 ) -> None:
     """Every workspace sync must converge the shared sidecar to this decision."""
-    workspaces = {db.require_workspace_id()}
-    workspaces.update(row['id'] for row in db.photo_visibility.affected_workspaces([photo_id]))
+    workspaces = db.photo_visibility.workspace_ids_for_photo(photo_id)
+    if not workspaces:
+        raise IdentityMergeConflict('Restore photo access in a workspace before merging its identification and keyword changes.')
     queue = queue_keyword_add if present else queue_keyword_remove
     kind = 'keyword_add' if present else ('keyword_remove_flat' if flat_only else 'keyword_remove')
     for workspace_id in sorted(workspaces):
@@ -128,6 +130,29 @@ def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str]) ->
         _queue_shared_keyword(db, photo_id, current.get(key, name), present=key in current,
                               may_have_written=may_have_written, flat_only=key not in current and key in ancestors)
 
+
+def prepare_photo_merge(db: Database, losing: int, survivor: int) -> None:
+    """Preserve current shared identity before any caller deletes photo tags.
+
+    Runs inside the caller's rollback boundary. Current tags, not old history
+    snapshots, supply confirmations; history contributes only affected names
+    whose older queued writes must also converge. No workspace is switched.
+    """
+    names = db.identity_alternatives.merge_candidate_names(losing, survivor)
+    if names is None:
+        return
+    db.photo_visibility.remap({losing: survivor})
+    db.identity_alternatives.prepare_photo_merge(losing, survivor)
+    db.moves_merge.reconcile_conflicting_keyword_edits(losing, survivor)
+    db.identity_alternatives.prepare_photo_merge(losing, survivor, after_reconciliation=True)
+    db.pending_changes.remap_photo_keyword_intents(losing, survivor)
+    _reconcile_keyword_intents(db, survivor, names)
+    # Later generic metadata carries must not copy an outvoted source tag back
+    # onto the canonical row after the winning pending removal settled it.
+    kept = {link['keyword_id'] for link in db.identity_alternatives.candidate_links([survivor], names).get(survivor, [])}
+    for link in db.identity_alternatives.candidate_links([losing], names).get(losing, []):
+        if link['keyword_id'] not in kept:
+            db.untag_photo(losing, link['keyword_id'], _commit=False)
 
 def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str) -> None:
     """Apply a recorded delta in either direction, including sidecar intents."""

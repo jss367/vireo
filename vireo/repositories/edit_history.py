@@ -285,13 +285,13 @@ class EditHistoryRepository:
         if not self.conn.in_transaction:
             self.conn.execute('BEGIN IMMEDIATE')
         self.conn.execute('SAVEPOINT identity_history_replay')
+        succeeded = False
         try:
             yield
-        except BaseException:
-            self.conn.execute('ROLLBACK TO identity_history_replay')
-            self.conn.execute('RELEASE identity_history_replay')
-            raise
-        else:
+            succeeded = True
+        finally:
+            if not succeeded:
+                self.conn.execute('ROLLBACK TO identity_history_replay')
             self.conn.execute('RELEASE identity_history_replay')
 
     def retire_superseded_identity_entry(self, entry_id: int) -> None:

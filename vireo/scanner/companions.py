@@ -17,6 +17,7 @@ from preview_cache import (
     cleanup_cached_files_for_deleted_photos,
 )
 from scanner.cache_invalidation import _invalidate_derived_caches, _invalidate_raw_display_cache
+from services.identity_alternatives import prepare_photo_merge
 
 if TYPE_CHECKING:
     import sqlite3
@@ -604,6 +605,7 @@ def _merge_companion_into_primary(
     # remove either row. Skip before writes or deferred filesystem actions.
     if primary_full is None or companion_full is None:
         return False
+    prepare_photo_merge(db, companion["id"], primary["id"])
     _keep_companion_import_identity(db, primary, companion)
     _fill_primary_metadata_gaps(
         db, primary, primary_full, companion_full,

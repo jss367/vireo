@@ -1938,6 +1938,7 @@ class Database:
         transfer and the embedded-keyword offers) are bound here too.
         """
         from repositories.folders import FolderRepository
+        from services.identity_alternatives import prepare_photo_merge
 
         return FolderRepository(
             self.conn,
@@ -1952,6 +1953,7 @@ class Database:
             transfer_gps_review=self.moves_merge.transfer_gps_review,
             transfer_embedded_offered=self.photo_keywords.transfer_embedded_offered_keys,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
+            prepare_identity_merge=lambda losing, survivor: prepare_photo_merge(self, losing, survivor),
         )
 
     @property
@@ -3392,6 +3394,7 @@ class Database:
         from repositories.identity_alternatives import IdentityAlternativesRepository
         return IdentityAlternativesRepository(
             self.conn, self._ws_id, lookup_taxon_id=self._lookup_taxon_id_for_keyword,
+            keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     def _photo_species_repository(self) -> PhotoSpeciesRepository:

@@ -5,10 +5,11 @@ newer decisions even when a photo was resolved to the same species again. A shar
 frames together without asserting that every candidate occurs in a frame.
 """
 
+import contextlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from functools import partial
 from typing import Any
 
@@ -78,6 +79,25 @@ def retarget_candidate_names(conn: sqlite3.Connection, old_name: str, new_name: 
                     f'UPDATE edit_history_items SET {column}=? WHERE id=?',
                     (json.dumps(data, sort_keys=True), row['id']),
                 )
+
+
+@contextlib.contextmanager
+def identity_merge_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Rollback an entire photo-collapse batch without committing its caller."""
+    started = not conn.in_transaction
+    if started:
+        conn.execute('BEGIN IMMEDIATE')
+    conn.execute('SAVEPOINT identity_photo_merge')
+    succeeded = False
+    try:
+        yield
+        succeeded = True
+    finally:
+        if not succeeded:
+            conn.execute('ROLLBACK TO identity_photo_merge')
+        conn.execute('RELEASE identity_photo_merge')
+        if not succeeded and started:
+            conn.rollback()
 
 
 class IdentityMergeConflict(ValueError):
@@ -266,11 +286,35 @@ def _remap_identity_history(conn: sqlite3.Connection, losing_id: int, survivor_i
 class IdentityAlternativesRepository:
     def __init__(
         self, conn: sqlite3.Connection, workspace_id: Callable[[], int], *,
-        lookup_taxon_id: Callable[..., int | None],
+        lookup_taxon_id: Callable[..., int | None], keyword_source_conflict_sql: str,
     ) -> None:
         self.conn = conn
         self._workspace_id = workspace_id
         self._lookup_taxon_id = lookup_taxon_id
+        self._keyword_source_conflict_sql = keyword_source_conflict_sql
+
+    def merge_candidate_names(self, losing: int, survivor: int) -> list[str] | None:
+        """Current and audited affected names for a catalog-wide collapse."""
+        states = self.conn.execute('SELECT candidates FROM photo_identity_alternatives WHERE photo_id IN (?, ?)', (losing, survivor)).fetchall()
+        if not states:
+            return None
+        names = [name for row in states for name in json.loads(row['candidates'])]
+        rows = self.conn.execute(
+            'SELECT i.old_value,i.new_value FROM edit_history_items i JOIN edit_history e ON e.id=i.edit_id '
+            "WHERE i.photo_id IN (?, ?) AND e.action_type IN ('identity_alternatives','identity_alternatives_superseded')",
+            (losing, survivor),
+        ).fetchall()
+        for row in rows:
+            for value in row:
+                data = json.loads(value)
+                if data.get('identity'):
+                    names.extend(data['identity']['candidates'])
+        return list(dict.fromkeys(names))
+
+    def prepare_photo_merge(self, losing: int, survivor: int, *, after_reconciliation: bool = False) -> None:
+        """Carry current identity/associations inside the caller's transaction."""
+        remap_identity_for_photo_merge(self.conn, losing, survivor, self._keyword_source_conflict_sql,
+                                      after_reconciliation=after_reconciliation)
 
     def for_photos(self, photo_ids: Collection[int] | None = None, *, include_resolved: bool = False) -> dict[int, dict[str, Any]]:
         """Visible unresolved photos in this workspace, optionally restricted."""

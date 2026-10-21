@@ -26,8 +26,10 @@ transaction, and the scanner owns the commit.
 """
 
 import sqlite3
+from contextlib import contextmanager
 
 from metadata import EXIF_SUMMARY_COLUMNS
+from repositories.identity_alternatives import identity_merge_transaction
 from repositories.photo_row_deletion import photo_row_deletion
 
 # The columns a merge may carry from companion to primary.
@@ -244,9 +246,11 @@ class CompanionPairingRepository:
     def delete_keyword_associations(self, photo_id: int) -> None:
         self.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (photo_id,))
 
+    @contextmanager
     def row_deletion(self):
-        """``photo_row_deletion`` on this connection (see that module)."""
-        return photo_row_deletion(self.conn)
+        """Keep companion collapse atomic when shared identity rejects a pair."""
+        with identity_merge_transaction(self.conn), photo_row_deletion(self.conn) as rows:
+            yield rows
 
     # -- attaching a companion without a row ---------------------------------
 

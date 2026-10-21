@@ -58,6 +58,13 @@ class SyncRepository:
         self._resolve_workspace_id = resolve_workspace_id
         self.chunk_size = chunk_size
 
+    def remap_photo_keyword_intents(self, losing: int, survivor: int) -> None:
+        """Retain each workspace's keyword work before a photo-row collapse."""
+        self.conn.execute(
+            "UPDATE pending_changes SET photo_id=? WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')",
+            (survivor, losing),
+        )
+
     @property
     def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""
