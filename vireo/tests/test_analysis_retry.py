@@ -526,3 +526,57 @@ def test_cancel_during_regroup_wait_finishes_without_waiting_for_holder(retry_li
     finally:
         lock.release()
         thread.join(synchronization_timeout(5))
+
+
+@pytest.mark.parametrize("eye_status", ["measured", "not_located", "disabled", "identity_unavailable", "model_unavailable"])
+def test_eye_fingerprint_records_model_attempts_without_stamping_skips(retry_library, tmp_path, monkeypatch, eye_status):
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    from services import stage_counts
+    from services.detection_store import write_detection_batch
+    _, db, ids, _ = retry_library
+    pid = ids[0]
+    did = write_detection_batch(db, pid, "megadetector-v6", [
+        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}], "legacy")[0]
+    db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match", taxonomy={"class": "Aves"})
+    eye = {"eye_status": eye_status, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None}
+    if eye_status == "measured":
+        eye.update(eye_x=.3, eye_y=.4, eye_conf=.99, eye_tenengrad=123.)
+    monkeypatch.setattr("subject_analysis.measure_eye", lambda *args: eye)
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": eye_status != "disabled"}})
+    result = run_retry(Context(db), {"id": "eye-retry", "progress": {}, "errors": []}, [pid], effective, str(tmp_path))
+    assert result["ok"]
+    row = db.conn.execute("SELECT eye_kp_fingerprint,eye_tenengrad FROM photos WHERE id=?", (pid,)).fetchone()
+    attempted = eye_status in ("measured", "not_located")
+    assert row["eye_kp_fingerprint"] == (EYE_KP_FINGERPRINT_VERSION if attempted else None)
+    assert row["eye_tenengrad"] == eye["eye_tenengrad"]
+    assert db.pipeline_features.count_eye_keypoint_attempts(db.require_workspace_id(), .2, EYE_KP_FINGERPRINT_VERSION) == int(attempted)
+    assert stage_counts.count_eye_keypoint_stale(db, photo_ids=[pid]) == 0
+
+
+@pytest.mark.parametrize("race_read", [1, 2])
+def test_visibility_lost_between_validation_and_feature_read_does_not_abort_batch(retry_library, tmp_path, monkeypatch, race_read):
+    from services import analysis_retry
+    _, db, ids, calls = retry_library
+    removed_folder = db.add_folder(str(tmp_path / "removable"), name="Removed during read")
+    db.conn.execute("UPDATE photos SET folder_id=? WHERE id=?", (removed_folder, ids[0]))
+    db.commit()
+    original = analysis_retry._current
+    reads = []
+    def hide_during_read(worker, selected, effective):
+        if selected == [ids[0]]:
+            reads.append(True)
+            if len(reads) == race_read:
+                db.remove_workspace_folder(db.require_workspace_id(), removed_folder)
+        return original(worker, selected, effective)
+    monkeypatch.setattr(analysis_retry, "_current", hide_during_read)
+    # The original source remains a scratch image even if the race occurs after detection.
+    if race_read == 2:
+        folder = tmp_path / "removable"
+        folder.mkdir()
+        Image.new("RGB", (100, 80), (100, 160, 80)).save(folder / "duck-0.jpg")
+    result, job = execute(db, ids[:2], tmp_path)
+    assert not result["ok"] and job["progress"]["current"] == 2
+    assert [photo["status"] for photo in result["photos"]] == ["failed", "complete"]
+    assert "no longer visible" in result["photos"][0]["error"]
+    assert calls["detection"].count("duck-1.jpg") == 1
+    assert [photo["photo_id"] for photo in result["readiness"]["photos"]] == [ids[1]]

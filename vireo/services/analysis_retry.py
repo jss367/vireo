@@ -48,6 +48,13 @@ def _current(db: Database, ids: list[int], effective: JsonDict) -> list[JsonDict
             if photo["id"] in wanted]
 
 
+def _current_photo(db: Database, pid: int, effective: JsonDict) -> JsonDict:
+    photos = _current(db, [pid], effective)
+    if not photos:
+        raise ValueError("Photo is no longer visible in this workspace")
+    return photos[0]
+
+
 def _context_ids(db: Database, ids: list[int], effective: JsonDict) -> list[int]:
     """Read neighboring weak-run anchors without inferring on unselected photos."""
     from services.detection_store import get_detections_for_photos
@@ -214,7 +221,7 @@ def _selected_detection(db: Database, pid: int, effective: JsonDict) -> JsonDict
     detection, _ = resolve_subject(db, pid, SubjectComparison())
     if detection:
         return detection
-    current = _current(db, [pid], effective)[0]
+    current = _current_photo(db, pid, effective)
     if current.get("subject_uncertain") and current.get("detection_box"):
         box = current["detection_box"]
         candidate = next((d for d in retained(db, pid, min_conf=0)
@@ -232,6 +239,7 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     import numpy as np
     from masking import save_mask
     from PIL import Image
+    from pipeline import EYE_KP_FINGERPRINT_VERSION
     from pipeline_job import _StagedMaskFile
     from repositories.masks_features import MaskQuality, PipelineFeatures
     from subject_analysis import publish_analysis
@@ -268,13 +276,14 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
             db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}), _commit=False)
-            current = _current(db, [pid], effective)[0]
+            current = _current_photo(db, pid, effective)
             weak_floor = effective.get("pipeline", {}).get("weak_detection_confidence", .12) if current.get("subject_uncertain") else None
             db.masks_features.set_active_variant(pid, variant, effective.get("detector_confidence", .2),
                 _commit=False, weak_rescue_min_conf=weak_floor)
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},
-                eye_kp_fingerprint=None), _commit=False)
+                eye_kp_fingerprint=(EYE_KP_FINGERPRINT_VERSION
+                    if features.get("eye_status") in ("measured", "not_located") else None)), _commit=False)
             if existing_mask_path is None:
                 db.masks_features.update_embeddings(pid, None, None, variant=None, _commit=False)
             photo = db.photos.get(pid, verify_workspace=True)
@@ -323,7 +332,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
             stage = "readiness"
             try:
                 selected_ids(db, [pid])
-                photo = _current(db, [pid], effective)[0]
+                photo = _current_photo(db, pid, effective)
                 stages = required_stages(photo)
                 job["progress"].update(current=index, current_file=photo["filename"], phase="Checking analysis")
                 ran = []
@@ -332,7 +341,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     job["progress"]["phase"] = "Retrying subject detection"
                     retry_detection(db, pid, checkpoint)
                     ran.append("detection")
-                    photo = _current(db, [pid], effective)[0]
+                    photo = _current_photo(db, pid, effective)
                     stages = required_stages(photo)
                 no_subject = "no_qualifying_subject" in subject_analysis_readiness(photo)["reasons"]
                 if stages and not no_subject:
@@ -340,7 +349,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     job["progress"]["phase"] = f"Retrying {stage} measurements"
                     retry_features(db, pid, effective, cache_dir, checkpoint, quality_only=stages == ["quality"])
                     ran.extend(stage_name for stage_name in stages if stage_name != "detection")
-                after = subject_analysis_readiness(_current(db, [pid], effective)[0])
+                after = subject_analysis_readiness(_current_photo(db, pid, effective))
                 result["photos"].append({"photo_id": pid, "status": "complete" if after["eligible"] else "review",
                                          "stages_run": ran, "analysis": after})
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
