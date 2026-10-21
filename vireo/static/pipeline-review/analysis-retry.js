@@ -41,7 +41,7 @@ async function openAnalysisRetry(photoIds) {
     reviewAnalysisRetry.workspaceId = data.workspace_id;
     renderAnalysisReadiness(data);
     setAnalysisRetryStatus(isScopedReviewView() ?
-      'This regrouped view is read-only. Switch to All reviewed photos, or open these photos from Browse, to retry analysis.' :
+      'This regrouped view is read-only. Switch the scope to Saved review results, or open these photos from Browse, to retry analysis.' :
       'Review the exact ' + data.count + ' selected photos before starting.');
   } catch (error) {
     if (sequence === reviewAnalysisRetry.sequence) setAnalysisRetryStatus('Could not check analysis: ' + analysisRetryError(error));
