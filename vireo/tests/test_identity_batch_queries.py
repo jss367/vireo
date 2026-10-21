@@ -130,3 +130,23 @@ def test_higher_rank_candidate_name_uses_species_alias_and_preserves_metadata(tm
                 assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (photo, scientific)).fetchone()[0] == 'accept'
     finally:
         db.close()
+
+
+def test_photo_collapse_without_identity_names_skips_taxonomy_scans(tmp_path):
+    from repositories.identity_alternatives import remap_identity_keyword_intents
+
+    with Database(str(tmp_path / 'ordinary-collapse.db')) as db:
+        folder = db.add_folder(str(tmp_path / 'photos'))
+        photos = [photo_ingest.add_photo(db, folder_id=folder, filename=f'{i}.jpg',
+                                         extension='.jpg', file_size=1, file_mtime=1) for i in range(2)]
+        db.conn.executemany("INSERT INTO keywords(name,type,is_species) VALUES (?,'taxonomy',1)",
+                            [(f'Catalog species {i}',) for i in range(2000)])
+        db.queue_change(photos[0], 'keyword_add', 'Catalog species 1')
+        before = [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
+        scans = []
+        db.conn.set_trace_callback(lambda sql: scans.append(sql) if 'FROM keywords k ' in sql else None)
+        moved = remap_identity_keyword_intents(db.conn, photos[0], photos[1], [])
+        db.conn.set_trace_callback(None)
+        assert moved == {}
+        assert scans == []
+        assert [tuple(row) for row in db.conn.execute('SELECT * FROM pending_changes')] == before

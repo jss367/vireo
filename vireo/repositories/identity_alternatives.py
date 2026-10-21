@@ -144,6 +144,8 @@ def identity_merge_associations(conn: sqlite3.Connection, losing: int, survivor:
 def remap_identity_keyword_intents(conn: sqlite3.Connection, losing: int, survivor: int, names: list[str]) -> dict[str | tuple[str, int], str]:
     """Retain captured-write flags; an old-path writer cannot acknowledge the new owner."""
     moved = {}
+    if not names:
+        return moved
     keys = {keyword_match_key(name) for name in names}
     lookup = partial(lookup_species_taxon_id, conn)
     identities = candidate_identities(conn, names, lookup_taxon_id=lookup)
