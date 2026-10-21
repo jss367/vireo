@@ -187,7 +187,7 @@ def _check_merge_confirmations(conn: sqlite3.Connection, losing: int, survivor: 
     for row in conn.execute(
         "SELECT pk.photo_id,k.name FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id "
         "JOIN taxa t ON t.id=k.taxon_id WHERE pk.photo_id IN (?, ?) "
-        "AND k.type='taxonomy' AND t.rank IS NOT NULL AND t.rank!='species'", (losing, survivor),
+        "AND t.rank IS NOT NULL AND t.rank!='species'", (losing, survivor),
     ):
         key = keyword_match_key(row['name'])
         other = survivor if row['photo_id'] == losing else losing
