@@ -286,3 +286,90 @@ def test_job_captures_submission_workspace_even_after_switch(retry_library, monk
     assert job["result"]["readiness"]["workspace_id"] == workspace
     assert calls["detection"] == ["duck-0.jpg"]
     assert client.get("/api/pipeline/page-init").json["workspace_id"] == other
+
+
+def _damage_cached_quality(db, pid, *, invalid=True):
+    import json
+
+    from subject_readiness import REQUIRED_QUALITY_FIELDS
+    row = db.conn.execute("SELECT a.* FROM subject_ranking_analysis a JOIN detections d ON d.id=a.detection_id WHERE d.photo_id=?", (pid,)).fetchone()
+    features = json.loads(row["features"])
+    if invalid:
+        features["subject_clip_low"] = None
+    else:
+        features.update(dict.fromkeys(REQUIRED_QUALITY_FIELDS, 0.0))
+        for optional in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "noise_estimate"):
+            features.pop(optional, None)
+    encoded = json.dumps(features)
+    db.conn.execute("UPDATE subject_ranking_analysis SET features=? WHERE detection_id=? AND source_key=?", (encoded, row["detection_id"], row["source_key"]))
+    db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (pid,))
+    db.commit()
+    return row["detection_id"], row["source_key"], encoded, row["mask_png"]
+
+
+@pytest.mark.parametrize("damage", ["quality", "mask", "json"])
+def test_incomplete_ranking_generation_is_repaired_with_active_publication(retry_library, tmp_path, damage):
+    import json
+    _, db, ids, calls = retry_library
+    execute(db, [ids[0]], tmp_path)
+    did, key, damaged, _ = _damage_cached_quality(db, ids[0])
+    if damage == "mask":
+        db.conn.execute("UPDATE subject_ranking_analysis SET mask_png=? WHERE detection_id=?", (b"not a PNG", did))
+    elif damage == "json":
+        db.conn.execute("UPDATE subject_ranking_analysis SET features=? WHERE detection_id=?", ("corrupt JSON", did))
+    db.commit()
+    calls["segmentation"].clear()
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert result["ok"] and result["photos"][0]["status"] == "complete"
+    repaired = db.subjects.ranking_analysis(did, key)
+    assert repaired["features"]["subject_clip_low"] is not None
+    assert repaired["features"] != json.loads(damaged)
+    assert calls["segmentation"] == []  # the current valid mask supplies quality only
+
+
+def test_valid_zero_generation_and_optional_fallbacks_remain_immutable(retry_library, tmp_path):
+    _, db, ids, _ = retry_library
+    execute(db, [ids[0]], tmp_path)
+    did, key, encoded, png = _damage_cached_quality(db, ids[0], invalid=False)
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert result["ok"]
+    row = db.conn.execute("SELECT features,mask_png FROM subject_ranking_analysis WHERE detection_id=? AND source_key=?", (did, key)).fetchone()
+    assert tuple(row) == (encoded, png)
+
+
+@pytest.mark.parametrize("failure", ["inference", "cancel", "publication", "inputs"])
+def test_invalid_generation_survives_failed_cancelled_or_rolled_back_repair(retry_library, tmp_path, monkeypatch, failure):
+    _, db, ids, _ = retry_library
+    execute(db, [ids[0]], tmp_path)
+    did, key, encoded, png = _damage_cached_quality(db, ids[0])
+    old_path = db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0]
+    cancelled = []
+    original = __import__("quality").compute_all_quality_features
+    def fail_quality(*args, **kwargs):
+        if failure == "inference":
+            raise ValueError("quality retry failed")
+        cancelled.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr("quality.compute_all_quality_features", fail_quality)
+    if failure == "inputs":
+        from pipeline_job import _StagedMaskFile
+        original_install = _StagedMaskFile.install
+        def change_inputs(stage):
+            original_install(stage)
+            db.predictions.add(did, "Mallard", .9, "inat21", category="match")
+        monkeypatch.setattr(_StagedMaskFile, "install", change_inputs)
+    if failure == "publication":
+        def late_failure(*args, **kwargs):
+            raise ValueError("late active publication failed")
+        # This runs after cached retirement+insert, and before commit.
+        monkeypatch.setattr("db.Database.commit_with_retry", late_failure)
+    if failure == "cancel":
+        with pytest.raises(JobCancelled):
+            execute(db, [ids[0]], tmp_path, cancel=lambda: bool(cancelled))
+    else:
+        result, _ = execute(db, [ids[0]], tmp_path)
+        assert not result["ok"]
+    row = db.conn.execute("SELECT features,mask_png FROM subject_ranking_analysis WHERE detection_id=? AND source_key=?", (did, key)).fetchone()
+    assert tuple(row) == (encoded, png)
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0] == old_path
+    assert Path(old_path).read_bytes() == png

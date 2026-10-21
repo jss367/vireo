@@ -178,7 +178,6 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None]) -> N
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
                    checkpoint: Callable[[], None], *, quality_only: bool = False) -> None:
     from subject_analysis import analyze_detection
-    from subject_ranking import cached_analysis
 
     photo, path, identity = _source(db, pid)
     checkpoint()
@@ -186,10 +185,10 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
         _unchanged(db, pid, path, identity)
         detection = _selected_detection(db, pid, effective)
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
-        analyze_detection(db, photo, detection, effective, checkpoint, force=True,
-                          existing_mask_path=mask_path["path"] if quality_only and mask_path else None)
-        _, analysis = cached_analysis(db, photo, detection, effective)
-        if analysis is None:
+        analysis = analyze_detection(db, photo, detection, effective, checkpoint, force=True,
+                          existing_mask_path=mask_path["path"] if quality_only and mask_path else None,
+                          defer_publication=True)
+        if not isinstance(analysis, dict):
             raise ValueError("No current subject analysis was published")
         _unchanged(db, pid, path, identity)
         current = _selected_detection(db, pid, effective)
@@ -225,6 +224,7 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     from PIL import Image
     from pipeline_job import _StagedMaskFile
     from repositories.masks_features import MaskQuality, PipelineFeatures
+    from subject_analysis import publish_analysis
 
     features = analysis["features"]
     if any(not isinstance(features.get(field), (int, float)) or isinstance(features.get(field), bool)
@@ -254,6 +254,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},
                 eye_kp_fingerprint=None), _commit=False)
             db.masks_features.update_embeddings(pid, None, None, variant=None, _commit=False)
+            photo = db.photos.get(pid, verify_workspace=True)
+            publish_analysis(db, photo, detection, analysis, effective)
             db.commit_with_retry()
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
             db.rollback()
