@@ -149,11 +149,18 @@ def remap_identity_keyword_intents(conn: sqlite3.Connection, losing: int, surviv
     keys = {keyword_match_key(name) for name in names}
     lookup = partial(lookup_species_taxon_id, conn)
     identities = candidate_identities(conn, names, lookup_taxon_id=lookup)
+    alias_identities: dict[str, set[str]] = {}
     for row in conn.execute(
         "SELECT id,value,change_token FROM pending_changes WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')", (losing,),
     ).fetchall():
         name = row['value'] or ''
-        if keyword_match_key(name) in keys or identities & candidate_identities(conn, [name], lookup_taxon_id=lookup):
+        key = keyword_match_key(name)
+        matches = key in keys
+        if not matches and identities:
+            if key not in alias_identities:
+                alias_identities[key] = candidate_identities(conn, [name], lookup_taxon_id=lookup)
+            matches = bool(identities & alias_identities[key])
+        if matches:
             token = str(uuid.uuid4())
             conn.execute('UPDATE pending_changes SET photo_id=?,change_token=? WHERE id=?', (survivor, token, row['id']))
             moved[row['change_token'] or ('id', row['id'])] = token
@@ -314,9 +321,13 @@ def _check_merge_confirmations(conn: sqlite3.Connection, losing: int, survivor: 
                         'Reconcile the species confirmation in Review before merging these photo rows.'
                     )
     elif links.get(losing) and links.get(survivor):
-        identities = {row['id']: row['identity'] for row in conn.execute(
-            f"SELECT k.id, {identity_sql('k')} AS identity FROM keywords k",
-        )}
+        identities = {}
+        linked_ids = sorted({link['keyword_id'] for photo in (losing, survivor) for link in links[photo]})
+        for ids in chunked(linked_ids):
+            identities.update({row['id']: row['identity'] for row in conn.execute(
+                f"SELECT k.id, {identity_sql('k')} AS identity FROM keywords k "
+                f"WHERE k.id IN ({','.join('?' for _ in ids)})", ids,
+            )})
         if {identities[link['keyword_id']] for link in links[losing]} != {
             identities[link['keyword_id']] for link in links[survivor]
         }:

@@ -252,3 +252,15 @@ service applies normalized-name and count validation as well as taxon validation
 so API and direct callers share the same rule. Genuinely unknown distinct names
 remain valid; an existing unresolved group collapsed to one candidate by taxonomy
 maintenance stays editable and still requires explicit confirmation.
+
+Automatic RAW/JPEG pairing keeps an identity-conflicting pair separate and logs
+both photo IDs with the reconciliation reason. Each attempt has a savepoint;
+rollback also discards that pair's pending collection remap and deferred
+filesystem actions. Unrelated pairs and the scan continue. Non-domain failures
+still abort the batch, and explicit folder/archive merges retain their atomic
+rejection contract. Collection rewriting stays batched across successful pairs.
+
+Resolved collision comparisons fetch authoritative identities only for the
+union of linked keyword IDs, using bounded parameter chunks and primary-key
+searches. Pending-intent remapping performs no identity scan with empty candidate
+names and reuses duplicate pending-name lookups only within that call.

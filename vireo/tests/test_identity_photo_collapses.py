@@ -118,7 +118,7 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
     assert db.identity_alternatives.for_photos([primary], include_resolved=True)[primary] == before
 
 
-def test_companion_identity_conflict_rolls_back_earlier_pair(catalog, tmp_path):
+def test_companion_identity_conflict_keeps_pair_and_commits_earlier_pair(catalog, tmp_path):
     db = catalog
     folder = db.add_folder(str(tmp_path))
     raw, jpeg = photo(db, folder, 'first.raf'), photo(db, folder, 'first.jpg')
@@ -128,13 +128,16 @@ def test_companion_identity_conflict_rolls_back_earlier_pair(catalog, tmp_path):
         resolve_alternatives(db, [jpeg], CANDIDATES[0])
         save_alternatives(db, [raw2], CANDIDATES, 'RAW evidence', 'Audio')
         save_alternatives(db, [jpeg2], CANDIDATES, 'JPEG evidence', 'Video')
-    before = rows(db)
-    with pytest.raises(IdentityMergeConflict, match='conflicting identity'):
-        _pair_raw_jpeg_companions(db)
+    before_photos = [db.photos.get(pid) for pid in (raw2, jpeg2)]
+    tables = ['photo_identity_alternatives', 'photo_keywords', 'pending_changes', 'edit_history_items']
+    before = {table: [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} WHERE photo_id IN (?,?) ORDER BY photo_id', (raw2, jpeg2))] for table in tables}
+    assert _pair_raw_jpeg_companions(db) == {jpeg: raw}
     assert not db.conn.in_transaction
-    assert rows(db) == before
-    assert db.photos.get(raw)['companion_path'] is None
-    assert db.photos.get(jpeg) is not None
+    assert [db.photos.get(pid) for pid in (raw2, jpeg2)] == before_photos
+    for table in tables:
+        assert [tuple(row) for row in db.conn.execute(f'SELECT * FROM {table} WHERE photo_id IN (?,?) ORDER BY photo_id', (raw2, jpeg2))] == before[table]
+    assert db.photos.get(raw)['companion_path'] == 'first.jpg'
+    assert db.photos.get(jpeg) is None
 
 
 @pytest.mark.parametrize('kind', ['folder', 'companion'])

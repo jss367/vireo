@@ -148,7 +148,7 @@ def test_stale_companion_pair_never_writes_reports_or_cleans(missing):
     @contextlib.contextmanager
     def deletion():
         events.append("enter")
-        yield object()
+        yield SimpleNamespace(atomic_merge=lambda _photo_id: contextlib.nullcontext())
         events.append("exit")
 
     def read(photo_id):
@@ -166,8 +166,10 @@ def test_stale_companion_pair_never_writes_reports_or_cleans(missing):
         "_transfer_companion_inat_submissions", "_transfer_companion_edit_recipe", "_delete_companion_row",
         "_defer_primary_display_cache_invalidation"]}
     ns = _selected("companions.py", {"_read_metadata_transfer_rows", "_merge_companion_into_primary",
-                                        "_pair_raw_jpeg_companions", "_MergedPhotoIds"}, {
+                                        "_pair_raw_jpeg_companions", "_try_automatic_companion_merge", "_MergedPhotoIds"}, {
         **helpers, "cast": lambda _kind, value: value,
+        "IdentityMergeConflict": type("IdentityMergeConflict", (ValueError,), {}),
+        "log": SimpleNamespace(warning=lambda *args: events.append("warning")),
         "_group_photos_by_folder_and_stem": lambda _: {(5, "invented"): [primary, companion]},
         "_pick_compatible_raw_jpeg_pairs": lambda _: [(primary, companion)],
         "catalog_masks_directory": lambda _: "/invented/masks",

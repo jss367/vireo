@@ -98,7 +98,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
 
 @pytest.mark.parametrize('path', ['folder', 'companion'])
 @pytest.mark.parametrize('conflict', ['decision', 'confirmation'])
-def test_collapse_conflicts_leave_domain_and_callers_transaction_untouched(db, tmp_path, path, conflict):
+def test_collapse_conflicts_keep_pair_data_and_folder_transaction_untouched(db, tmp_path, path, conflict):
     from repositories.identity_alternatives import IdentityMergeConflict
     source, target, survivor, losing, target_path = _fixture(db, tmp_path, path)
     with db._commits_held():
@@ -112,16 +112,16 @@ def test_collapse_conflicts_leave_domain_and_callers_transaction_untouched(db, t
     db.conn.execute('UPDATE photos SET rating=4 WHERE id=?', (survivor,))
     tables = ['photos', 'folders', 'photo_keywords', 'photo_identity_alternatives', 'pending_changes', 'edit_history_items']
     before = {table: [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] for table in tables}
-    with pytest.raises(IdentityMergeConflict):
-        if path == 'folder':
+    if path == 'folder':
+        with pytest.raises(IdentityMergeConflict):
             db.folders.merge_into_existing(source, target, str(target_path))
-        else:
-            from scanner.companions import _pair_raw_jpeg_companions
-            _pair_raw_jpeg_companions(db)
+    else:
+        from scanner.companions import _pair_raw_jpeg_companions
+        assert _pair_raw_jpeg_companions(db) == {}
     for table in tables:
         assert [tuple(r) for r in db.conn.execute(f'SELECT * FROM {table}')] == before[table]
     db.conn.rollback()
-    assert db.photos.get(survivor)['rating'] != 4
+    assert (db.photos.get(survivor)['rating'] != 4) == (path == 'folder')
 
 
 @pytest.mark.parametrize('path', ['folder', 'companion'])
