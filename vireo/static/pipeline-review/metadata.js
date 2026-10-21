@@ -328,6 +328,10 @@ function buildQualityEvidenceHtml(photo) {
     });
     html += '</div>';
   }
+  var status = photo.analysis_status || 'unknown';
+  html += '<section aria-label="Subject analysis"><strong>Saved subject analysis: ' + escapeHtml(status) + '</strong>' +
+    '<p>Check the current stages and any recorded failures before retrying.</p>' +
+    '<button type="button" onclick="openAnalysisRetry([' + photo.id + '])">Analysis details and retry…</button></section>';
   return html + buildRelativeFocusHtml(photo);
 }
 

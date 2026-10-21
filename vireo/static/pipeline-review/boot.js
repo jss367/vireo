@@ -33,5 +33,6 @@ bindPipelineReviewOrganizationKeyboard();
 bindPipelineReviewContextMenu();
 bindPipelineReviewPhotoEvents();
 bindCollectionCoverage();
+bindAnalysisRetryControls();
 
 initPipelineReviewPage();

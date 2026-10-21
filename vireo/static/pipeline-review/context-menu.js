@@ -38,24 +38,8 @@ function filterPipelineReviewContextSelectionToScope() {
   }
 }
 
-/** @param {number[]} photoIds @param {number} clickedPhotoId @param {boolean} inGroupReview */
-function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
-  // Scope guard: the menu's actions close over these ids, so drop any the
-  // Folder/Collection scope hides (Group Review members stay allowed).
-  photoIds = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds));
-  var one = photoIds.length === 1;
-  var singleHint = one ? undefined : 'Select a single photo';
-  var scopedWriteHint = isScopedReviewView()
-    ? scopedViewEditHint()
-    : undefined;
-  var tauriNavigationBlocked = !!(
-    inGroupReview &&
-    typeof isTauri === 'function' && isTauri() &&
-    grmHasPendingUserEdits()
-  );
-  var navigationHint = tauriNavigationBlocked
-    ? 'Apply or close Group Review before leaving this page'
-    : singleHint;
+/** @param {number[]} photoIds @param {boolean} inGroupReview @returns {ReviewMenuItem[]} */
+function pipelineReviewDecisionChips(photoIds, inGroupReview) {
   var rateChip = function(/** @type {number} */ n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
@@ -79,6 +63,37 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
     };
   };
 
+  return [{chips: [0, 1, 2, 3, 4, 5].map(rateChip)}, {chips: [
+    flagChip('flagged', '\u2691', 'Flag as pick'),
+    flagChip('rejected', '\u2715', 'Reject'),
+    flagChip('none', '\u25CB', 'Clear flag'),
+  ]}];
+}
+
+/** @param {number[]} ids @param {string | undefined} disabledHint @returns {ReviewMenuItem} */
+function analysisRetryMenuItem(ids, disabledHint) {
+  return {label: 'Analysis details and retry…', title: disabledHint,
+    onClick: function() { openAnalysisRetry(ids); }};
+}
+
+/** @param {number[]} photoIds @param {number} clickedPhotoId @param {boolean} inGroupReview */
+function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
+  // Scope guard: the menu's actions close over these ids, so drop any the
+  // Folder/Collection scope hides (Group Review members stay allowed).
+  photoIds = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds));
+  var one = photoIds.length === 1;
+  var singleHint = one ? undefined : 'Select a single photo';
+  var scopedWriteHint = isScopedReviewView()
+    ? scopedViewEditHint()
+    : undefined;
+  var tauriNavigationBlocked = !!(
+    inGroupReview &&
+    typeof isTauri === 'function' && isTauri() &&
+    grmHasPendingUserEdits()
+  );
+  var navigationHint = tauriNavigationBlocked
+    ? 'Apply or close Group Review before leaving this page'
+    : singleHint;
   /** @type {ReviewMenuItem[]} */ var items = [];
   if (inGroupReview) {
     items = items.concat([
@@ -88,13 +103,9 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
       {separator: true},
     ]);
   }
-  items.push({chips: [0, 1, 2, 3, 4, 5].map(rateChip)});
-  items.push({chips: [
-    flagChip('flagged', '\u2691', 'Flag as pick'),
-    flagChip('rejected', '\u2715', 'Reject'),
-    flagChip('none', '\u25CB', 'Clear flag'),
-  ]});
+  items = items.concat(pipelineReviewDecisionChips(photoIds, inGroupReview));
   items.push({separator: true});
+  items.push(analysisRetryMenuItem(photoIds, scopedWriteHint));
   items.push({label: 'Add to Collection\u2026', disabled: !!scopedWriteHint,
     disabledHint: scopedWriteHint,
     onClick: function() { addToCollection(photoIds); }});
