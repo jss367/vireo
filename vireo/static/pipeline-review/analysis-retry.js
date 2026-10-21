@@ -124,7 +124,7 @@ async function finishAnalysisRetry(job) {
   if (result && result.photos) {
     var ready = result.photos.filter(function(photo) { return photo.status === 'complete'; }).length;
     var failed = result.photos.filter(function(photo) { return photo.status === 'failed'; }).length;
-    message += ' ' + ready + ' ready for comparison; ' + (result.photos.length - ready - failed) + ' remain in REVIEW; ' + failed + ' failed.';
+    message += ' ' + ready + ' ready for comparison; ' + (result.photos.length - ready - failed) + ' without current subject measurements; ' + failed + ' failed.';
   }
   setAnalysisRetryStatus(message + ' Reloading current analysis…');
   try {

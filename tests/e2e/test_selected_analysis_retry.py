@@ -79,6 +79,7 @@ def test_retry_previews_exact_selection_and_refreshes_without_losing_staged_flag
     expect(page.locator("#analysisRetryPhotos")).not_to_contain_text(f"selected-{ids[1]}.jpg")
     page.locator("#analysisRetryStart").click()
     expect(page.locator("#analysisRetryStatus")).to_contain_text("1 ready for comparison")
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("0 without current subject measurements")
     assert state["submitted"] == [{"photo_ids": [ids[0]], "expected_workspace_id": live_server["db"].active_workspace_id}]
     assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
     assert page.evaluate("pid => grmState.picks.has(pid)", ids[1])
