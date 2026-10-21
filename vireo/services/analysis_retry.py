@@ -195,7 +195,8 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
         if current is None or current["id"] != detection["id"]:
             raise ValueError("Primary subject changed during analysis; retry the chosen subject")
         _publish_features(db, pid, detection, analysis, effective, cache_dir, checkpoint,
-                          lambda: _unchanged(db, pid, path, identity))
+                          lambda: _unchanged(db, pid, path, identity),
+                          existing_mask_path=mask_path["path"] if quality_only and mask_path else None)
 
 
 def _selected_detection(db: Database, pid: int, effective: JsonDict) -> JsonDict:
@@ -218,7 +219,7 @@ def _selected_detection(db: Database, pid: int, effective: JsonDict) -> JsonDict
 
 def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: JsonDict,
                       effective: JsonDict, cache_dir: str, checkpoint: Callable[[], None],
-                      validate_source: Callable[[], None]) -> None:
+                      validate_source: Callable[[], None], *, existing_mask_path: str | None = None) -> None:
     import numpy as np
     from masking import save_mask
     from PIL import Image
@@ -230,20 +231,30 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     if any(not isinstance(features.get(field), (int, float)) or isinstance(features.get(field), bool)
            or not math.isfinite(features[field]) for field in REQUIRED_QUALITY_FIELDS):
         raise ValueError("Required quality measurements are still incomplete")
-    with Image.open(io.BytesIO(analysis["mask_png"])) as image:
-        mask = np.asarray(image).astype(bool)
     variant = effective.get("pipeline", {}).get("sam2_variant") or "sam2-small"
-    stage = _StagedMaskFile.create(mask, os.path.join(cache_dir, "masks"), pid, variant, save_mask)
+    stage = None
+    if existing_mask_path is None:
+        with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            mask = np.asarray(image).astype(bool)
+        stage = _StagedMaskFile.create(mask, os.path.join(cache_dir, "masks"), pid, variant, save_mask)
+    mask_path = stage.final_path if stage else existing_mask_path
+    if mask_path is None:
+        raise ValueError("Current subject mask is unavailable")
     try:
         checkpoint()
-        stage.install()
+        if stage:
+            stage.install()
         db.begin_immediate()
         try:
             selected_ids(db, [pid])
             validate_source()
             if _selected_detection(db, pid, effective)["id"] != detection["id"]:
                 raise ValueError("Primary subject changed before publication; retry the chosen subject")
-            db.masks_features.upsert_mask(pid, variant, stage.final_path, detection["detector_model"],
+            if existing_mask_path:
+                previous = db.masks_features.get_mask(pid, variant)
+                if previous is None or previous["path"] != existing_mask_path:
+                    raise ValueError("Subject mask changed before quality publication; retry the current mask")
+            db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}), _commit=False)
             current = _current(db, [pid], effective)[0]
@@ -253,7 +264,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},
                 eye_kp_fingerprint=None), _commit=False)
-            db.masks_features.update_embeddings(pid, None, None, variant=None, _commit=False)
+            if existing_mask_path is None:
+                db.masks_features.update_embeddings(pid, None, None, variant=None, _commit=False)
             photo = db.photos.get(pid, verify_workspace=True)
             publish_analysis(db, photo, detection, analysis, effective)
             db.commit_with_retry()
@@ -263,11 +275,12 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     finally:
         if db.in_transaction:
             db.rollback()
-        current_mask = db.masks_features.get_mask(pid, variant)
-        if current_mask is not None and current_mask["path"] == stage.final_path:
-            stage.finish()
-        else:
-            stage.restore()
+        if stage:
+            current_mask = db.masks_features.get_mask(pid, variant)
+            if current_mask is not None and current_mask["path"] == stage.final_path:
+                stage.finish()
+            else:
+                stage.restore()
 
 
 def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str) -> JsonDict:

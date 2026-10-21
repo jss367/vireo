@@ -348,16 +348,12 @@ def test_invalid_generation_survives_failed_cancelled_or_rolled_back_repair(retr
     def fail_quality(*args, **kwargs):
         if failure == "inference":
             raise ValueError("quality retry failed")
-        cancelled.append(True)
-        return original(*args, **kwargs)
-    monkeypatch.setattr("quality.compute_all_quality_features", fail_quality)
-    if failure == "inputs":
-        from pipeline_job import _StagedMaskFile
-        original_install = _StagedMaskFile.install
-        def change_inputs(stage):
-            original_install(stage)
+        pixels = original(*args, **kwargs)
+        if failure == "inputs":
             db.predictions.add(did, "Mallard", .9, "inat21", category="match")
-        monkeypatch.setattr(_StagedMaskFile, "install", change_inputs)
+        cancelled.append(True)
+        return pixels
+    monkeypatch.setattr("quality.compute_all_quality_features", fail_quality)
     if failure == "publication":
         def late_failure(*args, **kwargs):
             raise ValueError("late active publication failed")
@@ -373,3 +369,28 @@ def test_invalid_generation_survives_failed_cancelled_or_rolled_back_repair(retr
     assert tuple(row) == (encoded, png)
     assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0] == old_path
     assert Path(old_path).read_bytes() == png
+
+
+@pytest.mark.parametrize("quality_only", [True, False])
+def test_quality_only_preserves_mask_and_embeddings_while_remask_invalidates(retry_library, tmp_path, quality_only):
+    _, db, ids, calls = retry_library
+    execute(db, [ids[0]], tmp_path)
+    old_path = db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0]
+    subject = np.arange(768, dtype=np.float32).tobytes()
+    background = np.arange(768, dtype=np.float32)[::-1].tobytes()
+    db.masks_features.update_embeddings(ids[0], subject, background, variant="vit-b14")
+    if quality_only:
+        db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (ids[0],))
+    else:
+        db.conn.execute("UPDATE photo_masks SET prompt_x=.4 WHERE photo_id=?", (ids[0],))
+    db.commit()
+    calls["segmentation"].clear()
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert result["ok"]
+    row = db.conn.execute("SELECT mask_path,dino_subject_embedding,dino_global_embedding,dino_embedding_variant FROM photos WHERE id=?", (ids[0],)).fetchone()
+    if quality_only:
+        assert tuple(row) == (old_path, subject, background, "vit-b14")
+        assert calls["segmentation"] == []
+    else:
+        assert row["mask_path"] != old_path and tuple(row)[1:] == (None, None, None)
+        assert len(calls["segmentation"]) == 1
