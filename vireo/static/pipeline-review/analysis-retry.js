@@ -130,7 +130,9 @@ async function finishAnalysisRetry(job) {
     var failed = result.photos.filter(function(photo) { return photo.status === 'failed'; }).length;
     message += ' ' + ready + ' ready for comparison; ' + (result.photos.length - ready - failed) + ' without current subject measurements; ' + failed + ' failed.';
   }
-  setAnalysisRetryStatus(message + ' Reloading current analysis…');
+  var deferred = result && result.review_refresh && result.review_refresh.status === 'deferred';
+  setAnalysisRetryStatus(message + (deferred ?
+    ' Waiting for the current regroup to finish before refreshing saved suggestions…' : ' Reloading current analysis…'));
   try {
     if (!await refreshAnalysisRetryView()) message += ' The view changed during analysis; reload it to see the updated measurements.';
     var readiness = await safeFetch('/api/photos/analysis-readiness', {

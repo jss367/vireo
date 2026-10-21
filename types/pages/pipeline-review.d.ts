@@ -95,7 +95,7 @@ interface ReviewAnalysisReadiness {workspace_id: number; count: number; max_sele
 interface ReviewAnalysisJob {
   id?: string; status: string; errors?: string[];
   progress?: {total?: number; current?: number; current_file?: string; phase?: string};
-  result?: {ok?: boolean; photos?: {photo_id: number; status: string; stages_run?: string[]; stage?: string; error?: string}[]; readiness?: ReviewAnalysisReadiness};
+  result?: {ok?: boolean; photos?: {photo_id: number; status: string; stages_run?: string[]; stage?: string; error?: string}[]; readiness?: ReviewAnalysisReadiness; review_refresh?: {status: string; photo_ids?: number[]}};
 }
 declare function safeFetch(url: '/api/photos/analysis-readiness', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewAnalysisReadiness>;
 declare function safeFetch(url: '/api/photos/analysis-retry', init?: RequestInit, options?: {toast?: boolean}): Promise<{job_id: string; photo_ids: number[]}>;

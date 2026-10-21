@@ -15,7 +15,7 @@ def _open_review(live_server, page):
 
 
 def _install_retry(live_server, page, ids, *, failed=False, held=False, workspace_mismatch=False,
-                   delay_refresh=False, preview_workspace_mismatch=False):
+                   delay_refresh=False, preview_workspace_mismatch=False, deferred_refresh=False):
     state = {"submitted": [], "polls": 0, "terminal": False, "cancelled": False, "refresh_held": [], "refreshes": 0}
     workspace_id = live_server["db"].active_workspace_id
 
@@ -43,7 +43,8 @@ def _install_retry(live_server, page, ids, *, failed=False, held=False, workspac
         status = "cancelled" if state["cancelled"] else "completed" if state["terminal"] else "running"
         route.fulfill(json={"status": status, "progress": {"total": 1, "current": int(state["terminal"]),
                                                           "current_file": f"selected-{ids[0]}.jpg", "phase": "Segmentation"},
-                            "result": {"photos": [{"photo_id": ids[0], "status": "failed" if failed else "complete"}]}})
+                            "result": {"photos": [{"photo_id": ids[0], "status": "failed" if failed else "complete"}],
+                                       "review_refresh": {"status": "deferred" if deferred_refresh else "complete"}}})
 
     def cancel(route):
         state["cancelled"] = True
@@ -217,3 +218,22 @@ def test_scope_change_while_submission_pending_does_not_overlay_regrouped_scores
     assert page.evaluate("pid => findPhotoInResults(pid).quality_composite", ids[0]) == .123
     assert page.evaluate("pid => findPhotoInResults(pid).label", ids[0]) == "REJECT"
     assert state["refreshes"] == 0
+
+
+def test_partial_cancel_explains_deferred_refresh_then_shows_published_analysis(live_server, page):
+    ids = _open_review(live_server, page)
+    state = _install_retry(live_server, page, ids, held=True, delay_refresh=True, deferred_refresh=True)
+    page.locator("#grmAnalysisRetryAction").click()
+    page.locator("#analysisRetryStart").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("Segmentation")
+    page.locator("#analysisRetryCancel").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("Analysis cancelled")
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("Waiting for the current regroup")
+    expect(page.locator("#analysisRetryPhotos")).to_have_attribute("data-refresh-held", "1")
+    assert len(state["refresh_held"]) == 1
+    route, payload = state["refresh_held"][0]
+    route.fulfill(json=payload)
+    expect(page.locator("#analysisRetryStatus")).not_to_contain_text("Waiting for the current regroup")
+    assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
+    assert page.evaluate("pid => findPhotoInResults(pid).analysis_status", ids[0]) == "complete"
+    expect(page.locator("#analysisRetryStart")).to_be_disabled()
