@@ -2366,3 +2366,65 @@ def test_collision_keeps_higher_rank_taxonomy_outside_species_decision(db, tmp_p
     assert keyword in _kw_ids(db, survivor)
     assert db.redo_last_undo()['id'] == edit
     assert keyword in _kw_ids(db, survivor)
+
+
+@pytest.mark.parametrize('same_hash', [True, False])
+@pytest.mark.parametrize('rank', ['genus', 'family'])
+@pytest.mark.parametrize('identity_owner', ['losing', 'survivor'])
+@pytest.mark.parametrize('edited_away', [False, True])
+def test_higher_rank_homonym_collision_rollback_survives_sync_and_history(db, tmp_path, same_hash, rank, identity_owner, edited_away):
+    from repositories.identity_alternatives import IdentityMergeConflict
+    from services.identity_alternatives import save_alternatives
+    from sync import sync_from_xmp, sync_to_xmp
+    from xmp import read_keywords, write_sidecar
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    ws = db.require_workspace_id()
+    db.add_workspace_folder(ws, t['stage_root'])
+    sharing = db.create_workspace('Homonym sync sharing')
+    db.set_active_workspace(ws)
+    db.add_workspace_folder(sharing, t['stage_root'])
+    db.add_workspace_folder(sharing, t['base'])
+    losing, survivor = (t['staged'], t['survivor']) if same_hash else (t['survivor'], t['staged'])
+    identity_photo, metadata_photo = ((losing, survivor) if identity_owner == 'losing' else (survivor, losing))
+    paths = {t['staged']: tmp_path / 'stage/day/dup.xmp', t['survivor']: tmp_path / 'arch/day/dup.xmp'}
+    for pid, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.with_suffix('.raf').write_bytes(b'bytes')
+        write_sidecar(str(path), flat_keywords={'Unrelated note'} | ({'Ardea'} if pid == metadata_photo else set()), hierarchical_keywords=set())
+    db.conn.execute('INSERT INTO taxa (id, name, rank) VALUES (93001, ?, ?)', ('Ardea', rank))
+    higher = db.add_keyword('Ardea', kw_type='taxonomy')
+    db.conn.execute('UPDATE keywords SET taxon_id=93001 WHERE id=?', (higher,))
+    note = db.add_keyword('Unrelated note')
+    for pid in paths:
+        db.tag_photo(pid, note, source='manual')
+    db.tag_photo(metadata_photo, higher, source='manual')
+    with db._commits_held():
+        edit = save_alternatives(db, [identity_photo], ['Ardea', 'Egret'], 'Uncertain silhouette', 'Bill')
+        if edited_away:
+            edit = save_alternatives(db, [identity_photo], ['Heron', 'Ibis'], 'Uncertain silhouette', 'Bill')
+    db.conn.execute("UPDATE pending_changes SET sync_started=1 WHERE photo_id=? AND value='Ardea'", (identity_photo,))
+    db.commit()
+    state = db.identity_alternatives.for_photos()
+    pending = [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')]
+    history = [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
+    with pytest.raises(IdentityMergeConflict, match='higher-rank taxonomy metadata'):
+        db.merge_staged_tree_into_archive(t['stage_root'], t['arch'])
+    assert db.identity_alternatives.for_photos() == state
+    assert [tuple(r) for r in db.conn.execute('SELECT * FROM pending_changes ORDER BY id')] == pending
+    assert [tuple(r) for r in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')] == history
+    for action in (None, 'undo', 'redo'):
+        db.set_active_workspace(ws)
+        if action:
+            result = db.undo_last_edit() if action == 'undo' else db.redo_last_undo()
+            assert result['id'] == edit
+        db.set_active_workspace(sharing)
+        assert sync_to_xmp(db)['failed'] == 0
+        sync_from_xmp(db, list(paths))
+        assert 'Ardea' in read_keywords(str(paths[metadata_photo]))
+        assert db.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?', (metadata_photo, higher)).fetchone()[0] == 'manual'
+        assert not db.identity_alternatives.candidate_links([metadata_photo], ['Ardea', 'Egret'])
+        for pid in paths:
+            assert 'Unrelated note' in read_keywords(str(paths[pid]))
+            assert note in _kw_ids(db, pid)
+    assert db.identity_alternatives.for_photos()[identity_photo]['reason'] == 'Uncertain silhouette'
