@@ -179,6 +179,23 @@ def remap_identity_for_photo_merge(
 def _check_merge_confirmations(conn: sqlite3.Connection, losing: int, survivor: int, state: dict[str, Any]) -> None:
     """Require evidence for reconciling actual candidate confirmations."""
     lookup = partial(lookup_species_taxon_id, conn)
+    names = {keyword_match_key(name) for name in json.loads(state['candidates'])}
+    removals = {(row['photo_id'], keyword_match_key(row['value'])) for row in conn.execute(
+        "SELECT photo_id,value FROM pending_changes WHERE photo_id IN (?, ?) AND change_type='keyword_remove'",
+        (losing, survivor),
+    )}
+    for row in conn.execute(
+        "SELECT pk.photo_id,k.name FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id "
+        "JOIN taxa t ON t.id=k.taxon_id WHERE pk.photo_id IN (?, ?) "
+        "AND k.type='taxonomy' AND t.rank IS NOT NULL AND t.rank!='species'", (losing, survivor),
+    ):
+        key = keyword_match_key(row['name'])
+        other = survivor if row['photo_id'] == losing else losing
+        if key in names and (other, key) in removals:
+            raise IdentityMergeConflict(
+                'Photo collision has a candidate removal sharing a name with higher-rank taxonomy metadata. '
+                'Reconcile that keyword in Review before merging these photo rows.'
+            )
     links = candidate_links(conn, [losing, survivor], json.loads(state['candidates']), lookup_taxon_id=lookup)
     if state['status'] == 'unresolved':
         pending = {(row['photo_id'], row['change_type'], keyword_match_key(row['value'])) for row in conn.execute(

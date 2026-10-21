@@ -191,13 +191,14 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
     old_links = db.identity_alternatives.candidate_links(photo_ids, names)
     target_links = db.identity_alternatives.candidate_links(photo_ids, [species])
     items = []
+    resolution_revision = uuid.uuid4().hex
     for pid in photo_ids:
         links = old_links.get(pid, [])
         # Keep equivalent hierarchical target tags rather than attaching a
         # redundant root; every other candidate association is removed.
         equivalents = target_links.get(pid) or [{'keyword_id': kid, 'source': 'manual'}]
         old = _snapshot(states[pid], links)
-        resolved = {**states[pid], 'group_id': uuid.uuid4().hex, 'status': 'resolved'}
+        resolved = {**states[pid], 'group_id': resolution_revision, 'status': 'resolved'}
         new = _snapshot(resolved, equivalents)
         replay_identity_edit(db, pid, old, new)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
