@@ -134,3 +134,16 @@ def test_reject_role_requires_recorded_failure_and_cannot_create_a_keeper():
     assert result["cards"][0]["role"] == "reject"
     assert result["cards"][1]["role"] == "review"
     assert result["summary"] == {"keep_count": 0, "review_count": 1, "reject_count": 1}
+
+
+def test_external_evaluation_report_and_cached_producer_claims_do_not_authorize_runtime_keeps():
+    photo = measured_photo(absolute_keeper_evidence={
+        'runtime_approved': True, 'risk_requirement_met': True,
+        'producer': 'self-claimed validated', 'model_sha256': 'a' * 64,
+        'animal_score': 1., 'focus_score': 1.,
+    })
+    encounters, photos = run_triage([{'photos': [photo]}])
+    saved = serialize_results({'encounters': encounters, 'photos': photos, 'summary': {}})
+    assert saved['photos'][0]['label'] == 'REVIEW'
+    assert saved['photos'][0]['automatic_keep_eligible'] is False
+    assert saved['photos'][0]['absolute_keeper_evidence'] == photo['absolute_keeper_evidence']
