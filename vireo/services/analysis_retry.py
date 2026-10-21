@@ -245,7 +245,9 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     if existing_mask_path is None:
         with Image.open(io.BytesIO(analysis["mask_png"])) as image:
             mask = np.asarray(image).astype(bool)
-        stage = _StagedMaskFile.create(mask, os.path.join(cache_dir, "masks"), pid, variant, save_mask)
+        previous = db.masks_features.get_mask(pid, variant)
+        stage = _StagedMaskFile.create(mask, os.path.join(cache_dir, "masks"), pid, variant, save_mask,
+                                      previous_path=previous["path"] if previous else None)
     mask_path = stage.final_path if stage else existing_mask_path
     if mask_path is None:
         raise ValueError("Current subject mask is unavailable")
@@ -292,7 +294,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 stage.restore()
 
 
-def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str) -> JsonDict:
+def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
+              *, results_dir: str | None = None) -> JsonDict:
     """Execute only the immutable selection; partial failures stay visible and retryable."""
     from resource_ledger import bind_resource_cancel_check
 
@@ -301,10 +304,12 @@ def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: 
         return False
 
     with bind_resource_cancel_check(cancellation_probe):
-        return _run_retry(ctx, job, photo_ids, effective, cache_dir)
+        return _run_retry(ctx, job, photo_ids, effective, cache_dir,
+                          results_dir if results_dir is not None else cache_dir)
 
 
-def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str) -> JsonDict:
+def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
+               results_dir: str) -> JsonDict:
     db = ctx.thread_db()
     result: JsonDict = {"ok": True, "photos": [], "errors": [], "requested_photo_ids": photo_ids}
     job["result"] = result
@@ -346,7 +351,8 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 result["errors"].append(outcome)
                 result["ok"] = False
             job["progress"]["current"] = index + 1
-        _refresh_review(db, effective, cache_dir, photo_ids)
+        job["progress"]["phase"] = "Refreshing affected review suggestions"
+        _refresh_review(db, effective, results_dir, photo_ids, checkpoint)
         remaining = [pid for pid in photo_ids if db.photos.get(pid, verify_workspace=True)]
         result["readiness"] = explain_selected(db, remaining, effective) if remaining else {"photos": [], "count": 0}
         return result
@@ -354,19 +360,26 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
         db.close()
 
 
-def _refresh_review(db: Database, effective: JsonDict, cache_dir: str, photo_ids: list[int]) -> None:
+def _refresh_review(db: Database, effective: JsonDict, results_dir: str, photo_ids: list[int],
+                    checkpoint: Callable[[], None]) -> None:
     from pipeline import load_results_raw, save_results_raw
     from pipeline_locks import acquire_workspace_regroup
     from services.saved_review import refresh_selected_suggestions
 
-    with acquire_workspace_regroup(db.require_workspace_id()):
-        data = load_results_raw(cache_dir, db.require_workspace_id())
+    lock = acquire_workspace_regroup(db.require_workspace_id())
+    while not lock.acquire(timeout=.2):
+        checkpoint()
+    try:
+        checkpoint()
+        data = load_results_raw(results_dir, db.require_workspace_id())
         if data is not None:
             db.begin_immediate()
             try:
                 refresh_selected_suggestions(db, data, photo_ids, effective)
-                save_results_raw(data, cache_dir, db.require_workspace_id())
+                save_results_raw(data, results_dir, db.require_workspace_id())
                 db.commit()
             finally:
                 if db.in_transaction:
                     db.rollback()
+    finally:
+        lock.release()

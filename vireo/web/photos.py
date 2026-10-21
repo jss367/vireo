@@ -1528,7 +1528,7 @@ def create_photos_blueprint(
             return json_error("Active workspace changed; preview the selection again", 409)
         effective = db.get_effective_config(cfg.load())
         cache_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        return ctx.start("analysis-retry", lambda job: run_retry(ctx, job, ids, effective, cache_dir),
+        return ctx.start("analysis-retry", lambda job: run_retry(ctx, job, ids, effective, cache_dir, results_dir=os.path.dirname(db_path)),
                          config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
 

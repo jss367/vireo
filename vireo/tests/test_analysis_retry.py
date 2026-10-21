@@ -439,3 +439,90 @@ def test_detector_first_use_prepares_identity_before_inference(retry_library, mo
         assert calls["detection"] == []
         assert db.model_runs.detector_runtime_fingerprint(ids[0], "megadetector-v6") is None
     assert prepared == [True]
+
+
+def test_api_refreshes_database_results_when_thumbnail_cache_is_elsewhere(retry_library, tmp_path):
+    import os
+
+    from pipeline import load_results_raw, save_results_raw
+    from wait import wait_for_job_via_client
+    app, db, ids, _ = retry_library
+    results_dir = os.path.dirname(db.job_history.catalog_file())
+    masks_dir = tmp_path / "external-media-cache"
+    app.config["THUMB_CACHE_DIR"] = str(masks_dir / "thumbnails")
+    cache = {"photos": [{"id": pid, "flag": "none", "rating": 0, "label": "REJECT"} for pid in ids],
+             "encounters": [{"photo_ids": ids, "bursts": [{"photo_ids": ids}]}], "summary": {}}
+    save_results_raw(cache, results_dir, db.require_workspace_id())
+    client = app.test_client()
+    response = client.post("/api/photos/analysis-retry", json={"photo_ids": [ids[0]]})
+    job = wait_for_job_via_client(client, response.json["job_id"], wait_for_history=True)
+    assert job["status"] == "completed"
+    saved = load_results_raw(results_dir, db.require_workspace_id())
+    assert saved["summary"]["reject_count"] == 0
+    assert next(photo for photo in saved["photos"] if photo["id"] == ids[0])["selection_eligible"]
+    path = db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0]
+    assert Path(path).parent == masks_dir / "masks"
+    assert load_results_raw(str(masks_dir), db.require_workspace_id()) is None
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_remask_cleans_only_committed_predecessor(retry_library, tmp_path, monkeypatch, failed):
+    _, db, ids, _ = retry_library
+    execute(db, [ids[0]], tmp_path)
+    old_path = Path(db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0])
+    original = old_path.read_bytes()
+    db.conn.execute("UPDATE photo_masks SET prompt_x=.4 WHERE photo_id=?", (ids[0],))
+    db.commit()
+    if failed:
+        def fail_commit(*args, **kwargs):
+            raise ValueError("late remask commit failed")
+        monkeypatch.setattr("db.Database.commit_with_retry", fail_commit)
+    result, _ = execute(db, [ids[0]], tmp_path)
+    current = Path(db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (ids[0],)).fetchone()[0])
+    assert result["ok"] is not failed and current.exists()
+    assert sorted((tmp_path / "masks").glob("*.png")) == [current]
+    if failed:
+        assert current == old_path and old_path.read_bytes() == original
+    else:
+        assert current != old_path and not old_path.exists()
+
+
+def test_cancel_during_regroup_wait_finishes_without_waiting_for_holder(retry_library, tmp_path, monkeypatch):
+    from db import Database
+    from pipeline import load_results_raw, save_results_raw
+    from pipeline_locks import acquire_workspace_regroup
+    from services import analysis_retry
+    _, db, ids, _ = retry_library
+    execute(db, [ids[0]], tmp_path)
+    cache = {"photos": [{"id": ids[0]}], "encounters": [{"photo_ids": [ids[0]]}], "summary": {"sentinel": True}}
+    save_results_raw(cache, str(tmp_path), db.require_workspace_id())
+    entered, cancelled = threading.Event(), threading.Event()
+    original_refresh = analysis_retry._refresh_review
+    def refresh(*args, **kwargs):
+        entered.set()
+        return original_refresh(*args, **kwargs)
+    monkeypatch.setattr(analysis_retry, "_refresh_review", refresh)
+    path, ws = db.job_history.catalog_file(), db.require_workspace_id()
+    outcomes = []
+    def worker():
+        own = Database(path)
+        own.set_active_workspace(ws)
+        try:
+            execute(own, [ids[0]], tmp_path, cancel=cancelled.is_set)
+        except Exception as error:
+            outcomes.append(error)
+        finally:
+            own.close()
+    lock = acquire_workspace_regroup(ws)
+    lock.acquire()
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        cancelled.set()
+        thread.join(synchronization_timeout(5))
+        assert not thread.is_alive() and len(outcomes) == 1 and isinstance(outcomes[0], JobCancelled)
+        assert load_results_raw(str(tmp_path), ws) == cache
+    finally:
+        lock.release()
+        thread.join(synchronization_timeout(5))
