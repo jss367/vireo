@@ -10,6 +10,7 @@ from threading import Lock
 from flask import Flask, jsonify, request, send_file
 
 from .evaluate import read_profile
+from .holdout import read_commitment
 from .manifest import read_bundle, read_reviews, validate_label
 
 
@@ -20,10 +21,11 @@ def create_review_app(bundle, reviewer, *, partition='development', reviewer_kin
         raise ValueError('Name the independent reviewer and declare human/assistant provenance')
     if partition not in {'development', 'holdout', 'diagnostic'}:
         raise ValueError('Unknown review partition')
+    commitment = None
     if partition == 'holdout':
         if profile_path is None:
             raise ValueError('A frozen candidate profile is required before held-out review')
-        read_profile(profile_path, manifest)
+        commitment = read_commitment(bundle, read_profile(profile_path, manifest))
     read_reviews(bundle, manifest)  # Reject stale or malformed existing review artifacts.
     samples = {s['sample_id']: s for s in manifest['samples'] if s['partition'] == partition}
     app = Flask(__name__)
@@ -73,6 +75,8 @@ def create_review_app(bundle, reviewer, *, partition='development', reviewer_kin
             return jsonify(error=str(exc)), 400
         value = {k: value[k] for k in ('animal', 'focus', 'notes', 'full_frame_inspected', 'native_crop_inspected')}
         value['recorded_at'] = datetime.now(UTC).isoformat()
+        if commitment is not None:
+            value['prediction_commitment_sha256'] = commitment['commitment_sha256']
         with lock:
             own = read_own()
             own['history'].append({'sample_id': sid, 'previous': own['labels'].get(sid), 'label': value})

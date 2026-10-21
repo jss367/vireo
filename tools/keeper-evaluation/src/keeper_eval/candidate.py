@@ -13,6 +13,7 @@ from scipy.optimize import minimize
 
 from .evaluate import development_digest, in_domain, read_profile, validate_domain
 from .features import FEATURE_RECIPE
+from .holdout import commit_predictions
 from .manifest import consensus, digest, file_digest, read_bundle, read_reviews, tree_fingerprint, write_json
 from .region_target import region_contract
 
@@ -27,7 +28,10 @@ def read_features(path, manifest):
     if (digest(features) != recorded or features.get('manifest_sha256') != manifest['manifest_sha256']
             or features.get('feature_recipe') != FEATURE_RECIPE):
         raise ValueError('Candidate features changed or refer to a different pixel/preprocessing recipe')
-    for name in ('features.py', 'manifest.py'):
+    # Frozen features retain their complete original source fingerprint. Recheck
+    # exact pixels with today's stronger validators, and require the numerical
+    # extractor itself to match; validator-only changes need no repeated inference.
+    for name in ('features.py',):
         if features['producer_code']['files'].get(name) != file_digest(Path(__file__).with_name(name)):
             raise ValueError('Executed feature code differs; recompute features with the frozen extractor')
     rows = features['samples']
@@ -189,5 +193,6 @@ def score(bundle, feature_path, model_directory, profile_path, output):
               'calibrated': False, 'runtime_approved': False}
     if Path(output).exists() or Path(output).resolve().is_relative_to(Path(bundle).resolve()):
         raise ValueError('Write new predictions outside the frozen evidence bundle')
+    commit_predictions(bundle, manifest, profile, result)
     write_json(output, result)
     return result

@@ -46,7 +46,7 @@ def valid_box(box):
 def validate_samples(samples):
     if not samples:
         raise ValueError('At least one sample is required')
-    ids, partitions = set(), {}
+    ids, partitions, groups = set(), {}, {}
     for sample in samples:
         sid = sample['sample_id']
         if not re.fullmatch(r'[a-f0-9]{12}', sid) or sid in ids:
@@ -63,6 +63,10 @@ def validate_samples(samples):
             if key in partitions and partitions[key] != partition:
                 raise ValueError(f'{field} crosses partitions; originals, derivatives and encounters must stay together')
             partitions[key] = partition
+            if field in {'lineage_id', 'source_sha256'}:
+                if key in groups and groups[key] != sample['group_id']:
+                    raise ValueError(f'{field} maps to multiple encounter groups; repeated sources/derivatives are not independent trials')
+                groups[key] = sample['group_id']
         if not re.fullmatch(r'[a-f0-9]{64}', sample['source_sha256']):
             raise ValueError('Source bytes must have an actual SHA256 digest')
         if not sample.get('session_id') or not sample.get('camera_model'):

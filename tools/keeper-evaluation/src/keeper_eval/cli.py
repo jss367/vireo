@@ -93,7 +93,7 @@ def main(argv=None):
     elif args.command == 'score':
         from .candidate import score
         score(args.bundle, args.features, args.model_directory, args.profile, args.output)
-        print('Frozen candidate scores recorded; no runtime approval')
+        print('Frozen candidate scores committed before held-out review; no runtime approval')
     elif args.command == 'freeze':
         freeze_profile(args.bundle, args.model, args.producer_code, focus_min=args.focus_min,
                        animal_min=args.animal_min, domain=json.loads(args.domain.read_text()),

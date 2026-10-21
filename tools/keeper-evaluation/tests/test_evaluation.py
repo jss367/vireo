@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from keeper_eval.evaluate import evaluate, freeze_profile, upper_bound
+from keeper_eval.holdout import LOCK_NAME, commit_predictions
 from keeper_eval.manifest import consensus, read_reviews, write_json
 from keeper_eval.review import create_review_app
 
@@ -15,7 +16,7 @@ def domain(evidence):
             'pixel_recipe': evidence['manifest']['pixel_recipe'], 'notes': 'Synthetic test domain, never runtime approved'}
 
 
-def frozen(evidence, tmp_path):
+def frozen(evidence, tmp_path, *, commit=True):
     model, code = tmp_path / 'model', tmp_path / 'code'
     model.mkdir()
     code.mkdir()
@@ -25,6 +26,8 @@ def frozen(evidence, tmp_path):
     profile_path = tmp_path / 'profile.json'
     profile = freeze_profile(evidence['bundle'], model, code, focus_min=.5, animal_min=.5,
                              domain=domain(evidence), evaluation_plan=PLAN, application_code=Path(__file__).resolve().parents[3] / 'vireo', output=profile_path)
+    if commit:
+        commit_predictions(evidence['bundle'], evidence['manifest'], profile, predictions(evidence, profile))
     return profile, profile_path
 
 
@@ -144,7 +147,7 @@ def test_holdout_judgments_prevent_later_profile_selection(evidence, tmp_path):
 
 
 def test_source_id_allowlists_are_not_a_deployment_domain(evidence, tmp_path):
-    frozen(evidence, tmp_path)
+    frozen(evidence, tmp_path, commit=False)
     value = domain(evidence)
     value['source_ids'] = ['an already inspected photo']
     with pytest.raises(ValueError, match='source-ID allowlists'):
@@ -182,7 +185,7 @@ def test_missing_defocus_negatives_cannot_validate_both_gates(evidence, tmp_path
 @pytest.mark.parametrize('field,value', [('maximum_false_keep_rate', float('nan')), ('confidence', 1.),
                                         ('minimum_positive_groups', True)])
 def test_invalid_evaluation_plan_cannot_be_frozen(evidence, tmp_path, field, value):
-    frozen(evidence, tmp_path)
+    frozen(evidence, tmp_path, commit=False)
     plan = dict(PLAN, **{field: value})
     with pytest.raises(ValueError, match='Freeze a finite'):
         freeze_profile(evidence['bundle'], tmp_path / 'model', tmp_path / 'code', focus_min=.5, animal_min=.5,
@@ -210,14 +213,15 @@ def test_out_of_domain_abstentions_do_not_dilute_joint_or_gate_denominators(evid
     manifest['manifest_sha256'] = digest({k: v for k, v in manifest.items() if k != 'manifest_sha256'})
     write_json(evidence['bundle'] / 'manifest.json', manifest)
     evidence['manifest'] = manifest
-    profile, path = frozen(evidence, tmp_path)
-    labels(evidence, path)
+    profile, path = frozen(evidence, tmp_path, commit=False)
     values = predictions(evidence, profile)
     for row in values['samples'][7:]:
         row.clear()
     for row, sample in zip(values['samples'][7:], manifest['samples'][7:], strict=True):
         row.update(sample_id=sample['sample_id'], region_sha256=sample['assets']['region']['sha256'],
                    status='unavailable', reason='outside_evaluated_domain')
+    commit_predictions(evidence['bundle'], evidence['manifest'], profile, values)
+    labels(evidence, path)
     result = run(evidence, path, values)
     assert result['total_heldout_samples'] == 6
     assert result['heldout_samples'] == 3
@@ -233,7 +237,7 @@ def test_out_of_domain_abstentions_do_not_dilute_joint_or_gate_denominators(evid
 
 
 @pytest.mark.parametrize('adaptation', ['score', 'availability'])
-def test_first_holdout_evaluation_commits_exact_predictions(evidence, tmp_path, adaptation):
+def test_pre_review_commitment_locks_exact_predictions(evidence, tmp_path, adaptation):
     import json
 
     from keeper_eval.manifest import digest
@@ -241,7 +245,7 @@ def test_first_holdout_evaluation_commits_exact_predictions(evidence, tmp_path, 
     labels(evidence, path)
     values = predictions(evidence, profile)
     first = run(evidence, path, values)
-    lock = json.loads((evidence['bundle'] / 'evaluation-lock.json').read_text())
+    lock = json.loads((evidence['bundle'] / LOCK_NAME).read_text())
     assert lock['predictions_sha256'] == digest(values)
     assert run(evidence, path, deepcopy(values))['predictions_sha256'] == first['predictions_sha256']
     changed = deepcopy(values)
@@ -251,4 +255,48 @@ def test_first_holdout_evaluation_commits_exact_predictions(evidence, tmp_path, 
         changed['samples'][4].update(status='unavailable', reason='adapted after seeing holdout')
     with pytest.raises(ValueError, match='predictions already committed'):
         run(evidence, path, changed)
-    assert json.loads((evidence['bundle'] / 'evaluation-lock.json').read_text()) == lock
+    assert json.loads((evidence['bundle'] / LOCK_NAME).read_text()) == lock
+
+
+def test_holdout_review_cannot_open_before_prediction_commitment(evidence, tmp_path):
+    _, path = frozen(evidence, tmp_path, commit=False)
+    with pytest.raises(ValueError, match='Commit frozen predictions before held-out review'):
+        create_review_app(evidence['bundle'], 'independent-human', partition='holdout', profile_path=path)
+    assert not (evidence['bundle'] / 'reviews').exists()
+
+
+def test_first_predictions_cannot_be_adapted_after_holdout_labels_exist(evidence, tmp_path):
+    import json
+    profile, path = frozen(evidence, tmp_path)
+    labels(evidence, path)
+    # Simulate previously exposed/imported labels without a pre-review commitment.
+    (evidence['bundle'] / LOCK_NAME).unlink()
+    adapted = predictions(evidence, profile)
+    for row in adapted['samples'][4:]:
+        row.update(status='unavailable', reason='chosen after reading labels')
+    with pytest.raises(ValueError, match='no late first commitment'):
+        run(evidence, path, adapted)
+    with pytest.raises(ValueError, match='judgments already exposed'):
+        commit_predictions(evidence['bundle'], evidence['manifest'], profile, adapted)
+    assert not (evidence['bundle'] / LOCK_NAME).exists()
+    # Removing only the latest answers does not erase exposure in revision history.
+    for review_path in (evidence['bundle'] / 'reviews').glob('*.json'):
+        review = json.loads(review_path.read_text())
+        review['labels'] = {}
+        write_json(review_path, review)
+    with pytest.raises(ValueError, match='judgments already exposed'):
+        commit_predictions(evidence['bundle'], evidence['manifest'], profile, adapted)
+
+
+def test_holdout_judgments_are_bound_to_the_pre_review_outputs(evidence, tmp_path):
+    import json
+    profile, path = frozen(evidence, tmp_path)
+    labels(evidence, path)
+    review_path = next((evidence['bundle'] / 'reviews').glob('*.json'))
+    review = json.loads(review_path.read_text())
+    first = next(iter(review['labels'].values()))
+    assert first['prediction_commitment_sha256']
+    first['prediction_commitment_sha256'] = 'another commitment'
+    write_json(review_path, review)
+    with pytest.raises(ValueError, match='not bound to the pre-review'):
+        run(evidence, path, predictions(evidence, profile))

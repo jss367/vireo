@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scipy.stats import binomtest
 
+from .holdout import LOCK_NAME, require_committed_predictions
 from .manifest import consensus, digest, read_bundle, read_reviews, tree_fingerprint, write_json
 from .region_target import APP_RECIPE_FILES, freeze_region_target, region_contract
 
@@ -50,7 +51,8 @@ def freeze_profile(bundle, model, producer_code, *, focus_min, animal_min, domai
         raise ValueError('Freeze the producer before holdout judgments are recorded; do not retune on holdout labels')
     if Path(output).resolve().is_relative_to(Path(bundle).resolve()):
         raise ValueError('Store the frozen profile outside the evidence bundle')
-    if (Path(bundle) / 'evaluation-lock.json').exists() or Path(output).exists():
+    if ((Path(bundle) / 'evaluation-lock.json').exists() or (Path(bundle) / LOCK_NAME).exists()
+            or Path(output).exists()):
         raise ValueError('Profile/output is frozen or holdout has already been evaluated')
     validate_domain(domain, manifest['pixel_recipe'])
     validate_evaluation_plan(evaluation_plan)
@@ -171,21 +173,7 @@ def evaluate(bundle, profile_path, predictions):
     if profile['development_labels_sha256'] != development_digest(manifest, reviews):
         raise ValueError('Development judgments changed after the profile was frozen')
     accepted = decisions(predictions, manifest, profile)
-    # Commit exact outputs before exposing any held-out metrics. Same-profile
-    # predictions cannot be adapted after the first report, including abstentions.
-    lock = Path(bundle) / 'evaluation-lock.json'
-    commitment = {'schema': 'vireo-keeper-evaluation-lock-v1', 'profile_sha256': profile['profile_sha256'],
-                  'predictions_sha256': digest(predictions)}
-    if lock.exists():
-        existing = json.loads(lock.read_text())
-        if existing.get('profile_sha256') != commitment['profile_sha256']:
-            raise ValueError('Holdout already exposed to another profile; use fresh held-out encounters')
-        if existing != commitment:
-            raise ValueError('Holdout predictions already committed; changed scores or availability need fresh held-out encounters')
-    else:
-        # Exclusive creation also prevents two first evaluations from racing.
-        with lock.open('x') as stream:
-            json.dump(commitment, stream, sort_keys=True)
+    commitment = require_committed_predictions(bundle, manifest, profile, predictions, reviews)
     labels = consensus(manifest, reviews)
     all_heldout = [s for s in manifest['samples'] if s['partition'] == 'holdout']
     heldout = [s for s in all_heldout if in_domain(s, profile)]
@@ -204,6 +192,7 @@ def evaluate(bundle, profile_path, predictions):
     return {'schema': 'vireo-keeper-evaluation-v1', 'evaluated_at': datetime.now(UTC).isoformat(),
             'manifest_sha256': manifest['manifest_sha256'], 'profile_sha256': profile['profile_sha256'],
             'reviews_sha256': digest(reviews), 'predictions_sha256': digest(predictions),
+            'prediction_commitment_sha256': commitment['commitment_sha256'],
             'domain': profile['domain'], 'application_region_target': profile['application_region_target'],
             'confidence': confidence, 'maximum_false_keep_rate': maximum_false_keep_rate,
             'risk_definition': 'An invalid region is accepted in a known-negative encounter; denominator is known-negative encounters, not accepted keepers.',

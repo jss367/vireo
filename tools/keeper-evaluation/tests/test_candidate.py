@@ -101,10 +101,31 @@ def test_single_photographer_development_fit_freeze_and_heldout_scores(evidence,
     freeze_profile(bundle, model, code, focus_min=0., animal_min=0., domain=domain,
                    evaluation_plan={'maximum_false_keep_rate': .99, 'confidence': .95, 'minimum_positive_groups': 1},
                    application_code=Path(__file__).resolve().parents[3] / 'vireo', output=profile_path)
-    judge('holdout', profile_path)
     scored = score(bundle, features, model, profile_path, tmp_path / 'scores.json')
+    judge('holdout', profile_path)
     report = evaluate(bundle, profile_path, scored)
     assert report['all_heldout_independently_judged'] is True
     assert report['review_protocol']['minimum_human_reviewers'] == 1
     assert report['false_keep_groups'] == 0
     assert report['runtime_approved'] is False
+
+
+@pytest.mark.parametrize('changed_file,accepted', [('manifest.py', True), ('features.py', False)])
+def test_feature_reuse_checks_numerical_code_and_revalidates_frozen_pixels(evidence, tmp_path, changed_file, accepted):
+    import json
+
+    from keeper_eval.candidate import read_features
+    from keeper_eval.manifest import read_bundle
+    path = synthetic_features(evidence, tmp_path)
+    value = json.loads(path.read_text())
+    value['producer_code']['files'][changed_file] = 'previous source fingerprint'
+    value['features_sha256'] = digest({k: v for k, v in value.items() if k != 'features_sha256'})
+    write_json(path, value)
+    # Current validation still runs before consuming old measured features;
+    # preserving original validator provenance is not bypassing corpus guards.
+    manifest = read_bundle(evidence['bundle'])
+    if accepted:
+        assert len(read_features(path, manifest)[1]) == len(manifest['samples'])
+    else:
+        with pytest.raises(ValueError, match='Executed feature code differs'):
+            read_features(path, manifest)

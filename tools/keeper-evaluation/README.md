@@ -55,7 +55,9 @@ a random 12-hex-digit `sample_id` and a `lineage_id` shared by derivatives.
 Partitions are `development`, `holdout` and `diagnostic`. Keep the already-seen
 reported failures and their controls diagnostic; do not tune on them and then
 call them unseen validation data. Related scenes and near duplicates must be
-grouped conservatively; the operator must audit these group declarations.
+grouped conservatively; the operator must audit these group declarations. Each
+source hash and derivative lineage must map to one encounter group as well as
+one partition; repeated copies cannot manufacture independent trials.
 
 The curator uses SQLite `mode=ro` and `query_only`, copies each selected original
 to scratch, hashes the copied bytes, and extracts an upright RGB raster. Camera
@@ -100,7 +102,8 @@ vireo-evaluate-keepers review --bundle /scratch/native-region-review \
 
 Open `http://127.0.0.1:8097`. Judgments go only to the bundle's `reviews/`
 directory. Other reviewers' answers and partition names are absent from the
-judging page. Held-out review requires an already frozen candidate profile.
+judging page. Held-out review requires an already frozen candidate profile and
+committed exact predictions generated before those judgments can be collected.
 
 An optional bounded extraction pilot uses an **already installed** DINOv2-B
 ONNX model directory. It creates one CPU session with at most two threads,
@@ -117,7 +120,11 @@ DINOv2 crop embedding. Contrast-normalized derivatives, texture, exposure and
 embedding values are **features, not validated focus or animal probabilities**.
 The embedding preprocessing resamples for representation extraction; that image
 is never substituted for the native focus tiles. Graph, external weights, code,
-region bytes, preprocessing and dependency versions are recorded. Controlled
+region bytes, preprocessing and dependency versions are recorded. Existing
+feature artifacts keep their complete original source fingerprint. Reuse checks
+the unchanged numerical extractor and exact region hashes while revalidating
+with the current corpus guards; validator-only changes do not trigger redundant
+model inference or rewrite original feature provenance. Controlled
 blur tests verify measurement behavior only; they do not establish wildlife
 calibration. DINOv2 is a general representation model, so use here is a candidate
 design choice requiring evaluation. [Official DINOv2 repository](https://github.com/facebookresearch/dinov2).
@@ -173,6 +180,9 @@ vireo-evaluate-keepers freeze --bundle /scratch/native-region-review \
   --domain /scratch/domain.json \
   --maximum-false-keep-rate ERROR_BUDGET --confidence CONFIDENCE_LEVEL \
   --minimum-positive-groups POSITIVE_GROUP_REQUIREMENT --output /scratch/frozen-profile.json
+vireo-evaluate-keepers score --bundle /scratch/native-region-review \
+  --features /scratch/candidate-features.json --model-directory /scratch/candidate-model \
+  --profile /scratch/frozen-profile.json --output /scratch/heldout-scores.json
 vireo-evaluate-keepers review --bundle /scratch/native-region-review \
   --reviewer 'Independent photographer' --partition holdout \
   --profile /scratch/frozen-profile.json --port 8097
@@ -182,14 +192,17 @@ Threshold placeholders intentionally have no suggested numeric values. The
 profile freezes the model/code directories, pixel recipe, development judgments,
 thresholds, scope, error budget, confidence and positive coverage requirement before held-out judgments are recorded. It rejects later
 threshold selection using that exposed holdout. Changed code, external weights,
-regions or development judgments invalidate their bindings.
+regions or development judgments invalidate their bindings. `score` verifies
+the frozen model/code, then exclusively commits the exact profile and prediction
+digest before held-out review opens. The review server binds each held-out
+judgment and revision to that commitment. Evaluation requires the pre-review
+commitment; it cannot accept an adapted first predictions file after labels
+have already been exposed. Prior exposed/imported holdout labels cannot be
+retroactively certified by creating a new commitment.
 
 ## Evaluate the held-out candidate
 
 ```sh
-vireo-evaluate-keepers score --bundle /scratch/native-region-review \
-  --features /scratch/candidate-features.json --model-directory /scratch/candidate-model \
-  --profile /scratch/frozen-profile.json --output /scratch/heldout-scores.json
 vireo-evaluate-keepers evaluate --bundle /scratch/native-region-review \
   --profile /scratch/frozen-profile.json --predictions /scratch/heldout-scores.json \
   --output /scratch/evaluation.json
@@ -209,7 +222,8 @@ cases prevent meeting the requirement. Minimum positive accepted groups prevent
 an always-abstain candidate from appearing useful. Out-of-domain inputs must
 abstain. Missing/nonfinite predictions cannot become measured zeroes. The same
 holdout is locked against subsequent producer selection and exact prediction
-changes, including availability/abstention changes, before metrics are exposed.
+changes, including availability/abstention changes, **before held-out review
+opens**, rather than waiting for the first evaluation.
 An identical rerun is permitted; a changed prediction digest needs fresh held-out
 encounters. Out-of-domain held-out abstentions are reported separately and
 contribute neither joint nor per-gate validation trials, positive coverage,

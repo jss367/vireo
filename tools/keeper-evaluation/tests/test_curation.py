@@ -88,3 +88,14 @@ def test_review_requires_actual_inspection_and_no_assumed_labels(evidence):
 def test_holdout_review_requires_frozen_profile(evidence):
     with pytest.raises(ValueError, match='frozen candidate'):
         create_review_app(evidence['bundle'], 'one', partition='holdout')
+
+
+@pytest.mark.parametrize('field', ['source_sha256', 'lineage_id'])
+def test_same_partition_repeated_source_or_derivative_cannot_be_split_into_trials(evidence, field):
+    samples = deepcopy(evidence['manifest']['samples'])
+    assert samples[0]['partition'] == samples[1]['partition']
+    samples[1][field] = samples[0][field]
+    with pytest.raises(ValueError, match='multiple encounter groups'):
+        validate_samples(samples)
+    samples[1]['group_id'] = samples[0]['group_id']
+    validate_samples(samples)  # Multiple region views are allowed as one trial.
