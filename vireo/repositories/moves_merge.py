@@ -38,7 +38,11 @@ from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
-from repositories.identity_alternatives import remap_identity_for_photo_merge
+from repositories.identity_alternatives import (
+    merge_candidate_names,
+    remap_identity_for_photo_merge,
+    remap_identity_keyword_intents,
+)
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import (
     keep_photo_visible_across_folder_change,
@@ -491,6 +495,12 @@ class MovesMergeRepository:
             ).fetchall()
             if keyword_match_key(r["name"]) == match_key
         ]
+
+    def photo_keyword_source(self, photo_id: int, keyword_id: int) -> str | None:
+        """The current claim carried by a winning merge association."""
+        row = self.conn.execute('SELECT source FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                                (photo_id, keyword_id)).fetchone()
+        return row['source'] if row else None
 
     def transfer_gps_review(self, losing_id, surviving_id):
         """Carry the newest GPS keep decision across an identity merge.
@@ -1887,11 +1897,11 @@ class _StagedTreeMerge:
         # end of the merge, where the survivor's
         # final ``folder_id`` is settled.
         self._defer_sibling_links(pid, survivor_id)
-        self._remap_pending_changes(pid, survivor_id)
+        token_remap = self._remap_pending_changes(pid, survivor_id)
         if off_staging_row_identities:
             self.counts[
                 "preserved_off_staging_identities"
-            ].extend(off_staging_row_identities)
+            ].extend(token_remap.get(identity, identity) for identity in off_staging_row_identities)
 
     def _reparent_staged_photo(self, fold, match):
         pid = match.pid
@@ -2031,13 +2041,16 @@ class _StagedTreeMerge:
             self.sibling_links.add((sibling_ws, survivor_id))
 
     def _remap_pending_changes(self, losing_id, survivor_id):
+        identity_tokens = remap_identity_keyword_intents(
+            self.conn, losing_id, survivor_id, merge_candidate_names(self.conn, losing_id, survivor_id))
         remap = self.conn.execute(
             "UPDATE pending_changes "
             "SET photo_id = ? WHERE photo_id = ?",
             (survivor_id, losing_id),
         )
         self.counts["preserved_edit_count"] += (
-            remap.rowcount or 0)
+            (remap.rowcount or 0) + len(identity_tokens))
+        return identity_tokens
 
     def _transfer_embedded_keyword_offered(self, losing_id, survivor_id):
         """Carry the losing row's embedded-offered keys onto the survivor.

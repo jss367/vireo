@@ -29,7 +29,11 @@ import sqlite3
 from contextlib import contextmanager
 
 from metadata import EXIF_SUMMARY_COLUMNS
-from repositories.identity_alternatives import identity_merge_transaction
+from repositories.identity_alternatives import (
+    identity_merge_transaction,
+    merge_candidate_names,
+    remap_identity_keyword_intents,
+)
 from repositories.photo_row_deletion import photo_row_deletion
 
 # The columns a merge may carry from companion to primary.
@@ -200,6 +204,8 @@ class CompanionPairingRepository:
         )
 
     def transfer_pending_changes(self, primary_id: int, companion_id: int) -> None:
+        names = merge_candidate_names(self.conn, companion_id, primary_id)
+        remap_identity_keyword_intents(self.conn, companion_id, primary_id, names)
         self.conn.execute(
             "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
             (primary_id, companion_id),

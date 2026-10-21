@@ -561,7 +561,7 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
         untagged.append((a, k)), real_untag(*a, **k))[1])
 
     assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
-    assert tagged == [((survivor, heron), {"_commit": False})]
+    assert tagged == [((survivor, heron), {"source": "manual", "_commit": False})]
     assert untagged == [((survivor, egret), {"_commit": False})]
     assert _kw_ids(db, survivor) == [heron]
 

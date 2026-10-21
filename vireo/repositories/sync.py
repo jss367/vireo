@@ -60,10 +60,12 @@ class SyncRepository:
 
     def remap_photo_keyword_intents(self, losing: int, survivor: int) -> None:
         """Retain each workspace's keyword work before a photo-row collapse."""
-        self.conn.execute(
-            "UPDATE pending_changes SET photo_id=? WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')",
-            (survivor, losing),
-        )
+        for row in self.conn.execute(
+            "SELECT id FROM pending_changes WHERE photo_id=? AND change_type IN ('keyword_add','keyword_remove','keyword_remove_flat')",
+            (losing,),
+        ).fetchall():
+            self.conn.execute('UPDATE pending_changes SET photo_id=?, change_token=? WHERE id=?',
+                              (survivor, str(uuid.uuid4()), row['id']))
 
     @property
     def workspace_id(self) -> int:

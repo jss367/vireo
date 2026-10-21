@@ -2210,7 +2210,9 @@ class Database:
                 # the sync rather than guessing a keyword by name.
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         losing_id, match_key):
-                    self.tag_photo(surviving_id, kw_id, _commit=False)
+                    source = keyword_source_max(
+                        self.moves_merge.photo_keyword_source(losing_id, kw_id))
+                    self.tag_photo(surviving_id, kw_id, source=source, _commit=False)
             elif newest_loser["change_type"] == "keyword_remove":
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
