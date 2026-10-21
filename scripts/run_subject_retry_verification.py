@@ -88,7 +88,7 @@ def export_outcomes(report: dict, destination: Path) -> None:
             "Reasons after": ";".join(after[pid]["analysis_reasons"]),
         })
     with destination.open("w", newline="") as output:
-        writer = csv.DictWriter(output, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(output, fieldnames=list(rows[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
