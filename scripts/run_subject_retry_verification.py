@@ -64,6 +64,26 @@ def group_members(data: dict) -> list:
     ]} for encounter in data["encounters"]]
 
 
+def verify_preservation(before_rows: dict, after_rows: dict, ids: list[int], expected: dict,
+                        before_review: dict, after_review: dict, persisted_review: dict) -> None:
+    """Fail before recording success, including under Python optimization."""
+    if set(before_rows) != set(after_rows):
+        raise RuntimeError("Photo membership changed during verification")
+    if not all((row["flag"], row["rating"]) == expected[pid] for pid, row in after_rows.items()):
+        raise RuntimeError("Photographer decisions changed during verification")
+    if not all(row_digest(row) == row_digest(after_rows[pid]) for pid, row in before_rows.items() if pid not in ids):
+        raise RuntimeError("Unselected photo rows changed during verification")
+    if not group_members(before_review) == group_members(after_review) == group_members(persisted_review):
+        raise RuntimeError("Saved encounter or burst membership changed during verification")
+    if next((p["label"] for p in after_review["photos"] if p["id"] == 216716), None) != "KEEP":
+        raise RuntimeError("Existing photographer keep was lost during verification")
+
+
+def verify_ranking_preservation(before: dict, after: dict, repair_key: tuple | None) -> None:
+    if not all(value == after.get(key) for key, value in before.items() if key != repair_key):
+        raise RuntimeError("A valid cached ranking generation changed during verification")
+
+
 def export_outcomes(report: dict, destination: Path) -> None:
     before = {photo["photo_id"]: photo for photo in report["before"]["photos"]}
     after = {photo["id"]: photo for photo in report["selected_photos_after"]}
@@ -247,10 +267,7 @@ def main() -> None:
     expected = {pid: (row["flag"], row["rating"]) for pid, row in before_rows.items()}
     if args.concurrent_decision is not None:
         expected[args.concurrent_decision] = ("rejected", 2)
-    assert all((row["flag"], row["rating"]) == expected[pid] for pid, row in after_rows.items())
-    assert all(row_digest(row) == row_digest(after_rows[pid]) for pid, row in before_rows.items() if pid not in ids)
-    assert group_members(before_review) == group_members(after_review) == group_members(persisted_review)
-    assert next(p["label"] for p in after_review["photos"] if p["id"] == 216716) == "KEEP"
+    verify_preservation(before_rows, after_rows, ids, expected, before_review, after_review, persisted_review)
     timings = []
     for pid in ids:
         measured = [call for call in calls if call.get("filename") == after_rows[pid]["filename"]]
@@ -259,14 +276,15 @@ def main() -> None:
     ranking_after = {(row["detection_id"], row["source_key"]): row_digest(dict(row))
                      for row in db.conn.execute("SELECT * FROM subject_ranking_analysis")}
     repair_key = (incomplete_generation["detection_id"], incomplete_generation["source_key"]) if incomplete_generation else None
-    assert all(value == ranking_after.get(key) for key, value in ranking_before.items() if key != repair_key)
+    verify_ranking_preservation(ranking_before, ranking_after, repair_key)
     repaired = False
     if repair_key is not None:
         from subject_readiness import REQUIRED_QUALITY_FIELDS
         generation = db.subjects.ranking_analysis(*repair_key)
         repaired = (generation is not None and all(generation["features"].get(field) is not None for field in REQUIRED_QUALITY_FIELDS)
                     and ranking_before[repair_key] != ranking_after.get(repair_key))
-        assert repaired
+        if not repaired:
+            raise RuntimeError("Incomplete cached ranking generation was not repaired")
     report = {"implementation_commit": implementation_commit,
               "retry_service_sha256": hashlib.sha256((implementation / "vireo/services/analysis_retry.py").read_bytes()).hexdigest(),
               "execution_provider": "CPUExecutionProvider", "cpu_thread_budget": 4,

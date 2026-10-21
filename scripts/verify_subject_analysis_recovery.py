@@ -139,7 +139,7 @@ def prepare(args: argparse.Namespace) -> None:
     prediction_ids = tuple(row[0] for row in target.execute("SELECT id FROM predictions"))
     if prediction_ids:
         prediction_marks = ",".join("?" for _ in prediction_ids)
-        copy_rows(source, target, "prediction_review", f"prediction_id IN ({prediction_marks})", prediction_ids)
+        copy_rows(source, target, "prediction_review", f"workspace_id=? AND prediction_id IN ({prediction_marks})", (args.workspace, *prediction_ids))
     catalog_baseline = catalog_snapshot(source, ids)
     originals = []
     copies = []
@@ -171,6 +171,9 @@ def prepare(args: argparse.Namespace) -> None:
         clone_file(Path(mask["path"]), copied_mask)
         target.execute("UPDATE photo_masks SET path=? WHERE photo_id=? AND variant=?", (str(copied_mask), mask["photo_id"], mask["variant"]))
         target.execute("UPDATE photos SET mask_path=? WHERE id=? AND active_mask_variant=?", (str(copied_mask), mask["photo_id"], mask["variant"]))
+    violations = target.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise ValueError(f"Scratch catalog has dangling foreign-key references: {len(violations)}")
     target.commit()
     target.close()
     source.close()

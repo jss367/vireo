@@ -138,3 +138,71 @@ def test_check_detects_live_catalog_measurement_changes(tmp_path):
         conn.execute("UPDATE photos SET width=100 WHERE id=7")
     with pytest.raises(ValueError, match="Selected live catalog rows changed"):
         fixture.check(argparse.Namespace(scratch=args.output))
+
+
+def test_prepare_limits_prediction_reviews_to_copied_workspace(tmp_path):
+    args = fixture_arguments(tmp_path)
+    with sqlite3.connect(args.catalog) as conn:
+        conn.execute("INSERT INTO workspaces(id,name) VALUES(6,'Other workspace')")
+        conn.execute("""INSERT INTO detections(id,photo_id,detector_model,box_x,box_y,box_w,box_h,detector_confidence,category)
+                        VALUES(20,7,'test-model',.1,.1,.5,.5,.9,'animal')""")
+        conn.execute("""INSERT INTO predictions(id,detection_id,classifier_model,labels_fingerprint,species,confidence)
+                        VALUES(30,20,'test-classifier','labels','Duck',.9)""")
+        conn.executemany("INSERT INTO prediction_review(prediction_id,workspace_id,status) VALUES(30,?,?)",
+                         [(5, "accepted"), (6, "rejected")])
+    fixture.prepare(args)
+    with sqlite3.connect(args.output / "catalog.db") as conn:
+        assert conn.execute("SELECT workspace_id,status FROM prediction_review").fetchall() == [(5, "accepted")]
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("fault,message", [
+    ("decision", "Photographer decisions changed"),
+    ("unselected", "Unselected photo rows changed"),
+    ("grouping", "Saved encounter or burst membership changed"),
+    ("keep", "Existing photographer keep was lost"),
+    ("ranking", "valid cached ranking generation changed"),
+])
+def test_preservation_checks_fail_under_python_optimization(tmp_path, fault, message):
+    import subprocess
+    import sys
+    from copy import deepcopy
+
+    before = {1: {"flag": "none", "rating": 0, "width": 10},
+              2: {"flag": "none", "rating": 0, "width": 10},
+              216716: {"flag": "flagged", "rating": 0, "width": 10}}
+    review = {"photos": [{"id": 1, "label": "REVIEW"}, {"id": 216716, "label": "KEEP"}],
+              "encounters": [{"photo_ids": [1, 216716], "bursts": [{"photo_ids": [1, 216716]}]}]}
+    after = deepcopy(before)
+    refreshed = deepcopy(review)
+    if fault == "decision":
+        after[1]["flag"] = "rejected"
+    elif fault == "unselected":
+        after[2]["width"] = 20
+    elif fault == "grouping":
+        refreshed["encounters"][0]["bursts"][0]["photo_ids"] = [1]
+    elif fault == "keep":
+        refreshed["photos"][1]["label"] = "REVIEW"
+    payload = {"before_rows": before, "after_rows": after, "ids": [1],
+               "expected": {pid: [row["flag"], row["rating"]] for pid, row in before.items()},
+               "before_review": review, "after_review": refreshed, "persisted_review": deepcopy(refreshed)}
+    program = """import importlib.util,json,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('runner',sys.argv[1])
+runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+payload=json.loads(sys.argv[2])
+for key in ('before_rows','after_rows','expected'):
+    payload[key]={int(pid):value for pid,value in payload[key].items()}
+payload['expected']={pid:tuple(value) for pid,value in payload['expected'].items()}
+if sys.argv[4]=='ranking':
+    runner.verify_ranking_preservation({(1,'key'):'original'},{(1,'key'):'changed'},None)
+else:
+    runner.verify_preservation(**payload)
+Path(sys.argv[3]).write_text('success')
+"""
+    success = tmp_path / "success.txt"
+    completed = subprocess.run([sys.executable, "-O", "-c", program,
+                                str(SCRIPT.with_name("run_subject_retry_verification.py")),
+                                json.dumps(payload), str(success), fault], capture_output=True, text=True)
+    assert completed.returncode != 0 and message in completed.stderr
+    assert not success.exists()
