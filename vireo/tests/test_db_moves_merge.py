@@ -1133,7 +1133,8 @@ def test_identity_merge_preserves_higher_rank_taxonomy_without_confirming_candid
 
 
 @pytest.mark.parametrize('same_hash', [True, False])
-def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_higher_taxon(db, tmp_path, same_hash):
+@pytest.mark.parametrize('edited_candidates', [False, True])
+def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_higher_taxon(db, tmp_path, same_hash, edited_candidates):
     from repositories.identity_alternatives import IdentityMergeConflict
     from services.identity_alternatives import save_alternatives
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
@@ -1145,6 +1146,8 @@ def test_identity_merge_rejects_candidate_removal_that_would_erase_same_named_hi
     db.tag_photo(survivor, keyword)
     with db._commits_held():
         save_alternatives(db, [losing], ['Puma', 'Bobcat'], 'Uncertain species', 'A clearer view')
+        if edited_candidates:
+            save_alternatives(db, [losing], ['Heron', 'Egret'], 'Updated alternatives', 'A call recording')
     state = db.identity_alternatives.for_photos()
     pending = _pending(db, losing, survivor)
     history = [tuple(row) for row in db.conn.execute('SELECT * FROM edit_history_items ORDER BY id')]
