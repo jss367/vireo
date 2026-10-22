@@ -1,9 +1,9 @@
 // Selected-photo analysis details, bounded retry, and background progress.
 // Classic page script; no staged Group Review decisions are submitted here.
 
-/** @type {{ids: number[]; sequence: number; jobId: string | null; workspaceId: number | null; readiness: ReviewAnalysisReadiness | null; snapshot: ReviewResults | null; scopeSequence: number; cancelRequested: boolean; submitting: boolean; refreshFailed: boolean}} */
+/** @type {{ids: number[]; sequence: number; jobId: string | null; workspaceId: number | null; readiness: ReviewAnalysisReadiness | null; snapshot: ReviewResults | null; scopeSequence: number; cancelRequested: boolean; submitting: boolean}} */
 var reviewAnalysisRetry = {ids: [], sequence: 0, jobId: null, workspaceId: null,
-  readiness: null, snapshot: null, scopeSequence: 0, cancelRequested: false, submitting: false, refreshFailed: false};
+  readiness: null, snapshot: null, scopeSequence: 0, cancelRequested: false, submitting: false};
 
 /** @param {string} id */
 function analysisRetryElement(id) {
@@ -24,9 +24,6 @@ async function openAnalysisRetry(photoIds) {
   var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds));
   if (!ids.length) { showToast('Select photos to inspect their analysis.', 'warning'); return; }
   if (ids.length > 200) { showToast('Select at most 200 photos for analysis retry.', 'warning'); return; }
-  reviewAnalysisRetry.refreshFailed = reviewAnalysisRetry.refreshFailed &&
-    reviewAnalysisRetry.workspaceId === pipelineReviewWorkspaceId && ids.length === reviewAnalysisRetry.ids.length &&
-    ids.every(function(id) { return reviewAnalysisRetry.ids.indexOf(id) !== -1; });
   reviewAnalysisRetry.ids = ids.slice();
   reviewAnalysisRetry.readiness = null;
   var workspaceId = pipelineReviewWorkspaceId;
@@ -48,7 +45,8 @@ async function openAnalysisRetry(photoIds) {
     renderAnalysisReadiness(data);
     setAnalysisRetryStatus(isScopedReviewView() ?
       'This regrouped view is read-only. Switch the scope to Saved review results, or open these photos from Browse, to retry analysis.' :
-      reviewAnalysisRetry.refreshFailed ? 'Analysis is current, but saved suggestions still need refresh. Retry refreshing them below.' :
+      !data.photos.some(function(photo) { return photo.required_stages.length > 0; }) ?
+      'Analysis is current. You can refresh saved suggestions without running analysis again.' :
       'Review the exact ' + data.count + ' selected photos before starting.');
   } catch (error) {
     if (sequence === reviewAnalysisRetry.sequence) setAnalysisRetryStatus('Could not check analysis: ' + analysisRetryError(error));
@@ -71,10 +69,9 @@ function renderAnalysisReadiness(data) {
       '</strong> (photo ' + photo.photo_id + ')<p>' + escapeHtml(photo.explanation) + '</p><p>' + escapeHtml(stages) + '</p>' + failure + '</li>';
   }).join('');
   var start = /** @type {HTMLButtonElement} */ (analysisRetryElement('analysisRetryStart'));
-  start.textContent = reviewAnalysisRetry.refreshFailed ? 'Refresh saved suggestions' : 'Start analysis';
-  start.disabled =
-    isScopedReviewView() || !!reviewAnalysisRetry.jobId || (!reviewAnalysisRetry.refreshFailed &&
-      !data.photos.some(function(photo) { return photo.required_stages.length > 0; }));
+  start.textContent = data.photos.some(function(photo) { return photo.required_stages.length > 0; }) ?
+    'Start analysis' : 'Refresh saved suggestions';
+  start.disabled = isScopedReviewView() || !!reviewAnalysisRetry.jobId || !data.photos.length;
 }
 
 async function startAnalysisRetry() {
@@ -139,8 +136,7 @@ async function finishAnalysisRetry(job) {
   }
   var refresh = result && result.review_refresh;
   var deferred = refresh && refresh.status === 'deferred';
-  reviewAnalysisRetry.refreshFailed = !!refresh && refresh.status === 'failed';
-  if (reviewAnalysisRetry.refreshFailed) message += ' Saved suggestions could not refresh: ' +
+  if (refresh && refresh.status === 'failed') message += ' Saved suggestions could not refresh: ' +
     (refresh && refresh.error ? refresh.error : 'unknown refresh error') + '. Retry after resolving this error.';
   setAnalysisRetryStatus(message + (deferred ?
     ' Waiting for the current regroup to finish before refreshing saved suggestions…' +

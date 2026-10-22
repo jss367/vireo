@@ -90,7 +90,8 @@ def test_retry_previews_exact_selection_and_refreshes_without_losing_staged_flag
     assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
     assert page.evaluate("pid => grmState.picks.has(pid)", ids[1])
     assert live_server["db"].photos.get(ids[1])["flag"] == "none"
-    expect(page.locator("#analysisRetryStart")).to_be_disabled()
+    expect(page.locator("#analysisRetryStart")).to_have_text("Refresh saved suggestions")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
 
 
 def test_failed_analysis_displays_recorded_error_and_allows_retry(live_server, page):
@@ -239,7 +240,8 @@ def test_partial_cancel_explains_deferred_refresh_then_shows_published_analysis(
     expect(page.locator("#analysisRetryStatus")).not_to_contain_text("Waiting for the current regroup")
     assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
     assert page.evaluate("pid => findPhotoInResults(pid).analysis_status", ids[0]) == "complete"
-    expect(page.locator("#analysisRetryStart")).to_be_disabled()
+    expect(page.locator("#analysisRetryStart")).to_have_text("Refresh saved suggestions")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
 
 
 def test_failed_saved_refresh_is_explicit_and_can_retry_without_model_work(live_server, page):
@@ -253,8 +255,36 @@ def test_failed_saved_refresh_is_explicit_and_can_retry_without_model_work(live_
     expect(page.locator("#analysisRetryStart")).to_have_text("Refresh saved suggestions")
     state["refresh_failed"] = False
     page.locator("#analysisRetryStart").click()
-    page.wait_for_function("reviewAnalysisRetry.jobId === null && !reviewAnalysisRetry.submitting && !reviewAnalysisRetry.refreshFailed")
-    expect(page.locator("#analysisRetryStart")).to_be_disabled()
+    page.wait_for_function("reviewAnalysisRetry.jobId === null && !reviewAnalysisRetry.submitting")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
     expect(page.locator("#analysisRetryStatus")).to_contain_text("1 ready for comparison")
     expect(page.locator("#analysisRetryStatus")).not_to_contain_text("could not refresh")
+    assert len(state["submitted"]) == 2
+
+
+def test_refresh_only_recovery_survives_another_selection_and_page_reload(live_server, page):
+    ids = _open_review(live_server, page)
+    state = _install_retry(live_server, page, ids, failed_refresh=True)
+    page.locator("#grmAnalysisRetryAction").click()
+    page.locator("#analysisRetryStart").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("Saved suggestions could not refresh")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
+    page.locator("#analysisRetryClose").click()
+    page.evaluate("pid => grmSelect(pid, 'replace')", ids[1])
+    page.locator("#grmAnalysisRetryAction").click()
+    expect(page.locator("#analysisRetryStart")).to_have_text("Refresh saved suggestions")
+    page.locator("#analysisRetryClose").click()
+    page.reload()
+    page.wait_for_function("pipelineResults && pipelineResults.photos.length === 3")
+    page.evaluate("pid => openGroupReview(0, 0, pid)", ids[0])
+    page.wait_for_function("grmState && grmState.seeded")
+    page.locator("#grmAnalysisRetryAction").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("without running analysis again")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
+    assert page.evaluate("reviewAnalysisRetry.readiness.photos[0].required_stages") == []
+    state["refresh_failed"] = False
+    page.locator("#analysisRetryStart").click()
+    page.wait_for_function("reviewAnalysisRetry.jobId === null && !reviewAnalysisRetry.submitting")
+    expect(page.locator("#analysisRetryStatus")).not_to_contain_text("could not refresh")
+    assert state["submitted"][-1]["photo_ids"] == [ids[0]]
     assert len(state["submitted"]) == 2
