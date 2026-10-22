@@ -1502,6 +1502,36 @@ def create_photos_blueprint(
 
         return jsonify({"results": results})
 
+    @blueprint.route("/api/photos/analysis-readiness", methods=["POST"])
+    def api_selected_analysis_readiness():
+        from services.analysis_retry import explain_selected, selected_ids
+        db = get_db()
+        body = request.get_json(silent=True)
+        try:
+            ids = selected_ids(db, body.get("photo_ids") if isinstance(body, dict) else None)
+            return jsonify(explain_selected(db, ids, db.get_effective_config(cfg.load())))
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+    @blueprint.route("/api/photos/analysis-retry", methods=["POST"])
+    @background_job
+    def api_selected_analysis_retry(ctx):
+        from services.analysis_retry import run_retry, selected_ids
+        db = get_db()
+        body = request.get_json(silent=True)
+        try:
+            ids = selected_ids(db, body.get("photo_ids") if isinstance(body, dict) else None)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        expected = body.get("expected_workspace_id")
+        if expected is not None and (type(expected) is not int or expected != db.active_workspace_id):
+            return json_error("Active workspace changed; preview the selection again", 409)
+        effective = db.get_effective_config(cfg.load())
+        cache_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        return ctx.start("analysis-retry", lambda job: run_retry(ctx, job, ids, effective, cache_dir, results_dir=os.path.dirname(db_path)),
+                         config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
+                         extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
+
     @blueprint.route("/api/photos/<int:photo_id>/subjects")
     def api_photo_subjects(photo_id):
         from subjects import payload

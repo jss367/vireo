@@ -1608,6 +1608,11 @@ input[type="range"]::-moz-range-thumb {
 .species-preview-subject { display: block; position: relative; width: 120px; margin: 5px 0; }
 .species-preview-subject img { display: block; width: 120px; }
 .species-preview-subject > span { position: absolute; border: 2px solid #ffcc00; pointer-events: none; }
+#analysisRetryDialog { margin: auto; line-height: 1.5; }
+#analysisRetryDialog p { margin: 10px 0; }
+#analysisRetryDialog ol { padding-left: 24px; margin: 16px 0; }
+#analysisRetryDialog li { padding: 12px 0; border-bottom: 1px solid var(--border-primary); }
+#analysisRetryDialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 </style>
 </head>
 <body>
@@ -1895,6 +1900,7 @@ input[type="range"]::-moz-range-thumb {
     <!-- Filter bar (hidden until data loads) -->
     <div class="filter-bar" id="filterBar" style="display:none">
       <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
+      <button type="button" class="filter-btn" id="analysisRetryAction">Analysis details / retry…</button>
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -1951,6 +1957,7 @@ input[type="range"]::-moz-range-thumb {
       </div>
     </div>
 
+    <p id="analysisRetryBanner" role="status" aria-live="polite"></p>
     {% include '_sync_panel.html' %}
 
     <!-- Encounters rendered by JS -->
@@ -2041,6 +2048,7 @@ input[type="range"]::-moz-range-thumb {
       <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
       <button type="button" class="grm-eye-align-btn" id="grmEyeAlignBtn" aria-pressed="false" onclick="grmToggleEyeAlign()">Center on eyes</button>
       <button type="button" class="grm-region-sharpness-btn" id="grmBoxSharpnessBtn" onclick="grmCalculateBoxSharpness()">Score box sharpness</button>
+      <button type="button" class="filter-btn" id="grmAnalysisRetryAction">Retry analysis for selected photos…</button>
       <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
     </div>
   </div>
@@ -2100,6 +2108,19 @@ input[type="range"]::-moz-range-thumb {
   </div>
 </div>
 
+<dialog id="analysisRetryDialog" aria-labelledby="analysisRetryTitle"
+        style="max-width:760px;width:85vw;max-height:80vh;overflow:auto;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:8px;padding:24px;">
+  <h2 id="analysisRetryTitle">Selected photo analysis</h2>
+  <p>Review the current evidence and required work for these photos. Retry processes this selection, preserving your flags, ratings and staged Group Review decisions.</p>
+  <p id="analysisRetryStatus" role="status" aria-live="polite"></p>
+  <ol id="analysisRetryPhotos"></ol>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <button type="button" class="filter-btn" id="analysisRetryStart" disabled>Retry analysis for these photos</button>
+    <button type="button" class="filter-btn" id="analysisRetryCancel" hidden>Cancel analysis</button>
+    <button type="button" class="filter-btn" id="analysisRetryClose">Close</button>
+  </div>
+</dialog>
+
 <script defer src="/static/pipeline-review/state.js"></script>
 <script defer src="/static/pipeline-review/view-controls.js"></script>
 <script defer src="/static/pipeline-review/group-resolution.js"></script>
@@ -2124,6 +2145,7 @@ input[type="range"]::-moz-range-thumb {
 <script defer src="/static/pipeline-review/lightbox-integration.js"></script>
 <script defer src="/static/pipeline-review/events.js"></script>
 <script defer src="/static/pipeline-review/coverage.js"></script>
+<script defer src="/static/pipeline-review/analysis-retry.js"></script>
 <script defer src="/static/pipeline-review/boot.js"></script>
 </body>
 </html>

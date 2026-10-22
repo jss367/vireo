@@ -118,6 +118,13 @@ class SubjectsRepository:
             (detection_id, source_key),
         )
 
+    def discard_ranking_analysis(self, detection_id: int, source_key: str) -> None:
+        """Retire one caller-validated invalid generation; caller owns the transaction."""
+        self.conn.execute(
+            "DELETE FROM subject_ranking_analysis WHERE detection_id=? AND source_key=?",
+            (detection_id, source_key),
+        )
+
     # -- primary projection -----------------------------------------------------
 
     def clear_primary_features(self, photo_id: int) -> None:

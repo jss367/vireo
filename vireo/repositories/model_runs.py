@@ -836,6 +836,14 @@ class ModelRunsRepository:
         ).fetchone()
         return row["box_count"] if row else None
 
+    def detector_run_identity(self, photo_id: int, detector_model: str) -> sqlite3.Row | None:
+        """Read the stored runtime and source fingerprints from one run snapshot."""
+        return self.conn.execute(
+            "SELECT runtime_fingerprint, input_fingerprint FROM detector_runs "
+            "WHERE photo_id=? AND detector_model=?",
+            (photo_id, detector_model),
+        ).fetchone()
+
     def detector_runtime_fingerprint(
         self, photo_id: int, detector_model: str,
     ) -> str | None:

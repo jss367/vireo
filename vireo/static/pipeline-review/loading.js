@@ -122,6 +122,7 @@ function initPipelineReviewPage() {
 function loadPipelinePageInit() {
   safeFetch('/api/pipeline/page-init', {}, { toast: false })
   .then(function(data) {
+    pipelineReviewWorkspaceId = data.workspace_id ?? null;
     // Capture overrides regardless of state so computeReviewNow() can apply
     // the same review_min_confidence logic when the user clicks Compute.
     workspaceOverrides = (data && data.workspace_overrides) || null;
@@ -278,6 +279,7 @@ function openBrowseBurstReviewFromStorage() {
       return;
     }
 
+    pipelineReviewWorkspaceId = data.workspace_id ?? null;
     pipelineResults = data;
     currentReviewResults().source = 'browse-selection';
 

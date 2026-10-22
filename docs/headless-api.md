@@ -134,6 +134,21 @@ Current stable set:
 | GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
+Selected analysis recovery uses `POST /api/v1/photos/analysis-readiness` with
+`{"photo_ids": [1, 2]}` (1–200 positive integer IDs visible in the active
+workspace). Each photo reports current stage provenance, missing measurements,
+the required retry stages and the last persisted retry failure when available.
+A completed detector run without a qualifying animal remains REVIEW; it does
+not establish a failed detector run.
+
+`POST /api/v1/photos/analysis-retry` accepts the same selection plus optional
+`expected_workspace_id` from the readiness response; a workspace mismatch
+returns 409. It returns `job_id`, exact `photo_ids` and captured `workspace_id`.
+The background job runs only required stages on those photos, bypasses incomplete
+analysis caches, and reports per-photo stages, failures and final readiness in
+its result. Existing job progress and cancellation routes apply. This derived
+analysis operation has no metadata Undo step and never changes flags or ratings.
+
 Request/response shapes mirror the internal `/api/*` endpoints — see source
 or open `/api/v1/<path>` with the token in your browser's dev tools for
 concrete examples.

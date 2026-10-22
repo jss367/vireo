@@ -12,6 +12,7 @@ hooks, and binds events after every definition is available.
 | `view-controls.js` | Sidebar, sorting, search, filters, and display controls |
 | `summary.js` | Review totals and the focused encounter algorithm trace |
 | `coverage.js` | Stable import provenance, current membership and defined review coverage |
+| `analysis-retry.js` | Current stage explanations, exact selected-photo retry, progress/cancellation, and analysis refresh preserving staged decisions |
 | `species-conflicts.js` | Species identity comparison, evidence, and warnings |
 | `results.js` | Encounter grid reconciliation and photo cards |
 | `tuning.js` | Scoring/grouping controls, defaults, reflow, and regrouping |

@@ -1,10 +1,11 @@
 """Background, detection-scoped comparison analysis at a fixed 1024px scale."""
 import io
+import json
 import os
 
 import numpy as np
 from PIL import Image
-from subject_ranking import analysis_key, cached_analysis, resolve_subject, source_path
+from subject_ranking import analysis_key, resolve_subject, source_path
 
 
 def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
@@ -41,23 +42,26 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     return result
 
 
-def analyze_detection(db, photo, detection, effective_cfg, checkpoint):
+def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=False, existing_mask_path=None, defer_publication=False):
     from image_loader import load_image
     from masking import crop_completeness, generate_mask
     from quality import compute_all_quality_features
 
-    key, cached = cached_analysis(db, photo, detection, effective_cfg)
-    if cached:
-        return False
     path = source_path(db, photo)
     key = analysis_key(path, detection, effective_cfg)
+    if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
+        return False
     checkpoint()
     image = load_image(path, max_size=1024)
     if image is None:
         raise ValueError("Could not decode original for subject analysis")
     try:
-        mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
-                             variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
+        if existing_mask_path:
+            with Image.open(existing_mask_path) as saved_mask:
+                mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
+        else:
+            mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
+                                 variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         if mask is None or not np.any(mask):
             raise ValueError("No subject mask was produced")
         checkpoint()
@@ -69,16 +73,60 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint):
         buffer = io.BytesIO()
         Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255).save(buffer, format="PNG")
         checkpoint()
-        # Do not publish measurements of a source or prediction that changed mid-inference.
-        from subject_ranking import SubjectComparison
-        current, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection["id"]}))
-        if current is None or analysis_key(path, current, effective_cfg) != key:
-            raise ValueError("Subject analysis inputs changed; retry this frame")
-        db.subjects.save_ranking_analysis(detection["id"], key, features, buffer.getvalue())
-        db.commit_with_retry()
+        analysis = {"source_key": key, "features": features, "mask_png": buffer.getvalue()}
+        if not _usable_analysis(analysis):
+            raise ValueError("Required subject measurements are still incomplete")
+        if defer_publication:
+            return analysis
+        with db.transaction():
+            db.begin_immediate()
+            publish_analysis(db, photo, detection, analysis, effective_cfg)
+            db.commit_with_retry()
     finally:
         image.close()
     return True
+
+
+def _existing_analysis(db, detection_id, key):
+    try:
+        return db.subjects.ranking_analysis(detection_id, key)
+    except (json.JSONDecodeError, TypeError):
+        return None  # malformed cached output may be repaired after fresh work succeeds
+
+
+def _usable_analysis(analysis):
+    from subject_readiness import subject_analysis_readiness
+    if not isinstance(analysis, dict) or not isinstance(analysis.get("features"), dict):
+        return False
+    ready = subject_analysis_readiness({**analysis["features"], "subject_present": True,
+                                       "subject_mask_available": bool(analysis.get("mask_png"))})
+    if not ready["eligible"]:
+        return False
+    try:
+        with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            pixels = np.asarray(image)
+            return pixels.ndim == 2 and bool(np.any(pixels))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def publish_analysis(db, photo, detection, analysis, effective_cfg):
+    """Publish inside the caller's transaction; valid generations stay immutable."""
+    from subject_ranking import SubjectComparison
+    current_photo = db.photos.get(photo["id"], verify_workspace=True)
+    if current_photo is None:
+        raise ValueError("Photo is no longer visible in this workspace")
+    current, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection["id"]}))
+    key = analysis["source_key"]
+    if current is None or analysis_key(source_path(db, current_photo), current, effective_cfg) != key:
+        raise ValueError("Subject analysis inputs changed; retry this frame")
+    if not _usable_analysis(analysis):
+        raise ValueError("Required subject measurements are still incomplete")
+    # Retire only unusable cache entries, after fresh work and input validation.
+    # Valid bytes are immutable, and a failed outer publication rolls this back.
+    if not _usable_analysis(_existing_analysis(db, detection["id"], key)):
+        db.subjects.discard_ranking_analysis(detection["id"], key)
+    db.subjects.save_ranking_analysis(detection["id"], key, analysis["features"], analysis["mask_png"])
 
 
 def analyze_comparison(ctx, job, photo_ids, comparison, effective_cfg):

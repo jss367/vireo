@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from services.service_types import JsonDict
 
 
-def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
+def refresh_saved_suggestions(db: Database, data: JsonDict, *, effective_config: JsonDict | None = None) -> None:
     """Re-score the saved members without inference or catalog/sidecar writes."""
     import config as cfg
     from pipeline import (
@@ -28,7 +28,7 @@ def refresh_saved_suggestions(db: Database, data: JsonDict) -> None:
     # Identify/species-only reviews deliberately do not run quality triage.
     if data.get("review_mode") == "species":
         return
-    effective = db.get_effective_config(cfg.load())
+    effective = effective_config if effective_config is not None else db.get_effective_config(cfg.load())
     ids = [p["id"] for p in data.get("photos", [])]
     current = load_photo_features(
         db, photo_ids=ids, config=effective, effective_config=effective,
@@ -122,3 +122,60 @@ def _current_groups(data: JsonDict, photos: dict[int, JsonDict]) -> list[JsonDic
                       "burst_count": 1, "bursts": [{"photo_ids": remainder}]})
     data["encounters"] = saved
     return groups
+
+
+def _refresh_species_analysis(db: Database, data: JsonDict, effective: JsonDict) -> None:
+    """Refresh analysis inputs without turning an identify review into culling."""
+    from pipeline import _clean_serialized_photo, load_photo_features, refresh_serialized_summary
+    from subject_readiness import SCORE_FIELDS, subject_analysis_readiness
+
+    ids = [photo["id"] for photo in data.get("photos", [])]
+    current = load_photo_features(db, photo_ids=ids, config=effective, effective_config=effective)
+    photos = {photo["id"]: photo for photo in current}
+    _current_groups(data, photos)
+    refreshed = []
+    for old in data.get("photos", []):
+        photo = photos.get(old["id"])
+        if photo is None:
+            continue
+        readiness = subject_analysis_readiness(photo)
+        saved = {**old, **_clean_serialized_photo(photo)}
+        # Species-only mode has no cohort scores or automatic culling verdict.
+        for field in (*SCORE_FIELDS, "focus_evidence", "rarity_protected"):
+            saved.pop(field, None)
+        saved.update(analysis_status=readiness["status"], analysis_reasons=readiness["reasons"],
+                     selection_eligible=readiness["eligible"], reject_reasons=[])
+        refreshed.append(saved)
+    data["photos"] = refreshed
+    _refresh_species_summaries(data, current)
+    refresh_serialized_summary(data)
+
+
+def refresh_selected_suggestions(db: Database, data: JsonDict, photo_ids: list[int], effective: JsonDict) -> None:
+    """Refresh complete affected cohorts, retaining other saved groups unchanged."""
+    from copy import deepcopy
+
+    from pipeline import refresh_serialized_summary
+
+    selected = set(photo_ids)
+    groups = [group for group in data.get("encounters", []) if selected.intersection(group.get("photo_ids", []))]
+    members = {pid for group in groups for pid in group.get("photo_ids", [])} | selected
+    # Keep each copied group's identity across visibility filtering. A later
+    # group must never replace an earlier group that disappeared from scope.
+    pairs = [(group, deepcopy(group)) for group in groups]
+    subset = {**data, "encounters": [copied for _, copied in pairs],
+              "photos": [deepcopy(photo) for photo in data.get("photos", []) if photo["id"] in members]}
+    if not subset["photos"]:
+        return
+    if subset.get("review_mode") == "species":
+        _refresh_species_analysis(db, subset, effective)
+    else:
+        refresh_saved_suggestions(db, subset, effective_config=effective)
+    updated = {photo["id"]: photo for photo in subset["photos"]}
+    data["photos"] = [updated.get(photo["id"], photo) for photo in data.get("photos", [])]
+    retained_groups = {id(group) for group in subset["encounters"]}
+    for original, copied in pairs:
+        if id(copied) in retained_groups:
+            original.clear()
+            original.update(copied)
+    refresh_serialized_summary(data)
