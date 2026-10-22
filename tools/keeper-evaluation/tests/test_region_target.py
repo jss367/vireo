@@ -88,7 +88,7 @@ def test_unmappable_application_or_detector_input_claims_fail(evidence, defect):
     manifest = deepcopy(evidence['manifest'])
     sample = manifest['samples'][0]
     if defect == 'small_preview':
-        sample.update(source_kind='original_embedded_jpeg', decoded_dimensions=[800, 600])
+        sample.update(source_kind='original_embedded_jpeg', source_path='synthetic.nef', decoded_dimensions=[800, 600])
     elif defect == 'different_aspect':
         sample['decoded_dimensions'] = [2000, 600]
     else:
@@ -171,5 +171,51 @@ def test_legacy_raster_recipe_cannot_claim_new_app_color_parity(evidence):
     # The old RAW-only recipe already follows the actual app helper, including
     # its deliberate lack of raster-style ICC conversion. Preserve that scope.
     for sample in manifest['samples']:
-        sample.update(source_kind='original_embedded_jpeg', decoded_dimensions=[1600, 1200])
+        sample.update(source_kind='original_embedded_jpeg', source_path='synthetic.nef', decoded_dimensions=[1600, 1200])
     assert region_contract(manifest)['pixel_recipe'] == LEGACY_PIXEL_RECIPE
+
+
+def test_source_extension_allowlists_match_actual_app_without_importing_it():
+    from keeper_eval import source_formats
+    tree = ast.parse((APP_CODE / 'image_loader.py').read_text())
+    names = {'RAW_EXTENSIONS', 'IMAGE_EXTENSIONS', 'SUPPORTED_EXTENSIONS'}
+    assignments = [n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id in names for t in n.targets)]
+    namespace = {}
+    exec(compile(ast.Module(body=assignments, type_ignores=[]), 'app-format-constants', 'exec'), namespace)
+    assert set(namespace) >= names
+    for name in names:
+        assert getattr(source_formats, name) == namespace[name]
+
+
+@pytest.mark.parametrize('extension', ['.nrw', '.gif', '.ppm', '.avif', '.unknown', ''])
+def test_unsupported_source_formats_are_rejected_before_decoding(tmp_path, monkeypatch, extension):
+    from keeper_eval.curate import decode_raster
+    path = tmp_path / ('source' + extension)
+    # Valid Pillow-readable bytes must not override the source extension contract.
+    Image.new('RGB', (8, 8), '#abcdef').save(path, format='PNG')
+
+    def forbidden_decode(*args, **kwargs):
+        pytest.fail('Unsupported source reached Pillow instead of failing its allowlist')
+
+    monkeypatch.setattr(Image, 'open', forbidden_decode)
+    with pytest.raises(ValueError, match='Unsupported application source format'):
+        decode_source(path)
+    with pytest.raises(ValueError, match='Unsupported application raster format'):
+        decode_raster(path)
+
+
+@pytest.mark.parametrize('extension', ['.NRW', '.gif', '.ppm'])
+def test_legacy_frozen_unsupported_source_cannot_claim_app_region(evidence, extension):
+    manifest = deepcopy(evidence['manifest'])
+    sample = manifest['samples'][0]
+    sample['source_path'] = 'source' + extension
+    with pytest.raises(ValueError, match='Unsupported application source format'):
+        region_contract(manifest)
+
+
+def test_frozen_source_kind_must_match_application_format(evidence):
+    manifest = deepcopy(evidence['manifest'])
+    manifest['samples'][0]['source_kind'] = 'original_embedded_jpeg'
+    with pytest.raises(ValueError, match='source kind does not match'):
+        region_contract(manifest)

@@ -96,7 +96,11 @@ fitting/freezing until supported originals are curated again as new evidence. Th
 Full-size source/region PNGs are not resampled; only the
 context JPEG is reduced. Generated evidence carries no EXIF/GPS metadata.
 
-Missing originals fail explicitly. Output must be a new directory outside the
+Source extensions must match the application's explicit RAW/raster allowlists;
+there is no generic Pillow-readable fallback. Unsupported formats such as NRW
+or GIF are rejected before source copying/decoding and cannot become valid
+through legacy frozen manifest claims. Format parity is checked against the
+actual app constants without importing live app code. Missing originals fail explicitly. Output must be a new directory outside the
 catalog and selected source directories. The bundle is private local evidence:
 it contains source paths and original imagery and should not be committed.
 

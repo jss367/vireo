@@ -13,12 +13,12 @@ from PIL import Image, ImageCms, ImageDraw, ImageOps
 
 from .manifest import SCHEMA, digest, file_digest, valid_box, validate_samples, write_json
 from .region_target import PIXEL_RECIPE, TARGET
-
-RAW_EXTENSIONS = {'.nef', '.nrw', '.arw', '.cr2', '.cr3', '.dng', '.orf', '.rw2', '.raf'}
+from .source_formats import IMAGE_EXTENSIONS, source_kind_for_path
 
 
 def decode_source(path):
-    if path.suffix.lower() in RAW_EXTENSIONS:
+    kind = source_kind_for_path(path)
+    if kind == 'original_embedded_jpeg':
         import rawpy
         with rawpy.imread(str(path)) as raw:
             thumb = raw.extract_thumb()
@@ -30,19 +30,19 @@ def decode_source(path):
         with path.open('rb') as stream:
             tags = exifread.process_file(stream, details=False, stop_tag='Model')
         source_camera = str(tags.get('Image Model') or 'unknown').strip()
-        kind = 'original_embedded_jpeg'
         # The app's RAW embedded-JPEG path transposes and converts directly;
         # unlike its raster path, it does not apply embedded ICC profiles.
         image = ImageOps.exif_transpose(image).convert('RGB')
     else:
         image, source_camera = decode_raster(path)
-        kind = 'original_raster'
     # Evidence PNGs intentionally carry no source EXIF/GPS/ICC metadata.
     return Image.frombytes('RGB', image.size, image.tobytes()), kind, source_camera
 
 
 def decode_raster(path):
     """Mirror image_loader.load_image's upright/native raster transforms."""
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise ValueError('Unsupported application raster format')
     with Image.open(path) as opened:
         source_camera = str(opened.getexif().get(272) or 'unknown').strip()
         image = ImageOps.exif_transpose(opened)
@@ -130,6 +130,7 @@ def curate(db_path, specification, output):
             if output.is_relative_to(folder) or output == db_path or db_path.is_relative_to(output):
                 raise ValueError('Evidence output must be separate from the catalog and source directories')
             source = folder / photo['filename']
+            source_kind_for_path(source)  # Reject before output/copy/decode, even if Pillow can read it.
             if not source.is_file():
                 raise FileNotFoundError(f'Original unavailable for photo {photo["id"]}; no cache fallback')
             observations.append((requested, dict(photo), dict(detection), box, source))

@@ -2,6 +2,7 @@
 from pathlib import Path
 
 from .manifest import file_digest
+from .source_formats import source_kind_for_path
 
 LEGACY_PIXEL_RECIPE = 'upright-rgb-embedded-jpeg-or-raster-v1'
 PIXEL_RECIPE = 'upright-rgb-app-color-raster-or-embedded-jpeg-v2'
@@ -13,6 +14,8 @@ def region_contract(manifest):
     if manifest['pixel_recipe'] not in {PIXEL_RECIPE, LEGACY_PIXEL_RECIPE} or manifest.get('region_target', TARGET) != TARGET:
         raise ValueError('Unsupported region target; original detector-input pixels are not reconstructable from legacy boxes')
     for sample in manifest['samples']:
+        if source_kind_for_path(sample['source_path']) != sample['source_kind']:
+            raise ValueError('Frozen source kind does not match the application extension recipe')
         if sample['pixel_recipe'] != manifest['pixel_recipe']:
             raise ValueError('Sample pixel recipe differs from the frozen bundle recipe')
         if manifest['pixel_recipe'] == LEGACY_PIXEL_RECIPE and sample['source_kind'] != 'original_embedded_jpeg':

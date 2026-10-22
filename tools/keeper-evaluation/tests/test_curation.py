@@ -99,3 +99,23 @@ def test_same_partition_repeated_source_or_derivative_cannot_be_split_into_trial
         validate_samples(samples)
     samples[1]['group_id'] = samples[0]['group_id']
     validate_samples(samples)  # Multiple region views are allowed as one trial.
+
+
+@pytest.mark.parametrize('extension', ['.nrw', '.gif'])
+def test_curator_rejects_unsupported_catalog_source_before_copying(evidence, tmp_path, monkeypatch, extension):
+    import sqlite3
+
+    import keeper_eval.curate as curator
+    filename = 'unsupported' + extension
+    Image.new('RGB', (80, 60)).save(evidence['sources'] / filename, format='PNG')
+    with sqlite3.connect(evidence['db']) as connection:
+        connection.execute('UPDATE photos SET filename=? WHERE id=1', (filename,))
+
+    def forbidden_copy(*args, **kwargs):
+        pytest.fail('Unsupported catalog source was copied')
+
+    monkeypatch.setattr(curator.shutil, 'copyfile', forbidden_copy)
+    output = tmp_path / 'not-created'
+    with pytest.raises(ValueError, match='Unsupported application source format'):
+        curate(evidence['db'], evidence['spec'], output)
+    assert not output.exists()
