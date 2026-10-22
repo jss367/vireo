@@ -15,8 +15,9 @@ def _open_review(live_server, page):
 
 
 def _install_retry(live_server, page, ids, *, failed=False, held=False, workspace_mismatch=False,
-                   delay_refresh=False, preview_workspace_mismatch=False, deferred_refresh=False):
-    state = {"submitted": [], "polls": 0, "terminal": False, "cancelled": False, "refresh_held": [], "refreshes": 0}
+                   delay_refresh=False, preview_workspace_mismatch=False, deferred_refresh=False, failed_refresh=False):
+    state = {"submitted": [], "polls": 0, "terminal": False, "cancelled": False, "refresh_held": [],
+             "refreshes": 0, "refresh_failed": failed_refresh}
     workspace_id = live_server["db"].active_workspace_id
 
     def readiness(route):
@@ -44,7 +45,9 @@ def _install_retry(live_server, page, ids, *, failed=False, held=False, workspac
         route.fulfill(json={"status": status, "progress": {"total": 1, "current": int(state["terminal"]),
                                                           "current_file": f"selected-{ids[0]}.jpg", "phase": "Segmentation"},
                             "result": {"photos": [{"photo_id": ids[0], "status": "failed" if failed else "complete"}],
-                                       "review_refresh": {"status": "deferred" if deferred_refresh else "complete"}}})
+                                       "review_refresh": {"status": "failed" if state["refresh_failed"] else
+                                                          "deferred" if deferred_refresh else "complete",
+                                                          "error": "Disk full" if state["refresh_failed"] else None}}})
 
     def cancel(route):
         state["cancelled"] = True
@@ -237,3 +240,21 @@ def test_partial_cancel_explains_deferred_refresh_then_shows_published_analysis(
     assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
     assert page.evaluate("pid => findPhotoInResults(pid).analysis_status", ids[0]) == "complete"
     expect(page.locator("#analysisRetryStart")).to_be_disabled()
+
+
+def test_failed_saved_refresh_is_explicit_and_can_retry_without_model_work(live_server, page):
+    ids = _open_review(live_server, page)
+    state = _install_retry(live_server, page, ids, failed_refresh=True)
+    page.locator("#grmAnalysisRetryAction").click()
+    page.locator("#analysisRetryStart").click()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("Saved suggestions could not refresh: Disk full")
+    expect(page.locator("#analysisRetryStart")).to_be_enabled()
+    assert page.evaluate("reviewAnalysisRetry.readiness.photos[0].required_stages") == []
+    expect(page.locator("#analysisRetryStart")).to_have_text("Refresh saved suggestions")
+    state["refresh_failed"] = False
+    page.locator("#analysisRetryStart").click()
+    page.wait_for_function("reviewAnalysisRetry.jobId === null && !reviewAnalysisRetry.submitting && !reviewAnalysisRetry.refreshFailed")
+    expect(page.locator("#analysisRetryStart")).to_be_disabled()
+    expect(page.locator("#analysisRetryStatus")).to_contain_text("1 ready for comparison")
+    expect(page.locator("#analysisRetryStatus")).not_to_contain_text("could not refresh")
+    assert len(state["submitted"]) == 2
