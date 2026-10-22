@@ -157,7 +157,8 @@ def _photo_lock(pid: int, checkpoint: Callable[[], None]) -> Iterator[None]:
         lock.release()
 
 
-def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None]) -> None:
+def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
+                    *, on_published: Callable[[], None] | None = None) -> None:
     from computation_cache import megadetector_runtime_fingerprint, source_input
     from detector import detect_animals, ensure_megadetector_weights
     from services.detection_store import write_detection_batch
@@ -185,6 +186,8 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None]) -> N
         if megadetector_runtime_fingerprint() != runtime:
             raise ValueError("Detector runtime changed during analysis; retry with the current model")
         write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
+        if on_published:
+            on_published()
         # The normal writer protects reviewed detector outputs. Never force away
         # those decisions merely to make recovery appear successful.
         stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
@@ -322,7 +325,10 @@ def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: 
 def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
                results_dir: str) -> JsonDict:
     db = ctx.thread_db()
-    result: JsonDict = {"ok": True, "photos": [], "errors": [], "requested_photo_ids": photo_ids}
+    result: JsonDict = {"ok": True, "photos": [], "errors": [], "requested_photo_ids": photo_ids,
+                       "review_refresh": {"status": "not_needed", "photo_ids": []}}
+    published: set[int] = set()
+    refreshed = False
     job["result"] = result
     job["progress"]["total"] = len(photo_ids)
     def checkpoint() -> None:
@@ -341,7 +347,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 if "detection" in stages:
                     stage = "detection"
                     job["progress"]["phase"] = "Retrying subject detection"
-                    retry_detection(db, pid, checkpoint)
+                    retry_detection(db, pid, checkpoint, on_published=lambda photo_id=pid: published.add(photo_id))
                     ran.append("detection")
                     photo = _current_photo(db, pid, effective)
                     stages = required_stages(photo)
@@ -350,6 +356,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     stage = "quality" if stages == ["quality"] else "segmentation and quality"
                     job["progress"]["phase"] = f"Retrying {stage} measurements"
                     retry_features(db, pid, effective, cache_dir, checkpoint, quality_only=stages == ["quality"])
+                    published.add(pid)
                     ran.extend(stage_name for stage_name in stages if stage_name != "detection")
                 after = subject_analysis_readiness(_current_photo(db, pid, effective))
                 result["photos"].append({"photo_id": pid, "status": "complete" if after["eligible"] else "review",
@@ -363,12 +370,59 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 result["ok"] = False
             job["progress"]["current"] = index + 1
         job["progress"]["phase"] = "Refreshing affected review suggestions"
-        _refresh_review(db, effective, results_dir, photo_ids, checkpoint)
+        try:
+            _refresh_review(db, effective, results_dir, photo_ids, checkpoint)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+            result["ok"] = False
+            result["review_refresh"] = {"status": "failed", "photo_ids": photo_ids, "error": str(error)}
+            raise
+        refreshed = True
+        result["review_refresh"] = {"status": "complete", "photo_ids": photo_ids}
         remaining = [pid for pid in photo_ids if db.photos.get(pid, verify_workspace=True)]
         result["readiness"] = explain_selected(db, remaining, effective) if remaining else {"photos": [], "count": 0}
         return result
     finally:
-        db.close()
+        try:
+            if published and not refreshed:
+                _refresh_interrupted(db, effective, results_dir, sorted(published), result)
+        finally:
+            db.close()
+
+
+def _refresh_interrupted(db: Database, effective: JsonDict, results_dir: str,
+                         photo_ids: list[int], result: JsonDict) -> None:
+    from pipeline import load_results_raw
+    from pipeline_locks import acquire_workspace_regroup
+    from services.review_refresh import queue_refresh, refresh_pending
+
+    state: JsonDict = {"status": "pending", "photo_ids": photo_ids}
+    result["review_refresh"] = state  # visible even if durable marker publication fails
+    try:
+        queue_refresh(results_dir, db.require_workspace_id(), photo_ids)
+    except (OSError, ValueError, RuntimeError) as error:
+        state.update(status="failed", error=str(error))
+        result["ok"] = False
+        log.exception("Could not persist interrupted analysis review refresh")
+        return
+    lock = acquire_workspace_regroup(db.require_workspace_id())
+    if not lock.acquire(blocking=False):
+        state["status"] = "deferred"
+        return
+    try:
+        data = load_results_raw(results_dir, db.require_workspace_id())
+        db.begin_immediate()
+        try:
+            refresh_pending(db, data, results_dir, effective)
+            db.commit()
+            state["status"] = "complete"
+        finally:
+            if db.in_transaction:
+                db.rollback()
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        state.update(status="deferred", error=str(error))
+        log.exception("Interrupted analysis review refresh will retry on next read")
+    finally:
+        lock.release()
 
 
 def _refresh_review(db: Database, effective: JsonDict, results_dir: str, photo_ids: list[int],

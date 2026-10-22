@@ -617,3 +617,181 @@ def test_changed_source_with_same_runtime_never_remasks_retained_reviewed_boxes(
         assert result["ok"] and len(calls["segmentation"]) == 1
         assert stored["input_fingerprint"] == current_input
         assert result["photos"][0]["status"] == "complete"
+
+
+def _stale_review(ids, mode="quality"):
+    return {"review_mode": mode, "photos": [{"id": pid, "flag": "none", "rating": 0,
+        "label": "REVIEW", "mask_path": None, "subject_tenengrad": None, "analysis_status": "incomplete"} for pid in ids],
+        "encounters": [{"photo_ids": ids, "bursts": [{"photo_ids": ids}], "species_confirmed": True}], "summary": {}}
+
+
+def _cancel_after_first(db, job, ids, directory):
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": False}})
+    return run_retry(Context(db, cancel=lambda: job["progress"].get("current", 0) >= 1), job, ids, effective, str(directory))
+
+
+def test_cancel_after_committed_photo_refreshes_saved_analysis(retry_library, tmp_path):
+    from pipeline import load_results_raw, save_results_raw
+    from services.review_refresh import pending_refresh
+    _, db, ids, calls = retry_library
+    save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
+    job = {"id": "partial-cancel", "progress": {}, "errors": []}
+    with pytest.raises(JobCancelled):
+        _cancel_after_first(db, job, ids[:2], tmp_path)
+    saved = load_results_raw(str(tmp_path), db.require_workspace_id())
+    assert job["result"]["review_refresh"] == {"status": "complete", "photo_ids": [ids[0]]}
+    first = next(photo for photo in saved["photos"] if photo["id"] == ids[0])
+    assert first["selection_eligible"] and first["mask_path"] and first["subject_tenengrad"] is not None
+    assert saved["encounters"][0]["photo_ids"] == ids and saved["encounters"][0]["species_confirmed"]
+    assert calls["detection"] == ["duck-0.jpg"] and len(calls["segmentation"]) == 1
+    assert pending_refresh(str(tmp_path), db.require_workspace_id()) == {}
+
+
+def test_partial_cancel_defers_busy_regroup_and_next_read_repairs_species_cache(retry_library, tmp_path):
+    from db import Database
+    from pipeline import load_results, load_results_raw, save_results_raw
+    from pipeline_locks import acquire_workspace_regroup
+    from services.review_refresh import pending_refresh
+    _, db, ids, calls = retry_library
+    ws, path = db.require_workspace_id(), db.job_history.catalog_file()
+    original = _stale_review(ids, mode="species")
+    save_results_raw(original, str(tmp_path), ws)
+    job = {"id": "deferred-cancel", "progress": {}, "errors": []}
+    outcomes = []
+    def worker():
+        own = Database(path)
+        own.set_active_workspace(ws)
+        try:
+            _cancel_after_first(own, job, ids[:2], tmp_path)
+        except Exception as error:
+            outcomes.append(error)
+        finally:
+            own.close()
+    lock = acquire_workspace_regroup(ws)
+    lock.acquire()
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        thread.join(synchronization_timeout(5))
+        assert not thread.is_alive() and len(outcomes) == 1 and isinstance(outcomes[0], JobCancelled)
+        assert job["result"]["review_refresh"] == {"status": "deferred", "photo_ids": [ids[0]]}
+        assert load_results_raw(str(tmp_path), ws) == original
+        assert set(pending_refresh(str(tmp_path), ws)) == {str(ids[0])}
+    finally:
+        lock.release()
+        thread.join(synchronization_timeout(5))
+    db.photo_review.set_flag(ids[0], "rejected")
+    db.photo_review.set_rating(ids[0], 2)
+    refreshed = load_results(str(tmp_path), ws, db=db)
+    first = next(photo for photo in refreshed["photos"] if photo["id"] == ids[0])
+    assert first["selection_eligible"] and first["analysis_status"] == "complete" and first["mask_path"]
+    assert (first["flag"], first["rating"]) == ("rejected", 2)
+    assert refreshed["encounters"][0]["photo_ids"] == ids and refreshed["encounters"][0]["species_confirmed"]
+    assert next(photo for photo in refreshed["photos"] if photo["id"] == ids[1])["mask_path"] is None
+    assert pending_refresh(str(tmp_path), ws) == {}
+    assert load_results_raw(str(tmp_path), ws)["photos"][0]["mask_path"]
+    assert calls["detection"] == ["duck-0.jpg"] and len(calls["segmentation"]) == 1
+
+
+def test_failed_refresh_marker_is_explicit_and_noop_retry_repairs_cache(retry_library, tmp_path, monkeypatch):
+    from pipeline import load_results_raw, save_results_raw
+    from services import review_refresh
+    _, db, ids, calls = retry_library
+    save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
+    job = {"id": "marker-failure", "progress": {}, "errors": []}
+    def fail_marker(*args):
+        raise OSError("refresh marker not writable")
+    with monkeypatch.context() as patch:
+        patch.setattr(review_refresh, "queue_refresh", fail_marker)
+        with pytest.raises(JobCancelled):
+            _cancel_after_first(db, job, ids[:2], tmp_path)
+    assert job["result"]["ok"] is False and job["result"]["review_refresh"]["status"] == "failed"
+    assert "not writable" in job["result"]["review_refresh"]["error"]
+    assert load_results_raw(str(tmp_path), db.require_workspace_id())["photos"][0]["mask_path"] is None
+    calls["detection"].clear()
+    calls["segmentation"].clear()
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert result["ok"] and result["review_refresh"] == {"status": "complete", "photo_ids": [ids[0]]}
+    assert calls == {"detection": [], "segmentation": []}
+    assert load_results_raw(str(tmp_path), db.require_workspace_id())["photos"][0]["selection_eligible"]
+
+
+def test_read_refresh_keeps_a_new_generation_queued_during_publication(retry_library, tmp_path, monkeypatch):
+    from pipeline import load_results_raw
+    from pipeline_locks import acquire_workspace_regroup
+    from services import review_refresh, saved_review
+    _, db, ids, _ = retry_library
+    ws = db.require_workspace_id()
+    review_refresh.queue_refresh(str(tmp_path), ws, [ids[0]])
+    before = review_refresh.pending_refresh(str(tmp_path), ws)
+    runs = []
+    def refresh(reader, data, photo_ids, effective):
+        runs.append(photo_ids)
+        data["refreshed"] = len(runs)
+        if len(runs) == 1:
+            review_refresh.queue_refresh(str(tmp_path), ws, [ids[0]])
+    monkeypatch.setattr(saved_review, "refresh_selected_suggestions", refresh)
+    data = _stale_review(ids)
+    with acquire_workspace_regroup(ws):
+        review_refresh.refresh_pending(db, data, str(tmp_path), {})
+        queued = review_refresh.pending_refresh(str(tmp_path), ws)
+        assert queued and queued != before
+        review_refresh.refresh_pending(db, data, str(tmp_path), {})
+    assert runs == [[ids[0]], [ids[0]]]
+    assert load_results_raw(str(tmp_path), ws)["refreshed"] == 2
+    assert review_refresh.pending_refresh(str(tmp_path), ws) == {}
+
+
+def test_api_partial_cancel_persists_refreshed_outcomes(retry_library, tmp_path, monkeypatch):
+    from pipeline import load_results_raw, save_results_raw
+    from services import analysis_retry
+    from wait import wait_for_job_via_client
+    app, db, ids, _ = retry_library
+    save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
+    entered, release = threading.Event(), threading.Event()
+    original = analysis_retry.retry_detection
+    def gate_second(reader, pid, checkpoint, **kwargs):
+        if pid == ids[1]:
+            entered.set()
+            assert release.wait(synchronization_timeout(5))
+            checkpoint()
+        return original(reader, pid, checkpoint, **kwargs)
+    monkeypatch.setattr(analysis_retry, "retry_detection", gate_second)
+    client = app.test_client()
+    response = client.post("/api/photos/analysis-retry", json={"photo_ids": ids[:2]})
+    job_id = response.json["job_id"]
+    try:
+        assert entered.wait(synchronization_timeout(5))
+        assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+    finally:
+        release.set()
+    job = wait_for_job_via_client(client, job_id, wait_for_history=True)
+    assert job["status"] == "cancelled"
+    assert job["result"]["review_refresh"] == {"status": "complete", "photo_ids": [ids[0]]}
+    saved = load_results_raw(str(tmp_path), db.require_workspace_id())
+    assert saved["photos"][0]["selection_eligible"] and saved["photos"][0]["mask_path"]
+    assert saved["photos"][1]["mask_path"] is None
+
+
+def test_refresh_only_write_failure_is_explicit_for_another_no_inference_retry(retry_library, tmp_path, monkeypatch):
+    from pipeline import load_results_raw, save_results_raw
+    from services import saved_review
+    _, db, ids, calls = retry_library
+    execute(db, [ids[0]], tmp_path)
+    save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
+    job = {"id": "refresh-only-failure", "progress": {}, "errors": []}
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": False}})
+    def fail_refresh(*args):
+        raise OSError("saved suggestions not writable")
+    calls["detection"].clear()
+    calls["segmentation"].clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(saved_review, "refresh_selected_suggestions", fail_refresh)
+        with pytest.raises(OSError, match="suggestions not writable"):
+            run_retry(Context(db), job, [ids[0]], effective, str(tmp_path))
+    assert job["result"]["ok"] is False
+    assert job["result"]["review_refresh"] == {"status": "failed", "photo_ids": [ids[0]], "error": "saved suggestions not writable"}
+    result, _ = execute(db, [ids[0]], tmp_path)
+    assert result["ok"] and result["review_refresh"]["status"] == "complete"
+    assert calls == {"detection": [], "segmentation": []}
+    assert load_results_raw(str(tmp_path), db.require_workspace_id())["photos"][0]["selection_eligible"]
