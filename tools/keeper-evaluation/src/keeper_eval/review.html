@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wildlife selected-region evidence review</title>
+<style>
+body{margin:24px auto;padding:0 20px;max-width:1400px;background:#152128;color:#f4f4f4;font:17px system-ui}button,select,textarea{font:inherit;margin:8px;padding:8px}textarea{display:block;width:90%;height:70px}h1{font-size:25px}.context{max-width:100%;max-height:58vh;object-fit:contain}.native{overflow:auto;max-height:70vh;border:1px solid #7c929e}.native img{display:block;max-width:none;image-rendering:auto}fieldset{margin:18px 0}label{display:block;margin:8px}#status{color:#a7e3fd;min-height:25px}a{color:#a7e3fd}
+</style>
+<h1>Wildlife selected-region evidence review</h1>
+<p id="definition"></p><p>Judge the selected region, not the photograph's best animal elsewhere. Ignore aesthetics, rarity and model guesses. Use “uncertain” for a doubtful animal, a tiny/obscured subject, or a borderline focus judgment. Do not infer detail from adjacent frames.</p>
+<p id="position"></p><button id="previous">Previous</button><button id="next">Next</button><span id="identity"></span>
+<h2>Full-frame context</h2><p>The red rectangle identifies the selected region. <a id="source" target="_blank" rel="noopener">Open unresized source raster</a></p><img id="context" class="context" alt="Full frame with selected region">
+<h2>Selected region at native raster pixels</h2><p id="pixels"></p><div class="native"><img id="region" alt="Selected region, one image pixel per displayed pixel"></div>
+<fieldset><legend>Independent visual judgments</legend>
+<label>Animal validity <select id="animal"><option value="uncertain">Uncertain</option><option value="animal">Visible animal structure in this region</option><option value="not_animal">No identifiable animal in this region</option></select></label>
+<label>Absolute subject detail <select id="focus"><option value="uncertain">Uncertain</option><option value="sufficient_detail">Subject detail is sufficient; no obvious severe defocus</option><option value="severe_defocus">Severe defocus destroys usable subject detail</option><option value="not_applicable">Not applicable: region is not an animal</option></select></label>
+<label><input id="full" type="checkbox"> I inspected the full frame and the selected region's location.</label>
+<label><input id="native" type="checkbox"> I inspected the native region at 100% pixels.</label>
+<label for="notes">Visual reason, including uncertainty</label><textarea id="notes" maxlength="2000"></textarea>
+<button id="save">Save judgment and continue</button></fieldset><p id="status" role="status"></p>
+<script type="module">
+let samples=[],current=0;
+const el=id=>document.getElementById(id);
+function render(){const s=samples[current];if(!s){el('status').textContent='This review partition has no samples.';return;}el('position').textContent=`Sample ${current+1} of ${samples.length} · ${samples.filter(x=>x.label).length} judged`;
+el('identity').textContent=s.sample_id;el('context').src=`/asset/${s.sample_id}/context`;el('region').src=`/asset/${s.sample_id}/region`;el('source').href=`/asset/${s.sample_id}/source`;el('pixels').textContent=`${s.width} × ${s.height} pixels · ${s.source_kind.replaceAll('_',' ')} · scroll to inspect larger regions. Browser zoom must be 100%.`;
+el('animal').value=s.label?.animal||'uncertain';el('focus').value=s.label?.focus||'uncertain';el('notes').value=s.label?.notes||'';el('full').checked=!!s.label?.full_frame_inspected;el('native').checked=!!s.label?.native_crop_inspected;}
+el('previous').onclick=()=>{current=Math.max(0,current-1);render();};el('next').onclick=()=>{current=Math.min(samples.length-1,current+1);render();};
+el('save').onclick=async()=>{const s=samples[current];if(!s)return;const value={animal:el('animal').value,focus:el('focus').value,notes:el('notes').value,full_frame_inspected:el('full').checked,native_crop_inspected:el('native').checked};const response=await fetch(`/api/label/${s.sample_id}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)});const result=await response.json();if(!response.ok){el('status').textContent=result.error;return;}s.label=value;el('status').textContent='Saved independently. No photo flags or catalog metadata were changed.';current=Math.min(samples.length-1,current+1);render();};
+const response=await fetch('/api/session');const session=await response.json();samples=session.samples;el('definition').textContent=session.definition;render();
+</script></html>

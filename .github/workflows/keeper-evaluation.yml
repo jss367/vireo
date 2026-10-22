@@ -1,0 +1,31 @@
+name: Wildlife Keeper Evidence Evaluation
+
+on:
+  pull_request:
+    paths:
+      - 'tools/keeper-evaluation/**'
+      - '.github/workflows/keeper-evaluation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tool-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install the evidence tool and test dependencies
+        run: pip install -e 'tools/keeper-evaluation[test]'
+      - name: Check evidence tool code
+        run: ruff check tools/keeper-evaluation
+      - name: Test frozen evidence, independent judgments and candidate evaluation
+        run: python -m pytest -c tools/keeper-evaluation/pyproject.toml tools/keeper-evaluation/tests -q
+      - name: Build the standalone review package
+        run: python -m build --wheel --no-isolation tools/keeper-evaluation
