@@ -120,7 +120,8 @@ def fit(bundle, feature_path, domain, output):
         vector = np.mean(vectors, axis=0)
         prototypes[str(label)] = (vector / max(np.linalg.norm(vector), 1e-12)).tolist()
     result = {'schema': 'vireo-keeper-two-gate-candidate-v1', 'fit_recipe': FIT_RECIPE, 'feature_recipe': FEATURE_RECIPE,
-              'feature_model_artifacts': features['model_artifacts'], 'manifest_sha256': manifest['manifest_sha256'],
+              'feature_model_artifacts': features['model_artifacts'], 'training_features_sha256': features['features_sha256'],
+              'manifest_sha256': manifest['manifest_sha256'],
               'development_labels_sha256': development_digest(manifest, reviews), 'domain': domain,
               'animal_prototypes': prototypes, 'detail': fit_detail(detail_rows),
               'training_groups': {'animal': len({r[1] for r in animal_rows}), 'detail': len({r[1] for r in detail_rows})},
@@ -140,6 +141,7 @@ def read_candidate(directory, manifest, features):
     recorded = model.pop('candidate_sha256')
     if (digest(model) != recorded or model.get('schema') != 'vireo-keeper-two-gate-candidate-v1'
             or model['feature_model_artifacts'] != features['model_artifacts']
+            or model.get('training_features_sha256') != features['features_sha256']
             or model['manifest_sha256'] != manifest['manifest_sha256']):
         raise ValueError('Candidate model does not match its development/feature provenance')
     model['candidate_sha256'] = recorded

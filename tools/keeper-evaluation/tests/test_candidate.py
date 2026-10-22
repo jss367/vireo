@@ -94,6 +94,7 @@ def test_single_photographer_development_fit_freeze_and_heldout_scores(evidence,
     result = fit(bundle, features, domain, model)
     assert result['training_groups'] == {'animal': 6, 'detail': 4}
     assert result['calibrated'] is False
+    assert result['training_features_sha256'] == values['features_sha256']
     dev = development_scores(bundle, features, model, tmp_path / 'development.json')
     assert len(dev['samples']) == 6
     profile_path = tmp_path / 'frozen.json'
@@ -101,6 +102,24 @@ def test_single_photographer_development_fit_freeze_and_heldout_scores(evidence,
     freeze_profile(bundle, model, code, focus_min=0., animal_min=0., domain=domain,
                    evaluation_plan={'maximum_false_keep_rate': .99, 'confidence': .95, 'minimum_positive_groups': 1},
                    application_code=Path(__file__).resolve().parents[3] / 'vireo', output=profile_path)
+    # Alternate self-consistent feature artifacts retain model/manifest/region
+    # metadata, but were not used to fit this frozen candidate.
+    for change in ('embedding', 'native_detail', 'runtime'):
+        alternate = deepcopy(values)
+        if change == 'embedding':
+            alternate['samples'][6]['embedding'][0] *= -1
+        elif change == 'native_detail':
+            alternate['samples'][6]['native_detail']['median_gradient_energy'] *= 10
+        else:
+            alternate['runtime'] = {'numpy': 'different extraction runtime'}
+        alternate['features_sha256'] = digest({k: v for k, v in alternate.items() if k != 'features_sha256'})
+        path = tmp_path / f'alternate-{change}.json'
+        write_json(path, alternate)
+        with pytest.raises(ValueError, match='development/feature provenance'):
+            development_scores(bundle, path, model, tmp_path / f'rejected-development-{change}.json')
+        with pytest.raises(ValueError, match='development/feature provenance'):
+            score(bundle, path, model, profile_path, tmp_path / f'rejected-score-{change}.json')
+        assert not (bundle / 'prediction-commitment.json').exists()
     scored = score(bundle, features, model, profile_path, tmp_path / 'scores.json')
     judge('holdout', profile_path)
     report = evaluate(bundle, profile_path, scored)

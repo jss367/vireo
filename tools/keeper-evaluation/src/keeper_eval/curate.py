@@ -9,12 +9,11 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageCms, ImageDraw, ImageOps
 
 from .manifest import SCHEMA, digest, file_digest, valid_box, validate_samples, write_json
-from .region_target import TARGET
+from .region_target import PIXEL_RECIPE, TARGET
 
-PIXEL_RECIPE = 'upright-rgb-embedded-jpeg-or-raster-v1'
 RAW_EXTENSIONS = {'.nef', '.nrw', '.arw', '.cr2', '.cr3', '.dng', '.orf', '.rw2', '.raf'}
 
 
@@ -32,14 +31,35 @@ def decode_source(path):
             tags = exifread.process_file(stream, details=False, stop_tag='Model')
         source_camera = str(tags.get('Image Model') or 'unknown').strip()
         kind = 'original_embedded_jpeg'
+        # The app's RAW embedded-JPEG path transposes and converts directly;
+        # unlike its raster path, it does not apply embedded ICC profiles.
+        image = ImageOps.exif_transpose(image).convert('RGB')
     else:
-        image = Image.open(path)
-        image.load()
-        source_camera = str(image.getexif().get(272) or 'unknown').strip()
+        image, source_camera = decode_raster(path)
         kind = 'original_raster'
-    image = ImageOps.exif_transpose(image).convert('RGB')
     # Evidence PNGs intentionally carry no source EXIF/GPS/ICC metadata.
     return Image.frombytes('RGB', image.size, image.tobytes()), kind, source_camera
+
+
+def decode_raster(path):
+    """Mirror image_loader.load_image's upright/native raster transforms."""
+    with Image.open(path) as opened:
+        source_camera = str(opened.getexif().get(272) or 'unknown').strip()
+        image = ImageOps.exif_transpose(opened)
+        if image.mode.startswith('I;16') or (image.mode == 'I' and path.suffix.lower() == '.png'):
+            import numpy as np
+            values = np.asarray(image, dtype=np.float64)
+            image = Image.fromarray(np.clip(np.rint(values / 257.0), 0, 255).astype('uint8'))
+        profile = opened.info.get('icc_profile')
+        if profile:
+            try:
+                image = ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
+                                                 ImageCms.createProfile('sRGB'), outputMode='RGB')
+            except (OSError, ValueError, ImageCms.PyCMSError) as exc:
+                # The app falls back after a profile error; the evaluator
+                # excludes that uncertain rendition instead of claiming parity.
+                raise ValueError('Unsupported raster ICC profile; cannot claim the application color recipe') from exc
+        return image.convert('RGB'), source_camera
 
 
 def catalog_sample(conn, requested):

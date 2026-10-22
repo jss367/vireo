@@ -64,7 +64,13 @@ to scratch, hashes the copied bytes, and extracts an upright RGB raster. Camera
 model is read from the copied original's metadata, with the catalog value kept
 separately for comparison. A RAW source uses its embedded JPEG **without a
 silent demosaic or working-copy fallback**. This is a native embedded-JPEG
-raster, not newly demosaiced sensor detail. Raster dimensions, selected box,
+raster, not newly demosaiced sensor detail. Raster originals use the app's
+upright transform, 16-bit PNG/sample scaling and ICC-to-sRGB conversion before
+RGB conversion. Unsupported ICC transforms are refused, rather than claiming
+parity with the app's fallback. RAW embedded JPEGs follow the app's separate
+helper: upright RGB conversion without raster-style ICC transformation.
+New bundles freeze `upright-rgb-app-color-raster-or-embedded-jpeg-v2` so older
+raster evidence cannot silently claim the corrected transforms. Raster dimensions, selected box,
 rounded pixel rectangle, detector provenance, exact decode recipe and asset
 hashes are frozen.
 
@@ -83,9 +89,10 @@ A frozen profile binds this target contract and hashes of the relevant app
 source files. Fitting/freezing rejects embedded previews smaller than the app's
 1024px request and aspect mismatches rejected by the app's source geometry guard;
 it never invents a detector-to-preview transform. Requests to curate original
-unknown detector-input pixels are unsupported. Existing version-one bundles
-retain their exact selected-region target, pixels, hashes and judgments; no
-migration relabels them. The first 18 native previews cover the app's request.
+unknown detector-input pixels are unsupported. Existing version-one RAW embedded-JPEG bundles retain their exact
+selected-region target, pixels, hashes and judgments; no migration relabels them.
+Legacy raster bundles lack proven color/depth parity and are refused for
+fitting/freezing until supported originals are curated again as new evidence. The first 18 native previews cover the app's request.
 Full-size source/region PNGs are not resampled; only the
 context JPEG is reduced. Generated evidence carries no EXIF/GPS metadata.
 
@@ -140,7 +147,9 @@ that Vireo selected a real animal. [CLIP-IQA authors](https://github.com/IceClea
 Declare a domain JSON containing exactly `camera_models`, `source_kinds`,
 `pixel_recipe` and explanatory `notes`. For example, a Z8 embedded-JPEG study
 would declare `NIKON Z 8`, `original_embedded_jpeg`, and
-`upright-rgb-embedded-jpeg-or-raster-v1`. This is a proposed scope, not evidence
+the recipe recorded in its frozen bundle: newly curated evidence uses
+`upright-rgb-app-color-raster-or-embedded-jpeg-v2`; the existing RAW-only private
+tranche retains `upright-rgb-embedded-jpeg-or-raster-v1`. This is a proposed scope, not evidence
 that every condition inside it has been validated. Source IDs cannot be used
 as an approval allowlist. A single-shoot study may support a narrowly declared
 scope; it cannot silently justify global claims.
@@ -168,7 +177,11 @@ labels. Keep existing held-out encounters and reported diagnostic cases excluded
 freeze a new expanded bundle before collecting its labels and features. Record
 this targeted sampling when interpreting coverage; a deliberately enriched set
 does not estimate natural deployment prevalence.
-It emits uncalibrated scores, not a claim that this approach is accurate.
+The fitted model records the exact `training_features_sha256`; development and
+frozen scoring reject a different feature artifact, even if its self-checksum,
+model fingerprint and manifest agree. Alternate runtime measurements or changed
+embeddings/native detail require a newly fitted candidate and fresh holdout
+protocol. It emits uncalibrated scores, not a claim that this approach is accurate.
 Inspect development outcomes and select thresholds there; do not inspect
 held-out scores or labels to choose the producer, features or thresholds.
 

@@ -7,16 +7,25 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
 
 from keeper_eval.curate import curate, decode_source, save_assets
-from keeper_eval.region_target import APP_RECIPE_FILES, TARGET, freeze_region_target, region_contract
+from keeper_eval.region_target import (
+    APP_RECIPE_FILES,
+    LEGACY_PIXEL_RECIPE,
+    PIXEL_RECIPE,
+    TARGET,
+    freeze_region_target,
+    region_contract,
+)
 
 APP_CODE = Path(__file__).resolve().parents[3] / 'vireo'
 
 
-def test_raw_native_region_matches_app_upright_embedded_recipe(tmp_path, monkeypatch):
+@pytest.mark.parametrize('embedded_icc', [False, True])
+def test_raw_native_region_matches_app_upright_embedded_recipe(tmp_path, monkeypatch, embedded_icc):
     # Execute only the real pure embedded-preview function, not app imports.
     tree = ast.parse((APP_CODE / 'image_loader.py').read_text())
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_extract_embedded_jpeg')
@@ -26,7 +35,8 @@ def test_raw_native_region_matches_app_upright_embedded_recipe(tmp_path, monkeyp
     exif = Image.Exif()
     exif[274] = 6
     buffer = io.BytesIO()
-    pixels.save(buffer, format='JPEG', exif=exif)
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile('LAB')).tobytes() if embedded_icc else None
+    pixels.save(buffer, format='JPEG', exif=exif, icc_profile=profile)
     thumb = SimpleNamespace(format=1, data=buffer.getvalue())
     raw = SimpleNamespace(extract_thumb=lambda: thumb)
 
@@ -66,7 +76,7 @@ def test_region_contract_binds_current_app_source_and_unknown_detector_rendition
     assert all(len(h) == 64 for h in value['application_source_sha256'].values())
     assert value['contract']['name'] == TARGET
     assert 'unknown' in value['contract']['detector_input_rendition']
-    # Existing v1 bundles mean the same app-selected native region; do not
+    # Missing optional target prose does not alter a frozen recipe; do not
     # rewrite frozen manifests, images or independent judgments to add prose.
     legacy = deepcopy(evidence['manifest'])
     legacy.pop('region_target')
@@ -103,3 +113,63 @@ def test_truncated_preview_is_not_substituted_for_app_demosaic(tmp_path):
     choose = namespace['_embedded_preview_suffices']
     assert choose(raw, Image.new('RGB', (1800, 1200)), 1024, 'jpeg-first')
     assert not choose(raw, Image.new('RGB', (800, 600)), 1024, 'jpeg-first')
+
+
+@pytest.mark.parametrize('kind', ['lab_icc', 'rgb_icc', '16_bit_png'])
+def test_raster_native_pixels_match_actual_app_color_and_depth_transforms(tmp_path, monkeypatch, kind):
+    tree = ast.parse((APP_CODE / 'image_loader.py').read_text())
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'load_image' and not n.decorator_list)
+    namespace = {'Path': Path, 'Image': Image, 'ImageOps': ImageOps, 'io': io, 'log': logging.getLogger(__name__),
+                 'SUPPORTED_EXTENSIONS': {'.png', '.tiff'}, 'RAW_EXTENSIONS': set(),
+                 'RAW_DECODE_JPEG_FIRST': 'jpeg-first', '_RAW_DECODE_MODES': {'jpeg-first'}}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), 'app-native-raster', 'exec'), namespace)
+    path = tmp_path / ('sample.tiff' if kind == 'lab_icc' else 'sample.png')
+    if kind == 'lab_icc':
+        image = Image.new('LAB', (5, 3), (128, 145, 110))
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile('LAB')).tobytes()
+        image.save(path, icc_profile=profile)
+    elif kind == 'rgb_icc':
+        image = Image.new('RGB', (5, 3), '#a6247c')
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+        image.save(path, icc_profile=profile)
+    else:
+        image = Image.fromarray(np.array([[0, 257, 32768, 65535]], dtype=np.uint16))
+        image.save(path)
+    transforms = []
+    transform = ImageCms.profileToProfile
+
+    def counted_transform(*args, **kwargs):
+        transforms.append(True)
+        return transform(*args, **kwargs)
+
+    monkeypatch.setattr(ImageCms, 'profileToProfile', counted_transform)
+    app = namespace['load_image'](path, max_size=None)
+    actual, source_kind, _ = decode_source(path)
+    assert app is not None and source_kind == 'original_raster'
+    assert actual.size == app.size and actual.tobytes() == app.tobytes()
+    assert not actual.getexif() and 'icc_profile' not in actual.info
+    assert len(transforms) == (0 if kind == '16_bit_png' else 2)
+    if kind == '16_bit_png':
+        assert [p[0] for p in actual.get_flattened_data()] == [0, 1, 128, 255]
+
+
+def test_unsupported_raster_profile_fails_instead_of_claiming_conversion(tmp_path):
+    path = tmp_path / 'unsupported.png'
+    Image.new('RGB', (8, 8), '#c08040').save(path, icc_profile=b'not a valid ICC transform')
+    with pytest.raises(ValueError, match='Unsupported raster ICC profile'):
+        decode_source(path)
+
+
+def test_legacy_raster_recipe_cannot_claim_new_app_color_parity(evidence):
+    manifest = deepcopy(evidence['manifest'])
+    assert manifest['pixel_recipe'] == PIXEL_RECIPE
+    manifest['pixel_recipe'] = LEGACY_PIXEL_RECIPE
+    for sample in manifest['samples']:
+        sample['pixel_recipe'] = LEGACY_PIXEL_RECIPE
+    with pytest.raises(ValueError, match='Legacy raster color recipe'):
+        region_contract(manifest)
+    # The old RAW-only recipe already follows the actual app helper, including
+    # its deliberate lack of raster-style ICC conversion. Preserve that scope.
+    for sample in manifest['samples']:
+        sample.update(source_kind='original_embedded_jpeg', decoded_dimensions=[1600, 1200])
+    assert region_contract(manifest)['pixel_recipe'] == LEGACY_PIXEL_RECIPE
