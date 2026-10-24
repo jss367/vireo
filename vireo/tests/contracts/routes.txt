@@ -262,6 +262,7 @@ POST         /api/collections/preview
 POST         /api/computation-cache/import
 POST         /api/config
 POST         /api/culling/apply
+POST         /api/detections/<int:detection_id>/evidence-review
 POST         /api/duplicates/apply
 POST         /api/duplicates/bulk-resolve
 POST         /api/duplicates/delete-loser-files

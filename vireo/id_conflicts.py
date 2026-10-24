@@ -901,7 +901,7 @@ def _row_signal(subjects, signals, statuses):
 
 FILTERS = [
     ("model_disagreement", "Models disagree"),
-    ("strong_model_disagreement", "Strong model disagreement"),
+    ("strong_model_disagreement", "Models differ; both relative scores at least 70%"),
     ("keyword_model_conflict", "Keyword vs models"),
     ("strong_keyword_model_conflict", "Strong keyword conflict"),
     ("consensus_conflict", "Model consensus conflicts"),

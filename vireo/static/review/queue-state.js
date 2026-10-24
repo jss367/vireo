@@ -42,14 +42,14 @@ function rqSession(value) {
 
 function rqViewSettings() {
   return {collection: currentCollection, tab: currentTab, model: currentModel, sort: currentSort,
-    confidence: minConfidence, fingerprint: currentLabelsFingerprint, photoId: currentPhotoIdFilter,
+    evidence: reviewEvidenceFilter, confidence: minConfidence, fingerprint: currentLabelsFingerprint, photoId: currentPhotoIdFilter,
     enabled: reviewQueue.enabled, source: reviewQueue.source,
     rules: VireoFilter.getRules(), visual: VireoFilter.getVisual()};
 }
 
 function rqScopeKey() {
   return 'vireo:review-queue:' + reviewQueue.workspace + ':' + JSON.stringify({
-    collection: currentCollection, tab: currentTab, model: currentModel, confidence: minConfidence,
+    collection: currentCollection, tab: currentTab, model: currentModel, evidence: reviewEvidenceFilter, confidence: minConfidence,
     fingerprint: currentLabelsFingerprint, photoId: currentPhotoIdFilter,
     rules: VireoFilter.getRules(), visual: VireoFilter.getVisual(),
   });
@@ -72,6 +72,8 @@ async function initializeReviewQueue() {
   }
   currentCollection = typeof view.collection === 'string' ? view.collection : 'all';
   currentTab = ['all', 'pending', 'accepted', 'rejected'].includes(view.tab || '') ? view.tab || 'all' : 'all';
+  reviewEvidenceFilter = ['all', 'questionable', 'deferred'].includes(view.evidence || '') ? view.evidence || 'all' : 'all';
+  /** @type {HTMLSelectElement} */ (rqElement('reviewEvidenceFilter')).value = reviewEvidenceFilter;
   currentModel = typeof view.model === 'string' ? view.model : 'all';
   currentSort = typeof view.sort === 'string' ? view.sort : 'filename';
   minConfidence = typeof view.confidence === 'number' && view.confidence >= 0 && view.confidence <= 1 ? view.confidence : 0;

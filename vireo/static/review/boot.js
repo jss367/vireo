@@ -89,6 +89,7 @@ document.addEventListener('vireo:edit-history-changed', function() {
 
 bindReviewDetectionBoxRenderSync();
 bindReviewGridClicks();
+bindReviewEvidence();
 bindReviewKeyboard();
 bindReviewCardContextMenu();
 bindBurstGroupContextMenu();

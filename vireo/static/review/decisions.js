@@ -8,7 +8,9 @@
 // exactly these (each burst card's accept covers its burst, as clicking it
 // would), so rows the filters hide are never tagged behind the user's back.
 function visiblePendingCards() {
-  return getVisibleItems().filter(function(p) { return p.status === 'pending'; });
+  return getVisibleItems().filter(function(p) {
+    return p.status === 'pending' && !reviewEvidenceBlocksAccept(p.id);
+  });
 }
 
 // Mark every row the accept says it decided, not only the one in the URL.
@@ -33,6 +35,7 @@ function visiblePendingCards() {
 
 /** @param {number} predId */ async function acceptPrediction(predId) {
   if (_predictionsReloading) return;
+  if (reviewEvidenceBlocksAccept(predId)) return;
   var epoch = _loadPredictionsEpoch;
   var applied;
   try {
@@ -71,7 +74,7 @@ function visiblePendingCards() {
 }
 
 /** @param {number} altId @param {number} parentPredId */ async function acceptAlternative(altId, parentPredId) {
-  if (_predictionsReloading) return;
+  if (_predictionsReloading || reviewEvidenceBlocksAccept(parentPredId)) return;
   var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + altId + '/accept', { method: 'POST' });

@@ -18,7 +18,7 @@ function bindReviewKeyboard() {
     if (document.querySelector(/** @type {'div'} */ ('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active'))) return;
     // The toolbar hint promises "first visible card": use the grid's filtered
     // + sorted view, not the API-ordered raw predictions array.
-    var pending = getVisibleItems().filter(function(p) { return p.status === 'pending'; });
+    var pending = visiblePendingCards();
     if (pending.length === 0) return;
     if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(pending[0]?.id || 0); }
     else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0]?.id || 0); }

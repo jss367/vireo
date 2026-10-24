@@ -362,7 +362,7 @@ def test_version_23_import_catalog_gains_identity_state_without_changing_import_
         # Exercise the registry directly before Database's idempotent schema
         # setup can create the missing table on its own.
         schema._apply_pending(conn)
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
     schema.ensure_schema(path)
     with Database(path, initialize_schema=False) as db:
@@ -384,7 +384,7 @@ def test_version_22_catalog_runs_import_and_identity_registry_migrations(tmp_pat
         # Run the registry before normal startup can create missing tables.
         schema._apply_pending(conn)
         schema._apply_pending(conn)
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert conn.execute('SELECT COUNT(*) FROM photo_identity_alternatives').fetchone()[0] == 0
         row = conn.execute(
             'SELECT name, rules, original_import_count, import_recorded_at FROM collections WHERE id=?',
