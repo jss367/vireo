@@ -1873,6 +1873,7 @@ class KeywordProvenanceRepository:
             if not targets:
                 return _out_of_scope_result(self.conn, species, identity)
 
+            self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
             source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
             kid = self.add_keyword(species, is_species=True, _commit=False, **source_args)
             species = _stored_keyword_name(self.conn, kid, species)

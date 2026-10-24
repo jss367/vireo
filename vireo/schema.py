@@ -23,6 +23,7 @@ from canonical_schema import (
     JOB_HISTORY_LATER_COLUMNS,
     JOB_HISTORY_WORKSPACE_OBJECTS,
     create_current_flag_attribution,
+    create_detection_evidence_reviews,
     create_formerly_lazy_objects,
     create_identity_alternatives,
     create_subject_ranking_analysis,
@@ -240,6 +241,7 @@ MIGRATIONS = (
     Migration(22, "subject_ranking_analysis", create_subject_ranking_analysis),
     Migration(23, "collection_import_provenance", _add_collection_import_provenance),
     Migration(24, "identity_alternatives", create_identity_alternatives),
+    Migration(25, "detection_evidence_reviews", create_detection_evidence_reviews),
 )
 
 

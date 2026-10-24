@@ -11,6 +11,7 @@
     "../vireo/static/review/deep-links.js",
     "../vireo/static/review/detection-boxes.js",
     "../vireo/static/review/grid.js",
+    "../vireo/static/review/evidence.js",
     "../vireo/static/review/group-cards.js",
     "../vireo/static/review/group-changes.js",
     "../vireo/static/review/group-loupe.js",
