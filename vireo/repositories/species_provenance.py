@@ -6,6 +6,7 @@ manual/unspecified or imported/unknown, according to its existing source.
 
 import json
 import sqlite3
+from collections.abc import Callable
 from typing import Any  # Evidence payloads contain caller-supplied JSON fields.
 
 
@@ -60,7 +61,57 @@ class SpeciesProvenanceRepository:
                 (state['source'], state['species_provenance'], photo_id, keyword_id),
             )
 
-    def replay(self, photo_id: int, snapshot: str | None, *, undo: bool) -> None:
+    def replay(self, photo_id: int, snapshot: str | None, *, undo: bool, restore_source: bool = True) -> None:
         if snapshot:
             for keyword_id, states in json.loads(snapshot).items():
-                self.restore(photo_id, int(keyword_id), states['before' if undo else 'after'])
+                state = states['before' if undo else 'after']
+                if state is not None and not restore_source:
+                    current = self.state(photo_id, int(keyword_id))
+                    if current is not None:
+                        state = {**state, 'source': current['source']}
+                self.restore(photo_id, int(keyword_id), state)
+
+
+def _fold_history_state(left: dict[str, Any] | None, right: dict[str, Any] | None,
+                        source_max: Callable[[str | None, str | None], str | None]) -> dict[str, Any] | None:
+    """Converged aliases retain the stronger authorship and existing evidence."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return {**right, **left, 'source': source_max(left['source'], right['source']),
+            'species_provenance': left['species_provenance'] or right['species_provenance']}
+
+
+def retarget_keyword_history(conn: sqlite3.Connection, src_id: int, dst_id: int,
+                             source_max: Callable[[str | None, str | None], str | None]) -> None:
+    """Retarget evidence replay alongside the ordinary keyword-history rewrite."""
+    rows = conn.execute(
+        '''SELECT i.*, e.action_type FROM edit_history_items i JOIN edit_history e ON e.id=i.edit_id
+           WHERE i.species_provenance IS NOT NULL OR e.action_type='species_provenance' ''',
+    ).fetchall()
+    for row in rows:
+        if row['species_provenance']:
+            states = json.loads(row['species_provenance'])
+            source = states.pop(str(src_id), None)
+            if source is not None:
+                target = states.get(str(dst_id), {})
+                states[str(dst_id)] = {phase: _fold_history_state(target.get(phase), source.get(phase), source_max)
+                                      for phase in ('before', 'after')}
+                conn.execute('UPDATE edit_history_items SET species_provenance=? WHERE id=?',
+                             (json.dumps(states, sort_keys=True), row['id']))
+        if row['action_type'] == 'species_provenance':
+            destination = conn.execute(
+                'SELECT source, species_provenance FROM photo_keywords WHERE photo_id=? AND keyword_id=?',
+                (row['photo_id'], dst_id),
+            ).fetchone()
+            destination = dict(destination) if destination else None
+            for column in ('old_value', 'new_value'):
+                snapshot = json.loads(row[column])
+                if snapshot['keyword_id'] == src_id:
+                    snapshot['keyword_id'] = dst_id
+                    snapshot['state'] = _fold_history_state(destination, snapshot['state'], source_max)
+                    conn.execute(f'UPDATE edit_history_items SET {column}=? WHERE id=?',
+                                 (json.dumps(snapshot, sort_keys=True), row['id']))
+    conn.execute("UPDATE edit_history SET new_value=? WHERE action_type='species_provenance' AND new_value=?",
+                 (str(dst_id), str(src_id)))

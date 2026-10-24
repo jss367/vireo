@@ -415,6 +415,8 @@ def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids,
     _retarget_bare_history_ids(conn, src_str, dst_str)
     _retarget_history_json_payloads(conn, src_id, dst_id, preexisting_dst_photos)
     _retarget_identity_history(conn, src_id, dst_id, set(preexisting_dst_photos), source_max)
+    from repositories.species_provenance import retarget_keyword_history
+    retarget_keyword_history(conn, src_id, dst_id, source_max)
 
 
 def _rewrite_identity_links(data, src_id, dst_id, source_max):
@@ -1192,7 +1194,9 @@ class KeywordProvenanceRepository:
             f"""UPDATE photo_keywords AS dst_pk
                SET source = {self.keyword_source_max_sql(
                    "dst_pk.source", src_source_sql,
-               )}
+               )}, species_provenance = COALESCE(dst_pk.species_provenance,
+                   (SELECT species_provenance FROM photo_keywords src_pk
+                    WHERE src_pk.photo_id=dst_pk.photo_id AND src_pk.keyword_id=:src_id))
                WHERE dst_pk.keyword_id = :dst_id
                  AND EXISTS (
                      SELECT 1 FROM photo_keywords src_pk

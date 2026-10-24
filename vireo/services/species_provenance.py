@@ -89,8 +89,9 @@ def history_items(db: Database, action: str, items: Any) -> list[dict[str, Any]]
     return items
 
 
-def replay_history(db: Database, items: Any, *, undo: bool) -> None:
+def replay_history(db: Database, items: Any, *, undo: bool, restore_source: bool = True) -> None:
     """Restore attribution after the normal association and sidecar handlers."""
     for item in items:
-        db.species_provenance.replay(item['photo_id'], dict(item).get('species_provenance'), undo=undo)
+        db.species_provenance.replay(item['photo_id'], dict(item).get('species_provenance'),
+                                     undo=undo, restore_source=restore_source)
     db._species_provenance_before = {}

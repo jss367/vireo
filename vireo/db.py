@@ -5388,7 +5388,9 @@ class Database:
         if action == 'identity_alternatives':
             from services.identity_alternatives import replay_identity_batch
             replay_identity_batch(self, items, undo=undo)
-            replay_history(self, items, undo=undo)
+            # Identity snapshots already restore their retargeted authorship
+            # lattice; the extra replay only owns species evidence here.
+            replay_history(self, items, undo=undo, restore_source=False)
             return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS

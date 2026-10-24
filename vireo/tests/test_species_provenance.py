@@ -219,3 +219,24 @@ def test_same_named_distinct_species_do_not_share_evidence(app_and_db):
     assert actual[first]['method'] == 'direct_visual'
     assert actual[second]['method'] == 'manual_unspecified'
     assert db.photo_species.equivalent_assignment_ids([1], first) == {1: [first]}
+
+
+def test_keyword_merge_retargets_evidence_and_undo(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Robin', provenance={'method': 'direct_visual', 'reason': 'Visible markings'})
+    source = assignments(client)['Robin']
+    assert evidence(client, source, method='adjacent_frames', reason='Compared adjacent frames').status_code == 200
+    survivor = db.add_keyword('Surviving Robin', is_species=True)
+    db.tag_photo(1, survivor, source='accept')
+    db._merge_keyword_into(source['keyword_id'], survivor)
+    db.commit()
+    merged = assignments(client)['Surviving Robin']
+    assert merged['method'] == 'adjacent_frames'
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client)['Surviving Robin']['method'] == 'direct_visual'
+    assert client.post('/api/redo').status_code == 200
+    assert assignments(client)['Surviving Robin']['method'] == 'adjacent_frames'
+    assert client.delete(f'/api/photos/1/keywords/{survivor}').status_code == 200
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client)['Surviving Robin']['method'] == 'adjacent_frames'
