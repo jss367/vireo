@@ -34,7 +34,8 @@ def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[
         if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
                 or not 0 <= confidence <= 1 or not math.isfinite(confidence)):
             raise ValueError('confidence must be a finite number between 0 and 1, or null')
-        if not result['confidence_meaning']:
+        if (not result['confidence_meaning']
+                or result['confidence_meaning'].casefold() in {'not recorded', 'unknown', 'unspecified'}):
             raise ValueError('confidence_meaning is required when confidence is supplied')
     result['confidence'] = confidence
     result['confidence_meaning'] = result['confidence_meaning'] or 'Not recorded'

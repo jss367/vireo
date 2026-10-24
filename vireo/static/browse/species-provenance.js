@@ -64,6 +64,7 @@ function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAss
     if (key === 'confidence') { input.min = '0'; input.max = '1'; input.step = 'any'; }
     input.value = key === 'supporting_photo_ids' ? (assignment.supporting_photo_ids || []).join(', ') :
       String(assignment[/** @type {'reviewer' | 'reason' | 'evidence_source' | 'confidence' | 'confidence_meaning'} */ (key)] ?? '');
+    if (key === 'confidence_meaning' && input.value === 'Not recorded') input.value = '';
     field.appendChild(input); inputs[/** @type {keyof typeof inputs} */ (key)] = input; form.appendChild(field);
   });
   const save = document.createElement('button');

@@ -1077,7 +1077,7 @@ def test_keyword_provenance_facade_signatures_unchanged():
     sig = {n: str(inspect.signature(getattr(Database, n)))
            for n in _DELEGATING_PROVENANCE_METHODS}
     assert sig == {
-        "tag_photo": "(self, photo_id, keyword_id, source: str | None = 'manual', _commit=True)",
+        "tag_photo": "(self, photo_id, keyword_id, source: str | None = 'manual', _commit=True, *, provenance=None)",
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
         "accept_prediction": (
             "(self, prediction_id, replace_species=False, photo_ids=None, "
