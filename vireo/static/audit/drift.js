@@ -53,7 +53,8 @@ function renderDrift() {
 /** Only the resolutions the server says can apply to this row. @param {AuditDrift} d @param {boolean} unreadable */
 function driftActions(d, unreadable) {
   var offered = d.resolutions || ['use_db', 'use_xmp'];
-  var buttons = [['use_db', 'Use DB'], ['use_xmp', 'Use XMP']].filter(function(pair) {
+  /** @type {[string, string][]} */ var choices = [['use_db', 'Use DB'], ['use_xmp', 'Use XMP']];
+  var buttons = choices.filter(function(pair) {
     return offered.indexOf(pair[0]) >= 0;
   }).map(function(pair) {
     return '<button class="btn btn-secondary" data-photo-id="' + d.photo_id + '" data-direction="' + pair[0] + '">' + pair[1] + '</button>';
