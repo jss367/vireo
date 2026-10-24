@@ -268,6 +268,20 @@ def test_preparation_repairs_corrupt_destination_without_touching_source(catalog
     _assert_masks(catalog, catalog.raw)
 
 
+def test_preparation_protects_reused_copies_from_stale_gc_snapshot(catalog, monkeypatch):
+    values = catalog.db.companion_pairing.recipe_snapshot_values(catalog.jpeg)
+    local_masks.prepare_snapshot_transfer(catalog.root, catalog.jpeg, catalog.raw, values)
+    for recipe in catalog.recipes:
+        os.utime(_path(catalog, catalog.raw, recipe), (1, 1))
+    # Model a GC pass that read the reference set before these edits were
+    # saved, then resumed its filesystem sweep after preparation reused an
+    # old destination. Its grace-window check must protect the new owner.
+    monkeypatch.setattr(local_masks, "_referenced_refs", lambda _: set())
+    local_masks.prepare_snapshot_transfer(catalog.root, catalog.jpeg, catalog.raw, values)
+    local_masks.gc_edit_masks(catalog.db, catalog.root)
+    _assert_masks(catalog, catalog.raw)
+
+
 def test_cleanup_retains_source_if_prepared_copy_disappears(catalog):
     values = catalog.db.companion_pairing.recipe_snapshot_values(catalog.jpeg)
     refs = local_masks.prepare_snapshot_transfer(catalog.root, catalog.jpeg, catalog.raw, values)

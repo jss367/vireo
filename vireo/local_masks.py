@@ -390,6 +390,10 @@ def _copy_snapshot_for_transfer(vireo_dir, old_photo_id, new_photo_id, ref):
     try:
         with open(dest, "rb") as stream:
             if stream.read() == data:
+                # A GC pass may have captured its reference set before
+                # the recipe was saved. Renew the grace period even on
+                # retry, just as _publish_snapshot does for reused masks.
+                os.utime(dest, None)
                 return
     except FileNotFoundError:
         pass
