@@ -21,6 +21,14 @@ log = logging.getLogger("jobs")
 INTERRUPTED_BY_RESTART = "Interrupted by Vireo restart"
 
 
+class JobHistoryUnavailable(RuntimeError):
+    """The ``job_history`` rows could not be read from the catalog.
+
+    Raised instead of returning ``[]``: an empty list reads as "no jobs have
+    run", which is not what happened. The message is user-facing.
+    """
+
+
 def _load_json(blob):
     """Decode a job_history JSON column, tolerating NULL and junk."""
     if not blob or not isinstance(blob, str):
@@ -418,6 +426,9 @@ class JobHistory:
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
+
+        Raises:
+            JobHistoryUnavailable: the rows could not be read.
         """
         try:
             ws_id = db.active_workspace_id
@@ -435,6 +446,12 @@ class JobHistory:
                 attach_result_text(d)
                 result.append(d)
             return result
-        except Exception:  # broad: history rows hold arbitrary stored JSON; the Jobs page gets an empty list rather than a 500
+        except sqlite3.Error as exc:
+            # Stored JSON is already tolerated per field above, and describer
+            # bugs fall back to the generic summary in ``describe_result``; a
+            # failure here is the catalog itself (locked, corrupt, missing
+            # table). Say so rather than answering "no jobs have run".
             log.warning("Could not read job history", exc_info=True)
-            return []
+            raise JobHistoryUnavailable(
+                f"Vireo could not read the job history from its catalog ({exc})."
+            ) from exc
