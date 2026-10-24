@@ -1223,7 +1223,7 @@ def sync_from_xmp(db, photo_ids):
             db.scanning.set_xmp_mtime(photo_id, xmp_mtime)
             if owns_transaction:
                 db.commit()
-        except Exception:
+        except Exception:  # broad: roll back only our transaction, then propagate every reconciliation error
             if owns_transaction:
                 db.rollback()
             raise
