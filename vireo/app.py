@@ -2302,6 +2302,7 @@ _V1_ALIASES = [
     ("/api/v1/folders/<int:folder_id>/bursts", "folders.api_folder_bursts", ["GET"]),
     # Preview or confirm species keyword changes on an encounter transition.
     ("/api/v1/encounters/species", "encounters.api_encounter_species", ["POST"]),
+    ("/api/v1/encounters/species/bulk", "encounters.api_encounter_species_bulk", ["POST"]),
 ]
 
 

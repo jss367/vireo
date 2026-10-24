@@ -268,7 +268,7 @@ def record_species_confirm_cache(
     db: Database, *, species: str, target_enc: JsonDict | None, burst_index: int | None,
     submitted_photo_ids: Sequence[int], new_override: object = None,
     new_encounter_state: JsonDict | None = None, description: str | None = None,
-) -> None:
+) -> int | None:
     """Record an ``/api/encounters/species`` call that only wrote the cache.
 
     When every submitted photo already carries the requested species keyword,
@@ -333,7 +333,7 @@ def record_species_confirm_cache(
             description = (
                 f'Confirmed species "{species}" on {len(submitted_photo_ids)} photos'
             )
-    db.record_edit(
+    return db.record_edit(
         "species_confirm_cache", description, new_value, [],
         is_batch=False, _commit=False,
     )

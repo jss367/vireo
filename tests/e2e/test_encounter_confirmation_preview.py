@@ -55,8 +55,15 @@ def test_reviewer_narrows_transition_and_preserves_other_subject_species(live_se
     expect(preview.locator('tbody tr').nth(0)).to_contain_text('Excluded; no changes')
     preview.locator('.species-preview-split').check()
     expect(preview.locator('.species-preview-apply')).to_be_enabled()
-    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')):
+    requests = []
+    page.on('request', lambda request: requests.append(request.url))
+    with page.expect_response(lambda response: '/api/encounters/species' in response.url and not response.request.post_data_json.get('preview')) as response:
         preview.locator('.species-preview-apply').click()
+    result = response.value.json()
+    assert response.value.request.post_data_json['response_mode'] == 'compact'
+    assert result['response_mode'] == 'compact'
+    assert 'encounters' not in result
+    assert len(result['encounter_changes']['upserts']) == 2
     expect(preview).to_have_count(0)
     expect(page.locator('.encounter-card')).to_have_count(2)
     db = live_server['db']
@@ -65,6 +72,7 @@ def test_reviewer_narrows_transition_and_preserves_other_subject_species(live_se
     assert {s.lower() for s in species[ids[1]]} == {new.lower(), other.lower()}
     assert [s.lower() for s in species[ids[2]]] == [new.lower()]
     assert db.photos.get(ids[1])['flag'] == 'flagged'
+    assert not any('/api/pipeline/page-init' in url or '/api/pipeline/save-cache' in url for url in requests)
 
 
 def test_preview_cancel_and_stale_revalidation_do_not_apply(live_server, page):
