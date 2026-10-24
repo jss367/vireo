@@ -3,7 +3,7 @@
  * Older Vireo downloads landed here before being copied into the models
  * folder, so each model took its size twice; downloads now skip the cache.
  * Settings only ever shows the models folder. This modal lists the cache per
- * model, says which entries duplicate an installed model, and removes them. Depends on storageFormatBytes / storageEscapeHtml and
+ * model, identifies existing model folders, and removes entries. Depends on storageFormatBytes / storageEscapeHtml and
  * safeFetch (navbar), and on loadStoragePanel to refresh the cards.
  */
 /** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
@@ -16,7 +16,7 @@ function hfCacheCardNote(hf) {
   }
   if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained cache payloads';
   return hf.installed_size
-    ? storageFormatBytes(hf.installed_size) + ' duplicates installed models'
+    ? storageFormatBytes(hf.installed_size) + ' cached for existing model folders'
     : 'No removable payloads';
 }
 
@@ -75,9 +75,9 @@ function _hfCacheRow(entry) {
   meta.appendChild(files);
   var tag = document.createElement('span');
   tag.className = 'stat-kind ' + (entry.removable === false ? 'keep' : 'safe');
-  tag.textContent = entry.installed ? 'Duplicate of installed model' : 'No installed model uses this';
+  tag.textContent = entry.installed ? 'Model folder exists' : 'No installed model uses this';
   if (entry.installed && entry.install_path) {
-    tag.title = 'Vireo reads only its own copy at ' + entry.install_path + ', so removing this frees its full size.';
+    tag.title = 'Model folder: ' + entry.install_path + '. It may be incomplete; removing this cache can require downloading missing files again.';
   }
   meta.appendChild(tag);
   label.appendChild(meta);

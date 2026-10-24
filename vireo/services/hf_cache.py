@@ -6,10 +6,10 @@ unavailable) and then byte-copy it into ``~/.vireo/models``, so each model
 took its size twice. Downloads now write straight into ``~/.vireo/models``
 (``hub_download.fetch_hub_file``) and add nothing here, but the entries older
 downloads left stay until removed. The runtime only ever reads
-``~/.vireo/models``, so every entry is a removable duplicate: one for an
-installed model only spares the network if that model is downloaded again,
-and one for a removed or superseded model is dead weight that Settings never
-shows (Settings reads only the install folder).
+``~/.vireo/models``. An entry for a complete install duplicates its files;
+one for an incomplete install can spare the network during repair. Entries
+for removed or superseded models are dead weight that Settings never shows
+(Settings reads only the install folder).
 
 ``inventory`` lists the cache per model with that distinction, ``remove``
 deletes chosen entries, and ``purge_model`` / ``purge_subfolder`` are the
