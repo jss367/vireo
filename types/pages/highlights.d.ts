@@ -7,6 +7,10 @@ interface HighlightsPhoto {
   has_accepted_species?: boolean; is_confirmable_prediction?: boolean;
   is_species_representative?: boolean; is_highlighted?: boolean; highlight_rank?: number | null;
   timestamp?: string | null; is_analyzed?: boolean;
+  /** The bucket this entry belongs to; a two-species photo has one entry per bucket. */
+  bucket_species?: string | null;
+  /** Every species the photo carries as a keyword, whichever bucket this entry is in. */
+  confirmed_species_list?: string[];
   [key: string]: unknown;
 }
 /** A species bucket or the unidentified section: the photos loaded so far. */

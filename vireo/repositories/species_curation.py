@@ -342,13 +342,21 @@ class SpeciesCurationRepository:
         single photo so the photo-detail endpoint can compute its highlight
         eligibility without rebuilding every workspace bucket.
 
-        Each row carries:
-          * ``species`` — accepted species keyword (NULL if none accepted)
-          * ``prediction_id`` / ``predicted_species`` /
-            ``predicted_confidence`` — top-confidence non-rejected prediction
-            across the photo's detections (NULL if no usable prediction
-            exists). Real detections use the workspace's detector floor;
-            full-image anchors remain eligible. Accepted keywords are unaffected.
+        Each row is a dict that carries every species the photo holds:
+
+          * ``species_names`` — the photo's accepted species keywords, most
+            recently tagged first (empty if none accepted)
+          * ``subject_predictions`` — one entry per detection: that
+            detection's top-confidence non-rejected prediction from its
+            latest label set (``detection_id``, ``prediction_id``,
+            ``species``, ``confidence``), highest confidence first. Real
+            detections use the workspace's detector floor; full-image anchors
+            remain eligible. Accepted keywords are unaffected.
+
+        and, for callers that only want one species per photo, the primary
+        of each: ``species`` (the most recent accepted keyword, NULL if
+        none) and ``prediction_id`` / ``predicted_species`` /
+        ``predicted_confidence`` (the top subject prediction, NULL if none).
 
         Photos with ``quality_score >= min_quality`` that are not
         user-rejected are returned. When ``min_quality <= 0`` (the default),
@@ -371,42 +379,47 @@ class SpeciesCurationRepository:
         if photo_id is None:
             photo_filter = ""
             photo_params = ()
-            bp_filter = ""
-            bp_params = ()
-            tp_filter = ""
-            tp_params = ()
-            kw_filter = ""
-            kw_params = ()
         else:
             photo_filter = "AND p.id = ?"
             photo_params = (photo_id,)
-            # Push the single-photo predicate into every derived subquery so
-            # SQLite never materializes workspace-wide keyword/prediction
-            # aggregations just to discard them at the outer join.
-            bp_filter = "AND pk.photo_id = ?"
-            bp_params = (photo_id,)
-            tp_filter = "AND d.photo_id = ?"
-            tp_params = (photo_id,)
-            kw_filter = "WHERE pk.photo_id = ?"
-            kw_params = (photo_id,)
-        return self._highlight_candidate_rows(
-            ws, min_quality, folder_filter, folder_params,
-            (
-                photo_filter, photo_params, bp_filter, bp_params,
-                tp_filter, tp_params, kw_filter, kw_params,
-            ),
+        scope_sql = f"""SELECT p.id
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ?
+                 {folder_filter}
+                 {photo_filter}
+                 AND (p.quality_score >= ?
+                      OR (? <= 0 AND p.quality_score IS NULL))
+                 AND (p.flag IS NULL OR p.flag != 'rejected')"""
+        scope_params = (
+            ws, *folder_params, *photo_params, min_quality, min_quality,
         )
+        rows = [
+            dict(row) for row in
+            self._highlight_candidate_rows(scope_sql, scope_params)
+        ]
+        species_names = self._highlight_species_names(scope_sql, scope_params)
+        subjects = self._highlight_subject_predictions(
+            ws, scope_sql, scope_params,
+        )
+        for row in rows:
+            names = species_names.get(row["id"], [])
+            preds = subjects.get(row["id"], [])
+            row["species_names"] = names
+            row["subject_predictions"] = preds
+            row["species"] = names[0] if names else None
+            top = preds[0] if preds else None
+            row["prediction_id"] = top["prediction_id"] if top else None
+            row["predicted_species"] = top["species"] if top else None
+            row["predicted_confidence"] = top["confidence"] if top else None
+        return rows
 
-    def _highlight_candidate_rows(
-        self, ws, min_quality, folder_filter, folder_params, photo_filters,
-    ):
-        """Run the ``get_highlights_candidates`` query over a resolved scope."""
-        (
-            photo_filter, photo_params, bp_filter, bp_params,
-            tp_filter, tp_params, kw_filter, kw_params,
-        ) = photo_filters
+    def _highlight_candidate_rows(self, scope_sql, scope_params):
+        """The photo columns of ``get_highlights_candidates`` over its scope."""
         return self.conn.execute(
-            f"""SELECT p.id, p.folder_id, p.filename, p.extension,
+            f"""WITH scope AS ({scope_sql})
+               SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       f.name AS folder_name, f.path AS folder_path,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
@@ -417,86 +430,83 @@ class SpeciesCurationRepository:
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
                       p.dino_subject_embedding, p.dino_global_embedding,
-                      bp.species,
-                      tp.prediction_id,
-                      tp.predicted_species,
-                      tp.predicted_confidence,
                       kw.keyword_names
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               LEFT JOIN (
-                   SELECT photo_id, name AS species FROM (
-                       SELECT pk.photo_id, k.name,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY pk.photo_id
-                                  ORDER BY pk.rowid DESC
-                              ) AS rn
-                       FROM photo_keywords pk
-                       JOIN keywords k ON k.id = pk.keyword_id
-                       LEFT JOIN taxa t ON t.id = k.taxon_id
-                       WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                         AND (t.rank = 'species' OR t.rank IS NULL)
-                         {bp_filter}
-                   ) WHERE rn = 1
-               ) bp ON bp.photo_id = p.id
-               LEFT JOIN (
-                   SELECT photo_id,
-                          id AS prediction_id,
-                          species AS predicted_species,
-                          confidence AS predicted_confidence
-                   FROM (
-                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY d.photo_id
-                                  ORDER BY pr.confidence DESC, pr.id DESC
-                              ) AS rn
-                       FROM detections d
-                       JOIN predictions pr ON pr.detection_id = d.id
-                       LEFT JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id
-                        AND pr_rev.workspace_id = ?
-                       WHERE (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
-                         AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                         AND pr.labels_fingerprint = (
-                             SELECT pr2.labels_fingerprint FROM predictions pr2
-                             WHERE pr2.detection_id = pr.detection_id
-                               AND pr2.classifier_model = pr.classifier_model
-                             ORDER BY pr2.created_at DESC, pr2.id DESC
-                             LIMIT 1
-                         )
-                         {tp_filter}
-                   ) WHERE rn = 1
-               ) tp ON tp.photo_id = p.id
+               FROM scope
+               JOIN photos p ON p.id = scope.id
+               JOIN folders f ON f.id = p.folder_id
                LEFT JOIN (
                    SELECT pk.photo_id,
                           group_concat(DISTINCT k.name) AS keyword_names
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
-                   {kw_filter}
+                   WHERE pk.photo_id IN (SELECT id FROM scope)
                    GROUP BY pk.photo_id
                ) kw ON kw.photo_id = p.id
-               WHERE wf.workspace_id = ?
-                 {folder_filter}
-                 {photo_filter}
-                 AND (p.quality_score >= ?
-                      OR (? <= 0 AND p.quality_score IS NULL))
-                 AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (
-                *bp_params,
-                ws,
-                self._detector_floor(),
-                *tp_params,
-                *kw_params,
-                ws,
-                *folder_params,
-                *photo_params,
-                min_quality,
-                min_quality,
-            ),
+            scope_params,
         ).fetchall()
+
+    def _highlight_species_names(self, scope_sql, scope_params):
+        """``{photo_id: [name, ...]}``: each scoped photo's species-rank
+        keywords, most recently tagged first."""
+        names = {}
+        for row in self.conn.execute(
+            f"""WITH scope AS ({scope_sql})
+               SELECT pk.photo_id, k.name
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE pk.photo_id IN (SELECT id FROM scope)
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+                 AND (t.rank = 'species' OR t.rank IS NULL)
+               ORDER BY pk.photo_id, pk.rowid DESC""",
+            scope_params,
+        ):
+            names.setdefault(row["photo_id"], []).append(row["name"])
+        return names
+
+    def _highlight_subject_predictions(self, ws, scope_sql, scope_params):
+        """``{photo_id: [subject, ...]}``: each scoped photo's detections'
+        top non-rejected prediction, highest confidence first."""
+        subjects = {}
+        for row in self.conn.execute(
+            f"""WITH scope AS ({scope_sql})
+               SELECT photo_id, detection_id, id AS prediction_id, species,
+                      confidence
+               FROM (
+                   SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
+                          pr.confidence,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY d.id
+                              ORDER BY pr.confidence DESC, pr.id DESC
+                          ) AS rn
+                   FROM detections d
+                   JOIN predictions pr ON pr.detection_id = d.id
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id
+                    AND pr_rev.workspace_id = ?
+                   WHERE d.photo_id IN (SELECT id FROM scope)
+                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                     AND pr.species IS NOT NULL
+                     AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                     AND pr.labels_fingerprint = (
+                         SELECT pr2.labels_fingerprint FROM predictions pr2
+                         WHERE pr2.detection_id = pr.detection_id
+                           AND pr2.classifier_model = pr.classifier_model
+                         ORDER BY pr2.created_at DESC, pr2.id DESC
+                         LIMIT 1
+                     )
+               ) WHERE rn = 1
+               ORDER BY photo_id, confidence DESC, id DESC""",
+            (*scope_params, ws, self._detector_floor()),
+        ):
+            subjects.setdefault(row["photo_id"], []).append({
+                "detection_id": row["detection_id"],
+                "prediction_id": row["prediction_id"],
+                "species": row["species"],
+                "confidence": row["confidence"],
+            })
+        return subjects
 
     def get_life_list_candidates(self, species=None):
         """Return (photo x accepted-identification-keyword) life-list rows.

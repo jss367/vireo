@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 from db import text_search_match
+from keyword_normalization import keyword_match_key
 from photo_payload import attach_edit_recipes
 
 
@@ -431,12 +432,103 @@ def species_canonicalizer(db):
     return canonicalize
 
 
+@dataclass(frozen=True)
+class HighlightMembership:
+    """One species bucket a candidate photo belongs to.
+
+    ``accepted_name`` is the stored keyword name when the photo carries the
+    species as a keyword (None for an unconfirmed prediction), and
+    ``prediction`` the subject prediction behind the bucket, if any.
+    """
+
+    species: str
+    accepted_name: str | None
+    prediction: dict | None
+
+
+def _candidate_subjects(row):
+    """The row's per-detection top predictions, highest confidence first.
+
+    Rows built without ``subject_predictions`` (older callers, hand-made
+    test rows) fall back to their single top prediction.
+    """
+    subjects = row.get("subject_predictions")
+    if subjects is not None:
+        return [s for s in subjects if s.get("species")]
+    if not row.get("predicted_species"):
+        return []
+    return [{
+        "detection_id": None,
+        "prediction_id": row.get("prediction_id"),
+        "species": row["predicted_species"],
+        "confidence": row.get("predicted_confidence"),
+    }]
+
+
+def photo_species_memberships(
+    row, canonicalize_species=None, confidence_threshold=0.0,
+):
+    """Every species bucket one ``get_highlights_candidates`` row joins.
+
+    A photo joins the bucket of each species keyword it carries (confirmed),
+    and of each subject's top prediction at or above
+    ``confidence_threshold`` that names a species it does not carry yet
+    (unconfirmed). A photo whose keywords match none of its subjects'
+    predictions is one the user has already identified against the model,
+    so its predictions open no bucket, the same rule ID Conflicts uses for an
+    "additional species": a subject only suggests a second species when
+    another subject accounts for the keyword.
+    """
+    def canonical(name):
+        if canonicalize_species is None:
+            return name
+        return canonicalize_species(name) or name
+
+    names = row.get("species_names")
+    if names is None:
+        names = [row["species"]] if row.get("species") else []
+    memberships = []
+    accepted_keys = set()
+    subjects = [
+        (keyword_match_key(canonical(s["species"])), canonical(s["species"]), s)
+        for s in _candidate_subjects(row)
+    ]
+    best_by_key = {}
+    for key, _bucket, subject in subjects:
+        best_by_key.setdefault(key, subject)
+    top = subjects[0][2] if subjects else None
+    for name in names:
+        bucket = canonical(name)
+        key = keyword_match_key(bucket)
+        if key in accepted_keys:
+            continue
+        accepted_keys.add(key)
+        memberships.append(HighlightMembership(
+            bucket, name, best_by_key.get(key) or top,
+        ))
+    if accepted_keys and not any(key in accepted_keys for key, _, _ in subjects):
+        return memberships
+    seen = set(accepted_keys)
+    for key, bucket, subject in subjects:
+        confidence = subject.get("confidence")
+        if key in seen or confidence is None or confidence < confidence_threshold:
+            continue
+        seen.add(key)
+        memberships.append(HighlightMembership(bucket, None, subject))
+    return memberships
+
+
 def collect_highlight_buckets(
     candidates,
     confidence_threshold,
     confirmation_filter="all",
     canonicalize_species=None,
 ):
+    """Group candidate rows into species buckets plus the unidentified photos.
+
+    A photo with two species appears in both buckets, as a separate entry
+    each, so each bucket's scores, ranks and confirm state are its own.
+    """
     confirmation_filter = normalize_highlight_confirmation_filter(
         confirmation_filter
     )
@@ -445,48 +537,33 @@ def collect_highlight_buckets(
 
     for row in candidates:
         r = dict(row)
-        accepted = r.get("species")
-        if confirmation_filter == "confirmed" and accepted is None:
-            continue
-        if confirmation_filter == "unconfirmed" and accepted is not None:
-            continue
-        predicted_conf = r.get("predicted_confidence")
-        if accepted:
-            species = accepted
-            if canonicalize_species is not None:
-                species = canonicalize_species(species) or species
-            is_accepted = True
-        elif (
-            r.get("predicted_species")
-            and predicted_conf is not None
-            and predicted_conf >= confidence_threshold
-        ):
-            # Prediction labels are external vocabulary (classifier label
-            # files) with their own casing. Bucket by the spelling
-            # add_keyword would store so a predicted `Common Waxbill` and
-            # photos already accepted as `Common waxbill` land in ONE
-            # bucket, and so curation written from this bucket's label keys
-            # on the string the keyword row and eligibility queries use.
-            species = r["predicted_species"]
-            if canonicalize_species is not None:
-                species = canonicalize_species(species) or species
-            is_accepted = False
-        else:
-            species = None
-            is_accepted = False
-
-        photo = _highlight_candidate_photo(
-            r, accepted, species, is_accepted, predicted_conf,
+        memberships = photo_species_memberships(
+            r, canonicalize_species, confidence_threshold,
         )
-
-        if species is None:
-            unidentified_photos.append(photo)
-        else:
+        confirmed = [m.species for m in memberships if m.accepted_name]
+        if not memberships:
+            if confirmation_filter != "confirmed":
+                subjects = _candidate_subjects(r)
+                unidentified_photos.append(_highlight_candidate_photo(
+                    r, HighlightMembership(
+                        None, None, subjects[0] if subjects else None,
+                    ),
+                    confirmed,
+                ))
+            continue
+        for membership in memberships:
+            is_accepted = membership.accepted_name is not None
+            if confirmation_filter == "confirmed" and not is_accepted:
+                continue
+            if confirmation_filter == "unconfirmed" and is_accepted:
+                continue
             entry = bucket_map.setdefault(
-                species, {"is_accepted": True, "photos": []}
+                membership.species, {"is_accepted": True, "photos": []}
             )
             entry["is_accepted"] = entry["is_accepted"] and is_accepted
-            entry["photos"].append(photo)
+            entry["photos"].append(
+                _highlight_candidate_photo(r, membership, confirmed)
+            )
 
     buckets = []
     for species, entry in bucket_map.items():
@@ -504,8 +581,16 @@ def collect_highlight_buckets(
     return buckets, unidentified_photos
 
 
-def _highlight_candidate_photo(r, accepted, species, is_accepted, predicted_conf):
-    """The Highlights photo entry for one candidate row."""
+def _highlight_candidate_photo(r, membership, confirmed_species):
+    """The Highlights photo entry for one candidate row in one bucket.
+
+    ``confirmed_species`` lists every species the photo carries as a
+    keyword, so an entry in one species' bucket can say what else the
+    photo is already tagged with.
+    """
+    accepted = membership.accepted_name
+    species = membership.species
+    prediction = membership.prediction or {}
     return {
         "id": r["id"],
         "filename": r["filename"],
@@ -531,16 +616,18 @@ def _highlight_candidate_photo(r, accepted, species, is_accepted, predicted_conf
         "noise_estimate": r.get("noise_estimate"),
         "eye_tenengrad": r.get("eye_tenengrad"),
         "species": accepted,
-        "canonical_species": species if is_accepted else None,
-        "prediction_id": r.get("prediction_id"),
-        "predicted_species": r.get("predicted_species"),
-        "predicted_confidence": predicted_conf,
+        "canonical_species": species if accepted is not None else None,
+        "bucket_species": species,
+        "confirmed_species_list": list(confirmed_species),
+        "prediction_id": prediction.get("prediction_id"),
+        "predicted_species": prediction.get("species"),
+        "predicted_confidence": prediction.get("confidence"),
         "has_accepted_species": accepted is not None,
         "is_unidentified": species is None,
         "is_confirmable_prediction": (
             accepted is None
             and species is not None
-            and r.get("prediction_id") is not None
+            and prediction.get("prediction_id") is not None
         ),
     }
 
@@ -824,8 +911,10 @@ def build_highlights_payload(db, query=None):
         candidates, query.confidence_threshold, confirmation_filter,
         canonicalize_species=species_canonicalizer(db),
     )
-    eligible_count = sum(b["photo_count"] for b in buckets) + len(
-        unidentified_photos
+    # Distinct photos: a two-species photo sits in two buckets.
+    eligible_count = len(
+        {p["id"] for b in buckets for p in b["photos"]}
+        | {p["id"] for p in unidentified_photos}
     )
     buckets, unidentified_photos = _filter_highlights_by_species(
         buckets, unidentified_photos, species_filter, query.species.match_case,

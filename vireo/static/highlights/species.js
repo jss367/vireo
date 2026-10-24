@@ -32,19 +32,31 @@ export async function unidPhotoIds() {
     .map(function(p) { return p.id; });
 }
 
+/**
+ * The species the photo is tagged with besides the one this entry's bucket
+ * shows. @param {HighlightsPhoto | null | undefined} photo @returns {string[]}
+ */
+export function otherTaggedSpecies(photo) {
+  if (!photo) return [];
+  var bucket = photo.bucket_species || null;
+  return (photo.confirmed_species_list || []).filter(function(name) { return name !== bucket; });
+}
+
 /** @param {HighlightsPhoto | null | undefined} photo */
 export function photoCurrentLabel(photo) {
   if (!photo) return '';
+  var others = otherTaggedSpecies(photo);
+  var also = others.length ? ' · also tagged ' + others.join(', ') : '';
   if (photo.has_accepted_species && photo.species) {
-    return 'Keyword confirmed: ' + photo.species;
+    return 'Keyword confirmed: ' + photo.species + also;
   }
   if (photo.predicted_species) {
     var conf = photo.predicted_confidence != null
       ? ' (' + Math.round(photo.predicted_confidence * 100) + '%)'
       : '';
-    return 'Predicted: ' + photo.predicted_species + conf;
+    return 'Predicted: ' + photo.predicted_species + conf + also;
   }
-  return 'Unidentified';
+  return 'Unidentified' + also;
 }
 
 /** @param {HighlightsPhoto | null | undefined} photo @returns {string} */
@@ -55,15 +67,19 @@ export function photoSpeciesName(photo) {
   return '';
 }
 
-/** @param {number[]} photoIds @param {HTMLButtonElement | null | undefined} button */
-export async function confirmPhotoIds(photoIds, button) {
-  if (!photoIds.length) return;
+/**
+ * Confirm ``species`` (the bucket the user confirmed from) on each photo, so
+ * a photo already tagged with another species gains this one too.
+ * @param {number[]} photoIds @param {string} species @param {HTMLButtonElement | null | undefined} button
+ */
+export async function confirmPhotoIds(photoIds, species, button) {
+  if (!photoIds.length || !species) return;
   if (button) button.disabled = true;
   try {
     await safeFetch('/api/highlights/confirm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ photo_ids: photoIds }),
+      body: JSON.stringify({ photo_ids: photoIds, species: species }),
     });
     await loadHighlights();
     if (typeof showToast === 'function') showToast('Species keyword confirmed', 'success');
@@ -93,9 +109,15 @@ export async function loadSpeciesSuggestions() {
   }
 }
 
-/** @param {string} title @param {string} summary @param {number[]} photoIds @param {string} initialSpecies */
-export function showSpeciesModal(title, summary, photoIds, initialSpecies) {
+/**
+ * ``fromSpecies`` is the bucket being changed: only that species is replaced
+ * on a photo that carries others. Null sets the photos' species outright.
+ * @param {string} title @param {string} summary @param {number[]} photoIds @param {string} initialSpecies
+ * @param {string | null} fromSpecies
+ */
+export function showSpeciesModal(title, summary, photoIds, initialSpecies, fromSpecies) {
   state.speciesModalPhotoIds = photoIds.slice();
+  state.speciesModalFromSpecies = fromSpecies || null;
   /** @type {HTMLElement} */ (document.getElementById('speciesModalTitle')).textContent = title;
   /** @type {HTMLElement} */ (document.getElementById('speciesModalSummary')).textContent = summary;
   var input = /** @type {HTMLInputElement} */ (document.getElementById('speciesModalInput'));
@@ -108,6 +130,7 @@ export function showSpeciesModal(title, summary, photoIds, initialSpecies) {
 export function closeSpeciesModal() {
   /** @type {HTMLElement} */ (document.getElementById('speciesModal')).classList.remove('open');
   state.speciesModalPhotoIds = [];
+  state.speciesModalFromSpecies = null;
 }
 
 export async function submitSpeciesModal() {
@@ -120,7 +143,10 @@ export async function submitSpeciesModal() {
     await safeFetch('/api/highlights/relabel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ photo_ids: state.speciesModalPhotoIds, species: species }),
+      body: JSON.stringify(Object.assign(
+        { photo_ids: state.speciesModalPhotoIds, species: species },
+        state.speciesModalFromSpecies ? { from_species: state.speciesModalFromSpecies } : {}
+      )),
     });
     closeSpeciesModal();
     await loadHighlights();

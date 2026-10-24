@@ -5,7 +5,7 @@
 
 import { advanceHighlightLightboxAfterReject, showHighlightUndo } from './lightbox.js';
 import { loadHighlights } from './loading.js';
-import { findHighlightPhoto, findHighlightPhotoWithContainer, refetchBucketFromZero } from './ordering.js';
+import { findAllHighlightPhotoContainers, findHighlightPhoto, refetchBucketFromZero } from './ordering.js';
 import { curationFilterAffectedByReject, removeRejectedPhotoFromModel } from './rejects.js';
 import { render } from './render.js';
 import { state } from './state.js';
@@ -59,8 +59,8 @@ export function onHighlightFlagChanged(e) {
     var next = detail.flag || 'none';
     if (prev === next) return;
     if (prev !== 'flagged' && next !== 'flagged') return;
-    var hit = findHighlightPhotoWithContainer(detail.photoId);
-    if (!hit) {
+    var hits = findAllHighlightPhotoContainers(detail.photoId);
+    if (!hits.length) {
       // Eviction path: a prior unpick's refetchBucketFromZero can drop a
       // photo out of the loaded window when it was only visible because
       // picked_first promoted it. If the lightbox is still open on that
@@ -75,16 +75,20 @@ export function onHighlightFlagChanged(e) {
     // photo.flag between now and the refetch resolving (e.g. the still-open
     // lightbox controls) reflects the new pick state; the refetch then
     // replaces the bucket's photo array with the server-authoritative order.
-    hit.photo.flag = next;
-    var isUnidentified = hit.bucket === null;
-    var target = isUnidentified ? /** @type {HighlightsData} */ (state.currentData).unidentified : hit.bucket;
-    if (!target) { render(); return; }
-    // Render after the authoritative refetch settles so the Pick badge/outline
+    // A photo with two species sits in two buckets; refetch each so both
+    // rows show the pick and their server order.
+    var refetches = hits.map(function(hit) {
+      hit.photo.flag = next;
+      var isUnidentified = hit.bucket === null;
+      var target = isUnidentified ? /** @type {HighlightsData} */ (state.currentData).unidentified : hit.bucket;
+      return target ? refetchBucketFromZero(target, isUnidentified) : Promise.resolve(true);
+    });
+    // Render after the authoritative refetches settle so the Pick badge/outline
     // and the bucket ordering become visible together. Rendering before the
     // refetch exposes a transient stale order: tests and collection saves can
     // observe the picked class while the photo is still in its old position.
-    refetchBucketFromZero(target, isUnidentified)
-      .then(function(applied) { if (applied) render(); })
+    Promise.all(refetches)
+      .then(function(applied) { if (applied.some(Boolean)) render(); })
       .catch(function() { render(); });
   }
 }
