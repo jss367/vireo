@@ -198,9 +198,13 @@ def test_history_replays_after_reopening_catalog(app_and_db):
 def test_same_named_distinct_species_do_not_share_evidence(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    first = db.add_keyword('Robin', is_species=True)
-    # SQLite's taxonomy and general roots can coexist for distinct identities.
-    second = db.add_keyword('robin', kw_type='taxonomy')
+    # Imported homonyms may legitimately coexist; normal add canonicalizes names.
+    first = db.conn.execute(
+        "INSERT INTO keywords(name, is_species, type) VALUES ('Robin', 1, 'general')"
+    ).lastrowid
+    second = db.conn.execute(
+        "INSERT INTO keywords(name, is_species, type) VALUES ('robin', 1, 'taxonomy')"
+    ).lastrowid
     db.conn.execute("INSERT INTO taxa(id, name, rank) VALUES (101, 'First robin', 'species')")
     db.conn.execute("INSERT INTO taxa(id, name, rank) VALUES (102, 'Other robin', 'species')")
     db.conn.execute('UPDATE keywords SET taxon_id=101 WHERE id=?', (first,))
