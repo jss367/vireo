@@ -12,7 +12,7 @@ import os
 
 import pytest
 from PIL import Image
-from test_import_job import _run_import, _stub_extractor
+from test_import_job import FakeRunner, _run_import, _stub_extractor
 
 
 def _raw_card(tmp_path, names):
@@ -39,8 +39,18 @@ def test_per_photo_failures_are_named_and_explained(tmp_path, monkeypatch):
     _stub_extractor(monkeypatch, lambda src: not src.endswith("DSC_0002.NEF"))
     card = _raw_card(tmp_path, ["DSC_0001.NEF", "DSC_0002.NEF"])
 
-    db, _ws, result = _run_import(tmp_path, _params(tmp_path, card))
+    runner = FakeRunner()
+    db, _ws, result = _run_import(tmp_path, _params(tmp_path, card), runner=runner)
 
+    # The Jobs page lists the import under its step summary.
+    import_summaries = [
+        kw["summary"] for _job, step, kw in runner.step_updates
+        if step == "import" and "summary" in kw
+    ]
+    assert import_summaries[-1] == (
+        "2 copied, 0 already present, 0 failed of 2 discovered, "
+        "1 photo without a working copy"
+    )
     assert result["copied"] == 2
     assert result["ok"] is True
     assert result["safe_to_format"] is True
@@ -153,3 +163,5 @@ def test_in_place_import_names_photos_without_a_working_copy(app_and_db, tmp_pat
     assert result["working_copy_notice"].startswith(
         "Vireo could not create a working copy for 1 photo."
     )
+    scan_step = next(step for step in job["steps"] if step["id"] == "scan")
+    assert scan_step["summary"] == "1 photos, 1 without a working copy"

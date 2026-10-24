@@ -1687,6 +1687,9 @@ class _InPlaceImportRun:
         snapshot_unreadable = self.snapshot_unreadable
         metadata_warning = scan_metadata_warning()
         summary = f"{indexed} photos"
+        if self.working_copy_failures:
+            n = len(self.working_copy_failures)
+            summary += f", {n:,} without a working copy"
         if metadata_warning:
             summary += f" — {metadata_warning}"
         snapshot_failures = (
