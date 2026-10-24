@@ -136,8 +136,9 @@ class EditHistoryRepository:
         edit_id = cur.lastrowid
         for item in items:
             self.conn.execute(
-                "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
-                (edit_id, item['photo_id'], item['old_value'], item['new_value']),
+                "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value, species_provenance) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (edit_id, item['photo_id'], item['old_value'], item['new_value'], item.get('species_provenance')),
             )
         if _commit:
             self.conn.commit()

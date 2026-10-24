@@ -562,6 +562,8 @@ def apply_grouping_photo_edit(
     db: Database, entry: HistoryEntry, items: Iterable[sqlite3.Row], *, undo: bool,
 ) -> None:
     """Replay the photo half of a grouping action without releasing its transaction."""
+    from services.species_provenance import replay_history
+    items = list(items)
     payload = json.loads(entry["new_value"])
     flag_items = payload.get("flag_items", []) if (payload.get("photo_edit") or {}).get("action_type") != "flag" else []
     for item in flag_items:
@@ -581,7 +583,10 @@ def apply_grouping_photo_edit(
             continue
         if action not in ("keyword_add", "species_replace"):
             raise ValueError("Unsupported photo edit in grouping history")
-        old_ids = db._edit_old_value_meta(item["old_value"]).get("keyword_ids") or []
+        old_meta = db._edit_old_value_meta(item["old_value"])
+        if old_meta.get("no_tag"):
+            continue
+        old_ids = old_meta.get("keyword_ids") or []
         new_ids = [int(item["new_value"])] if item["new_value"] else []
         remove_ids, add_ids = (new_ids, old_ids) if undo else (old_ids, new_ids)
         for kid in remove_ids:
@@ -594,3 +599,4 @@ def apply_grouping_photo_edit(
             name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_remove', name, _commit=False) == 0:
                 db.queue_change(pid, 'keyword_add', name, _commit=False)
+    replay_history(db, items, undo=undo)

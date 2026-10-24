@@ -30,6 +30,7 @@
       "POST /api/photos/<int:photo_id>/location",
       "POST /api/photos/<int:photo_id>/location/text",
       "POST /api/photos/<int:photo_id>/rating",
+      "POST /api/photos/<int:photo_id>/species/<int:keyword_id>/provenance",
       "POST /api/photos/<int:photo_id>/wildlife_excluded",
       "POST /api/photos/edit-recipe/apply",
       "POST /api/pipeline/detach-burst",

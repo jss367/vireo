@@ -109,6 +109,9 @@ def create_encounters_blueprint(get_db, json_error, db_path):
             cache_dir=os.path.dirname(db_path),
             save_results_raw=save_results_raw,
         )
+        error = confirmation.read_provenance(body)
+        if error is not None:
+            return error
         confirmation.load_cache(load_results_raw)
         error = confirmation.burst_error()
         if error is not None:
@@ -378,6 +381,8 @@ class _SpeciesConfirmation:
         self.old_rows_by_photo = {}
         self.had_old = set()
         self.photo_edit_id = None
+        self.provenance = None
+        self.attribution_only = []
 
         self.new_species_list = []
         self.cache_description = None
@@ -385,6 +390,16 @@ class _SpeciesConfirmation:
         self.new_burst_override = None
         self.will_auto_detach = False
         self.new_encounter_state = None
+
+    def read_provenance(self, body):
+        if 'provenance' not in body:
+            return None
+        from services.species_provenance import validate_provenance
+        try:
+            self.provenance = validate_provenance(self.db, self.photo_ids, body['provenance'])
+        except ValueError as exc:
+            return self.json_error(str(exc))
+        return None
 
     # -- request against the cache ----------------------------------
 
@@ -761,10 +776,20 @@ class _SpeciesConfirmation:
 
     def tag_new_species(self, ws_id):
         for pid in self.newly_tagged:
-            self.db.tag_photo(pid, self.kid, source="manual", _commit=False)
+            self.db.tag_photo(pid, self.kid, source="manual", _commit=False, provenance=self.provenance)
             queue_keyword_add(
                 self.db, pid, self.species, workspace_id=ws_id, _commit=False,
             )
+
+        if self.provenance is not None and not self.remove_mode:
+            from services.species_provenance import remember_before
+            # Equivalent hierarchy aliases must retain their actual keyword ID.
+            equivalent = self.db.photo_species.equivalent_assignment_ids(self.already_has_new, self.kid)
+            for pid, keyword_ids in equivalent.items():
+                for keyword_id in keyword_ids:
+                    remember_before(self.db, pid, keyword_id, force=True)
+                    self.db.species_provenance.set(pid, keyword_id, self.provenance)
+                self.attribution_only.append(pid)
 
     def record_photo_edit(self):
         """Record the keyword change in edit history for undo."""
@@ -778,6 +803,7 @@ class _SpeciesConfirmation:
                 pid for pid in self.photo_ids
                 if pid in self.had_old or pid in newly_set
             ]
+            changed = list(dict.fromkeys(changed + self.attribution_only))
             items = []
             for pid in changed:
                 old_ids = [
@@ -811,20 +837,26 @@ class _SpeciesConfirmation:
                 items,
                 is_batch=len(changed) > 1,
                 _commit=False,
+                source=(self.provenance or {}).get('reviewer'),
+                reason=(self.provenance or {}).get('reason'),
             )
-        elif self.newly_tagged:
+        elif self.newly_tagged or self.attribution_only:
             items = [
                 {"photo_id": pid, "old_value": "", "new_value": str(kid)}
                 for pid in self.newly_tagged
             ]
+            items.extend({"photo_id": pid, "old_value": '{"no_tag": true}', "new_value": str(kid)}
+                         for pid in self.attribution_only)
             self.photo_edit_id = self.db.record_edit(
                 "keyword_add",
                 f'Confirmed species "{self.species}" on '
-                f'{len(self.newly_tagged)} photos',
+                f'{len(items)} photos',
                 str(kid),
                 items,
-                is_batch=len(self.newly_tagged) > 1,
+                is_batch=len(items) > 1,
                 _commit=False,
+                source=(self.provenance or {}).get('reviewer'),
+                reason=(self.provenance or {}).get('reason'),
             )
 
     # -- pipeline cache (inside the transaction) ---------------------
@@ -966,6 +998,7 @@ class _SpeciesConfirmation:
         cache_only_write = (
             not (self.is_replacement and self.had_old)
             and not self.newly_tagged
+            and self.photo_edit_id is None
             and self.cached
             and self.target_enc is not None
         )

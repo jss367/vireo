@@ -212,6 +212,14 @@ def _add_collection_import_provenance(conn):
             conn.execute(f"ALTER TABLE collections ADD COLUMN {name} {definition}")
 
 
+def _add_species_provenance(conn):
+    """Leave historical labels unspecified; evidence is never backfilled."""
+    for table in ('photo_keywords', 'edit_history_items'):
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+        if 'species_provenance' not in columns:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN species_provenance TEXT')
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -240,6 +248,7 @@ MIGRATIONS = (
     Migration(22, "subject_ranking_analysis", create_subject_ranking_analysis),
     Migration(23, "collection_import_provenance", _add_collection_import_provenance),
     Migration(24, "identity_alternatives", create_identity_alternatives),
+    Migration(25, "species_assignment_provenance", _add_species_provenance),
 )
 
 

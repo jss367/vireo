@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from keyword_identity import resolve_import_alias
 from keyword_normalization import (
@@ -1018,6 +1018,7 @@ class Database:
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
         self._db_path = db_path
+        self._species_provenance_before: dict[tuple[int, int], dict[str, Any] | None] = {}
         # ``conn`` exists only while the connection is open: ``close`` deletes
         # it, so its type is the connection, never ``None``. ``close`` and
         # ``__del__`` tolerate its absence if ``sqlite3.connect`` raises.
@@ -1157,6 +1158,7 @@ class Database:
     def rollback(self):
         """Roll back the open transaction."""
         self.conn.rollback()
+        self._species_provenance_before = {}
 
     def commit_with_retry(self):
         """Commit like ``commit``, retrying while SQLite reports locked or busy.
@@ -4163,6 +4165,7 @@ class Database:
 
     def tag_photo(
         self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
+        *, provenance=None,
     ):
         """Associate a keyword with a photo.
 
@@ -4187,9 +4190,16 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        from services.species_provenance import remember_before
+        if provenance is not None:
+            remember_before(self, photo_id, keyword_id, force=True)
         self._keyword_provenance_repository().tag(
-            photo_id, keyword_id, source=source, _commit=_commit,
+            photo_id, keyword_id, source=source, _commit=False,
         )
+        if provenance is not None:
+            self.species_provenance.set(photo_id, keyword_id, provenance)
+        if _commit:
+            self.commit()
 
     def _meta_repository(self):
         """Build the (catalog-wide) db_meta repository on this connection."""
@@ -4269,6 +4279,12 @@ class Database:
         """
         return self._photo_metadata_repository()
 
+    @property
+    def species_provenance(self):
+        """Per-species assignment evidence, independent of photographer flags."""
+        from repositories.species_provenance import SpeciesProvenanceRepository
+        return SpeciesProvenanceRepository(self.conn)
+
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
 
@@ -4280,6 +4296,8 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        from services.species_provenance import remember_before
+        remember_before(self, photo_id, keyword_id)
         return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
@@ -5155,6 +5173,8 @@ class Database:
             source, reason: the edit's provenance when the caller stated it
                      (who decided, and why); None for the user's own clicks.
         """
+        from services.species_provenance import history_items
+        items = history_items(self, action_type, items)
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
             is_batch=is_batch, _commit=_commit, source=source, reason=reason,
@@ -5363,10 +5383,12 @@ class Database:
         self._apply_edit_items(entry, items, undo=False)
 
     def _apply_edit_items(self, entry, items, *, undo):
+        from services.species_provenance import replay_history
         action = entry['action_type']
         if action == 'identity_alternatives':
             from services.identity_alternatives import replay_identity_batch
             replay_identity_batch(self, items, undo=undo)
+            replay_history(self, items, undo=undo)
             return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
@@ -5379,8 +5401,13 @@ class Database:
                 setter(self, item['photo_id'], item[value_key])
             elif handler is not None:
                 handler(self, entry, item)
+        replay_history(self, items, undo=undo)
 
     # -- plain per-photo fields (same setter for undo and redo) ----------
+
+    def _edit_set_species_provenance(self, pid, value):
+        snapshot = json.loads(value)
+        self.species_provenance.restore(pid, snapshot['keyword_id'], snapshot['state'])
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
@@ -5529,7 +5556,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        skip_tag = old_meta.get('no_tag', False)
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
@@ -5570,7 +5597,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        skip_tag = old_meta.get('no_tag', False)
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
@@ -5721,6 +5748,7 @@ class Database:
         replay_identity_edit(self, item['photo_id'], item['old_value'], item['new_value'])
 
     _EDIT_FIELD_SETTERS = {
+        'species_provenance': _edit_set_species_provenance,
         'flag': _edit_set_flag,
         'wildlife_excluded': _edit_set_wildlife_excluded,
         'color_label': _edit_set_color_label,

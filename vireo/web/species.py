@@ -5,8 +5,10 @@ workspace; ``/api/species/search`` suggests names for hand-tagging from the
 active label sets plus existing species keywords.
 """
 
+import json
 import logging
 import os
+import sqlite3
 
 from db import text_search_match
 from flask import Blueprint, jsonify, request
@@ -22,6 +24,51 @@ def create_species_blueprint(get_db):
     are imported directly.
     """
     blueprint = Blueprint("species", __name__)
+
+    @blueprint.post("/api/photos/<int:photo_id>/species/<int:keyword_id>/provenance")
+    def api_species_provenance(photo_id, keyword_id):
+        """Update one existing assignment's evidence as an undoable decision."""
+        from services.species_provenance import validate_provenance
+        db = get_db()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "request body must be a JSON object"}), 400
+        # Serialize with label removal/replacement and keep evidence validation
+        # and the history snapshot in the same transaction.
+        if not all(0 < key < 2**63 for key in (photo_id, keyword_id)):
+            return jsonify({"error": "photo and keyword IDs must be positive signed 64-bit integers"}), 400
+        try:
+            db.begin_immediate()
+        except sqlite3.OperationalError:
+            return jsonify({"error": "Another review decision is in progress; try again"}), 503
+        try:
+            if not db.photos.get(photo_id, verify_workspace=True):
+                return jsonify({"error": "photo not found"}), 404
+            assignments = db.species_provenance.assignments(photo_id)
+            assignment = next((a for a in assignments if a['keyword_id'] == keyword_id), None)
+            if assignment is None:
+                return jsonify({"error": "species assignment not found"}), 404
+            try:
+                provenance = validate_provenance(db, [photo_id], body)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            before = db.species_provenance.state(photo_id, keyword_id)
+            if before['species_provenance'] and json.loads(before['species_provenance']) == provenance:
+                return jsonify({"ok": True, "species_assignments": assignments})
+            db.species_provenance.set(photo_id, keyword_id, provenance)
+            after = db.species_provenance.state(photo_id, keyword_id)
+            db.record_edit(
+                'species_provenance', f"Updated species evidence for {assignment['species']}",
+                str(keyword_id), [{'photo_id': photo_id,
+                    'old_value': json.dumps({'keyword_id': keyword_id, 'state': before}),
+                    'new_value': json.dumps({'keyword_id': keyword_id, 'state': after})}],
+                source=provenance.get('reviewer'), reason=provenance.get('reason'), _commit=False,
+            )
+            db.commit()
+            return jsonify({"ok": True, "species_assignments": db.species_provenance.assignments(photo_id)})
+        finally:
+            if db.in_transaction:
+                db.rollback()
 
     @blueprint.route("/api/species")
     def api_species():

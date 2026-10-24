@@ -1,3 +1,4 @@
+import {renderSpeciesProvenance} from './species-provenance.js';
 /* Browse: single-photo detail panel, metadata, summary panel, undo/redo. ES module (see
    browse/README.md). */
 import { searchLaneSeq, state } from './state.js';
@@ -85,6 +86,33 @@ export async function loadDetail(/** @type {number} */ id) {
   } catch(e) {}
 }
 
+function renderDetailKeywords(/** @type {BrowsePhoto} */ photo) {
+  // Keywords
+  var kwTypeIcons = /** @type {Record<string, string>} */ ({general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'});
+  var kwTypeLabels = /** @type {Record<string, string>} */ ({general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'});
+  _rememberKeywordNames(photo.keywords || []);
+  var kwHtml = '';
+  (photo.keywords || []).forEach(function(k) {
+    var ktype = k.type || 'general';
+    var icon = kwTypeIcons[ktype] || '●';
+    var dropdownHtml = '<div class="keyword-type-dropdown" data-kw-id="' + k.id + '">';
+    Object.keys(kwTypeIcons).forEach(function(t) {
+      var activeClass = t === ktype ? ' active' : '';
+      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" data-kw-id="' + k.id + '" data-kw-type="' + t + '" data-browse-on="click:setKeywordType">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
+    });
+    dropdownHtml += '</div>';
+    kwHtml += '<span class="keyword-tag">' +
+      '<span class="keyword-type-indicator" data-kw-id="' + k.id + '" data-browse-on="click:toggleTypeDropdown" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
+      escapeHtml(k.name) +
+      '<span class="remove-kw" data-photo-id="' + photo.id + '" data-kw-id="' + k.id + '" data-browse-on="click:removeKeyword">&times;</span></span>';
+  });
+  var keywordsEl = /** @type {HTMLElement} */ (document.getElementById('detailKeywords'));
+  keywordsEl.innerHTML = kwHtml;
+  bindBrowseMarkup(keywordsEl);
+  renderSpeciesProvenance(photo, keywordsEl);
+
+}
+
 function renderDetail(/** @type {BrowsePhoto} */ photo) {
   state.detailPhotoId = photo.id;
   // Single-photo view: clear any Mixed markers left over from batch mode.
@@ -124,28 +152,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   // Wildlife classification exclusion
   updateDetailWildlifeExcluded(photo);
 
-  // Keywords
-  var kwTypeIcons = /** @type {Record<string, string>} */ ({general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'});
-  var kwTypeLabels = /** @type {Record<string, string>} */ ({general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'});
-  _rememberKeywordNames(photo.keywords || []);
-  var kwHtml = '';
-  (photo.keywords || []).forEach(function(k) {
-    var ktype = k.type || 'general';
-    var icon = kwTypeIcons[ktype] || '●';
-    var dropdownHtml = '<div class="keyword-type-dropdown" data-kw-id="' + k.id + '">';
-    Object.keys(kwTypeIcons).forEach(function(t) {
-      var activeClass = t === ktype ? ' active' : '';
-      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" data-kw-id="' + k.id + '" data-kw-type="' + t + '" data-browse-on="click:setKeywordType">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
-    });
-    dropdownHtml += '</div>';
-    kwHtml += '<span class="keyword-tag">' +
-      '<span class="keyword-type-indicator" data-kw-id="' + k.id + '" data-browse-on="click:toggleTypeDropdown" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
-      escapeHtml(k.name) +
-      '<span class="remove-kw" data-photo-id="' + photo.id + '" data-kw-id="' + k.id + '" data-browse-on="click:removeKeyword">&times;</span></span>';
-  });
-  var keywordsEl = /** @type {HTMLElement} */ (document.getElementById('detailKeywords'));
-  keywordsEl.innerHTML = kwHtml;
-  bindBrowseMarkup(keywordsEl);
+  renderDetailKeywords(photo);
 
   // Location section
   if (photo.location) {
