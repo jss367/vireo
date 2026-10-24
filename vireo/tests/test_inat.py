@@ -1401,3 +1401,49 @@ def test_api_inat_prepare_options_respect_detector_threshold(app_and_db):
     _add_second_subject(db, pid, detector_confidence=0.05)
     data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
     assert [o["species"] for o in data["species_options"]] == ["Northern Cardinal"]
+
+
+def test_api_inat_prepare_preserves_distinct_taxa_sharing_a_common_name(app_and_db):
+    """Two detections whose top predictions share a display name but resolve
+    to different taxa are both offered: dedup must not collapse homonyms."""
+    app, db, pid = app_and_db
+    # Two real-world homonyms: 'Red-crowned Parrot' is the preferred common
+    # name of A. viridigenalis, and legacy exports also hung it on
+    # A. rhodocorytha. Both taxa must stay selectable in the picker.
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (18976, 'Amazona viridigenalis', 'Red-crowned Parrot', 'species')",
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (18977, 'Amazona rhodocorytha', 'Red-crowned Parrot', 'species')",
+    )
+    db.conn.commit()
+    det_ids = db.detections.save(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    # Beat the fixture's cardinal prediction on det 0 so this homonym is the
+    # detection's top prediction; different source_taxon_id on each detection
+    # is what pins the two options to different identities.
+    db.predictions.add(det_ids[0], "Red-crowned Parrot", 0.98, "test-model",
+                       taxonomy={"scientific_name": "Amazona viridigenalis",
+                                 "taxon_id": 18976})
+    db.predictions.add(det_ids[1], "Red-crowned Parrot", 0.96, "test-model",
+                       taxonomy={"scientific_name": "Amazona rhodocorytha",
+                                 "taxon_id": 18977})
+    data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
+    options = data["species_options"]
+    assert [o["species"] for o in options] == [
+        "Red-crowned Parrot", "Red-crowned Parrot",
+    ]
+    assert {o["scientific_name"] for o in options} == {
+        "Amazona viridigenalis", "Amazona rhodocorytha",
+    }
+    # Exactly one option is marked primary: the one matching the overall
+    # top prediction's identity (det 0's A. viridigenalis).
+    primary = [o for o in options if o["primary"]]
+    assert len(primary) == 1
+    assert primary[0]["scientific_name"] == "Amazona viridigenalis"

@@ -65,6 +65,16 @@ def _confirmed_species_identity(resolver, entry):
     return resolver.display(name)
 
 
+def _option_dedup_keys(name, identity):
+    """Signature for the picker's dedup set. Authoritative identity keys
+    (``taxon:``/``scientific:``) stand alone so two taxa sharing a common
+    display name don't collapse into one option; the normalized name is used
+    only when the resolver had no identity to pin."""
+    if identity.key.startswith(("taxon:", "scientific:")):
+        return {identity.key}
+    return {"name:" + keyword_match_key(name)}
+
+
 def _species_options(db, photo_id, primary, min_conf):
     """Every species on the photo, for the submission dialog's picker.
 
@@ -82,7 +92,7 @@ def _species_options(db, photo_id, primary, min_conf):
     def add(name, scientific, source, confidence, identity):
         if not name:
             return
-        keys = {identity.key, "name:" + keyword_match_key(name)}
+        keys = _option_dedup_keys(name, identity)
         if any(keys & other for other in seen):
             return
         seen.append(keys)
@@ -106,8 +116,9 @@ def _species_options(db, photo_id, primary, min_conf):
         add(row["species"], _prediction_scientific_name(db, row), "prediction",
             row["confidence"], resolver.prediction(row))
     if primary:
-        primary_keys = {resolver.prediction(primary).key,
-                        "name:" + keyword_match_key(primary["species"])}
+        primary_keys = _option_dedup_keys(
+            primary["species"], resolver.prediction(primary),
+        )
         for keys, option in zip(seen, options, strict=True):
             if keys & primary_keys:
                 option["primary"] = True
