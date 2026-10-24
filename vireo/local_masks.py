@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import tempfile
 import time
 
@@ -355,91 +354,80 @@ def is_stale(recipe, active_mask_row):
         return True
 
 
-def transfer_snapshots(vireo_dir, old_photo_id, new_photo_id):
-    """Rename a photo's snapshot files to a new photo id.
+class SnapshotTransferError(OSError):
+    """A companion merge cannot preserve its referenced edit-mask snapshots."""
 
-    Snapshot files are named ``<photo_id>.<ref>.png`` and looked up by
-    ``snapshot_path(vireo_dir, photo_id, ref)``. When the scanner folds a
-    JPEG companion into a RAW primary (see ``_pair_raw_jpeg_companions``),
-    the recipe rows and edit-history rows get reassigned from the
-    companion's photo_id to the primary's, but the file names still carry
-    the companion's id — so ``load_snapshot`` for the transferred recipe
-    silently misses the file and every render disables the local pass.
-    Move the files here so lookups by the new id find them.
 
-    Byte-identical snapshots for the same ref hash to the same file name,
-    so ``os.replace`` on a pre-existing destination is safe (same content).
+def prepare_snapshot_transfer(vireo_dir, old_photo_id, new_photo_id, recipe_values):
+    """Copy referenced masks before a recipe moves, retaining rollback's originals.
 
-    Returns ``{"moved": [refs], "failed": [refs], "enumerate_failed":
-    bool}``. ``load_snapshot`` only ever builds
-    ``snapshot_path(vireo_dir, photo_id, ref)``, so a snapshot left under
-    the *old* id is unreachable no matter what — the render disables the
-    local pass indefinitely. That makes a silent failure here invisible,
-    so:
-
-    * ``os.replace`` failing (typically a locked source on Windows) falls
-      back to ``shutil.copy2`` + best-effort unlink. The copy is what
-      actually restores the local pass; leaving the original behind is
-      harmless because ``gc_edit_masks`` reaps by ref, not by id.
-    * Anything still unrecoverable is reported in ``failed`` so the
-      caller can say so out loud instead of rendering a silently
-      degraded image (CORE_PHILOSOPHY: no black boxes).
-    * If ``os.listdir`` itself raises (transient EIO, ACL change on
-      ``edit-masks/``), the individual refs are unknown but the outcome
-      is the same as ``failed``: every snapshot stays under the old id
-      and every affected local pass renders without its mask.
-      ``enumerate_failed`` surfaces that so the caller can log it rather
-      than let the exception vanish into the deferred-action guard.
+    Read exact paths from the recipe and its undo/redo values. Enumerating
+    edit-masks is unnecessary and can fail even when individual files are
+    readable. Publishing each copy atomically makes a partial preparation
+    safe to retry; no source file is ever moved or removed here.
     """
-    directory = edit_masks_dir(vireo_dir)
-    result = {"moved": [], "failed": [], "enumerate_failed": False}
-    if not os.path.isdir(directory):
-        return result
-    prefix = f"{int(old_photo_id)}."
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        log.warning(
-            "Could not enumerate edit-masks directory %s while moving "
-            "snapshots from photo %s to %s; any local adjustments will "
-            "render without their mask until the snapshots are recreated",
-            directory, old_photo_id, new_photo_id, exc_info=True,
-        )
-        result["enumerate_failed"] = True
-        return result
-    for name in names:
-        if not name.startswith(prefix):
-            continue
-        match = _SNAPSHOT_FILE_RE.match(name)
-        if not match or int(match.group(1)) != int(old_photo_id):
-            continue
-        ref = match.group(2)
-        src = os.path.join(directory, name)
-        dst = snapshot_path(vireo_dir, int(new_photo_id), ref)
+    refs = set()
+    for value in recipe_values:
+        refs.update(re.findall(r'"ref"\s*:\s*"([0-9a-f]{12})"', value or ""))
+    if refs and not vireo_dir:
+        raise SnapshotTransferError("The edit-mask directory is unavailable")
+    for ref in sorted(refs):
         try:
-            replace_file(src, dst)
+            _copy_snapshot_for_transfer(vireo_dir, old_photo_id, new_photo_id, ref)
+        except OSError as exc:
+            raise SnapshotTransferError(f"Could not preserve edit-mask {ref}: {exc}") from exc
+    return refs
+
+
+def _copy_snapshot_for_transfer(vireo_dir, old_photo_id, new_photo_id, ref):
+    """Publish an immutable copy without exposing a truncated destination."""
+    src = snapshot_path(vireo_dir, old_photo_id, ref)
+    dest = snapshot_path(vireo_dir, new_photo_id, ref)
+    with open(src, "rb") as stream:
+        data = stream.read()
+    if hashlib.sha1(data).hexdigest()[:12] != ref:
+        raise OSError(f"Snapshot content does not match its reference: {src}")
+    try:
+        with open(dest, "rb") as stream:
+            if stream.read() == data:
+                # A GC pass may have captured its reference set before
+                # the recipe was saved. Renew the grace period even on
+                # retry, just as _publish_snapshot does for reused masks.
+                os.utime(dest, None)
+                return
+    except FileNotFoundError:
+        pass
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{new_photo_id}.{ref}.", suffix=".png.tmp", dir=os.path.dirname(dest),
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        replace_file(tmp, dest)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
+def cleanup_snapshot_transfer(vireo_dir, old_photo_id, new_photo_id, refs):
+    """Remove old copies only after commit and while the new copies are intact."""
+    for ref in refs:
+        src = snapshot_path(vireo_dir, old_photo_id, ref)
+        dest = snapshot_path(vireo_dir, new_photo_id, ref)
+        try:
+            with open(dest, "rb") as stream:
+                if hashlib.sha1(stream.read()).hexdigest()[:12] != ref:
+                    continue
+            os.remove(src)
+        except FileNotFoundError:
+            pass
         except OSError:
             log.warning(
-                "Could not rename edit-mask snapshot %s -> %s; trying a copy",
-                src, dst, exc_info=True,
+                "Could not clean up old edit-mask snapshot %s; retaining it for garbage collection",
+                src, exc_info=True,
             )
-            try:
-                shutil.copy2(src, dst)
-            except OSError:
-                log.warning(
-                    "Could not copy edit-mask snapshot %s -> %s either; "
-                    "the local adjustment for photo %s will render "
-                    "without its mask until the snapshot is recreated",
-                    src, dst, new_photo_id, exc_info=True,
-                )
-                result["failed"].append(ref)
-                continue
-            # The copy already restored the local pass; the leftover
-            # source is only clutter, and gc_edit_masks reaps by ref.
-            with contextlib.suppress(OSError):
-                os.remove(src)
-        result["moved"].append(ref)
-    return result
 
 
 def _referenced_refs(db):
