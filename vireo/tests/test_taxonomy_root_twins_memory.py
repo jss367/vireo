@@ -48,11 +48,11 @@ def setup():
  CREATE TABLE taxa_common_names(taxon_id INTEGER,name TEXT);
  CREATE TABLE keywords(id INTEGER PRIMARY KEY,name TEXT,parent_id INTEGER REFERENCES keywords(id),type TEXT DEFAULT 'general',is_species INTEGER DEFAULT 0,taxon_id INTEGER REFERENCES taxa(id),source_taxon_id INTEGER,place_id TEXT,latitude REAL,longitude REAL,UNIQUE(name,parent_id));
  CREATE TABLE photo_identity_alternatives(photo_id INTEGER,group_id TEXT,candidates TEXT);
- CREATE TABLE photo_keywords(photo_id INTEGER,keyword_id INTEGER REFERENCES keywords(id),source TEXT,PRIMARY KEY(photo_id,keyword_id));
+ CREATE TABLE photo_keywords(photo_id INTEGER,keyword_id INTEGER REFERENCES keywords(id),source TEXT,species_provenance TEXT,PRIMARY KEY(photo_id,keyword_id));
  CREATE TABLE keyword_import_aliases(path_key TEXT PRIMARY KEY,path_json TEXT,keyword_id INTEGER REFERENCES keywords(id) ON DELETE CASCADE);
  CREATE TABLE pending_changes(id INTEGER PRIMARY KEY,photo_id INTEGER,workspace_id INTEGER,change_type TEXT,value TEXT);
  CREATE TABLE edit_history(id INTEGER PRIMARY KEY,action_type TEXT,new_value TEXT,old_value TEXT,workspace_id INTEGER);
- CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY,edit_id INTEGER REFERENCES edit_history(id),photo_id INTEGER,new_value TEXT,old_value TEXT);
+ CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY,edit_id INTEGER REFERENCES edit_history(id),photo_id INTEGER,new_value TEXT,old_value TEXT,species_provenance TEXT);
  INSERT INTO taxa VALUES(1,101,'Inventus avis','Invented bird','species'),(2,202,'Inventus','Other species','genus');
  """)
     from repositories.species_taxon_lookup import lookup_taxon_id, species_preferring_taxon_match
@@ -113,6 +113,13 @@ def setup():
     )
     load("repositories/identity_alternatives.py", ns)
     load("repositories/keyword_provenance.py", ns, methods={"KeywordProvenanceRepository": {"merge_keyword_into"}})
+    species_prov_ns = {
+        "__builtins__": {**vars(builtins), "__import__": forbidden},
+        "json": json,
+        "sqlite3": sqlite3,
+    }
+    load("repositories/species_provenance.py", species_prov_ns,
+         functions={"retarget_keyword_history", "_fold_history_state"})
     # One stand-in object answers for the three keyword repositories the
     # selected methods are split across.
     for name in ("lookup_taxon_id", "_species_preferring_taxon_match"):
@@ -136,6 +143,9 @@ def setup():
     modules = {
         "species_identity": types.SimpleNamespace(COMMON_NAME_CORRECTIONS={}, SpeciesResolver=Resolver),
         "config": types.SimpleNamespace(get=lambda key: None),
+        "repositories.species_provenance": types.SimpleNamespace(
+            retarget_keyword_history=species_prov_ns["retarget_keyword_history"],
+        ),
     }
     ns["__builtins__"]["__import__"] = lambda name, *a, **kw: modules[name] if name in modules else forbidden()
     repo._lookup_taxon_id_for_keyword = repo.lookup_taxon_id
@@ -176,13 +186,16 @@ class Checks(unittest.TestCase):
         dst = k(parent=p)
         src = k(source=101)
         c.executemany(
-            "INSERT INTO photo_keywords VALUES(?,?,?)",
+            "INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(?,?,?)",
             [(1, src, None), (2, src, "manual"), (2, dst, "accept"), (3, dst, "manual")],
         )
         c.execute("INSERT INTO keyword_import_aliases VALUES(?,?,?)", ("invented", '["Invented bird"]', src))
         c.execute("INSERT INTO pending_changes VALUES(1,2,7,'keyword_add','Invented bird')")
         c.execute("INSERT INTO edit_history VALUES(1,'keyword_add',?,NULL,7)", (str(src),))
-        c.execute("INSERT INTO edit_history_items VALUES(1,1,1,?,NULL)", (str(src),))
+        c.execute(
+            "INSERT INTO edit_history_items(id,edit_id,photo_id,new_value,old_value) VALUES(1,1,1,?,NULL)",
+            (str(src),),
+        )
         c.commit()
         pending = [tuple(x) for x in c.execute("SELECT * FROM pending_changes")]
         self.assertEqual(d.merge_taxonomy_root_twins(), 1)
@@ -208,7 +221,10 @@ class Checks(unittest.TestCase):
         dst = k(parent=p)
         a = k(source=101)
         b = k(source=202)
-        c.executemany("INSERT INTO photo_keywords VALUES(?,?,?)", [(1, a, "manual"), (2, b, "manual")])
+        c.executemany(
+            "INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(?,?,?)",
+            [(1, a, "manual"), (2, b, "manual")],
+        )
         c.commit()
         self.assertEqual(r.taxonomy_root_twins(), [])
         merged = d.merge_taxonomy_root_twins()
@@ -277,7 +293,7 @@ class Checks(unittest.TestCase):
                 src = k(source=source)
                 c.execute("INSERT INTO edit_history VALUES(1,'keyword_add',?,NULL,9)", (str(src),))
                 c.execute(
-                    "INSERT INTO edit_history_items VALUES(1,1,4,?,?)",
+                    "INSERT INTO edit_history_items(id,edit_id,photo_id,new_value,old_value) VALUES(1,1,4,?,?)",
                     (str(src), json.dumps({"keyword_id": src, "keyword_ids": [src]})),
                 )
                 c.commit()
@@ -296,7 +312,7 @@ class Checks(unittest.TestCase):
         a = k()
         b = k("Second bird")
         k("Second bird", parent=p)
-        c.execute("INSERT INTO photo_keywords VALUES(1,?,'manual')", (a,))
+        c.execute("INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(1,?,'manual')", (a,))
         c.commit()
         before = list(c.iterdump())
         real = d._merge_keyword_into
@@ -346,7 +362,7 @@ class Checks(unittest.TestCase):
         c.execute("UPDATE taxa SET name='Puma',common_name='Genus Puma' WHERE id=2")
         c.execute("UPDATE taxa SET common_name='Puma' WHERE id=1")
         placed = k("Puma", parent=p, taxon=2)
-        c.execute("INSERT INTO photo_keywords VALUES(1,?,'manual')", (placed,))
+        c.execute("INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(1,?,'manual')", (placed,))
         c.commit()
         result = r.add("Puma", is_species=True)
         self.assertNotEqual(result, placed, "A placed genus must not be reused for the resolved species")
@@ -382,7 +398,7 @@ class Checks(unittest.TestCase):
                 )
                 if case == "unknown_request":
                     c.execute("UPDATE taxa SET common_name='Other bird' WHERE id=1")
-                c.execute("INSERT INTO photo_keywords VALUES(1,?,'manual')", (placed,))
+                c.execute("INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(1,?,'manual')", (placed,))
                 c.commit()
                 result = r.add("Invented bird", is_species=True)
                 self.assertEqual(result == placed, case == "matching_source")
@@ -425,7 +441,10 @@ class Checks(unittest.TestCase):
         dst = k(parent=p, source=101)
         a = k(source=101)
         b = k(source=101)
-        c.executemany("INSERT INTO photo_keywords VALUES(?,?,?)", [(1, a, "manual"), (2, b, "accept")])
+        c.executemany(
+            "INSERT INTO photo_keywords(photo_id,keyword_id,source) VALUES(?,?,?)",
+            [(1, a, "manual"), (2, b, "accept")],
+        )
         c.commit()
         self.assertEqual(d.merge_taxonomy_root_twins(), 2)
         self.assertEqual(d.merge_taxonomy_root_twins(), 0)

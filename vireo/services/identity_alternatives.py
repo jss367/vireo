@@ -181,7 +181,8 @@ def prepare_photo_merge(db: Database, losing: int, survivor: int) -> None:
         if link['keyword_id'] not in kept:
             db.untag_photo(losing, link['keyword_id'], _commit=False)
 
-def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str, batch: _IdentityBatch | None = None) -> None:
+def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement: str,
+                         batch: _IdentityBatch | None = None, *, record_history: bool = False) -> None:
     """Apply a recorded delta in either direction, including sidecar intents."""
     batch = batch or _IdentityBatch(db)
     before, after = json.loads(previous), json.loads(replacement)
@@ -189,7 +190,7 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
-        db.untag_photo(photo_id, kid, _commit=False)
+        db.untag_photo(photo_id, kid, _commit=False, _record_history=record_history)
     for kid in new_links.keys() - old_links.keys():
         name = db.keywords.name_of(kid)
         if name:
@@ -244,7 +245,7 @@ def save_alternatives(
     for pid in photo_ids:
         old = _snapshot(states.get(pid), links.get(pid, []))
         new = _snapshot(state, [])
-        replay_identity_edit(db, pid, old, new, batch)
+        replay_identity_edit(db, pid, old, new, batch, record_history=True)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Saved unresolved species alternatives on {len(photo_ids)} photos',
@@ -276,7 +277,7 @@ def resolve_alternatives(db: Database, photo_ids: Sequence[int], species: str) -
         old = _snapshot(states[pid], links)
         resolved = {**states[pid], 'group_id': revision, 'status': 'resolved'}
         new = _snapshot(resolved, equivalents)
-        replay_identity_edit(db, pid, old, new, batch)
+        replay_identity_edit(db, pid, old, new, batch, record_history=True)
         items.append({'photo_id': pid, 'old_value': old, 'new_value': new})
     return db.record_edit(
         'identity_alternatives', f'Resolved species as "{species}" on {len(photo_ids)} photos',

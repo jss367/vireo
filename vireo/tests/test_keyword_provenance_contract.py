@@ -285,6 +285,18 @@ def _production_functions():
                 yield rel.as_posix(), node.name, node
 
 
+# These updates never create or converge associations. Evidence editing leaves
+# keyword authorship untouched; undo restores the exact historical stamp (even
+# unknown), rather than upgrading it to manual. Pin the complete SQL so this
+# exception cannot admit an INSERT or a future association move.
+SPECIES_EVIDENCE_UPDATES = {
+    ("repositories/species_provenance.py", "set"):
+        "update photo_keywords set species_provenance=? where photo_id=? and keyword_id=?",
+    ("repositories/species_provenance.py", "restore"):
+        "update photo_keywords set source=?, species_provenance=? where photo_id=? and keyword_id=?",
+}
+
+
 def test_photo_keywords_writers_use_the_shared_provenance_fold():
     """A new convergence point must be listed, and must use the shared fold.
 
@@ -295,16 +307,23 @@ def test_photo_keywords_writers_use_the_shared_provenance_fold():
     site one of the ones we looked at, and does it call the one fold".
     """
     found = {}
+    evidence_updates = set()
     unfolded = []
     for rel, name, node in _production_functions():
         for lineno, text in _sql_texts(node):
             lowered = text.lower()
             if not any(p.search(lowered) for p in _PHOTO_KEYWORDS_WRITE_PATTERNS):
                 continue
-            found[(rel, name)] = lineno
+            point = (rel, name)
+            if point in SPECIES_EVIDENCE_UPDATES:
+                assert " ".join(lowered.split()) == SPECIES_EVIDENCE_UPDATES[point]
+                evidence_updates.add(point)
+                continue
+            found[point] = lineno
             if not _references_fold_helper(node):
                 unfolded.append(f"{rel}:{lineno} ({name})")
 
+    assert evidence_updates == set(SPECIES_EVIDENCE_UPDATES)
     assert not unfolded, (
         "These functions write photo_keywords rows without referencing the "
         "shared provenance fold (" + ", ".join(sorted(PROVENANCE_FOLD_SYMBOLS))

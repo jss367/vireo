@@ -415,6 +415,8 @@ def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids,
     _retarget_bare_history_ids(conn, src_str, dst_str)
     _retarget_history_json_payloads(conn, src_id, dst_id, preexisting_dst_photos)
     _retarget_identity_history(conn, src_id, dst_id, set(preexisting_dst_photos), source_max)
+    from repositories.species_provenance import retarget_keyword_history
+    retarget_keyword_history(conn, src_id, dst_id, source_max)
 
 
 def _rewrite_identity_links(data, src_id, dst_id, source_max):
@@ -1081,7 +1083,7 @@ class KeywordProvenanceRepository:
         return self._resolve_workspace_id()
 
     def tag(
-        self, photo_id, keyword_id, *, source, _commit=True,
+        self, photo_id, keyword_id, *, source, species_provenance=None, _commit=True,
     ):
         """Associate a keyword with a photo.
 
@@ -1103,13 +1105,19 @@ class KeywordProvenanceRepository:
                     re-tagging with ``KEYWORD_SOURCE_UNKNOWN`` keeps a
                     recorded ``'manual'`` (and a future ``'accept'`` re-tag
                     would too).
+            species_provenance: Optional pre-serialized species evidence JSON
+                    (the loser's row in a merge). The shared conflict clause
+                    folds it in only when the surviving row has no evidence of
+                    its own, so a user-recorded identification on the winner
+                    is never overwritten by a loser's.
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
         self.conn.execute(
-            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-            "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
-            (photo_id, keyword_id, source),
+            "INSERT INTO photo_keywords "
+            "(photo_id, keyword_id, source, species_provenance) "
+            "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+            (photo_id, keyword_id, source, species_provenance),
         )
         if _commit:
             self.conn.commit()
@@ -1127,12 +1135,18 @@ class KeywordProvenanceRepository:
             # Move the association's provenance with it: pairing a RAW with
             # its camera JPEG must not turn the user's hand-added keywords
             # into "unknown" rows a retirement pass would treat as generated.
+            # Species evidence rides along for the same reason -- a RAW
+            # whose only representation of a reviewer's identification is
+            # the companion's row must not silently become a bare
+            # ``manual_unspecified``/``imported_unknown`` on the primary.
             # The shared conflict clause keeps whichever side's claim is
-            # stronger when the primary already carries the keyword.
+            # stronger when the primary already carries the keyword, and
+            # keeps the primary's existing evidence over the incoming one.
             self.conn.execute(
-                "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-                "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
-                (primary_id, kw["id"], kw["source"]),
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source, species_provenance) "
+                "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                (primary_id, kw["id"], kw["source"], kw["species_provenance"]),
             )
 
     def merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
@@ -1192,7 +1206,9 @@ class KeywordProvenanceRepository:
             f"""UPDATE photo_keywords AS dst_pk
                SET source = {self.keyword_source_max_sql(
                    "dst_pk.source", src_source_sql,
-               )}
+               )}, species_provenance = COALESCE(dst_pk.species_provenance,
+                   (SELECT species_provenance FROM photo_keywords src_pk
+                    WHERE src_pk.photo_id=dst_pk.photo_id AND src_pk.keyword_id=:src_id))
                WHERE dst_pk.keyword_id = :dst_id
                  AND EXISTS (
                      SELECT 1 FROM photo_keywords src_pk
@@ -1282,12 +1298,14 @@ class KeywordProvenanceRepository:
                         f"disambiguation"
                     ) from inner_err
         # Re-point photo_keywords from old → canonical, carrying
-        # each association's durable provenance with it. On a
-        # conflict the canonical row keeps the stronger of the two
-        # claims rather than silently dropping a stamp.
+        # each association's durable provenance and species evidence
+        # with it. On a conflict the canonical row keeps the stronger
+        # of the two claims rather than silently dropping a stamp,
+        # and keeps its existing species evidence over the incoming
+        # one.
         self.conn.execute(
-            f"""INSERT INTO photo_keywords (photo_id, keyword_id, source)
-                           SELECT photo_id, ?, source
+            f"""INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance)
+                           SELECT photo_id, ?, source, species_provenance
                            FROM photo_keywords WHERE keyword_id = ?
                            {self.KEYWORD_SOURCE_CONFLICT_SQL}""",
             (canonical_id, keyword_id),

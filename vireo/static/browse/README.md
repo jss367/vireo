@@ -30,6 +30,7 @@ is involved.
 | `selection.js` | Selection: click, range, select all, clear, `getActiveSelection` |
 | `keyboard.js` | Shortcuts and arrow-key navigation |
 | `lightbox.js` | Opening the shared lightbox from the grid and reconciling its events |
+| `species-provenance.js` | Per-species evidence display and editing, including supporting-frame links |
 | `detail.js` | The single-photo detail panel, metadata, the summary panel, undo/redo |
 | `edit-actions.js` | Detail-panel edits and the batch inspector |
 | `location.js` | Detail-panel location editing (Google Places, keywords, EXIF suggestion) |
