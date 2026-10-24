@@ -31,6 +31,7 @@ from services import prediction_decisions
 from services.edit_history import prediction_status_item
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
+from services.prediction_evidence import DECISIONS, attach_prediction_evidence
 from services.visual_scope import inject_active_visual_model
 from web.request_args import (
     MAX_SELECTION_PHOTOS,
@@ -307,6 +308,9 @@ def create_predictions_blueprint(
             return json_error(str(e), 400)
 
         results = _enrich_prediction_rows(db, preds, alt_preds)
+        if request.args.get('evidence') == '1':
+            import config as cfg
+            attach_prediction_evidence(db, results, db.get_effective_config(cfg.load()))
         # Surface the visual clause's status so the Review filter bar's
         # visual chip can warn on fallback. Without this the chip would
         # advertise a visual search while Accept All / bulk operations ran
@@ -323,6 +327,37 @@ def create_predictions_blueprint(
         if explicit_photo_ids is not None:
             _attach_photo_states(db, response, explicit_photo_ids)
         return jsonify(response)
+
+    @blueprint.route('/api/detections/<int:detection_id>/evidence-review', methods=['POST'])
+    def api_detection_evidence_review(detection_id):
+        """Save subject uncertainty independently of species decisions and flags."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error('Expected an object')
+        decision = body.get('decision')
+        if not isinstance(decision, str) or decision not in DECISIONS:
+            return json_error('Unknown evidence decision')
+        revision = body.get('observed_revision')
+        if type(revision) is not int or revision < 0:
+            return json_error('observed_revision must be a nonnegative integer')
+        db = get_db()
+
+        def save():
+            if type(body.get('observed_workspace_id')) is not int or (
+                body['observed_workspace_id'] != db.require_workspace_id()
+                or body['observed_workspace_id'] != db.workspaces.most_recently_opened_id()
+            ):
+                return json_error('Workspace changed; reload Review', 409)
+            current = db.predictions.evidence_review(detection_id)
+            if current is None:
+                return json_error('Detection not found in the active workspace', 404)
+            if current['revision'] != revision:
+                return json_error('Subject assessment changed; reload Review', 409)
+            db.predictions.set_evidence_review(detection_id, decision)
+            db.commit()
+            return jsonify({'ok': True, 'decision': decision, 'revision': revision + 1})
+
+        return prediction_decisions.under_prediction_decision_lock(db, save, json_error=json_error)
 
     _COMPARE_MAX_PER_PAGE = 200
 
@@ -2036,6 +2071,10 @@ def create_predictions_blueprint(
             actionable_rejects = [
                 pid for pid in rejects if pid not in stale_photos
             ]
+            target_ids = _group_pick_prediction_ids(db, actionable_picks, observed)
+            db.predictions.require_identifiable_subjects([
+                pred_id for ids in target_ids.values() for pred_id in ids
+            ])
 
             # Capture old flag values before mutation
             all_flag_pids = actionable_picks + actionable_rejects

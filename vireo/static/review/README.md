@@ -19,6 +19,7 @@ separate implementations: a fix in one does not reach the other.
 | `deep-links.js` | `?model=`, `?labels_fingerprint=` and `?photo_id=` deep links and their filter pills |
 | `controls.js` | `renderAll()`, the toolbar (confidence, model, sort, photo size), stats, status tabs, and Accept All |
 | `grid.js` | Filtering and sorting the grid, prediction cards, burst-group buttons, and grid clicks |
+| `evidence.js` | Relative score explanations, subject-specific disagreement, geographic context, questionable-detection filters and durable subject assessments |
 | `decisions.js` | Accept, reject, accept an alternative, and Accept All |
 | `keyboard.js` | The accept/skip shortcuts for the first visible pending card |
 | `photo-actions.js` | Rating, flag, reveal, copy path, lightbox, and keeping Representative badges current |
@@ -118,6 +119,44 @@ to update the remaining workspaces. The catalog's `identity_alternatives` edit
 history action replays the uncertainty and candidate-keyword delta together,
 including XMP keyword intents and original association provenance. Other
 confirmed species and flags are outside that delta.
+
+## Subject evidence and uncertain identifications
+
+Review requests `GET /api/predictions?evidence=1`. Each row's `evidence`
+separates the candidate-relative softmax score from its raw match score and
+model-specific match-threshold assessment. None is a calibrated probability
+that the species is correct. Missing raw scores and candidate counts remain
+unknown. Cross-model comparisons use each model's top raw candidate on the
+same detection, with canonical species identities; other animals in the
+photo do not count as disagreement. Sibling evidence is fetched without
+the grid's row filters so a hidden model cannot suppress a disagreement.
+
+The Questionable detections view shows one card per region, including model
+or keyword disagreements, weak/full-image subject evidence, below-threshold
+raw matches, saved deferrals, and pending relative scores of at least 95%
+for auditing. These are review heuristics, not calibrated error judgments.
+The detector-score heuristic uses 0.50, independently of the workspace's
+existing detector visibility floor. Catalog GPS supplies geographic context
+and a nearby-observations link; no validated range assessment is available,
+so plausibility remains unknown. Missing sightings never exclude a species.
+
+`POST /api/detections/<id>/evidence-review` accepts `decision`,
+`observed_revision` and `observed_workspace_id`. Decisions are `unreviewed`,
+`subject_valid`, `invalid_subject` and `not_enough_evidence`. The serialized
+writer rejects stale revisions, a switched workspace and invisible detections.
+Assessments live in `detection_evidence_reviews` per detection and workspace;
+they never change prediction statuses, species keywords, XMP intents or flags.
+Deleting a detection removes its assessment. Clear assessment / revisit
+retains the row and increments its revision so old clients stay stale.
+
+An acceptance checks every actual target's subject assessment before any
+keyword or prediction writes. A deferred region, including one reached only
+through burst expansion, returns `409 identification_deferred`; batched
+acceptance rolls back any earlier changes in that transaction. The grid and
+keyboard also skip deferred or currently-saving regions. Explicitly clear
+the assessment before reviewing species again. Browser inspection positions
+are scoped separately for each evidence filter; catalog assessments survive
+browser reloads.
 Keyword intents are reconciled in every workspace containing the photo, so
 syncing a sibling workspace cannot replay an older opposite decision. Each
 queue retains an explicit final intent, with captured-write compensation and

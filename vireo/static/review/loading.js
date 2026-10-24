@@ -43,7 +43,7 @@ async function loadPredictions() {
   /** @type {HTMLElement} */ (document.getElementById('empty')).style.display = 'none';
 
   try {
-    var params = new URLSearchParams();
+    var params = new URLSearchParams({evidence: '1'});
     if (window.VireoFilter && VireoFilter.getRules) {
       var rules = VireoFilter.getRules();
       var ruleCount = Array.isArray(rules) ? rules.length : (rules.rules || []).length;

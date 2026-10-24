@@ -1,6 +1,6 @@
 // Review page payloads, edit state, and shared-script dependencies.
 interface ReviewRecipe {rotation?:number;crop?:{x?:number;y?:number;w?:number;h?:number}}
-interface ReviewPrediction {flag?:string;id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
+interface ReviewPrediction {detection_id?:number;evidence?:ReviewPredictionEvidence;flag?:string;id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
 interface ReviewGroupState {groupId:string|null;model:string|null;items:ReviewPrediction[];picks:Set<number>;rejects:Set<number>;removed:Set<number>;selected:number|string|null;selectedIds:Set<number|string>;selectionAnchor:number|string|null;upgraded:boolean}
 interface ReviewOffsetTarget {card:HTMLElement;photoId:string;origTx:number;origTy:number}
 interface ReviewDrag {card:HTMLElement;photoId:string;targets:ReviewOffsetTarget[];startX:number;startY:number;moved:boolean}
@@ -33,3 +33,11 @@ interface ReviewQueueSession {photoId:number|null;items:Record<string,ReviewQueu
 interface ReviewQueuePhoto {id:number;flag?:string;flag_note?:{description?:string}|null}
 interface ReviewQueueSubject {id:number;box_x:number;box_y:number;box_w:number;box_h:number;is_primary?:boolean;analysis?:unknown}
 interface ReviewQueueState {savedRules:ReviewRule[]|{rules?:ReviewRule[]}|null;savedVisual:unknown;workspace:number|null;key:string;session:ReviewQueueSession;enabled:boolean;items:ReviewPrediction[];current:ReviewQueuePhoto|null;subjects:ReviewQueueSubject[];sequence:number;cropSequence:number;source:string;manual:boolean;busy:boolean;storageError:boolean}
+
+interface ReviewPredictionEvidence {
+  score:{model:string;kind:string;value:number;label_count:number|null;raw_value:number|null;raw_kind:string|null;calibrated_correctness:boolean;explanation:string};
+  subject:{decision:string;revision:number;detector_model:string;detector_score:number|null;category:string|null;explanation:string};
+  disagreement:boolean;model_candidates:{model:string;species:string;relative_score:number}[];
+  match:{state:string;explanation:string};
+  geography:{state:string;latitude?:number;longitude?:number;source?:string;observations_url?:string;explanation:string};reasons:string[];
+}

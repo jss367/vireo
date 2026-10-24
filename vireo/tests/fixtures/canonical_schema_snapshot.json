@@ -1058,6 +1058,18 @@
   ],
   [
    "table",
+   "detection_evidence_reviews",
+   "detection_evidence_reviews",
+   "CREATE TABLE detection_evidence_reviews (\n        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n        decision TEXT NOT NULL CHECK(decision IN ('unreviewed', 'not_enough_evidence', 'invalid_subject', 'subject_valid')),\n        revision INTEGER NOT NULL DEFAULT 1,\n        updated_at TEXT NOT NULL DEFAULT (datetime('now')),\n        PRIMARY KEY (detection_id, workspace_id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_detection_evidence_reviews_1",
+   "detection_evidence_reviews",
+   null
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"

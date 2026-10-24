@@ -18,7 +18,7 @@ function renderGroupModal() {
     var qScore = it.quality_score != null ? Math.round(it.quality_score * 100) : '-';
     var sharp = it.subject_sharpness != null ? Math.round(it.subject_sharpness) : (it.sharpness != null ? Math.round(it.sharpness) : '-');
     var boxSharp = it.box_sharpness != null ? Math.round(it.box_sharpness) : null;
-    var confPct = Math.round((it.confidence || 0) * 100);
+    var confPct = reviewRelativeScore(it.confidence);
 
     var src = grmPhotoUrl(it);
     var nat = grmNaturalDims(it);
@@ -35,7 +35,7 @@ function renderGroupModal() {
         ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
       '</div>' +
       '<div class="grm-card-info">' +
-        '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
+        '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '% relative · ' + escapeHtml(it.model || grmState.model || '') + '</span></div>' +
         '<div class="grm-card-scores">' + scoresHtml + '</div>' +
         (isBest ? '<div class="grm-card-ai">AI BEST</div>' : '') +
       '</div>' +
@@ -257,7 +257,7 @@ function grmRefreshSelectedLoupe() {
   return header + preds.map(function(p) {
     return '<div class="grm-loupe-preds-row' + (p.top ? ' top' : '') + '">' +
       '<span>' + escapeHtml(p.species) + '</span>' +
-      '<span class="conf">' + Math.round((p.confidence || 0) * 100) + '%</span>' +
+      '<span class="conf">' + reviewRelativeScore(p.confidence) + '% relative</span>' +
     '</div>';
   }).join('');
 }
