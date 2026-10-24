@@ -1159,7 +1159,8 @@ def sync_from_xmp(db, photo_ids):
         # one writer transaction. Background migrations use the same SQLite
         # writer lock, so they cannot act on a pre-reconciliation association
         # snapshot between this read and the final xmp_mtime update.
-        if not db.in_transaction:
+        owns_transaction = not db.in_transaction
+        if owns_transaction:
             db.begin_immediate()
         try:
             sidecar = _read_sidecar_keywords(db, photo_id, xmp_path)
@@ -1167,7 +1168,9 @@ def sync_from_xmp(db, photo_ids):
                 # Removed, unreadable or corrupt since the check above.
                 # Reconciling would read that as a sidecar with no keywords
                 # and untag every keyword the photo has.
-                db.rollback()
+                # An outer repair still needs its lock for the history comparison.
+                if owns_transaction:
+                    db.rollback()
                 continue
             (
                 xmp_keywords, xmp_keywords_by_key, imported_hierarchies,

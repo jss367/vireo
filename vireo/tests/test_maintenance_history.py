@@ -252,3 +252,29 @@ def test_unchanged_repair_does_not_duplicate_history(app_and_db, tmp_path, direc
     assert len(client.get('/api/edit-history').json) == 1
     assert client.post('/api/audit/resolve', json=body).status_code == 200
     assert len(client.get('/api/edit-history').json) == 1
+
+
+def test_skipped_xmp_repair_blocks_concurrent_writes_until_history_compared(app_and_db, tmp_path, monkeypatch):
+    from repositories.audit import AuditRepository
+
+    app, db = app_and_db
+    pid, path = _photo(db, tmp_path)
+    path.with_suffix('.xmp').write_text('not XML')
+    original = AuditRepository.drift_history_state
+    snapshots = []
+
+    def state(repository, photo_id):
+        if snapshots:
+            # The after-snapshot must not admit an unrelated metadata write
+            # and then misattribute it to this skipped repair.
+            with sqlite3.connect(db._db_path, timeout=0) as writer:
+                with pytest.raises(sqlite3.OperationalError, match='locked'):
+                    writer.execute('UPDATE photos SET xmp_mtime = 123 WHERE id = ?', (photo_id,))
+        snapshots.append(photo_id)
+        return original(repository, photo_id)
+
+    monkeypatch.setattr(AuditRepository, 'drift_history_state', state)
+    response = app.test_client().post('/api/audit/resolve', json={'photo_id': pid, 'direction': 'use_xmp'})
+    assert response.status_code == 200
+    assert snapshots == [pid, pid]
+    assert db.edit_history.list_recent() == []
