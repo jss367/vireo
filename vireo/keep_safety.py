@@ -78,13 +78,16 @@ def _review_culling_photo(photo, state):
     # photographer's approval from a flag that a ranking job can also write.
     if not isinstance(state, dict):
         state = {"flag": state if isinstance(state, str) else "none"}
-    flag = state.get("flag", "none")
+    # A SQL NULL flag means "no flag", same as a missing key. Normalize so a
+    # confirmed clear flag ("none") still matches its attribution, and an
+    # unattributed NULL does not satisfy the ``None == None`` identity test.
+    flag = state.get("flag") or "none"
     photo["ranking_selected"] = photo.get("ranking_selected", photo.get("action") == "keep")
     photo["flag"] = flag
     assessment = automatic_keep_assessment(photo)
     photo.update(automatic_keep_eligible=assessment["eligible"], keep_status=assessment["status"],
                  keep_reasons=assessment["reasons"])
-    confirmed = state.get("confirmed_flag") == flag and flag != "none"
+    confirmed = state.get("confirmed_flag") == flag
     decision = explicit_decision(photo) if confirmed else None
     photo["flag_confirmation_status"] = "confirmed" if confirmed else "unverified"
     photo["label"] = decision or "REVIEW"

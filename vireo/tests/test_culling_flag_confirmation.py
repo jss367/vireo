@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
 
-from canonical_schema import create_current_flag_attribution
+from canonical_schema import SCHEMA_VERSION, create_current_flag_attribution
 from keep_safety import review_culling_suggestions
 from repositories.edit_history import EditHistoryRepository
 from repositories.photo_review import PhotoReviewRepository
@@ -368,7 +368,7 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         upgraded = Database(str(self.db_path))
         try:
             upgraded.set_active_workspace(self.db.active_workspace_id)
-            self.assertEqual(upgraded.conn.execute("PRAGMA user_version").fetchone()[0], 26)
+            self.assertEqual(upgraded.conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(upgraded.photo_review.culling_flag_states([pid])[pid]["flag"], "flagged")
             self.assertIsNone(upgraded.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"])
             PhotoReviewService(upgraded).set_flag(pid, "flagged")

@@ -9,7 +9,6 @@
   "classifier.py": 2,
   "classifier_cache.py": 1,
   "classify_job/classify_pass.py": 3,
-  "classify_job/common.py": 1,
   "classify_job/detection.py": 6,
   "classify_job/job_run.py": 5,
   "classify_job/label_source.py": 1,

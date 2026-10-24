@@ -15,6 +15,7 @@ interface BrowsePhoto {
   _similarity?: number; similarity?: number;
   life_list?: {species: string; is_current_photo?: boolean; is_species_representative?: boolean}[];
   flag_note?: BrowseFlagNote | null;
+  species_assignments?: BrowseSpeciesAssignment[];
 }
 interface BrowseFlagNote {flag: 'none' | 'flagged' | 'rejected'; source: string | null; reason: string | null; description?: string; at?: string | null}
 interface BrowseStack {count: number; kind: string; photo_ids: number[]}
@@ -209,3 +210,10 @@ interface BrowseFolderJob {type: string; folder_ids?: number[]}
 interface BrowseLocalFolderData {legacy_workspace_session?: boolean; folders?: BrowseLocalFolder[]; jobs?: BrowseFolderJob[]}
 interface Window {vireoLocalFolderData?: BrowseLocalFolderData; vireoPendingArchives?: {folder_ids: number[]; state: string; destination?: string}[]}
 interface BrowseFolderStatusResult {statuses: Record<string, BrowseFolderStatus>; synthetic: BrowseFolder[]}
+
+interface BrowseSpeciesAssignment {
+  photo_id: number; keyword_id: number; species: string; method: string;
+  reviewer?: string | null; reason?: string | null; evidence_source?: string | null;
+  supporting_photo_ids?: number[]; detection_id?: number | null; subject_photo_id?: number | null;
+  confidence?: number | null; confidence_meaning?: string;
+}

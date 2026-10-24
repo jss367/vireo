@@ -121,7 +121,7 @@ def create_photo_location_keywords_blueprint(
                 break
         else:
             return jsonify({"ok": True})
-        db.untag_photo(photo_id, keyword_id)
+        db.untag_photo(photo_id, keyword_id, _record_history=True)
         queue_keyword_remove(db, photo_id, kw_name)
         # A ``keyword_remove`` on a ``type='location'`` tag strips the flat
         # and hierarchical entries but leaves ``vireo:locationKeywords`` and

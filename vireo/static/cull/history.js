@@ -31,14 +31,20 @@ async function cullAfterHistoryChange(result) {
       // grouping and refresh flags rather than restoring an older cache.
       var copy = /** @type {CullSourceResults} */ (JSON.parse(JSON.stringify(pipelineResults)));
       results = copy;
-      var state = /** @type {{photos: Record<number, {flag?: string} | undefined>}} */ (await safeFetch('/api/pipeline/group/state', {
+      var state = /** @type {{photos: Record<number, {flag?: string, flag_confirmation_status?: 'confirmed' | 'unverified'} | undefined>}} */ (await safeFetch('/api/pipeline/group/state', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({photo_ids: Array.from(new Set((cullSourceResults && cullSourceResults.photos || []).concat(copy.photos).map(function(photo) { return photo.id; })))}),
       }, {toast: false}));
       [results, cullSourceResults].forEach(function(source) {
         (source && source.photos || []).forEach(function(photo) {
           var saved = state.photos[photo.id];
-          if (saved) photo.flag = saved.flag;
+          if (saved) {
+            photo.flag = saved.flag;
+            // Undo may have restored a legacy flag that no attribution matches.
+            // Refresh confirmation from the server too, so an older Apply's
+            // "confirmed" marker cannot survive on the restored flag value.
+            photo.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
+          }
         });
       });
     } else {

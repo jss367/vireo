@@ -58,7 +58,7 @@
    "table",
    "photo_keywords",
    "photo_keywords",
-   "CREATE TABLE photo_keywords (\n                photo_id    INTEGER REFERENCES photos(id),\n                keyword_id  INTEGER REFERENCES keywords(id),\n                source      TEXT,\n                PRIMARY KEY (photo_id, keyword_id)\n            )"
+   "CREATE TABLE photo_keywords (\n                photo_id    INTEGER REFERENCES photos(id),\n                keyword_id  INTEGER REFERENCES keywords(id),\n                source      TEXT,\n                species_provenance TEXT,\n                PRIMARY KEY (photo_id, keyword_id)\n            )"
   ],
   [
    "index",
@@ -406,7 +406,7 @@
    "table",
    "edit_history_items",
    "edit_history_items",
-   "CREATE TABLE edit_history_items (\n                id        INTEGER PRIMARY KEY,\n                edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,\n                photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                old_value TEXT,\n                new_value TEXT\n            )"
+   "CREATE TABLE edit_history_items (\n                id        INTEGER PRIMARY KEY,\n                edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,\n                photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                old_value TEXT,\n                new_value TEXT,\n                species_provenance TEXT\n            )"
   ],
   [
    "table",

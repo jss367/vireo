@@ -1386,6 +1386,10 @@ def create_pipeline_blueprint(
         # no longer carrying the species keyword) doesn't light up the modal
         # while browse/highlights hide it.
         representatives = db.get_species_representatives(eligible_only=True)
+        # Confirmation status rides with the flag so Cull's undo/redo
+        # refresh does not strand a stale "confirmed" marker when the
+        # restored flag has no matching current attribution.
+        flag_states = db.photo_review.culling_flag_states(photo_ids) if photo_ids else {}
         photos = {}
         for pid in photo_ids:
             # Same workspace guard the apply endpoint uses, so a malicious
@@ -1406,8 +1410,13 @@ def create_pipeline_blueprint(
                     name: (kid is not None and kid in attached)
                     for name, kid in list_kids.items()
                 }
+            flag_state = flag_states.get(pid, {})
+            flag = flag_state.get("flag") or (row["flag"] or "none")
             photos[pid] = {
-                "flag": row["flag"] or "none",
+                "flag": flag,
+                "flag_confirmation_status": (
+                    "confirmed" if flag_state.get("confirmed_flag") == flag else "unverified"
+                ),
                 "has_species_keyword": has_kw,
                 "has_species_keywords": has_kws,
                 "is_species_representative": bool(
@@ -1444,31 +1453,91 @@ def create_pipeline_blueprint(
                 detach_review_photo(results, enc_idx, burst_idx, pid)
         return None
 
-    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags):
-        """Write each zone's target flag where it changes: ``(flag_items, error)``."""
+    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags, description):
+        """Write each zone's target flag where it changes, with attribution.
+
+        Returns ``(flag_items, before_attributions, error)``. Attribution is
+        captured BEFORE the writes and the matching current note is published
+        after each zone, so Cull sees explicit pipeline group decisions as
+        confirmed and Undo can restore prior attribution from the snapshot.
+        """
         try:
-            # Apply target flags. We rely on update_photo_flag's own write
-            # being a no-op at the SQL level when the value matches, but we
-            # still skip when unchanged so we don't record useless history.
             flag_items = []
-            for pid in picks:
-                old = old_flags.get(pid, "none")
-                if old != "flagged":
-                    db.photo_review.set_flag(pid, "flagged", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
-            for pid in rejects:
-                old = old_flags.get(pid, "none")
-                if old != "rejected":
-                    db.photo_review.set_flag(pid, "rejected", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
-            for pid in candidates:
-                old = old_flags.get(pid, "none")
-                if old in ("flagged", "rejected"):
-                    db.photo_review.set_flag(pid, "none", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
+            touched_ids = list(dict.fromkeys(list(picks) + list(rejects) + list(candidates)))
+            before_attributions = db.photo_review.flag_attributions(touched_ids)
+            for zone_ids, target in (
+                (picks, "flagged"), (rejects, "rejected"), (candidates, "none"),
+            ):
+                changed_ids = []
+                for pid in zone_ids:
+                    old = old_flags.get(pid, "none")
+                    # Candidates clears only prior flagged/rejected states;
+                    # a "none" photo moved into Candidates stays none.
+                    if target == "none" and old not in ("flagged", "rejected"):
+                        continue
+                    if old == target:
+                        continue
+                    db.photo_review.set_flag(pid, target, _commit=False)
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
+                    changed_ids.append(pid)
+                if changed_ids:
+                    db.photo_review.set_current_flag_note(changed_ids, target, description)
         except ValueError as e:
-            return None, json_error(str(e), 403)
-        return flag_items, None
+            return None, None, json_error(str(e), 403)
+        return flag_items, before_attributions, None
+
+    def _record_flag_attribution_history(db, edit_id, changed_ids, before_attributions):
+        """Replay metadata must share the flag write's transaction."""
+        if not changed_ids:
+            return
+        db.photo_review.record_flag_attribution_history(
+            edit_id, changed_ids, before_attributions,
+            db.photo_review.flag_attributions(changed_ids),
+        )
+
+    def _persist_group_apply(db, flag_items, before_attributions, desc,
+                             removed, before, results):
+        """Record the flag edits, attribution snapshots, and cache either path.
+
+        ``removed`` photos route through ``save_grouping_edit`` (same
+        transaction, encounter snapshot included); otherwise the flag edit is
+        recorded directly and the cache is saved before committing.
+        """
+        from pipeline import save_results_raw
+        from services.grouping_history import save_grouping_edit
+
+        if flag_items:
+            for item in flag_items:
+                db.queue_flag_change_if_enabled(item["photo_id"], item["new_value"], _commit=False)
+        changed_ids = [item["photo_id"] for item in (flag_items or ())]
+
+        def record_attribution(edit_id):
+            _record_flag_attribution_history(db, edit_id, changed_ids, before_attributions)
+
+        if removed:
+            save_grouping_edit(
+                db, before, results, desc + f", detached {len(removed)}",
+                photo_edit={"action_type": "flag", "new_value": "pipeline_group_apply"} if flag_items else None,
+                items=flag_items,
+                on_record=record_attribution if changed_ids else None,
+            )
+            return
+        if flag_items:
+            edit_id = db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
+                                     is_batch=len(flag_items) > 1, _commit=False)
+            record_attribution(edit_id)
+        saved = False
+        try:
+            if results is not None:
+                save_results_raw(results, os.path.dirname(db._db_path), db.require_workspace_id())
+                saved = True
+            db.commit()
+        except Exception:  # broad: roll back catalog changes and restore the saved cache before re-raising
+            db.rollback()
+            if saved:
+                save_results_raw(before, os.path.dirname(db._db_path), db.require_workspace_id())
+            raise
+        db._prune_edit_history()
 
     def _group_apply_photo_states(db, photo_ids):
         """Each photo's flag after a group apply, for the client's card update."""
@@ -1495,8 +1564,7 @@ def create_pipeline_blueprint(
         were previously flagged/rejected. Returns per-photo new flag state so
         the client can update its rendered cards without reloading.
         """
-        from pipeline import load_results_raw, save_results_raw
-        from services.grouping_history import save_grouping_edit
+        from pipeline import load_results_raw
 
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1530,45 +1598,24 @@ def create_pipeline_blueprint(
             if row:
                 old_flags[pid] = row["flag"] or "none"
 
-        flag_items, err = _apply_group_zone_flags(
-            db, picks, rejects, candidates, old_flags,
+        cleared_count = sum(
+            1 for pid in candidates if old_flags.get(pid, "none") in ("flagged", "rejected")
+        )
+        desc = (
+            f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
+            f"cleared {cleared_count}"
+        )
+
+        flag_items, before_attributions, err = _apply_group_zone_flags(
+            db, picks, rejects, candidates, old_flags, desc,
         )
         if err is not None:
             return err
 
-        if flag_items:
-            for item in flag_items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
-        desc = (
-            f"Pipeline burst group: flagged {len(picks)}, rejected {len(rejects)}, "
-            f"cleared {sum(1 for it in flag_items if it['new_value'] == 'none')}"
-        )
         if results is not None:
             sync_review_photo_flags(db, results, seen)
-        if removed:
-            save_grouping_edit(
-                db, before, results, desc + f", detached {len(removed)}",
-                photo_edit={"action_type": "flag", "new_value": "pipeline_group_apply"} if flag_items else None,
-                items=flag_items,
-            )
-        else:
-            if flag_items:
-                db.record_edit("flag", desc, "pipeline_group_apply", flag_items,
-                               is_batch=len(flag_items) > 1, _commit=False)
-            saved = False
-            try:
-                if results is not None:
-                    save_results_raw(results, os.path.dirname(db_path), db.require_workspace_id())
-                    saved = True
-                db.commit()
-            except Exception:  # broad: roll back catalog changes and restore the saved cache before re-raising
-                db.rollback()
-                if saved:
-                    save_results_raw(before, os.path.dirname(db_path), db.require_workspace_id())
-                raise
-            db._prune_edit_history()
+        _persist_group_apply(db, flag_items, before_attributions, desc,
+                             removed, before, results)
 
         # Return new per-photo state so the client can update without a reload.
         # `has_species_keyword` is kept in the payload (now always False) so the

@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from keyword_identity import resolve_import_alias
 from keyword_normalization import (
@@ -183,10 +183,19 @@ def keyword_source_max_sql(left, right):
 
 
 # The upsert clause every ``INSERT INTO photo_keywords`` must end with: an
-# existing row keeps its provenance unless the incoming row's is stronger.
+# existing row keeps its provenance unless the incoming row's is stronger,
+# and keeps its species_provenance unless it has none. Rows that INSERT only
+# three columns leave ``excluded.species_provenance`` NULL, so COALESCE
+# leaves the surviving row's evidence intact; merge paths that INSERT four
+# columns carry the loser's evidence onto the survivor when the survivor had
+# none, matching the ``_fold_history_state`` rule that keeps the survivor's
+# own stamp over the incoming one.
 KEYWORD_SOURCE_CONFLICT_SQL = (
-    "ON CONFLICT(photo_id, keyword_id) DO UPDATE SET source = "
+    "ON CONFLICT(photo_id, keyword_id) DO UPDATE SET "
+    "source = "
     + keyword_source_max_sql("excluded.source", "photo_keywords.source")
+    + ", species_provenance = COALESCE("
+    "photo_keywords.species_provenance, excluded.species_provenance)"
 )
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
@@ -1018,6 +1027,7 @@ class Database:
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
         self._db_path = db_path
+        self._species_provenance_before: dict[tuple[int, int], dict[str, Any] | None] = {}
         # ``conn`` exists only while the connection is open: ``close`` deletes
         # it, so its type is the connection, never ``None``. ``close`` and
         # ``__del__`` tolerate its absence if ``sqlite3.connect`` raises.
@@ -1157,6 +1167,7 @@ class Database:
     def rollback(self):
         """Roll back the open transaction."""
         self.conn.rollback()
+        self._species_provenance_before = {}
 
     def commit_with_retry(self):
         """Commit like ``commit``, retrying while SQLite reports locked or busy.
@@ -2215,6 +2226,7 @@ class Database:
                     source = keyword_source_max(
                         self.moves_merge.photo_keyword_source(losing_id, kw_id))
                     self.tag_photo(surviving_id, kw_id, source=source, _commit=False)
+                    self.species_provenance.carry(losing_id, surviving_id, keyword_id=kw_id)
             elif newest_loser["change_type"] == "keyword_remove":
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
@@ -2531,6 +2543,7 @@ class Database:
         transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
         """
         from duplicates import merge_metadata
+        from repositories.species_provenance import evidence_for_photo_copy
 
         repo = self._duplicates_repository()
         winner_meta = repo.photo_metadata(winner_id)
@@ -2542,22 +2555,28 @@ class Database:
                 repo.set_flag(winner_id, winner_flag)
             if merge.new_rating != winner_meta.rating:
                 repo.set_rating(winner_id, merge.new_rating)
-            # Carry every loser's durable provenance onto the winner,
-            # including keyword IDs the winner already has. merge_metadata()
-            # omits overlaps from keyword_ids_to_add, but a manual loser must
-            # still upgrade a weaker winner association — so this loop is
-            # driven by what the losers carry, not by what needs adding.
-            # tag_photo's upsert folds against the winner's own stamp, so a
-            # weak loser can never pull a stronger winner down.
-            loser_keyword_sources = {}
+            # Carry every loser's durable provenance -- and its species
+            # evidence -- onto the winner, including keyword IDs the winner
+            # already has. merge_metadata() omits overlaps from
+            # keyword_ids_to_add, but a manual loser must still upgrade a
+            # weaker winner association -- so this loop is driven by what the
+            # losers carry, not by what needs adding. tag_photo's upsert folds
+            # against the winner's own stamp, so a weak loser can never pull a
+            # stronger winner down; the same upsert keeps the winner's own
+            # species_provenance when the winner already recorded one.
+            loser_keyword_sources: dict[int, str | None] = {}
+            loser_keyword_evidence: dict[int, str | None] = {}
             for row in repo.loser_keyword_rows(loser_ids, survivor_id=winner_id):
                 kw_id = row["keyword_id"]
                 loser_keyword_sources[kw_id] = keyword_source_max(
                     row["source"], loser_keyword_sources.get(kw_id),
                 )
+                if row["species_provenance"] is not None and loser_keyword_evidence.get(kw_id) is None:
+                    loser_keyword_evidence[kw_id] = evidence_for_photo_copy(row["species_provenance"], row["photo_id"])
             for kw_id, merged_source in loser_keyword_sources.items():
                 self.tag_photo(
                     winner_id, kw_id, source=merged_source, _commit=False,
+                    species_provenance=loser_keyword_evidence.get(kw_id),
                 )
             # Rejected losers remain in the catalog and can be reopened.
             # Copy their suppression state after choosing carried tags, so
@@ -4163,6 +4182,7 @@ class Database:
 
     def tag_photo(
         self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
+        *, provenance=None, species_provenance: str | None = None, _record_provenance=False,
     ):
         """Associate a keyword with a photo.
 
@@ -4184,12 +4204,33 @@ class Database:
                     re-tagging with ``KEYWORD_SOURCE_UNKNOWN`` keeps a
                     recorded ``'manual'`` (and a future ``'accept'`` re-tag
                     would too).
+            _record_provenance: Capture attribution only for an undoable edit.
+                    Import and merge writes leave this false.
+            provenance: dict of species evidence the caller is recording
+                    deliberately (a reviewer's identification). Snapshotted
+                    for undo and set after the row is tagged, so it survives
+                    the ON CONFLICT fold that would otherwise keep an
+                    existing value.
+            species_provenance: pre-serialized evidence JSON forwarded during
+                    a merge (loser → winner). Unlike ``provenance`` it does
+                    not snapshot or overwrite -- the shared conflict clause
+                    keeps the surviving row's evidence over the incoming
+                    one, so the loser's row is only applied when the winner
+                    had none.
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        from services.species_provenance import remember_before
+        if provenance is not None and _record_provenance:
+            remember_before(self, photo_id, keyword_id, force=True)
         self._keyword_provenance_repository().tag(
-            photo_id, keyword_id, source=source, _commit=_commit,
+            photo_id, keyword_id, source=source,
+            species_provenance=species_provenance, _commit=False,
         )
+        if provenance is not None:
+            self.species_provenance.set(photo_id, keyword_id, provenance)
+        if _commit:
+            self.commit()
 
     def _meta_repository(self):
         """Build the (catalog-wide) db_meta repository on this connection."""
@@ -4269,7 +4310,13 @@ class Database:
         """
         return self._photo_metadata_repository()
 
-    def untag_photo(self, photo_id, keyword_id, _commit=True):
+    @property
+    def species_provenance(self):
+        """Per-species assignment evidence, independent of photographer flags."""
+        from repositories.species_provenance import SpeciesProvenanceRepository
+        return SpeciesProvenanceRepository(self.conn)
+
+    def untag_photo(self, photo_id, keyword_id, _commit=True, *, _record_history=False):
         """Remove a keyword association from a photo.
 
         Stays a ``Database`` method beside ``tag_photo``: the structural
@@ -4279,7 +4326,14 @@ class Database:
         Args:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
+            _record_history: Opt in only when the caller will record an
+                     undoable keyword/species edit. Reconciliation, merge and
+                     replay writers leave this false so no stale snapshots
+                     can accumulate or leak into a later edit.
         """
+        from services.species_provenance import remember_before
+        if _record_history:
+            remember_before(self, photo_id, keyword_id)
         return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(
@@ -5155,6 +5209,8 @@ class Database:
             source, reason: the edit's provenance when the caller stated it
                      (who decided, and why); None for the user's own clicks.
         """
+        from services.species_provenance import history_items
+        items = history_items(self, action_type, items)
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
             is_batch=is_batch, _commit=_commit, source=source, reason=reason,
@@ -5296,18 +5352,23 @@ class Database:
 
         history = self._edit_history_repository()
         stale = False
-        with self._commits_held():
-            try:
-                with history.identity_replay():
-                    if undo:
-                        self._apply_undo(entry, items)
-                        history.mark_undone(entry['id'])
-                    else:
-                        self._apply_redo(entry, items)
-                        history.mark_redone(entry['id'])
-            except IdentityHistoryStale:
-                history.retire_superseded_identity_entry(entry['id'])
-                stale = True
+        try:
+            with self._commits_held():
+                try:
+                    with history.identity_replay():
+                        if undo:
+                            self._apply_undo(entry, items)
+                            history.mark_undone(entry['id'])
+                        else:
+                            self._apply_redo(entry, items)
+                            history.mark_redone(entry['id'])
+                except IdentityHistoryStale:
+                    history.retire_superseded_identity_entry(entry['id'])
+                    stale = True
+        finally:
+            # SQL savepoint rollback cannot undo Python-side snapshots. A
+            # failed/retired replay must never contaminate a later edit.
+            self._species_provenance_before = {}
         if stale:
             raise IdentityHistoryStale(
                 'That identification was changed elsewhere. History has been refreshed; '
@@ -5363,10 +5424,14 @@ class Database:
         self._apply_edit_items(entry, items, undo=False)
 
     def _apply_edit_items(self, entry, items, *, undo):
+        from services.species_provenance import replay_history
         action = entry['action_type']
         if action == 'identity_alternatives':
             from services.identity_alternatives import replay_identity_batch
             replay_identity_batch(self, items, undo=undo)
+            # Identity snapshots already restore their retargeted authorship
+            # lattice; the extra replay only owns species evidence here.
+            replay_history(self, items, undo=undo, restore_source=False)
             return
         setter = self._EDIT_FIELD_SETTERS.get(action)
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
@@ -5387,8 +5452,13 @@ class Database:
                 setter(self, item['photo_id'], item[value_key])
             elif handler is not None:
                 handler(self, entry, item)
+        replay_history(self, items, undo=undo)
 
     # -- plain per-photo fields (same setter for undo and redo) ----------
+
+    def _edit_set_species_provenance(self, pid, value):
+        snapshot = json.loads(value)
+        self.species_provenance.restore(pid, snapshot['keyword_id'], snapshot['state'])
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
@@ -5537,7 +5607,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        skip_tag = old_meta.get('no_tag', False)
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
@@ -5578,7 +5648,7 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        skip_tag = old_meta.get('no_tag', False)
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
@@ -5729,6 +5799,7 @@ class Database:
         replay_identity_edit(self, item['photo_id'], item['old_value'], item['new_value'])
 
     _EDIT_FIELD_SETTERS = {
+        'species_provenance': _edit_set_species_provenance,
         'flag': _edit_set_flag,
         'wildlife_excluded': _edit_set_wildlife_excluded,
         'color_label': _edit_set_color_label,

@@ -333,7 +333,7 @@ class _HighlightsRelabel:
         if old_primary is not None:
             self.has_old_species = True
         for old in old_rows:
-            db.untag_photo(pid, old["id"], _commit=False)
+            db.untag_photo(pid, old["id"], _commit=False, _record_history=True)
             # Compare by keyword id: SQLite's NOCASE is ASCII-only,
             # so `Éclair` and `éclair` live as distinct rows with
             # distinct ids, but Python `.lower()` folds them equal.
