@@ -1583,7 +1583,9 @@ def test_keyword_facade_signatures_unchanged():
     assert sig["_add_source_species_keyword"] == (
         "(self, name, source_taxon_id, parent_id=None, _commit=True)"
     )
-    assert sig["untag_photo"] == "(self, photo_id, keyword_id, _commit=True)"
+    assert sig["untag_photo"] == (
+        "(self, photo_id, keyword_id, _commit=True, *, _record_history=True)"
+    )
     assert sig["update_keyword"] == "(self, keyword_id, **kwargs)"
     assert sig["_lookup_taxon_id_for_keyword"] == (
         "(self, name, prefer_species=False, species_only=False)"
