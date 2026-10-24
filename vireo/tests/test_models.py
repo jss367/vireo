@@ -2106,7 +2106,10 @@ def _stub_hf_module(monkeypatch, hf_hub_download_fn, try_to_load_from_cache_fn):
     import sys
     import types
 
+    from huggingface_hub import errors
+
     stub = types.ModuleType("huggingface_hub")
+    stub.errors = errors
     stub.hf_hub_download = hf_hub_download_fn
     stub.try_to_load_from_cache = try_to_load_from_cache_fn
     monkeypatch.setitem(sys.modules, "huggingface_hub", stub)

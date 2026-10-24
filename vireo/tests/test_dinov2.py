@@ -662,7 +662,10 @@ def _install_fake_hf(monkeypatch, hf_hub_download, repo_sha="a" * 40):
         def model_info(self, repo_id):
             return _FakeModelInfo(repo_sha)
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = hf_hub_download
     fake_hf.HfApi = _FakeHfApi
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
@@ -980,7 +983,10 @@ def test_ensure_dinov2_weights_falls_back_when_model_info_fails(
         def model_info(self, repo_id):
             raise ConnectionError("HfApi network blip")
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     fake_hf.HfApi = _BrokenHfApi
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)

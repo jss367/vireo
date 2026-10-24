@@ -17,6 +17,8 @@ import pytest
 @pytest.fixture
 def fake_hub(monkeypatch):
     """A huggingface_hub whose hf_hub_download writes where local_dir says."""
+    from huggingface_hub import errors
+
     calls = []
     state = {"fail": False, "resumed": []}
 
@@ -41,6 +43,7 @@ def fake_hub(monkeypatch):
 
     module = types.ModuleType("huggingface_hub")
     module.hf_hub_download = hf_hub_download
+    module.errors = errors
     monkeypatch.setitem(sys.modules, "huggingface_hub", module)
     return calls, state
 
@@ -61,6 +64,49 @@ def test_downloads_beside_the_destination_and_leaves_one_copy(fake_hub, tmp_path
                       "local_dir": calls[0]["local_dir"]}]
     assert Path(calls[0]["local_dir"]).parent == dest.parent / STAGING_DIRNAME
     assert sorted(os.listdir(dest.parent)) == ["model.onnx"], "staging is removed after publish"
+
+
+@pytest.mark.parametrize("revision", [None, "a" * 40, "b" * 40])
+def test_real_hub_offline_download_reuses_legacy_cache(tmp_path, monkeypatch, revision):
+    import httpx
+    import huggingface_hub
+    from hub_download import fetch_hub_file
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    cache = tmp_path / "hub"
+    repo = cache / "models--owner--repo"
+    snapshot = repo / "snapshots" / ("a" * 40) / "weights"
+    snapshot.mkdir(parents=True)
+    cached = snapshot / "model.onnx"
+    cached.write_bytes(b"cached weights")
+    (repo / "refs").mkdir()
+    (repo / "refs/main").write_text("a" * 40)
+    real_download = huggingface_hub.hf_hub_download
+    real_lookup = huggingface_hub.try_to_load_from_cache
+
+    def download(**kwargs):
+        return real_download(**kwargs, cache_dir=str(cache), local_files_only=True)
+
+    def lookup(*args, **kwargs):
+        return real_lookup(*args, **kwargs, cache_dir=str(cache))
+
+    def no_network(*args, **kwargs):
+        pytest.fail("offline repair must not request the network")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lookup)
+    monkeypatch.setattr(httpx.Client, "request", no_network)
+    destination = tmp_path / "model/model.onnx"
+    if revision == "b" * 40:
+        with pytest.raises(LocalEntryNotFoundError):
+            fetch_hub_file("owner/repo", "model.onnx", str(destination),
+                           subfolder="weights", revision=revision)
+        assert not destination.exists(), "a different cached revision cannot satisfy the request"
+        return
+    fetch_hub_file("owner/repo", "model.onnx", str(destination),
+                   subfolder="weights", revision=revision)
+    assert destination.read_bytes() == cached.read_bytes()
+    assert sorted(p.name for p in destination.parent.iterdir()) == ["model.onnx"]
 
 
 def test_repo_relative_filename_lands_at_its_destination(fake_hub, tmp_path):

@@ -103,9 +103,11 @@ def fetch_hub_file(repo_id: str, filename: str, dest_path: str, *,
     ``filename`` may be repo-relative (``onnx/model.onnx``); ``subfolder`` and
     ``revision`` mean what they mean to ``hf_hub_download``. A file already in
     the hub cache from an older Vireo is copied out of it by the hub client, so
-    no network transfer happens then either.
+    no payload transfer happens then either. If remote metadata is unavailable,
+    explicitly reuse a matching legacy cache entry without filling the cache.
     """
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
 
     staging_root = os.path.join(os.path.dirname(dest_path) or ".", STAGING_DIRNAME)
     # Isolate resume data by source and destination. Finishing a different
@@ -121,7 +123,22 @@ def fetch_hub_file(repo_id: str, filename: str, dest_path: str, *,
     # download never sees, or removes, another transfer's staging files.
     with DOWNLOAD_LOCK:
         os.makedirs(staging, exist_ok=True)
-        replace_file(hf_hub_download(**kwargs), dest_path)
+        try:
+            downloaded = hf_hub_download(**kwargs)
+        except LocalEntryNotFoundError:
+            # The local-dir client can fail its metadata request before it
+            # checks the global cache. Preserve the old offline repair path.
+            from huggingface_hub import try_to_load_from_cache
+
+            cached = try_to_load_from_cache(
+                repo_id, f"{subfolder}/{filename}" if subfolder else filename,
+                revision=revision,
+            )
+            if not isinstance(cached, str) or not os.path.isfile(cached):
+                raise
+            downloaded = os.path.join(staging, ".vireo-cached-file")
+            shutil.copyfile(cached, downloaded)
+        replace_file(downloaded, dest_path)
         shutil.rmtree(staging, ignore_errors=True)
         # Other interrupted transfers (or retained cleanup failures)
         # still own this parent; never remove them recursively.
