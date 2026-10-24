@@ -124,6 +124,38 @@ def test_ensure_keypoint_weights_missing_files_triggers_download(tmp_path, monke
     assert (tmp_path / "rtmpose-animal" / "config.json").is_file()
 
 
+def test_keypoint_retry_keeps_weights_downloaded_before_config_failure(tmp_path, monkeypatch):
+    """Retrying a failed companion fetch must not retransmit the completed model."""
+    from pathlib import Path
+
+    import huggingface_hub
+    import keypoints as kp
+
+    monkeypatch.setattr(kp, "MODELS_DIR", str(tmp_path))
+    downloads = []
+
+    def download(*, filename, local_dir, subfolder, **kwargs):
+        downloads.append(filename)
+        if filename == "config.json" and downloads.count(filename) == 1:
+            raise ConnectionError("config temporarily unavailable")
+        destination = Path(local_dir) / subfolder / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"completed weights" if filename == "model.onnx" else b"{}")
+        return str(destination)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    with pytest.raises(RuntimeError, match="config temporarily unavailable"):
+        kp.ensure_keypoint_weights("rtmpose-animal")
+
+    model_path = tmp_path / "rtmpose-animal" / "model.onnx"
+    assert model_path.read_bytes() == b"completed weights"
+    assert not (model_path.parent / "config.json").exists()
+    assert kp.ensure_keypoint_weights("rtmpose-animal") == str(model_path)
+    assert downloads == ["model.onnx", "config.json", "config.json"]
+    assert model_path.read_bytes() == b"completed weights"
+    assert (model_path.parent / "config.json").read_bytes() == b"{}"
+
+
 def _write_rtmpose_config(model_dir):
     (model_dir / "config.json").write_text(json.dumps({
         "input_size": [1, 3, 256, 256],

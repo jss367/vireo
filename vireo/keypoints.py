@@ -72,7 +72,7 @@ def ensure_keypoint_weights(model_name, progress_callback=None):
 
     Returns the path to ``model.onnx`` if both that file and ``config.json``
     already exist under ``MODELS_DIR/<model_name>/``. Otherwise downloads
-    both from the ``jss367/vireo-onnx-models`` HuggingFace repo.
+    the missing files from the ``jss367/vireo-onnx-models`` HuggingFace repo.
 
     The shared cache guard wraps the download helper, not this fast path,
     so a pipeline whose weights are already on disk does not wait for an
@@ -134,6 +134,8 @@ def _hf_download_keypoint_weights(model_name, progress_callback=None):
                 ("model.onnx", onnx_path),
                 ("config.json", config_path),
             ):
+                if os.path.isfile(final_path):
+                    continue
                 fetch_hub_file(ONNX_REPO, filename, final_path, subfolder=model_name)
         except Exception as e:
             raise RuntimeError(
