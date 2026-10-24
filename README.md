@@ -54,6 +54,14 @@ AI models are downloaded automatically on first use.
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 
+## Uninstalling
+
+Removing the Vireo application leaves its catalog, settings, downloaded models,
+and other support files on disk. Before uninstalling, use **Settings → Models**
+to remove downloaded models and **Storage → Hugging Face Cache → Manage** to
+review remaining download-cache entries. See the [uninstall guide](docs/uninstalling.md)
+for manual cleanup locations and how to preserve photos, edits, and catalog data.
+
 ## Developing from source
 
 ### Requirements
