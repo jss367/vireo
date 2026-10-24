@@ -1836,6 +1836,7 @@ def download_hf_model(repo_id, progress_callback=None):
     model_id = "hf-" + repo_id.replace("/", "-").lower()
     slug = repo_id.split("/")[-1]
     local_dir = os.path.join(DEFAULT_MODELS_DIR, slug)
+    batch = DownloadBatch(repo_id, local_dir)
 
     # Find ONNX files in the repo
     if progress_callback:
@@ -1843,7 +1844,7 @@ def download_hf_model(repo_id, progress_callback=None):
 
     log.info("Listing files in HuggingFace repo: %s", repo_id)
     try:
-        files = list_repo_files(repo_id)
+        files = list_repo_files(repo_id, revision=batch.revision)
     except Exception as e:
         raise RuntimeError(f"Could not access HuggingFace repo '{repo_id}': {e}")
 
@@ -1860,7 +1861,6 @@ def download_hf_model(repo_id, progress_callback=None):
 
     # Download all ONNX files and common config files
     config_files = [f for f in files if f.endswith((".json", ".npy"))]
-    batch = DownloadBatch(repo_id, local_dir)
     to_download = batch.pending(onnx_files + config_files)
 
     for fi, filename in enumerate(to_download):
@@ -1871,6 +1871,7 @@ def download_hf_model(repo_id, progress_callback=None):
         _hf_download_with_retry(
             repo_id, filename, local_dir,
             progress_callback=progress_callback,
+            revision=batch.revision,
         )
         batch.record(filename)
 

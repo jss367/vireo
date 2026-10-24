@@ -207,10 +207,14 @@ def test_model_batch_retry_keeps_completed_files(app_and_db, tmp_path, monkeypat
     files = (["model.onnx", "config.json"] if kind == "custom"
              else ["image_encoder.onnx", "mask_decoder.onnx"])
     downloads = []
+    revisions = []
+    listings = []
+    server_revision = "a" * 40
     failing = True
 
     def download(*, filename, local_dir, **kwargs):
         downloads.append(filename)
+        revisions.append(kwargs.get("revision"))
         if failing and filename == files[1]:
             raise ConnectionError("companion unavailable")
         destination = Path(local_dir) / filename
@@ -219,7 +223,13 @@ def test_model_batch_retry_keeps_completed_files(app_and_db, tmp_path, monkeypat
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
     monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda **kw: None)
-    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda *_: files)
+    def list_files(*args, revision=None):
+        listings.append(revision)
+        return files
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", list_files)
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: types.SimpleNamespace(
+        model_info=lambda _: types.SimpleNamespace(sha=server_revision)))
     monkeypatch.setattr("time.sleep", lambda *_: None)
 
     if kind == "custom":
@@ -246,19 +256,27 @@ def test_model_batch_retry_keeps_completed_files(app_and_db, tmp_path, monkeypat
         run()
     assert downloads == [files[0], files[1], files[1], files[1]]
     failing = False
+    server_revision = "b" * 40
     run()
     assert downloads == [files[0], files[1], files[1], files[1], files[1]]
+    assert revisions == ["a" * 40] * 5, "a retry must finish the original snapshot"
     if kind == "pipeline":
         assert events[-1][-1]["total"] == 1, "progress counts only files still to download"
     # A later explicit download is a fresh batch, allowing deliberate refresh.
     run()
     assert downloads[-2:] == files
+    assert revisions[-2:] == ["b" * 40] * 2
+    if kind == "custom":
+        assert listings == ["a" * 40, "a" * 40, "b" * 40]
 
 
 @pytest.mark.parametrize("change", ["other-repository", "modified", "missing", "unrecorded"])
-def test_download_batch_does_not_reuse_unrelated_or_changed_files(tmp_path, change):
+def test_download_batch_does_not_reuse_unrelated_or_changed_files(tmp_path, monkeypatch, change):
+    import huggingface_hub
     from hub_download import DownloadBatch
 
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: types.SimpleNamespace(
+        model_info=lambda _: types.SimpleNamespace(sha="a" * 40)))
     file = tmp_path / "model.onnx"
     file.write_bytes(b"completed")
     batch = DownloadBatch("owner/model", str(tmp_path))
@@ -270,3 +288,36 @@ def test_download_batch_does_not_reuse_unrelated_or_changed_files(tmp_path, chan
         file.unlink()
     repo = "other-owner/model" if change == "other-repository" else "owner/model"
     assert DownloadBatch(repo, str(tmp_path)).pending([file.name]) == [file.name]
+
+
+@pytest.mark.parametrize("saved_revision", [None, "main", 123])
+def test_download_batch_does_not_reuse_unpinned_receipt(tmp_path, monkeypatch, saved_revision):
+    import json
+
+    import huggingface_hub
+    from hub_download import DownloadBatch
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: types.SimpleNamespace(
+        model_info=lambda _: types.SimpleNamespace(sha="b" * 40)))
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"old weights")
+    batch = DownloadBatch("owner/model", str(tmp_path))
+    batch.record(model.name)
+    receipt = Path(batch.path)
+    saved = json.loads(receipt.read_text())
+    saved["revision"] = saved_revision
+    receipt.write_text(json.dumps(saved))
+    retry = DownloadBatch("owner/model", str(tmp_path))
+    assert retry.revision == "b" * 40
+    assert retry.pending([model.name]) == [model.name]
+
+
+def test_download_batch_refuses_mutable_revision_before_any_transfer(tmp_path, monkeypatch):
+    import huggingface_hub
+    from hub_download import DownloadBatch
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: types.SimpleNamespace(
+        model_info=lambda _: types.SimpleNamespace(sha="main")))
+    with pytest.raises(RuntimeError, match="immutable revision"):
+        DownloadBatch("owner/model", str(tmp_path))
+    assert not (tmp_path / ".vireo-download-progress.json").exists()

@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 
@@ -30,10 +31,11 @@ STAGING_DIRNAME = ".hf-download"
 
 
 class DownloadBatch:
-    """Remember completed files only while a multi-file download is unfinished."""
+    """Resume an unfinished multi-file download at its original immutable revision."""
 
-    def __init__(self, repo_id: str, local_dir: str) -> None:
+    def __init__(self, repo_id: str, local_dir: str, *, subfolder: str | None = None) -> None:
         self.repo_id = repo_id
+        self.subfolder = subfolder
         self.local_dir = local_dir
         self.path = os.path.join(local_dir, ".vireo-download-progress.json")
         try:
@@ -41,10 +43,25 @@ class DownloadBatch:
                 saved = json.load(stream)
         except (OSError, ValueError):
             saved = {}
-        self.completed = (saved.get("completed", {})
-                          if isinstance(saved, dict) and saved.get("repo_id") == repo_id else {})
+        if not isinstance(saved, dict):
+            saved = {}
+        revision = saved.get("revision")
+        if (saved.get("repo_id") == repo_id and saved.get("subfolder") == subfolder
+                and isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{40}", revision)):
+            self.revision = revision
+            self.completed = saved.get("completed", {})
+        else:
+            from huggingface_hub import HfApi
+
+            self.revision = HfApi().model_info(repo_id).sha
+            if not isinstance(self.revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", self.revision):
+                raise RuntimeError(f"Could not resolve an immutable revision for {repo_id}")
+            self.completed = {}
         if not isinstance(self.completed, dict):
             self.completed = {}
+        os.makedirs(local_dir, exist_ok=True)
+        # Persist the pin before the first transfer, including failed first files.
+        self._save()
 
     def _signature(self, filename: str) -> list[int] | None:
         try:
@@ -59,11 +76,15 @@ class DownloadBatch:
 
     def record(self, filename: str) -> None:
         self.completed[filename] = self._signature(filename)
+        self._save()
+
+    def _save(self) -> None:
         # Publish the small receipt atomically. No model bytes are duplicated.
         fd, temporary = tempfile.mkstemp(dir=self.local_dir)
         try:
             with os.fdopen(fd, "w") as stream:
-                json.dump({"repo_id": self.repo_id, "completed": self.completed}, stream)
+                json.dump({"repo_id": self.repo_id, "subfolder": self.subfolder,
+                           "revision": self.revision, "completed": self.completed}, stream)
             replace_file(temporary, self.path)
         finally:
             with contextlib.suppress(OSError):

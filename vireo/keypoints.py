@@ -72,7 +72,8 @@ def ensure_keypoint_weights(model_name, progress_callback=None):
 
     Returns the path to ``model.onnx`` if both that file and ``config.json``
     already exist under ``MODELS_DIR/<model_name>/``. Otherwise downloads
-    the missing files from the ``jss367/vireo-onnx-models`` HuggingFace repo.
+    a consistent pair from the ``jss367/vireo-onnx-models`` HuggingFace repo,
+    reusing completed files from an interrupted batch at its pinned revision.
 
     The shared cache guard wraps the download helper, not this fast path,
     so a pipeline whose weights are already on disk does not wait for an
@@ -127,16 +128,15 @@ def _hf_download_keypoint_weights(model_name, progress_callback=None):
         log.info("%s weights missing — downloading from Hugging Face", model_name)
 
         try:
-            from hub_download import fetch_hub_file
+            from hub_download import DownloadBatch, fetch_hub_file
             from models import ONNX_REPO
 
-            for filename, final_path in (
-                ("model.onnx", onnx_path),
-                ("config.json", config_path),
-            ):
-                if os.path.isfile(final_path):
-                    continue
-                fetch_hub_file(ONNX_REPO, filename, final_path, subfolder=model_name)
+            batch = DownloadBatch(ONNX_REPO, target, subfolder=model_name)
+            for filename in batch.pending(["model.onnx", "config.json"]):
+                fetch_hub_file(ONNX_REPO, filename, os.path.join(target, filename),
+                               subfolder=model_name, revision=batch.revision)
+                batch.record(filename)
+            batch.finish()
         except Exception as e:
             raise RuntimeError(
                 f"Failed to download {model_name} weights: {e}. "

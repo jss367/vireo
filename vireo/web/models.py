@@ -773,7 +773,7 @@ def create_models_blueprint(
             subfolder = spec["subfolder"]
             model_dir = os.path.join(pipeline_models_dir(), subfolder)
             os.makedirs(model_dir, exist_ok=True)
-            batch = DownloadBatch(f"{ONNX_REPO}/{subfolder}", model_dir)
+            batch = DownloadBatch(ONNX_REPO, model_dir, subfolder=subfolder)
             files = batch.pending(spec["files"])
 
             total = len(files)
@@ -791,6 +791,7 @@ def create_models_blueprint(
                             ONNX_REPO, filename,
                             os.path.join(model_dir, filename),
                             subfolder=subfolder,
+                            revision=batch.revision,
                         )
                         batch.record(filename)
                         break
