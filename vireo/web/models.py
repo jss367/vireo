@@ -766,14 +766,15 @@ def create_models_blueprint(
 
         @cache_access
         def work(job):
-            from hub_download import fetch_hub_file
+            from hub_download import DownloadBatch, fetch_hub_file
             from models import ONNX_REPO
 
             spec = PIPELINE_MODELS[model_id]
             subfolder = spec["subfolder"]
-            files = spec["files"]
             model_dir = os.path.join(pipeline_models_dir(), subfolder)
             os.makedirs(model_dir, exist_ok=True)
+            batch = DownloadBatch(f"{ONNX_REPO}/{subfolder}", model_dir)
+            files = batch.pending(spec["files"])
 
             total = len(files)
             for fi, filename in enumerate(files):
@@ -791,6 +792,7 @@ def create_models_blueprint(
                             os.path.join(model_dir, filename),
                             subfolder=subfolder,
                         )
+                        batch.record(filename)
                         break
                     except Exception as exc:  # broad: hf_hub_download raises many network types; the last retry re-raises
                         if attempt == MAX_RETRIES:
@@ -809,6 +811,7 @@ def create_models_blueprint(
                         })
                         time.sleep(wait)
 
+            batch.finish()
             ctx.runner.push_event(job["id"], "progress", {
                 "phase": "Download complete", "current": total, "total": total,
             })

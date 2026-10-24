@@ -195,3 +195,78 @@ def test_failed_repair_preserves_unverified_weights_and_readable_metadata(
     with pytest.raises(ConnectionError):
         models._download_and_verify_file(filename, str(tmp_path), "weights", hashes, None)
     assert destination.read_bytes() == b"previous contents"
+
+
+@pytest.mark.parametrize("kind", ["custom", "pipeline"])
+def test_model_batch_retry_keeps_completed_files(app_and_db, tmp_path, monkeypatch, kind):
+    import huggingface_hub
+    import models
+    from web import models as routes
+
+    app, _db = app_and_db
+    files = (["model.onnx", "config.json"] if kind == "custom"
+             else ["image_encoder.onnx", "mask_decoder.onnx"])
+    downloads = []
+    failing = True
+
+    def download(*, filename, local_dir, **kwargs):
+        downloads.append(filename)
+        if failing and filename == files[1]:
+            raise ConnectionError("companion unavailable")
+        destination = Path(local_dir) / filename
+        destination.write_bytes(filename.encode())
+        return str(destination)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda **kw: None)
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda *_: files)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+
+    if kind == "custom":
+        def run():
+            return models.download_hf_model("owner/test-model")
+    else:
+        pending = []
+        events = []
+
+        def start(_kind, work, **kwargs):
+            pending.append(work)
+            return "test-download"
+
+        monkeypatch.setattr(routes, "pipeline_models_dir", lambda: str(tmp_path / "pipeline"))
+        monkeypatch.setattr(app._job_runner, "start", start)
+        monkeypatch.setattr(app._job_runner, "push_event", lambda *args: events.append(args))
+
+        def run():
+            response = app.test_client().post("/api/models/pipeline/download", json={"model_id": "sam2-small"})
+            assert response.status_code == 200
+            return pending.pop()({"id": "test-download"})
+
+    with pytest.raises((RuntimeError, ConnectionError)):
+        run()
+    assert downloads == [files[0], files[1], files[1], files[1]]
+    failing = False
+    run()
+    assert downloads == [files[0], files[1], files[1], files[1], files[1]]
+    if kind == "pipeline":
+        assert events[-1][-1]["total"] == 1, "progress counts only files still to download"
+    # A later explicit download is a fresh batch, allowing deliberate refresh.
+    run()
+    assert downloads[-2:] == files
+
+
+@pytest.mark.parametrize("change", ["other-repository", "modified", "missing", "unrecorded"])
+def test_download_batch_does_not_reuse_unrelated_or_changed_files(tmp_path, change):
+    from hub_download import DownloadBatch
+
+    file = tmp_path / "model.onnx"
+    file.write_bytes(b"completed")
+    batch = DownloadBatch("owner/model", str(tmp_path))
+    if change != "unrecorded":
+        batch.record(file.name)
+    if change == "modified":
+        file.write_bytes(b"different data")
+    elif change == "missing":
+        file.unlink()
+    repo = "other-owner/model" if change == "other-repository" else "owner/model"
+    assert DownloadBatch(repo, str(tmp_path)).pending([file.name]) == [file.name]

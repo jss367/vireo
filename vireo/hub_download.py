@@ -21,11 +21,57 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 
 from file_replace import replace_file
 from services.hf_cache_lock import DOWNLOAD_LOCK
 
 STAGING_DIRNAME = ".hf-download"
+
+
+class DownloadBatch:
+    """Remember completed files only while a multi-file download is unfinished."""
+
+    def __init__(self, repo_id: str, local_dir: str) -> None:
+        self.repo_id = repo_id
+        self.local_dir = local_dir
+        self.path = os.path.join(local_dir, ".vireo-download-progress.json")
+        try:
+            with open(self.path) as stream:
+                saved = json.load(stream)
+        except (OSError, ValueError):
+            saved = {}
+        self.completed = (saved.get("completed", {})
+                          if isinstance(saved, dict) and saved.get("repo_id") == repo_id else {})
+        if not isinstance(self.completed, dict):
+            self.completed = {}
+
+    def _signature(self, filename: str) -> list[int] | None:
+        try:
+            st = os.stat(os.path.join(self.local_dir, filename))
+        except OSError:
+            return None
+        return [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino]
+
+    def pending(self, filenames: list[str]) -> list[str]:
+        return [name for name in filenames if self.completed.get(name) is None
+                or self.completed[name] != self._signature(name)]
+
+    def record(self, filename: str) -> None:
+        self.completed[filename] = self._signature(filename)
+        # Publish the small receipt atomically. No model bytes are duplicated.
+        fd, temporary = tempfile.mkstemp(dir=self.local_dir)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump({"repo_id": self.repo_id, "completed": self.completed}, stream)
+            replace_file(temporary, self.path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+
+    def finish(self) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.path)
 
 
 def fetch_hub_file(repo_id: str, filename: str, dest_path: str, *,

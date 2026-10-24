@@ -15,7 +15,7 @@ import threading
 
 import model_verify
 from file_replace import replace_file
-from hub_download import fetch_hub_file
+from hub_download import DownloadBatch, fetch_hub_file
 from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
@@ -1860,7 +1860,8 @@ def download_hf_model(repo_id, progress_callback=None):
 
     # Download all ONNX files and common config files
     config_files = [f for f in files if f.endswith((".json", ".npy"))]
-    to_download = onnx_files + config_files
+    batch = DownloadBatch(repo_id, local_dir)
+    to_download = batch.pending(onnx_files + config_files)
 
     for fi, filename in enumerate(to_download):
         if progress_callback:
@@ -1871,6 +1872,7 @@ def download_hf_model(repo_id, progress_callback=None):
             repo_id, filename, local_dir,
             progress_callback=progress_callback,
         )
+        batch.record(filename)
 
     # Determine model_str — use hf-hub: prefix for compatibility
     model_str = f"hf-hub:{repo_id}"
@@ -1881,6 +1883,7 @@ def download_hf_model(repo_id, progress_callback=None):
         model_id, name, model_str, local_dir,
         f"Downloaded from HuggingFace: {repo_id}", managed=True,
     )
+    batch.finish()
 
     log.info("Model registered: %s (%s)", name, local_dir)
     return {"model_id": model_id, "weights_path": local_dir, "name": name}
