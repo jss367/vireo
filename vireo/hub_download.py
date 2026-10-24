@@ -16,6 +16,9 @@ continues where it stopped; a successful one removes the directory.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import os
 import shutil
 
@@ -37,7 +40,11 @@ def fetch_hub_file(repo_id: str, filename: str, dest_path: str, *,
     """
     from huggingface_hub import hf_hub_download
 
-    staging = os.path.join(os.path.dirname(dest_path) or ".", STAGING_DIRNAME)
+    staging_root = os.path.join(os.path.dirname(dest_path) or ".", STAGING_DIRNAME)
+    # Isolate resume data by source and destination. Finishing a different
+    # file must not erase an interrupted transfer in the same model folder.
+    identity = json.dumps([repo_id, subfolder, filename, revision, os.path.basename(dest_path)])
+    staging = os.path.join(staging_root, hashlib.sha256(identity.encode()).hexdigest())
     kwargs: dict[str, str] = {"repo_id": repo_id, "filename": filename, "local_dir": staging}
     if subfolder:
         kwargs["subfolder"] = subfolder
@@ -49,4 +56,8 @@ def fetch_hub_file(repo_id: str, filename: str, dest_path: str, *,
         os.makedirs(staging, exist_ok=True)
         replace_file(hf_hub_download(**kwargs), dest_path)
         shutil.rmtree(staging, ignore_errors=True)
+        # Other interrupted transfers (or retained cleanup failures)
+        # still own this parent; never remove them recursively.
+        with contextlib.suppress(OSError):
+            os.rmdir(staging_root)
     return dest_path

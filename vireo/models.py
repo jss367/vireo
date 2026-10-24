@@ -1264,6 +1264,28 @@ _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
 _MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
+def _prepare_existing_download(local_path, expected_sha, progress_callback):
+    """Keep verified files; release mismatching weights before staging a repair.
+
+    A legacy hub-cache blob plus the installed file plus its staged replacement
+    would otherwise require three weight-sized allocations. Only discard binary
+    artifacts proven to differ from the requested checksum. JSON metadata may
+    have concurrent readers and stays readable until its atomic replacement.
+    """
+    if expected_sha is None or not os.path.isfile(local_path):
+        return False
+    filename = os.path.basename(local_path)
+    if model_verify.sha256_file(local_path) == expected_sha:
+        log.info("%s already present and matches expected SHA256 — skipping download", filename)
+        if progress_callback:
+            progress_callback(f"{filename} already verified, skipping")
+        return True
+    if local_path.endswith((".onnx", ".onnx.data", ".npy")):
+        os.unlink(local_path)
+        log.info("Removed checksum-mismatching weights before replacement: %s", local_path)
+    return False
+
+
 def _download_and_verify_file(
     filename, model_dir, hf_subdir, expected_hashes, progress_callback,
     revision=None, optional=False,
@@ -1294,18 +1316,7 @@ def _download_and_verify_file(
     # hash what's on disk first and skip whatever already passes.
     # Only possible when HF gave us an expected hash — without one we
     # can't tell "correct" from "corrupt", so those still get downloaded.
-    pre_sha = expected_hashes.get(filename)
-    if (
-        pre_sha is not None
-        and os.path.isfile(local_path)
-        and model_verify.sha256_file(local_path) == pre_sha
-    ):
-        log.info(
-            "%s already present and matches expected SHA256 — "
-            "skipping download", filename,
-        )
-        if progress_callback:
-            progress_callback(f"{filename} already verified, skipping")
+    if _prepare_existing_download(local_path, expected_hashes.get(filename), progress_callback):
         return
 
     attempts = 0
