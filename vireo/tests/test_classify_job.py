@@ -9528,3 +9528,64 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         f"got {events}"
     )
     assert runner.paused is False
+
+
+def test_classify_job_names_a_timm_model_without_common_names(tmp_path, monkeypatch):
+    """A timm classifier built without label_descriptions.json names species
+    from the taxonomy alone; when Vireo's repair of the file failed, only
+    the log said so. The job's "Load model" step carries the notice as a
+    warning and its result adds ``common_names_notice``."""
+    from unittest.mock import MagicMock, patch
+
+    import models
+
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {
+        "hf-hub:timm/x": "could not fetch the model's upstream config: offline",
+    })
+    img_path = tmp_path / "bird.jpg"
+    Image.new("RGB", (200, 200), color="blue").save(str(img_path))
+    db = MagicMock()
+    db.collections.get_photos.return_value = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10, "timestamp": "2024-01-15T10:00:00"},
+    ]
+    db.folders.tree.return_value = [{"id": 10, "path": str(tmp_path), "name": "t"}]
+    db.predictions.get_existing_photo_ids.return_value = set()
+    db.masks_features.get_embedding.return_value = None
+    db.model_runs.cache_coverage_counts.return_value = (0, 0, 0)
+    db.get_subject_types.return_value = set()
+    db.photo_keywords.filter_out_subject_tagged.side_effect = lambda pids, _types: list(pids)
+    model = {
+        "id": "timm-x", "name": "iNat21", "model_str": "hf-hub:timm/x",
+        "weights_path": str(tmp_path), "model_type": "timm", "downloaded": True,
+    }
+    preds = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
+    clf = MagicMock(
+        label_descriptions_missing=True, _model_str="hf-hub:timm/x",
+        _model_dir=str(tmp_path), label_space_size=10000,
+    )
+    clf.classify.return_value = preds
+    clf.classify_batch.return_value = [preds]
+    runner = FakeRunner()
+    params = ClassifyParams("col-1", None, None, None, None, 10, 0.85, False)
+
+    with patch("classify_job.run.Database", return_value=db), \
+         patch("classify_job.job_run.get_active_model", return_value=model), \
+         patch("classify_job.job_run.get_models", return_value=[model]), \
+         patch("taxonomy.load_local_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_labels", return_value=(None, False, [])), \
+         patch("classify_job.job_run.TimmClassifier", return_value=clf), \
+         patch("timm_classifier._spawn_label_desc_heal", return_value=None), \
+         patch("classify_job.job_run._detect_subjects", return_value=({}, 0)):
+        result = run_classify_job(_make_job(), runner, str(tmp_path / "t.db"), 1, params)
+
+    notice = (
+        "iNat21 is missing its common-name file (label_descriptions.json), so "
+        "this run named species from the taxonomy alone, and species the "
+        "taxonomy does not name show their scientific name. Vireo's last "
+        "attempt to fetch it failed: could not fetch the model's upstream "
+        "config: offline. Click Repair on iNat21 in Settings › Models to "
+        "fetch it."
+    )
+    assert result["common_names_notice"] == notice
+    load_model = [kw for step, kw in runner.steps if step == "load_model" and kw.get("status") == "completed"]
+    assert load_model[-1]["error"] == notice

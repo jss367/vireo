@@ -235,6 +235,9 @@ class _SpecPass:
     # multi-model run each model owns its own Jobs step, so the stage
     # accumulates per-spec estimates while this keeps the spec's own
     # value for its ETA.
+    # Why this model's species names came from the taxonomy alone (a timm
+    # model without label_descriptions.json); kept as the step's warning.
+    common_names_notice: str | None = None
     cached_est: int = 0
     # The full preflight-cached photo id set (not just its count) so
     # overcount attribution can be scoped: recording an overcount for a
@@ -523,6 +526,24 @@ class _ClassifyPass:
             self._classify_with_spec(spec_idx, active_spec)
         self._finalize()
 
+    def _note_missing_common_names(
+        self, clf: Classifier | TimmClassifier, model_name: str, step_id: str,
+    ) -> str | None:
+        """Say when a timm model ran without its common-name file.
+
+        Its predictions are still valid, only named from the taxonomy alone,
+        so this is a note (the run stays green) shown in the Process notes
+        banner, plus a warning on the model's step in Jobs. Tagged
+        ``[common_names]``: no stage skipped, so no card says "Skipped".
+        """
+        from classify_job.run_helpers import _missing_common_names_notice
+
+        notice = _missing_common_names_notice(clf, model_name)
+        if notice:
+            self.run.note(f"[common_names] {notice}")
+            self.run.runner.update_step(self.run.job["id"], step_id, error=notice)
+        return notice
+
     def _classify_with_spec(self, spec_idx: int, active_spec: ModelSpec) -> None:
         run = self.run
         step_id = f"classify:{active_spec['id']}"
@@ -549,6 +570,7 @@ class _ClassifyPass:
         if model is None:
             return
         clf, model_type, model_name = model
+        common_names_notice = self._note_missing_common_names(clf, model_name, step_id)
 
         # Name the label space on the row. Set for both branches of
         # ``_activate_model``: the first model's bundle was built by
@@ -573,6 +595,7 @@ class _ClassifyPass:
             model_type=model_type,
             model_name=model_name,
             fp=self.loaded_models.get("labels_fingerprint", "legacy"),
+            common_names_notice=common_names_notice,
         )
         self._preflight(spec)
         # Set total BEFORE the pre-flight event so the UI's
@@ -1816,7 +1839,7 @@ class _ClassifyPass:
         # page shows a human-readable reason next to the collapsed step,
         # matching the shape of the model-load-failure row in
         # ``_activate_model``.
-        step_error = None
+        step_error = spec.common_names_notice
         if spec_failed:
             if self.offline_reason:
                 step_error = (

@@ -2875,6 +2875,69 @@ def test_ensure_label_descriptions_survives_network_failure(
     assert not (tmp_path / "label_descriptions.json").exists()
 
 
+def test_failed_label_descriptions_repair_is_remembered_until_one_succeeds(
+    tmp_path, monkeypatch,
+):
+    """A repair that could not fetch the common-name file used to say so
+    only in the log. Its reason is kept for Settings and for the runs that
+    go on with taxonomy-based names, and the next success clears it."""
+    import models
+
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+    monkeypatch.setattr(models, "_download_optional_files", lambda *a, **k: None)
+
+    def offline(_model_str):
+        raise OSError("Network is unreachable")
+
+    monkeypatch.setattr(models, "_load_upstream_timm_config", offline)
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is False
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) == (
+        "could not fetch the model's upstream config: Network is unreachable"
+    )
+
+    monkeypatch.setattr(
+        models, "_load_upstream_timm_config", lambda _m: {"architecture": "eva02"},
+    )
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is False
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) == (
+        "the model's upstream config has no common names"
+    )
+
+    monkeypatch.setattr(
+        models, "_load_upstream_timm_config",
+        lambda _m: {"label_descriptions": {"Bubulcus ibis": "Cattle Egret, Bird"}},
+    )
+    assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is True
+    assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) is None
+
+
+def test_get_models_names_a_failed_common_name_repair(tmp_path, monkeypatch):
+    """Settings › Models offers Repair for a missing label_descriptions.json;
+    when Vireo's own attempt to fetch it failed, the entry says why."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+    model_dir = tmp_path / "models" / "timm-inat21-eva02-l"
+    model_dir.mkdir(parents=True)
+    for name in ["model.onnx", "model.onnx.data", "class_names.json", "config.json"]:
+        (model_dir / name).write_bytes(b"stub")
+
+    def entry():
+        return next(m for m in models.get_models() if m["id"] == "timm-inat21-eva02-l")
+
+    assert "label_descriptions.json" in entry()["missing_optional_files"]
+    assert "label_descriptions_error" not in entry()
+
+    models._LABEL_DESC_HEAL_FAILURES[_TIMM_MODEL_STR] = "the model's upstream config has no common names"
+    assert entry()["label_descriptions_error"] == "the model's upstream config has no common names"
+
+    # Once the file is installed the stale reason is not shown.
+    (model_dir / "label_descriptions.json").write_text('{"Bubulcus ibis": "Cattle Egret, Bird"}')
+    assert "label_descriptions_error" not in entry()
+
+
 def test_ensure_label_descriptions_via_onnx_repo_publishes_atomically(
     tmp_path, monkeypatch
 ):

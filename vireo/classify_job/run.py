@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from classify_job.common import log
 from classify_job.job_run import _ClassifyJobRun
+from classify_job.run_helpers import _with_common_names_notice
 from db import Database
 
 if TYPE_CHECKING:
@@ -162,4 +163,4 @@ def _run_classify_phases(
         classify.reapply_local_computation_cache()
 
     classify.classify_photos()
-    return classify.store_predictions()
+    return _with_common_names_notice(job, classify.store_predictions())
