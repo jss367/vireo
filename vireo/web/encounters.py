@@ -1141,10 +1141,13 @@ class _SpeciesConfirmation:
         if not (cached and self.target_enc is not None):
             return
         flag_items = []
+        group_attribution: dict = {}
         if self.group_plan is not None:
             from services.review_group_changes import apply_group_changes
             # Derive shared species only after removals establish final bursts.
-            flag_items = apply_group_changes(self.db, cached, self.group_plan)
+            group_result = apply_group_changes(self.db, cached, self.group_plan)
+            flag_items = group_result["items"]
+            group_attribution = group_result
         if self.preview_scope:
             from services.encounter_confirmation import apply_scope
             apply_scope(self.db, cached, self.target_enc, self.photo_ids,
@@ -1155,7 +1158,7 @@ class _SpeciesConfirmation:
             self._apply_encounter_species()
         before_cached = self.before_cached
         if self.group_plan is not None:
-            self._apply_combined_group(flag_items)
+            self._apply_combined_group(flag_items, group_attribution)
         elif (
             self.photo_edit_id is not None
             and before_cached["encounters"] != cached["encounters"]
@@ -1177,7 +1180,7 @@ class _SpeciesConfirmation:
                 "before": before_cached["encounters"], "after": cached["encounters"],
             })
 
-    def _apply_combined_group(self, flag_items):
+    def _apply_combined_group(self, flag_items, group_attribution):
         """Record the completed species/cull decision as one history entry."""
         from services.grouping_history import convert_to_grouping_edit, record_grouping_edit
 
@@ -1190,10 +1193,29 @@ class _SpeciesConfirmation:
         if self.photo_edit_id is not None:
             change["photo_edit"] = dict(self.db.edit_history.action_and_new_value(self.photo_edit_id))
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
+            self._record_group_flag_attribution(self.photo_edit_id, group_attribution)
         elif flag_items or change["before"] != change["after"]:
             if flag_items:
                 change["photo_edit"] = {"action_type": "flag", "new_value": "pipeline_group_apply"}
             self.undo_edit_id = record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
+            self._record_group_flag_attribution(self.undo_edit_id, group_attribution)
+
+    def _record_group_flag_attribution(self, edit_id, group_attribution):
+        """Attach the pre-write attribution snapshot to the grouping edit.
+
+        apply_grouping_photo_edit's undo iterates ``flag_items`` and calls
+        ``restore_flag_attribution_history`` for each, so the Group Review
+        combined apply reverses attribution the same way pipeline group
+        apply does.
+        """
+        touched_ids = group_attribution.get("touched_ids") or []
+        if not edit_id or not touched_ids:
+            return
+        self.db.photo_review.record_flag_attribution_history(
+            edit_id, touched_ids,
+            group_attribution.get("before_attributions") or {},
+            self.db.photo_review.flag_attributions(touched_ids),
+        )
 
     def _apply_burst_override(self):
         self.target_enc["bursts"][self.burst_index]["species_override"] = (

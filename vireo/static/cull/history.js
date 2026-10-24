@@ -47,6 +47,21 @@ async function cullAfterHistoryChange(result) {
           }
         });
       });
+      // Reconcile saved Review pins against the refreshed state. An Apply
+      // can leave cullManualDecisions[pid] = cullAppliedDecisions[pid] =
+      // 'review' on photos it moved to Candidates; undo/redo then changes
+      // the live flag to a confirmed keep or reject on the server side,
+      // but the stale 'review' pin would keep hiding the restored decision
+      // (resolveCullDecision gives manual pins priority over the confirmed
+      // flag) and let a later Apply overwrite it.
+      Object.keys(cullAppliedDecisions).forEach(function(pid) {
+        if (cullAppliedDecisions[pid] !== 'review') return;
+        var saved = state.photos[pid];
+        if (!saved || saved.flag_confirmation_status !== 'confirmed') return;
+        if (saved.flag !== 'flagged' && saved.flag !== 'rejected') return;
+        delete cullManualDecisions[pid];
+        delete cullAppliedDecisions[pid];
+      });
     } else {
       var data = /** @type {{results?: CullSourceResults} | null} */ (await safeFetch('/api/pipeline/page-init', {}, {toast: false}));
       results = data && data.results;

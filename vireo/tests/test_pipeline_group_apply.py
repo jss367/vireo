@@ -92,11 +92,17 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
     assert db.photos.get(pid)['flag'] == 'none'
 
 
-def test_apply_is_idempotent_when_state_unchanged(app_and_db):
-    """Applying the same state twice doesn't double-record edit history."""
+def test_apply_records_attribution_history_without_flag_transition(app_and_db):
+    """A legacy ``flagged`` photo placed in Picks has its unverified
+    attribution turned into a confirmed photographer decision. The
+    confirmation is recorded as a reversible history entry even though
+    the raw flag did not change, so Undo can restore the prior
+    attribution (or lack of it)."""
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
+    # Direct set_flag writes the legacy flag without publishing
+    # attribution — the condition the finding this test covers describes.
     db.photo_review.set_flag(pid, 'flagged')
     client = app.test_client()
 
@@ -118,7 +124,7 @@ def test_apply_is_idempotent_when_state_unchanged(app_and_db):
         "SELECT COUNT(*) AS n FROM edit_history WHERE workspace_id = ?",
         (db._active_workspace_id,),
     ).fetchone()['n']
-    assert after == before  # no flag transition → no history row
+    assert after == before + 1  # explicit confirmation records one row
 
 
 def test_apply_skips_keyword_when_already_applied(app_and_db):

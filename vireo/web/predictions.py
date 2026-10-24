@@ -1881,12 +1881,14 @@ def create_predictions_blueprint(
         attach_nested_edit_recipes(db, rows)
         return jsonify(rows)
 
-    def _write_group_flags_and_species(db, actionable_picks, actionable_rejects, species):
+    def _write_group_flags_and_species(db, actionable_picks, actionable_rejects, species, description):
         """Group apply's flag and species-keyword writes, under its lock.
 
         Returns ``(kid, local_species, added_picks, error)``: the species
         keyword (or None), its stored spelling, the picks that newly gained
-        it, and a 403 response when a write refused.
+        it, and a 403 response when a write refused. The flag writes'
+        current attribution is republished per zone so Cull sees the
+        photographer's prediction-group decisions as confirmed.
         """
         local_species = species
         # Flag picks and add species keyword — every write uses
@@ -1927,6 +1929,18 @@ def create_predictions_blueprint(
             # Reject rejects
             for pid in actionable_rejects:
                 db.photo_review.set_flag(pid, "rejected", _commit=False)
+
+            # Republish current attribution for every explicit zone decision.
+            # The flag UPDATE trigger wiped prior attribution; without this,
+            # Cull would show these photographer picks/rejects as unverified.
+            if actionable_picks:
+                db.photo_review.set_current_flag_note(
+                    actionable_picks, "flagged", description,
+                )
+            if actionable_rejects:
+                db.photo_review.set_current_flag_note(
+                    actionable_rejects, "rejected", description,
+                )
         except ValueError as e:
             # ``prediction_decisions.under_prediction_decision_lock``'s
             # finally will roll back the still-open transaction; returning
@@ -1934,8 +1948,13 @@ def create_predictions_blueprint(
             return None, None, None, json_error(str(e), 403)
         return kid, local_species, added_picks, None
 
-    def _record_group_flag_history(db, actionable_picks, actionable_rejects, old_flags):
-        """Queue group apply's flag sidecar changes and record their undo entry."""
+    def _record_group_flag_history(db, actionable_picks, actionable_rejects, old_flags, desc):
+        """Queue group apply's flag sidecar changes and record their undo entry.
+
+        Returns the ``edit_id`` of the recorded flag edit (or ``None`` when
+        there was nothing to record) so the caller can attach replay
+        attribution to the same transaction.
+        """
         # Record flag history for all picks + rejects
         flag_items = []
         for pid in actionable_picks:
@@ -1944,19 +1963,16 @@ def create_predictions_blueprint(
         for pid in actionable_rejects:
             if pid in old_flags:
                 flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
-        if flag_items:
-            for item in flag_items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
-            desc = (
-                f'Group prediction: flagged {len(actionable_picks)}, '
-                f'rejected {len(actionable_rejects)}'
+        if not flag_items:
+            return None
+        for item in flag_items:
+            db.queue_flag_change_if_enabled(
+                item["photo_id"], item["new_value"], _commit=False
             )
-            db.record_edit(
-                'flag', desc, 'group_apply', flag_items,
-                is_batch=True, _commit=False,
-            )
+        return db.record_edit(
+            'flag', desc, 'group_apply', flag_items,
+            is_batch=True, _commit=False,
+        )
 
     def _record_group_pick_accepts(
         db, actionable_picks, observed, kid, local_species, added_picks,
@@ -2084,15 +2100,32 @@ def create_predictions_blueprint(
                 if old:
                     old_flags[pid] = old["flag"] or "none"
 
+            # Capture attribution BEFORE the flag UPDATEs so Undo can
+            # restore the exact prior note (or lack of one for a legacy
+            # flag). The invalidation trigger fires on every set_flag,
+            # erasing current attribution — _write_group_flags_and_species
+            # republishes a current note per zone and the snapshot below
+            # keeps Undo lossless.
+            before_attributions = db.photo_review.flag_attributions(all_flag_pids)
+
+            flag_desc = (
+                f"Group prediction: flagged {len(actionable_picks)}, "
+                f"rejected {len(actionable_rejects)}"
+            )
             kid, local_species, added_picks, err = _write_group_flags_and_species(
-                db, actionable_picks, actionable_rejects, species,
+                db, actionable_picks, actionable_rejects, species, flag_desc,
             )
             if err is not None:
                 return err
 
-            _record_group_flag_history(
-                db, actionable_picks, actionable_rejects, old_flags,
+            flag_edit_id = _record_group_flag_history(
+                db, actionable_picks, actionable_rejects, old_flags, flag_desc,
             )
+            if flag_edit_id is not None and all_flag_pids:
+                db.photo_review.record_flag_attribution_history(
+                    flag_edit_id, all_flag_pids, before_attributions,
+                    db.photo_review.flag_attributions(all_flag_pids),
+                )
 
             _record_group_pick_accepts(
                 db, actionable_picks, observed, kid, local_species, added_picks,

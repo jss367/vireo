@@ -51,7 +51,8 @@ class Catalog:
                 is_batch INTEGER DEFAULT 0, undone INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT 'synthetic-time');
             CREATE TABLE edit_history_items(id INTEGER PRIMARY KEY, edit_id INTEGER,
-                photo_id INTEGER, old_value TEXT, new_value TEXT);
+                photo_id INTEGER, old_value TEXT, new_value TEXT,
+                species_provenance TEXT);
             CREATE TABLE queued_flags(photo_id INTEGER, flag TEXT);
             INSERT INTO workspaces VALUES(1),(2);
             INSERT INTO photos VALUES(7,'none'),(8,'none');

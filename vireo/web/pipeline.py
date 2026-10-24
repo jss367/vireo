@@ -1454,12 +1454,14 @@ def create_pipeline_blueprint(
         return None
 
     def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags, description):
-        """Write each zone's target flag where it changes, with attribution.
+        """Write each zone's target flag with attribution for every explicit decision.
 
         Returns ``(flag_items, before_attributions, error)``. Attribution is
-        captured BEFORE the writes and the matching current note is published
-        after each zone, so Cull sees explicit pipeline group decisions as
-        confirmed and Undo can restore prior attribution from the snapshot.
+        captured BEFORE any writes. Every explicit zone decision — including
+        a legacy ``flagged`` photo placed in Picks or an unattributed ``none``
+        photo placed in Candidates — publishes a current attribution note and
+        gets a replay snapshot, so Cull sees the choice as confirmed and Undo
+        restores prior attribution from the snapshot.
         """
         try:
             flag_items = []
@@ -1468,20 +1470,27 @@ def create_pipeline_blueprint(
             for zone_ids, target in (
                 (picks, "flagged"), (rejects, "rejected"), (candidates, "none"),
             ):
-                changed_ids = []
+                attributed_ids = []
                 for pid in zone_ids:
                     old = old_flags.get(pid, "none")
                     # Candidates clears only prior flagged/rejected states;
-                    # a "none" photo moved into Candidates stays none.
+                    # a "none" photo moved into Candidates stays none, but
+                    # the user's explicit Review choice still confirms
+                    # attribution. The invalidation trigger does not fire
+                    # without a flag UPDATE, so set_current_flag_note below
+                    # inserts attribution for the already-matching flag.
                     if target == "none" and old not in ("flagged", "rejected"):
+                        attributed_ids.append(pid)
+                        flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
                         continue
-                    if old == target:
-                        continue
+                    # For old == target, the UPDATE still fires the trigger;
+                    # set_current_flag_note republishes the explicit note so
+                    # Cull sees the photographer's confirmation.
                     db.photo_review.set_flag(pid, target, _commit=False)
+                    attributed_ids.append(pid)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": target})
-                    changed_ids.append(pid)
-                if changed_ids:
-                    db.photo_review.set_current_flag_note(changed_ids, target, description)
+                if attributed_ids:
+                    db.photo_review.set_current_flag_note(attributed_ids, target, description)
         except ValueError as e:
             return None, None, json_error(str(e), 403)
         return flag_items, before_attributions, None
@@ -1508,7 +1517,10 @@ def create_pipeline_blueprint(
 
         if flag_items:
             for item in flag_items:
-                db.queue_flag_change_if_enabled(item["photo_id"], item["new_value"], _commit=False)
+                if item["old_value"] != item["new_value"]:
+                    db.queue_flag_change_if_enabled(
+                        item["photo_id"], item["new_value"], _commit=False,
+                    )
         changed_ids = [item["photo_id"] for item in (flag_items or ())]
 
         def record_attribution(edit_id):
