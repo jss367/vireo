@@ -446,38 +446,39 @@ def _transfer_companion_edit_recipe(
     """Preserve non-destructive edits when a JPEG companion is folded into a RAW primary.
 
     If both already have recipes, the primary wins. When the companion's
-    recipe is transferred, its edit-history items follow it and the
-    primary's derived renders are invalidated (deferred to post-commit when
-    ``vireo_dir`` is set, inline DB-only otherwise).
+    recipe is transferred, its edit-history items follow it. Referenced masks
+    are copied before commit while originals remain usable on rollback.
+    Derived-render invalidation and old-snapshot cleanup wait for commit.
     """
     if db.companion_pairing.copy_edit_recipe(primary["id"], companion["id"]):
+        from local_masks import prepare_snapshot_transfer
+
+        refs = prepare_snapshot_transfer(
+            vireo_dir, companion["id"], primary["id"],
+            db.companion_pairing.recipe_snapshot_values(companion["id"]),
+        )
         db.companion_pairing.transfer_recipe_history(primary["id"], companion["id"])
         if vireo_dir:
-            _defer_recipe_snapshot_transfer(
+            _defer_recipe_snapshot_cleanup(
                 db, post_commit_fs_actions, primary, companion,
-                vireo_dir, thumb_cache_dir,
+                vireo_dir, thumb_cache_dir, refs,
             )
         else:
             db.caches.clear_thumbnail_path(primary["id"])
             db.caches.delete_photo_previews(primary["id"])
 
 
-def _defer_recipe_snapshot_transfer(
+def _defer_recipe_snapshot_cleanup(
     db: Database, post_commit_fs_actions: list[Callable[[], None]], primary: Mapping[str, Any],
     companion: Mapping[str, Any], vireo_dir: StrPath, thumb_cache_dir: StrPath | None,
+    refs: set[str],
 ) -> None:
-    """Queue moving local-mask snapshots to the primary and invalidating its caches.
+    """Queue old-snapshot cleanup and render invalidation after commit.
 
-    Local-adjustment mask snapshots are looked up by
-    (photo_id, ref); the transferred recipe now points at
-    primary["id"], so the files must move with it or every
-    render silently disables the local pass.
-    Deferred to post-commit: transfer_snapshots MOVES files
-    and _invalidate_derived_caches DELETES them. Running
-    either before the transaction is durable risks moving
-    the companion's snapshots onto the primary and then
-    rolling back the recipe transfer — the render would
-    then load snapshots the DB no longer knows about.
+    Referenced snapshots have already been copied to the primary. Removing
+    old copies is best-effort cleanup; a failure cannot disable the
+    transferred recipe. Originals must stay in place until commit so a
+    rollback leaves the companion's recipe usable.
     """
     _primary_id = primary["id"]
     _companion_id = companion["id"]
@@ -487,41 +488,15 @@ def _defer_recipe_snapshot_transfer(
     def _apply_recipe_transfer_fs(
         pid: int = _primary_id, cid: int = _companion_id, tcd: StrPath | None = _tcd, vd: StrPath = _vd,
     ) -> None:
-        from local_masks import transfer_snapshots
-        # transfer_snapshots falls back to a copy when the
-        # rename fails, so ``failed`` means the snapshot is
-        # genuinely unreachable — ``load_snapshot`` only ever
-        # builds snapshot_path(vireo_dir, pid, ref), so the
-        # local pass for those refs renders without its mask.
-        # Say so rather than degrading the image silently.
-        transferred = transfer_snapshots(vd, cid, pid)
-        if transferred["failed"]:
-            log.warning(
-                "Pairing moved photo %s's edit recipe to %s but "
-                "could not relocate %d local-mask snapshot(s) "
-                "(refs %s); those local adjustments will render "
-                "without their mask until recreated",
-                cid, pid, len(transferred["failed"]),
-                ", ".join(transferred["failed"]),
-            )
-        if transferred.get("enumerate_failed"):
-            # ``os.listdir(edit-masks/)`` failed, so the snapshot
-            # refs are unknown. The recipe has been transferred
-            # to the primary and load_snapshot always builds
-            # ``snapshot_path(vireo_dir, primary_id, ref)`` — any
-            # snapshot still under the companion's id is
-            # unreachable, and the local pass renders without
-            # its mask until the snapshot is recreated. Say so
-            # (CORE_PHILOSOPHY: no black boxes) instead of
-            # letting the exception vanish into the deferred-
-            # action guard.
-            log.warning(
-                "Pairing moved photo %s's edit recipe to %s but "
-                "could not enumerate edit-masks/ to move any "
-                "snapshots; every affected local adjustment will "
-                "render without its mask until recreated",
-                cid, pid,
-            )
+        from local_masks import cleanup_snapshot_transfer
+
+        # A concurrent insert can reuse the deleted companion's id after
+        # commit. Keep its new owner's snapshots and hold the writer lock
+        # from this ownership check through cleanup.
+        if not db.in_transaction:
+            db.begin_immediate()
+        if db.photos.get(cid) is None:
+            cleanup_snapshot_transfer(vd, cid, pid, refs)
         _invalidate_derived_caches(
             db, vd, pid, thumb_cache_dir=tcd,
         )
@@ -594,9 +569,9 @@ def _merge_companion_into_primary(
 ) -> bool:
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
-    Every DB write joins the caller's transaction; every filesystem change
-    is appended to ``post_commit_fs_actions`` (only when ``vireo_dir`` is
-    set) for the caller to run once the commit succeeds. The companion row
+    Every DB write joins the caller's transaction. Referenced snapshots are
+    copied without removing originals; destructive filesystem changes wait
+    in ``post_commit_fs_actions`` until commit succeeds. The companion row
     is deleted through the caller's ``PhotoRowDeletion`` (``photo_rows``).
     """
     primary_full, companion_full = _read_metadata_transfer_rows(
@@ -673,6 +648,8 @@ def _try_automatic_companion_merge(
     photo_rows: PhotoRowDeletion,
 ) -> bool:
     """Keep a domain-conflicting pair separate without stopping unrelated work."""
+    from local_masks import SnapshotTransferError
+
     pair_actions: list[Callable[[], None]] = []
     try:
         with photo_rows.atomic_merge(companion['id']):
@@ -681,6 +658,13 @@ def _try_automatic_companion_merge(
             )
     except IdentityMergeConflict as exc:
         log.warning('Keeping RAW photo %s and JPEG photo %s separate: %s', primary['id'], companion['id'], exc)
+        return False
+    except SnapshotTransferError:
+        log.warning(
+            "Keeping RAW photo %s and JPEG photo %s separate because their edit masks "
+            "could not be preserved; a later scan will retry pairing",
+            primary['id'], companion['id'], exc_info=True,
+        )
         return False
     if paired:
         post_commit_fs_actions.extend(pair_actions)
@@ -696,9 +680,9 @@ def _pair_raw_jpeg_companions(
     keep the raw as the primary photo and set companion_path to the JPEG filename.
     Delete the duplicate JPEG-only photo record.
 
-    Successful pairs share one transaction; conflicting identities leave that
-    pair separate with a warning. Other errors abort the batch. Filesystem
-    changes run only after commit (see ``post_commit_fs_actions`` below).
+    Successful pairs share one transaction; conflicting identities or mask-copy
+    failures leave that pair separate with a warning. Other errors abort the
+    batch. Snapshot copies precede commit; destructive cleanup follows it.
 
     Returns ``{companion_id: primary_id}`` for the JPEG rows merged away.
     Callers that count indexed photos must discount these: both files were
@@ -729,8 +713,8 @@ def _pair_raw_jpeg_companions(
     # already unlinked inline are gone for good, leaving the restored
     # companion rows pointing at missing thumbnails, working copies,
     # masks, offline originals, and moved mask snapshots. Deferring gives
-    # us "all DB changes durable, then all FS changes" — commit failure
-    # aborts both halves.
+    # us "all DB changes durable, then destructive FS changes". Referenced
+    # mask copies are prepared before commit without removing originals.
     post_commit_fs_actions = []
     # Companion rows merged away (``companion_id -> primary_id``), reported
     # to the caller so it can correct its indexed count and the ids it

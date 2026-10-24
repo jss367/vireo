@@ -23,6 +23,23 @@ from services.maintenance_history import remove_orphans_with_history, resolve_dr
 
 log = logging.getLogger(__name__)
 
+# The Drift tab's bulk buttons, by the direction each one posts.
+_RESOLVE_ALL_BUTTONS = {"use_xmp": "Sync All from XMP", "use_db": "Sync All to XMP"}
+
+
+def _resolve_all_skipped_warning(direction, skipped):
+    """Why ``resolve-all`` left ``skipped`` photos alone (unreadable sidecars)."""
+    button = _RESOLVE_ALL_BUTTONS[direction]
+    if skipped == 1:
+        return (
+            f"{button} left 1 photo alone: Vireo could not read its XMP "
+            "sidecar. Its row on the Drift tab says why."
+        )
+    return (
+        f"{button} left {skipped} photos alone: Vireo could not read their "
+        "XMP sidecars. Their rows on the Drift tab say why."
+    )
+
 
 def create_audit_blueprint(
     get_db,
@@ -198,6 +215,20 @@ def create_audit_blueprint(
         # touch a photo that workspace can see -- the same set drift lists.
         if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
             return json_error("photo not found", 404)
+        from audit import drift_for_photo
+
+        # A sidecar Vireo cannot read takes only some directions (or none);
+        # refuse the others rather than answer ok for a no-op, or for queued
+        # writes the sync will fail on.
+        drift = drift_for_photo(db, photo_id)
+        if drift is not None and direction not in drift["resolutions"]:
+            return json_error(
+                f"Vireo could not read the XMP sidecar for {drift['filename']}: "
+                f"{drift['xmp_error']}.",
+                409,
+                code="drift_resolution_unavailable",
+                message=drift["advice"],
+            )
         resolve_drift_with_history(db, photo_id, direction)
         return jsonify({"ok": True})
 
@@ -211,9 +242,19 @@ def create_audit_blueprint(
         from audit import check_drift
 
         drifts = check_drift(db)
+        resolved = skipped = 0
         for d in drifts:
+            if direction not in d["resolutions"]:
+                skipped += 1
+                continue
             resolve_drift_with_history(db, d["photo_id"], direction)
-        return jsonify({"ok": True, "resolved": len(drifts)})
+            resolved += 1
+        response = {"ok": True, "resolved": resolved}
+        if skipped:
+            # Only an unreadable sidecar's row lacks a direction.
+            response["skipped"] = skipped
+            response["warning"] = _resolve_all_skipped_warning(direction, skipped)
+        return jsonify(response)
 
     @blueprint.route("/api/audit/remove-orphans", methods=["POST"])
     def api_audit_remove_orphans():

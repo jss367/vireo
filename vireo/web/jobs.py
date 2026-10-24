@@ -779,7 +779,9 @@ def create_jobs_blueprint(
             return {
                 "total_photos": result["total_photos"],
                 "suggested_keepers": result["suggested_keepers"],
+                "suggested_reviews": result.get("suggested_reviews", 0),
                 "suggested_rejects": result["suggested_rejects"],
+                "keep_review_message": result.get("keep_review_message"),
                 "species_count": len(result["species_groups"]),
                 "photos_missing_phash": result.get("photos_missing_phash", 0),
             }

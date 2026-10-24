@@ -5,7 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from keep_safety import KEEP_REVIEW_MESSAGE, review_ranked_response, review_ranked_suggestions
+from keep_safety import (
+    KEEP_REVIEW_MESSAGE,
+    review_culling_suggestions,
+    review_ranked_response,
+    review_ranked_suggestions,
+)
 from pipeline import run_triage, serialize_results
 from subject_readiness import automatic_keep_assessment
 
@@ -147,3 +152,63 @@ def test_external_evaluation_report_and_cached_producer_claims_do_not_authorize_
     assert saved['photos'][0]['label'] == 'REVIEW'
     assert saved['photos'][0]['automatic_keep_eligible'] is False
     assert saved['photos'][0]['absolute_keeper_evidence'] == photo['absolute_keeper_evidence']
+
+
+@pytest.mark.parametrize("group_key", ["scene_groups", "pose_groups"])
+@pytest.mark.parametrize("cached_action", ["keep", "reject"])
+def test_legacy_culling_cache_rechecks_suggestions_and_current_user_flags(app_and_db, tmp_path, group_key, cached_action):
+    app, db = app_and_db
+    ids = [p["id"] for p in db.photos.list_page()]
+    db.photo_review.set_flag(ids[0], "flagged")
+    db.photo_review.set_flag(ids[1], "rejected")
+    cached = {
+        "total_photos": 3, "suggested_keepers": 1, "suggested_rejects": 2,
+        "species_groups": [{"keepers": 1, "rejects": 2, "photos_data": [
+            {"photo_id": pid, "flag": "flagged", "automatic_keep_eligible": True} for pid in ids
+        ], group_key: [{"photos": [
+            {"photo_id": pid, "action": cached_action,
+             "automatic_keep_eligible": True, "keep_status": "validated", "flag": "flagged"}
+            for pid in ids
+        ]}]}],
+    }
+    path = tmp_path / f"culling_results_ws{db.active_workspace_id}.json"
+    path.write_text(json.dumps(cached))
+    before = path.read_bytes()
+    client = app.test_client()
+    for _ in range(2):
+        response = client.get("/api/culling/results")
+        assert response.status_code == 200
+        result = response.get_json()
+        photos = result["species_groups"][0][group_key][0]["photos"]
+        assert [p["action"] for p in photos] == ["keep", "reject", "review"]
+        assert all(p["automatic_keep_eligible"] is False for p in photos)
+        assert photos[2]["keep_reasons"] == ["absolute_focus_not_validated", "animal_subject_not_validated"]
+        assert result["suggested_keepers"] == result["suggested_rejects"] == result["suggested_reviews"] == 1
+        assert result["species_groups"][0]["reviews"] == 1
+        raw = result["species_groups"][0]["photos_data"]
+        assert [p["flag"] for p in raw] == ["flagged", "rejected", "none"]
+        assert all(p["automatic_keep_eligible"] is False for p in raw)
+    assert path.read_bytes() == before
+    assert [db.photos.get(pid)["flag"] for pid in ids] == ["flagged", "rejected", "none"]
+
+
+@pytest.mark.parametrize("singleton", [False, True])
+def test_legacy_culling_reported_failures_remain_review_candidates(singleton):
+    from culling import _build_scene_groups
+
+    fixture = json.loads((Path(__file__).parent / "fixtures/keep_safety_review_examples.json").read_text())
+    failures = [p for p in fixture["photos"] if p["id"] in (213640, 214325, 216521)]
+    ids = [p["id"] for p in failures]
+    groups = [[pid] for pid in ids] if singleton else [ids]
+    scenes, _, _ = _build_scene_groups(groups, groups, [
+        {"photo_id": p["id"], "quality": p["subject_tenengrad"]} for p in failures
+    ], {}, {})
+    result = {"species_groups": [{"scene_groups": scenes}]}
+    review_culling_suggestions(result, {pid: "none" for pid in ids})
+    assert result["suggested_keepers"] == result["suggested_rejects"] == 0
+    assert result["suggested_reviews"] == 3
+    assert all(p["action"] == "review" for s in scenes for p in s["photos"])
+    assert sum(p["ranking_selected"] for s in scenes for p in s["photos"]) == (3 if singleton else 1)
+    before = deepcopy(result)
+    review_culling_suggestions(result, {pid: "none" for pid in ids})
+    assert result == before

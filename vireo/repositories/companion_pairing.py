@@ -236,6 +236,22 @@ class CompanionPairingRepository:
             (primary_id, companion_id),
         ).rowcount)
 
+    def recipe_snapshot_values(self, photo_id: int) -> list[str | None]:
+        """Recipe and undo/redo values whose snapshots must follow a merge."""
+        rows = self.conn.execute(
+            """SELECT recipe_json AS value FROM photo_edit_recipes WHERE photo_id = ?
+               UNION ALL
+               SELECT items.old_value FROM edit_history_items items
+               JOIN edit_history history ON history.id = items.edit_id
+               WHERE items.photo_id = ? AND history.action_type = 'edit_recipe'
+               UNION ALL
+               SELECT items.new_value FROM edit_history_items items
+               JOIN edit_history history ON history.id = items.edit_id
+               WHERE items.photo_id = ? AND history.action_type = 'edit_recipe'""",
+            (photo_id, photo_id, photo_id),
+        ).fetchall()
+        return [row["value"] for row in rows]
+
     def transfer_recipe_history(self, primary_id: int, companion_id: int) -> None:
         """Move the companion's edit-recipe history items to the primary."""
         self.conn.execute(

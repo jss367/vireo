@@ -118,10 +118,22 @@ def _drift(snapshot, *, stat_error=None):
     db = SimpleNamespace(photos=SimpleNamespace(list_page=lambda **kwargs: rows),
                          folders=SimpleNamespace(tree=lambda: [{"id": 7, "path": "invented"}]),
                          photo_keywords=SimpleNamespace(get_for_photo=lambda pid: keywords))
-    fn = _selected("audit.py", "check_drift", {
+    import audit
+
+    namespace = {
         "os": SimpleNamespace(path=paths, stat=stat), "read_keyword_snapshot": reader,
         "read_keywords": lambda path: snapshot[0] if snapshot is not None else set(), "log": logger,
-    })
+        "sidecar_read_problem": lambda path: ("corrupt", "invented parse error"),
+        **{name: getattr(audit, name) for name in (
+            "DRIFT_RESOLUTIONS", "_UNREADABLE_SIDECAR_RESOLUTIONS",
+            "_UNREADABLE_SIDECAR_ADVICE",
+            "_CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE",
+            "_UNREADABLE_SIDECAR_ERROR",
+        )},
+    }
+    for helper in ("_unreadable_sidecar_drift", "_photo_drift"):
+        _selected("audit.py", helper, namespace)
+    fn = _selected("audit.py", "check_drift", namespace)
     result = fn(db)
     assert keywords == [{"name": "User keyword"}]
     return result, reader, logger
@@ -129,7 +141,11 @@ def _drift(snapshot, *, stat_error=None):
 
 def test_drift_unreadable_sidecar_is_not_successful_empty_keywords():
     result, reader, logger = _drift(None)
-    assert result == []
+    # Its own row, which claims nothing about the sidecar's keywords.
+    assert len(result) == 1 and result[0]["direction"] == "sidecar_unreadable"
+    assert result[0]["xmp_value"] is None and result[0]["removed_in_xmp"] == []
+    assert result[0]["xmp_error"] == "it is not valid XMP (invented parse error)"
+    assert result[0]["resolutions"] == ["use_db"]
     reader.assert_called_once_with("invented/invented.xmp")
     logger.warning.assert_called_once()
 
@@ -148,9 +164,12 @@ def test_drift_readable_empty_missing_and_real_changes_remain_distinct():
     assert result[0]["added_in_xmp"] == ["External"] and result[0]["direction"] == "both"
 
 
-def test_drift_stat_access_errors_skip_without_acknowledging_absence():
+def test_drift_stat_access_errors_are_unreadable_rows_not_absence():
     for error in (PermissionError("invented denial"), OSError("invented IO")):
         result, reader, logger = _drift(None, stat_error=error)
-        assert result == []
+        assert len(result) == 1 and result[0]["direction"] == "sidecar_unreadable"
+        assert result[0]["xmp_problem"] == "unreadable"
+        assert result[0]["xmp_error"] == f"it could not be opened ({error})"
+        assert result[0]["removed_in_xmp"] == [] and result[0]["resolutions"] == []
         reader.assert_not_called()
         assert logger.warning.call_args.kwargs == {"exc_info": True}

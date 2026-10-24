@@ -3467,14 +3467,12 @@ def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
 
 
 def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
-    """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
+    """Pairing makes referenced snapshots loadable under the primary id.
 
-    Snapshot lookup uses ``<photo_id>.<ref>.png``. Without renaming the
-    files when the recipe row's photo_id changes, ``load_snapshot`` misses
-    the file and every render silently disables the local pass.
+    Unreferenced files stay with reference-based garbage collection.
     """
     from db import Database
-    from local_masks import edit_masks_dir, snapshot_path
+    from local_masks import create_snapshot, edit_masks_dir, load_snapshot, snapshot_path
     from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
@@ -3491,17 +3489,20 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
         file_size=2000, file_mtime=1.0,
     )
 
-    # Set a recipe on the JPEG (any recipe — this test is about the file
-    # rename, not recipe schema). The pairing code moves the row to the RAW.
-    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
-
-    # Drop a snapshot file at <jpeg_id>.<ref>.png as if we'd called the
-    # snapshot endpoint on the JPEG before pairing.
-    ref = "abcdef012345"
-    os.makedirs(edit_masks_dir(str(tmp_path)), exist_ok=True)
+    source = tmp_path / "subject.png"
+    Image.new("L", (8, 6), 255).save(source)
+    mask = create_snapshot(
+        photo_id=jpeg_id, mask_row={"path": str(source)}, vireo_dir=str(tmp_path),
+    )
+    recipe = {"local": {"mask": mask, "regions": [
+        {"region": "subject", "adjustments": {"exposure": 1}},
+    ]}}
+    db.set_photo_edit_recipe(jpeg_id, recipe)
+    ref = mask["ref"]
     src_snap = snapshot_path(str(tmp_path), jpeg_id, ref)
-    with open(src_snap, "wb") as f:
-        f.write(b"snapshot-bytes")
+    unreferenced = snapshot_path(str(tmp_path), jpeg_id, "111111111111")
+    with open(unreferenced, "wb") as stream:
+        stream.write(b"unreferenced snapshot")
     # Also leave a decoy file for a different photo_id so the transfer
     # doesn't over-match.
     decoy = os.path.join(edit_masks_dir(str(tmp_path)), f"99999.{ref}.png")
@@ -3520,8 +3521,13 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     # The companion's snapshot file must have moved to the primary id.
     assert not os.path.exists(src_snap)
     assert os.path.exists(snapshot_path(str(tmp_path), primary_id, ref))
+    with load_snapshot(str(tmp_path), primary_id, recipe) as snapshot:
+        assert snapshot.getextrema() == (255, 255)
+    assert os.path.exists(unreferenced)
+    assert not os.path.exists(snapshot_path(str(tmp_path), primary_id, "111111111111"))
     # Decoy for an unrelated photo id must not be touched.
     assert os.path.exists(decoy)
+    db.close()
 
 
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
@@ -8064,115 +8070,6 @@ def test_recycled_id_index_indexes_external_dng_subdirectories(tmp_path):
         "would silently reuse the previous owner's DNG through the "
         "external-editor freshness check"
     )
-
-
-def test_pairing_recovers_snapshot_when_rename_fails(tmp_path, monkeypatch):
-    """A failed snapshot rename must still leave the mask reachable.
-
-    ``transfer_snapshots`` catches ``OSError`` from ``os.replace`` (a locked
-    source on Windows, a permissions blip). The recipe row has already been
-    reassigned to the primary by then, and ``load_snapshot`` only ever
-    builds ``snapshot_path(vireo_dir, primary_id, ref)`` — so merely leaving
-    the old-id file in place doesn't help: every render still disables the
-    local pass. The copy fallback is what actually recovers it.
-    """
-    import local_masks
-    from db import Database
-    from local_masks import snapshot_path
-    from scanner.companions import _pair_raw_jpeg_companions
-
-    img_dir = tmp_path / "photos"
-    img_dir.mkdir()
-    vireo_dir = str(tmp_path / "vireo")
-    thumb_dir = os.path.join(vireo_dir, "thumbnails")
-
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
-    jpeg_id = photo_ingest.add_photo(
-        db, folder_id=fid, filename="IMG_004.jpg", extension=".jpg",
-        file_size=1000, file_mtime=1.0,
-    )
-    raw_id = photo_ingest.add_photo(
-        db, folder_id=fid, filename="IMG_004.cr3", extension=".cr3",
-        file_size=2000, file_mtime=1.0,
-    )
-    # A recipe on the JPEG is what makes pairing transfer the row (and the
-    # snapshot files) over to the RAW primary.
-    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
-    ref = "abcdef012345"
-    _seed_edit_mask_snapshot(vireo_dir, jpeg_id, ref)
-
-    def _failing_replace(src, dst):
-        raise OSError("simulated locked source")
-
-    monkeypatch.setattr(local_masks.os, "replace", _failing_replace)
-
-    _pair_raw_jpeg_companions(
-        db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-    )
-
-    assert os.path.exists(snapshot_path(vireo_dir, raw_id, ref)), (
-        "snapshot never reached the primary id after the rename failed; "
-        "load_snapshot builds the path from the primary id, so the local "
-        "adjustment renders without its mask"
-    )
-
-
-def test_transfer_snapshots_reports_unrecoverable_refs(tmp_path):
-    """When neither rename nor copy works, the caller must be told.
-
-    A silently-degraded render is exactly the black box CORE_PHILOSOPHY
-    forbids — the mask is gone and the image just looks different.
-    """
-    import local_masks
-
-    vireo_dir = str(tmp_path / "vireo")
-    ref = "abcdef012345"
-    _seed_edit_mask_snapshot(vireo_dir, 11, ref)
-
-    def _boom(*args, **kwargs):
-        raise OSError("simulated failure")
-
-    local_masks.os.replace, real_replace = _boom, local_masks.os.replace
-    local_masks.shutil.copy2, real_copy = _boom, local_masks.shutil.copy2
-    try:
-        result = local_masks.transfer_snapshots(vireo_dir, 11, 22)
-    finally:
-        local_masks.os.replace = real_replace
-        local_masks.shutil.copy2 = real_copy
-
-    assert result["failed"] == [ref]
-    assert result["moved"] == []
-
-
-def test_transfer_snapshots_reports_enumerate_failure(tmp_path, monkeypatch):
-    """``os.listdir`` failing on ``edit-masks/`` must surface as a flag.
-
-    Without the flag, the raised ``OSError`` is caught by the deferred-
-    action loop in scanner._pair_raw_jpeg_companions after the recipe
-    has already been committed to the primary. Every affected local
-    adjustment renders without its mask indefinitely, and the caller
-    can't say so because the exception vanished before ``failed`` got
-    populated.
-    """
-    import local_masks
-
-    vireo_dir = str(tmp_path / "vireo")
-    _seed_edit_mask_snapshot(vireo_dir, 55)
-
-    def boom(path):
-        raise PermissionError(13, "Permission denied", path)
-
-    monkeypatch.setattr(local_masks.os, "listdir", boom)
-
-    result = local_masks.transfer_snapshots(vireo_dir, 55, 66)
-
-    assert result["enumerate_failed"] is True, (
-        "os.listdir failure did not surface as enumerate_failed; the "
-        "caller can't warn the user about masks left under the old id"
-    )
-    assert result["moved"] == []
-    assert result["failed"] == []
 
 
 def test_delete_photos_cleanup_leaves_edit_mask_snapshots_to_gc(tmp_path):

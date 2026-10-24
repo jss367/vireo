@@ -134,7 +134,7 @@ def test_skipped_xmp_repair_has_no_history(app_and_db, tmp_path, sidecar):
         path.with_suffix('.xmp').write_text('not XML')
     before = db.photo_keywords.get_for_photo(pid)
     response = app.test_client().post('/api/audit/resolve', json={'photo_id': pid, 'direction': 'use_xmp'})
-    assert response.status_code == 200
+    assert response.status_code == (409 if sidecar == 'corrupt' else 200)
     assert db.photo_keywords.get_for_photo(pid) == before
     assert db.edit_history.list_recent() == []
 
@@ -169,7 +169,7 @@ def test_bulk_repair_keeps_history_for_completed_photos_on_later_failure(app_and
             raise RuntimeError('second repair failed')
         return original(db, pid, direction)
 
-    monkeypatch.setattr(audit, 'check_drift', lambda db: [{'photo_id': pid} for pid in pids])
+    monkeypatch.setattr(audit, 'check_drift', lambda db: [{'photo_id': pid, 'resolutions': ['use_db', 'use_xmp']} for pid in pids])
     monkeypatch.setattr(audit, 'resolve_drift', resolve)
     client = app.test_client()
     assert client.post('/api/audit/resolve-all', json={'direction': 'use_db'}).status_code == 500
@@ -211,7 +211,7 @@ def test_bulk_repair_records_each_changed_photo(app_and_db, tmp_path, monkeypatc
     db.commit()
     # The untagged third photo has no catalog keywords to queue with use_db.
     pids = [photo['id'] for photo in photos[:2]]
-    monkeypatch.setattr(audit, 'check_drift', lambda db: [{'photo_id': pid} for pid in pids])
+    monkeypatch.setattr(audit, 'check_drift', lambda db: [{'photo_id': pid, 'resolutions': ['use_db', 'use_xmp']} for pid in pids])
     client = app.test_client()
     response = client.post('/api/audit/resolve-all', json={'direction': direction})
     assert response.status_code == 200, response.json
@@ -255,11 +255,14 @@ def test_unchanged_repair_does_not_duplicate_history(app_and_db, tmp_path, direc
 
 
 def test_skipped_xmp_repair_blocks_concurrent_writes_until_history_compared(app_and_db, tmp_path, monkeypatch):
+    import audit
     from repositories.audit import AuditRepository
 
     app, db = app_and_db
     pid, path = _photo(db, tmp_path)
     path.with_suffix('.xmp').write_text('not XML')
+    # Simulate a sidecar becoming unreadable after the route's availability check.
+    monkeypatch.setattr(audit, 'drift_for_photo', lambda db, pid: None)
     original = AuditRepository.drift_history_state
     snapshots = []
 
@@ -278,3 +281,39 @@ def test_skipped_xmp_repair_blocks_concurrent_writes_until_history_compared(app_
     assert response.status_code == 200
     assert snapshots == [pid, pid]
     assert db.edit_history.list_recent() == []
+
+
+def test_bulk_repair_skips_corrupt_sidecars_and_records_only_completed_repairs(app_and_db, tmp_path):
+    from xmp import write_sidecar
+
+    app, db = app_and_db
+    photos = db.photos.list_page()
+    paths = []
+    for photo in photos:
+        folder = tmp_path / str(photo['folder_id'])
+        folder.mkdir(exist_ok=True)
+        db.conn.execute('UPDATE folders SET path = ? WHERE id = ?', (str(folder), photo['folder_id']))
+        paths.append((folder / photo['filename']).with_suffix('.xmp'))
+    db.commit()
+    paths[0].write_text('not XML')
+    write_sidecar(str(paths[1]), flat_keywords={'Heron'}, hierarchical_keywords=set())
+    first_pid, second_pid = (photo['id'] for photo in photos[:2])
+    first_keywords = db.photo_keywords.get_for_photo(first_pid)
+    client = app.test_client()
+    response = client.post('/api/audit/resolve-all', json={'direction': 'use_xmp'})
+    assert response.status_code == 200, response.json
+    assert response.json['resolved'] == 1
+    assert response.json['skipped'] == 1
+    assert response.json['warning']
+    entries = client.get('/api/edit-history').json
+    assert len(entries) == 1
+    assert json.loads(entries[0]['new_value']) == {'photo_id': second_pid, 'direction': 'use_xmp'}
+    assert db.photo_keywords.get_for_photo(first_pid) == first_keywords
+    # The catalog direction is allowed for a corrupt sidecar with known
+    # keywords. Record the queued replacement, without claiming an XMP read.
+    response = client.post('/api/audit/resolve', json={'photo_id': first_pid, 'direction': 'use_db'})
+    assert response.status_code == 200, response.json
+    entries = client.get('/api/edit-history').json
+    assert len(entries) == 2
+    assert json.loads(entries[0]['new_value']) == {'photo_id': first_pid, 'direction': 'use_db'}
+    assert 'Queued catalog keywords' in entries[0]['description']
