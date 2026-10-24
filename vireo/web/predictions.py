@@ -2059,6 +2059,24 @@ def create_predictions_blueprint(
         if observed_err is not None:
             return observed_err
 
+        # Dedup each zone before any writes land. A duplicate pid would
+        # otherwise reach record_flag_attribution_history twice with the
+        # same (edit_id, photo_id), tripping the composite primary key on
+        # flag_attribution_history and turning a valid request into a 500.
+        picks = list(dict.fromkeys(picks))
+        rejects = list(dict.fromkeys(rejects))
+
+        # A photo in both picks and rejects would land on whichever write
+        # ran last, so the endpoint's answer would depend on prior state.
+        # Reject the payload before touching anything, same shape as
+        # /api/culling/apply's overlap guard.
+        overlap = set(picks) & set(rejects)
+        if overlap:
+            pid = next(iter(sorted(overlap)))
+            return json_error(
+                f"Photo {pid} listed in both picks and rejects", 400,
+            )
+
         # Pre-validate all photo IDs against workspace before any mutations
         for pid in picks + rejects:
             if not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
