@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -133,6 +133,13 @@ CURRENT_FLAG_ATTRIBUTION_OBJECTS = (
     BEGIN
         DELETE FROM current_flag_attribution WHERE photo_id = NEW.id;
     END""",
+    """CREATE TABLE IF NOT EXISTS flag_attribution_history (
+        edit_id INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        old_state TEXT,
+        new_state TEXT,
+        PRIMARY KEY (edit_id, photo_id)
+    )""",
 )
 
 

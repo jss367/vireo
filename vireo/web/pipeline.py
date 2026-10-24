@@ -816,6 +816,7 @@ def create_pipeline_blueprint(
             run_selected_batch_review(photos, config=effective_cfg)
         )
         attach_edit_recipes(db, results.get("photos", []))
+        _attach_live_flag_confirmations(db, results.get("photos", []))
         results["source"] = "browse-selection"
         results["workspace_id"] = db.active_workspace_id
         return jsonify(results)
@@ -899,6 +900,7 @@ def create_pipeline_blueprint(
             # so a stale one would keep showing a removed second species
             # and mis-derive "Mixed species" after an edit, undo, or redo.
             photo["confirmed_species_list"] = list(names)
+        _attach_live_flag_confirmations(db, results.get("photos", []))
         from pipeline import attach_species_identities
         from species_identity import SpeciesResolver
         attach_species_identities(results, SpeciesResolver(db=db))
@@ -1051,6 +1053,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
+        _attach_live_flag_confirmations(db, serialized.get("photos", []))
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/regroup-live", methods=["POST"])
@@ -1140,6 +1143,7 @@ def create_pipeline_blueprint(
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
+        _attach_live_flag_confirmations(db, serialized.get("photos", []))
         return jsonify(serialized)
 
     @blueprint.route("/api/pipeline/detach-burst", methods=["POST"])
@@ -1764,6 +1768,18 @@ def _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id):
         b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
 
 
+def _attach_live_flag_confirmations(db, photos):
+    """Only current persisted photographer attribution confirms a Cull flag."""
+    states = db.photo_review.culling_flag_states([p["id"] for p in photos])
+    for photo in photos:
+        state = states.get(photo["id"], {})
+        flag = state.get("flag") or "none"
+        photo["flag"] = flag
+        photo["flag_confirmation_status"] = (
+            "confirmed" if state.get("confirmed_flag") == flag else "unverified"
+        )
+
+
 def _overlay_live_photo_state(db, results):
     """Overlay live flags, ratings, eyes and edit recipes on cached results."""
     # Cached pipeline rows predate edit recipes, which live in their
@@ -1794,6 +1810,7 @@ def _overlay_live_photo_state(db, results):
     # live overlay above is what makes this call correct — the shared
     # attacher short-circuits rejected photos, and the overlay
     # ensures p["flag"] reflects the live DB, not a stale cache.
+    _attach_live_flag_confirmations(db, results["photos"])
     attach_species_representatives(db, results["photos"])
 
 

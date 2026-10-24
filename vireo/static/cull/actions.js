@@ -66,11 +66,6 @@ async function applyCulling() {
   var unflag = [];
   /** @type {Record<string, CullAction>} */
   var appliedPins = {};
-  /** @type {Record<string, string | undefined>} */
-  var savedFlags = {};
-  (pipelineResults && pipelineResults.photos || []).forEach(function(p) {
-    savedFlags[p.id] = p.flag;
-  });
   cullData.species_groups.forEach(function(sg) {
     var groups = sg.scene_groups || sg.pose_groups || [];
     groups.forEach(function(pg) {
@@ -78,10 +73,9 @@ async function applyCulling() {
         if (p.decision_source === 'manual') appliedPins[p.photo_id] = p.action;
         if (p.action === 'keep') keepers.push(p.photo_id);
         else if (p.action === 'reject') rejects.push(p.photo_id);
-        else if (p.decision_source === 'manual' && actionForFlag(savedFlags[p.photo_id])) {
-          // You moved an already-flagged photo back to Review. Clear the old
-          // flag, otherwise it would reappear as the photo's decision as soon
-          // as the pin is released.
+        else if (p.decision_source === 'manual') {
+          // Persist explicit Review even when the raw flag is already clear,
+          // so a later ranking job cannot replace this photographer choice.
           unflag.push(p.photo_id);
         }
       });
@@ -114,6 +108,9 @@ async function applyCulling() {
       if (keeperIds.has(photo.id)) photo.flag = 'flagged';
       else if (rejectIds.has(photo.id)) photo.flag = 'rejected';
       else if (clearedIds.has(photo.id)) photo.flag = 'none';
+      if (keeperIds.has(photo.id) || rejectIds.has(photo.id) || clearedIds.has(photo.id)) {
+        photo.flag_confirmation_status = 'confirmed';
+      }
     });
     // Pins the write covered are in the database now. Keep/reject ones are
     // saved flags from here on; review ones stay pinned (no flag can say

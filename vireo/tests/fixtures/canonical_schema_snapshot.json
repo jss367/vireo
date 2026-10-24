@@ -1034,6 +1034,18 @@
   ],
   [
    "table",
+   "flag_attribution_history",
+   "flag_attribution_history",
+   "CREATE TABLE flag_attribution_history (\n        edit_id INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        old_state TEXT,\n        new_state TEXT,\n        PRIMARY KEY (edit_id, photo_id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_flag_attribution_history_1",
+   "flag_attribution_history",
+   null
+  ],
+  [
+   "table",
    "subject_ranking_analysis",
    "subject_ranking_analysis",
    "CREATE TABLE subject_ranking_analysis (\n        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n        source_key TEXT NOT NULL,\n        features TEXT NOT NULL,\n        mask_png BLOB NOT NULL,\n        PRIMARY KEY (detection_id, source_key)\n    )"

@@ -157,10 +157,12 @@ def test_external_evaluation_report_and_cached_producer_claims_do_not_authorize_
 @pytest.mark.parametrize("group_key", ["scene_groups", "pose_groups"])
 @pytest.mark.parametrize("cached_action", ["keep", "reject"])
 def test_legacy_culling_cache_rechecks_suggestions_and_current_user_flags(app_and_db, tmp_path, group_key, cached_action):
+    from services.photo_review import PhotoReviewService
+
     app, db = app_and_db
     ids = [p["id"] for p in db.photos.list_page()]
-    db.photo_review.set_flag(ids[0], "flagged")
-    db.photo_review.set_flag(ids[1], "rejected")
+    PhotoReviewService(db).set_flag(ids[0], "flagged")
+    PhotoReviewService(db).set_flag(ids[1], "rejected")
     cached = {
         "total_photos": 3, "suggested_keepers": 1, "suggested_rejects": 2,
         "species_groups": [{"keepers": 1, "rejects": 2, "photos_data": [

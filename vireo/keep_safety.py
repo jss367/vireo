@@ -72,14 +72,21 @@ def best_batch_application_error(photos, best_id, reject_ids):
     return None
 
 
-def _review_culling_photo(photo, flag):
-    """Apply trusted live flags; cached flags and relative ranks are not decisions."""
+def _review_culling_photo(photo, state):
+    """Only a live, recorded photographer confirmation can override review."""
+    # Bare flags from legacy callers carry no producer evidence. Never infer a
+    # photographer's approval from a flag that a ranking job can also write.
+    if not isinstance(state, dict):
+        state = {"flag": state if isinstance(state, str) else "none"}
+    flag = state.get("flag", "none")
     photo["ranking_selected"] = photo.get("ranking_selected", photo.get("action") == "keep")
     photo["flag"] = flag
     assessment = automatic_keep_assessment(photo)
     photo.update(automatic_keep_eligible=assessment["eligible"], keep_status=assessment["status"],
                  keep_reasons=assessment["reasons"])
-    decision = explicit_decision(photo)
+    confirmed = state.get("confirmed_flag") == flag and flag != "none"
+    decision = explicit_decision(photo) if confirmed else None
+    photo["flag_confirmation_status"] = "confirmed" if confirmed else "unverified"
     photo["label"] = decision or "REVIEW"
     photo["action"] = photo["label"].lower()
     photo["decision_source"] = "confirmed" if decision else "auto"
@@ -100,10 +107,10 @@ def review_culling_suggestions(result, photo_flags):
         counts = {"keep": 0, "review": 0, "reject": 0}
         for scene in group.get("scene_groups", group.get("pose_groups", [])):
             for photo in scene["photos"]:
-                _review_culling_photo(photo, photo_flags.get(photo["photo_id"], "none"))
+                _review_culling_photo(photo, photo_flags.get(photo["photo_id"], {}))
                 counts[photo["action"]] += 1
         for photo in group.get("photos_data", []):
-            _review_culling_photo(photo, photo_flags.get(photo["photo_id"], "none"))
+            _review_culling_photo(photo, photo_flags.get(photo["photo_id"], {}))
         for action, field in (("keep", "keepers"), ("review", "reviews"), ("reject", "rejects")):
             group[field] = counts[action]
             totals[action] += counts[action]

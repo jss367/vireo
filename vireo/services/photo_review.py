@@ -117,6 +117,41 @@ class PhotoReviewService:
     ) -> int:
         return self._write_flags(photo_ids, flag, source=source, reason=reason, is_batch=True)
 
+    def apply_culling_flags(
+        self, keepers: Sequence[int], rejects: Sequence[int], unflag: Sequence[int],
+    ) -> dict[str, int]:
+        """Save explicit Cull choices and their attribution as one reversible edit."""
+        ids = list(keepers) + list(rejects) + list(unflag)
+        with self.db.photo_review.flag_write() as owns_transaction:
+            photos = self.db.photos.get_by_ids(ids)
+            if any(pid not in photos for pid in ids):
+                raise ValueError("Photo not in active workspace")
+            for pid in ids:
+                self.db._verify_photo_in_workspace(pid)
+            old = {pid: photos[pid]["flag"] or "none" for pid in ids}
+            cleared = [pid for pid in unflag if old[pid] != "none"]
+            before = self.db.photo_review.flag_attributions(ids)
+            items = []
+            summary = f"Culling: flagged {len(keepers)}, rejected {len(rejects)}"
+            if cleared:
+                summary += f", cleared {len(cleared)}"
+            for photo_ids, flag in ((keepers, "flagged"), (rejects, "rejected"), (unflag, "none")):
+                for pid in photo_ids:
+                    self.db.photo_review.set_flag(pid, flag, _commit=False)
+                    self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+                    items.append({"photo_id": pid, "old_value": old[pid], "new_value": flag})
+                self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
+            if items:
+                edit_id = self.db.record_edit(
+                    "flag", summary, "culling_apply", items, is_batch=True, _commit=False,
+                )
+                self.db.photo_review.record_flag_attribution_history(
+                    edit_id, ids, before, self.db.photo_review.flag_attributions(ids),
+                )
+        if owns_transaction and items:
+            self.db.prune_edit_history()
+        return {"keepers": len(keepers), "rejects": len(rejects), "cleared": len(cleared)}
+
     def _write_flags(
         self, photo_ids: Sequence[int], flag: str, *, source: str | None, reason: str | None, is_batch: bool,
         observed_flags: dict[int, str] | None = None, observed_workspace_id: int | None = None,
@@ -140,19 +175,23 @@ class PhotoReviewService:
             ):
                 raise FlagConflict("This photo's flag changed elsewhere. Reload it before changing the flag.")
             valid_ids = list(old_values)
+            before = self.db.photo_review.flag_attributions(valid_ids)
             description = flag_description(
                 flag, count=len(photo_ids) if is_batch else None, source=source, reason=reason,
             )
             self.db.photo_review.set_flags(valid_ids, flag, _commit=False)
             for pid in valid_ids:
                 self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
-            self.db.record_edit(
+            edit_id = self.db.record_edit(
                 "flag", description, flag,
                 [{"photo_id": pid, "old_value": old, "new_value": flag} for pid, old in old_values.items()],
                 is_batch=is_batch, source=source, reason=reason, _commit=False,
             )
             self.db.photo_review.set_current_flag_note(
                 valid_ids, flag, description, source=source, reason=reason,
+            )
+            self.db.photo_review.record_flag_attribution_history(
+                edit_id, valid_ids, before, self.db.photo_review.flag_attributions(valid_ids),
             )
         if owns_transaction:
             self.db.prune_edit_history()

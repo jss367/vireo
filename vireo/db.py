@@ -5374,6 +5374,14 @@ class Database:
         value_key = 'old_value' if undo else 'new_value'
         if setter is None and handler is None:
             raise ValueError(f'Unsupported history action: {action}')
+        if action == 'flag':
+            with self.photo_review.flag_write():
+                for item in items:
+                    self._edit_set_flag(item['photo_id'], item[value_key])
+                    self.photo_review.restore_flag_attribution_history(
+                        entry['id'], item['photo_id'], undo=undo,
+                    )
+            return
         for item in items:
             if setter is not None:
                 setter(self, item['photo_id'], item[value_key])
@@ -5384,8 +5392,8 @@ class Database:
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
-        self.photo_review.set_flag(pid, value, verify_workspace=False)
-        self.queue_flag_change_if_enabled(pid, value)
+        self.photo_review.set_flag(pid, value, verify_workspace=False, _commit=False)
+        self.queue_flag_change_if_enabled(pid, value, _commit=False)
 
     def _edit_set_wildlife_excluded(self, pid, value):
         self.update_photo_wildlife_excluded(

@@ -242,6 +242,7 @@ MIGRATIONS = (
     Migration(23, "collection_import_provenance", _add_collection_import_provenance),
     Migration(24, "identity_alternatives", create_identity_alternatives),
     Migration(25, "detection_evidence_reviews", create_detection_evidence_reviews),
+    Migration(26, "flag_attribution_history", create_current_flag_attribution),
 )
 
 

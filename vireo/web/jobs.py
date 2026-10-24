@@ -701,9 +701,7 @@ def create_jobs_blueprint(
             for r in result["results"]:
                 ctx.checkpoint(job)
                 if r["group_size"] > 1 and r["is_best"]:
-                    thread_db.photo_review.set_flag(r["photo_id"], "flagged",
-                                                verify_workspace=False)
-                    best_count += 1
+                    best_count += int(thread_db.photo_review.flag_ranked_candidate(r["photo_id"]))
 
             result["auto_flagged"] = best_count
             ctx.runner.update_step(job["id"], "save", status="completed",

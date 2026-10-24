@@ -2,6 +2,7 @@ type CullAction = 'keep' | 'review' | 'reject';
 interface CullSourcePhoto {
   id: number; filename: string; timestamp?: string | null;
   confirmed_species?: string | string[]; species_top5?: [string, number][];
+  flag_confirmation_status?: 'confirmed' | 'unverified';
   flag?: string; rating?: number; width?: number; height?: number;
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
 }
