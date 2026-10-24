@@ -67,7 +67,7 @@
   "vireo/static/pipeline-review/summary.js:renderAlgorithmTrace": 193,
   "vireo/static/pipeline-review/summary.js:renderAlgorithmTrace.@call:[[\"member\",[\"member\",[\"identifier\",\"enc\"],[\"property\",\"Identifier\",\"trace\"],false],[\"property\",\"Identifier\",\"forEach\"],false],null]": 115,
   "vireo/static/pipeline-review/view-controls.js:encounterMatchesSearch": 166,
-  "vireo/static/pipeline/completion.js:_onPipelineComplete": 223,
+  "vireo/static/pipeline/completion.js:_onPipelineComplete": 220,
   "vireo/static/pipeline/labels-modal.js:fetchPipelineLabels": 102,
   "vireo/static/pipeline/progress.js:_updatePipelineStageUI": 179,
   "vireo/static/pipeline/run.js:startPipeline": 213,

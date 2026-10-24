@@ -251,10 +251,7 @@ function _onPipelineComplete(result) {
   if (messages.noteList.length) {
     // A run that completed with only notes doesn't auto-redirect (below), so
     // the banner offers the way on to Review.
-    _showPipelineNotes(
-      messages.noteList.map(_humanizePipelineError),
-      succeeded && failureErrors.length === 0,
-    );
+    _showPipelineNotes(messages.noteList, succeeded && failureErrors.length === 0);
   }
   if (Object.keys(errorStages).length > 0) {
     var firstFailedCard = null;
