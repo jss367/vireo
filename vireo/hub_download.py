@@ -30,6 +30,42 @@ from services.hf_cache_lock import DOWNLOAD_LOCK
 STAGING_DIRNAME = ".hf-download"
 
 
+def _cached_default_revision(repo_id: str) -> str | None:
+    """Read the Hub's cached default ref without choosing an arbitrary snapshot."""
+    from huggingface_hub import constants
+    from huggingface_hub.utils import validate_repo_id
+
+    validate_repo_id(repo_id)
+    repo_dir = os.path.join(constants.HF_HUB_CACHE, "models--" + repo_id.replace("/", "--"))
+    try:
+        with open(os.path.join(repo_dir, "refs", "main"), encoding="utf-8") as stream:
+            revision = stream.read().strip()
+    except (OSError, ValueError):
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]{40}", revision) and os.path.isdir(os.path.join(repo_dir, "snapshots", revision)):
+        return revision
+    return None
+
+
+def _resolve_batch_revision(repo_id: str) -> str | None:
+    """Prefer current metadata; retain offline access to an immutable cached ref."""
+    from httpx import TransportError
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
+
+    try:
+        return HfApi().model_info(repo_id).sha
+    except (TransportError, OfflineModeIsEnabled, HfHubHTTPError) as exc:
+        if isinstance(exc, HfHubHTTPError) and (
+            exc.response is None or (exc.response.status_code < 500 and exc.response.status_code != 429)
+        ):
+            raise
+        revision = _cached_default_revision(repo_id)
+        if revision is None:
+            raise
+        return revision
+
+
 class DownloadBatch:
     """Resume an unfinished multi-file download at its original immutable revision."""
 
@@ -51,9 +87,7 @@ class DownloadBatch:
             self.revision = revision
             self.completed = saved.get("completed", {})
         else:
-            from huggingface_hub import HfApi
-
-            self.revision = HfApi().model_info(repo_id).sha
+            self.revision = _resolve_batch_revision(repo_id)
             if not isinstance(self.revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", self.revision):
                 raise RuntimeError(f"Could not resolve an immutable revision for {repo_id}")
             self.completed = {}

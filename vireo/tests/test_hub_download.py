@@ -109,6 +109,94 @@ def test_real_hub_offline_download_reuses_legacy_cache(tmp_path, monkeypatch, re
     assert sorted(p.name for p in destination.parent.iterdir()) == ["model.onnx"]
 
 
+@pytest.mark.parametrize("kind", ["keypoint", "pipeline"])
+@pytest.mark.parametrize("outage", ["offline", "connection", "server"])
+def test_batches_start_from_legacy_cache_during_metadata_outage(app_and_db, tmp_path, monkeypatch, kind, outage):
+    import httpx
+    import huggingface_hub
+    import keypoints
+    import models
+    from huggingface_hub import constants
+    from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
+    from web import models as routes
+
+    app, _db = app_and_db
+    model_name = "rtmpose-animal" if kind == "keypoint" else "sam2-small"
+    files = ["model.onnx", "config.json"] if kind == "keypoint" else ["image_encoder.onnx", "mask_decoder.onnx"]
+    cache = tmp_path / "hub"
+    repo = cache / ("models--" + models.ONNX_REPO.replace("/", "--"))
+    revision = "a" * 40
+    snapshot = repo / "snapshots" / revision / model_name
+    snapshot.mkdir(parents=True)
+    for name in files:
+        (snapshot / name).write_bytes(name.encode())
+    (repo / "refs").mkdir()
+    (repo / "refs/main").write_text(revision)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+
+    def model_info(*args, **kwargs):
+        if outage == "server":
+            raise HfHubHTTPError("unavailable", response=httpx.Response(
+                503, request=httpx.Request("GET", "https://huggingface.co/api/models/test")))
+        if outage == "connection":
+            raise httpx.ConnectError("connection failed")
+        raise OfflineModeIsEnabled("offline")
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", model_info)
+    real_download = huggingface_hub.hf_hub_download
+    revisions = []
+
+    def download(**kwargs):
+        revisions.append(kwargs["revision"])
+        return real_download(**kwargs, local_files_only=True)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    install = tmp_path / "models"
+    if kind == "keypoint":
+        monkeypatch.setattr(keypoints, "MODELS_DIR", str(install))
+        keypoints.ensure_keypoint_weights(model_name)
+    else:
+        pending = []
+        monkeypatch.setattr(routes, "pipeline_models_dir", lambda: str(install))
+        monkeypatch.setattr(app._job_runner, "start", lambda _kind, work, **kw: pending.append(work) or "job")
+        monkeypatch.setattr(app._job_runner, "push_event", lambda *args: None)
+        response = app.test_client().post("/api/models/pipeline/download", json={"model_id": model_name})
+        assert response.status_code == 200
+        pending.pop()({"id": "job"})
+    assert revisions == [revision, revision]
+    for name in files:
+        assert (install / model_name / name).read_bytes() == name.encode()
+    assert not (install / model_name / ".vireo-download-progress.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["missing-ref", "invalid-ref", "missing-snapshot", "denied"])
+def test_batch_cache_fallback_requires_valid_snapshot_and_metadata_outage(tmp_path, monkeypatch, failure):
+    import httpx
+    import huggingface_hub
+    from hub_download import DownloadBatch
+    from huggingface_hub import constants
+    from huggingface_hub.errors import HfHubHTTPError, OfflineModeIsEnabled
+
+    repo = tmp_path / "hub/models--owner--repo"
+    (repo / "refs").mkdir(parents=True)
+    if failure != "missing-ref":
+        (repo / "refs/main").write_text("main" if failure == "invalid-ref" else "a" * 40)
+    if failure != "missing-snapshot":
+        (repo / "snapshots" / ("a" * 40)).mkdir(parents=True)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    error = (HfHubHTTPError("denied", response=httpx.Response(
+        403, request=httpx.Request("GET", "https://huggingface.co/api/models/test")))
+        if failure == "denied" else OfflineModeIsEnabled("offline"))
+
+    def unavailable(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", unavailable)
+    with pytest.raises(type(error)):
+        DownloadBatch("owner/repo", str(tmp_path / "models"))
+    assert not (tmp_path / "models/.vireo-download-progress.json").exists()
+
+
 def test_repo_relative_filename_lands_at_its_destination(fake_hub, tmp_path):
     from hub_download import fetch_hub_file
 
