@@ -443,6 +443,17 @@ class JobHistory:
                             d[field] = json.loads(d[field])
                         except (json.JSONDecodeError, TypeError):
                             pass
+                # The Jobs page reads ``tree.length`` and iterates with
+                # ``forEach``; a stored ``tree`` that decoded to anything
+                # other than a list (``{"length": 1}``, a bare int) would
+                # abort rendering of the whole history pane. Iterating a
+                # dict visits its keys without raising, so the per-row
+                # guard below never fires on that shape — drop it here.
+                if d.get("tree") is not None and not isinstance(d["tree"], list):
+                    log.warning(
+                        "Dropping malformed tree in history row %r", d.get("id"),
+                    )
+                    d["tree"] = []
                 try:
                     attach_result_text(d)
                 except (TypeError, ValueError, AttributeError, LookupError):

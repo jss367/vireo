@@ -97,3 +97,28 @@ def test_a_malformed_tree_row_does_not_poison_the_whole_history(app_and_db):
     jobs = app.test_client().get("/api/jobs").get_json()
     assert "history_error" not in jobs
     assert {row["id"] for row in jobs["history"]} >= {"bad-row", "good-row"}
+
+
+def test_a_dict_shaped_tree_is_dropped_before_the_frontend_sees_it(app_and_db):
+    """A stored ``tree`` that decoded to an object is replaced with ``[]``.
+
+    Iterating a dict visits its keys without raising, so the per-row
+    ``attach_result_text`` guard does not fire on this shape. On the
+    Jobs page, ``steps.length > 0`` is truthy for a payload like
+    ``{"length": 1}`` (plain property access), and ``steps.forEach``
+    then throws, aborting rendering of the whole history pane.
+    """
+    app, db = app_and_db
+    _insert_terminal_row(db, job_id="dict-tree", tree_json='{"length": 1}')
+    _insert_terminal_row(db, job_id="good-row", tree_json='[]')
+
+    resp = app.test_client().get("/api/jobs/history?limit=100")
+    assert resp.status_code == 200
+    rows = {row["id"]: row for row in resp.get_json()}
+    assert rows["dict-tree"]["tree"] == []
+    assert rows["good-row"]["tree"] == []
+
+    jobs = app.test_client().get("/api/jobs").get_json()
+    assert "history_error" not in jobs
+    history_rows = {row["id"]: row for row in jobs["history"]}
+    assert history_rows["dict-tree"]["tree"] == []
