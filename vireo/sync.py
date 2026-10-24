@@ -1137,6 +1137,8 @@ def _untag_keywords_missing_from_sidecar(
 def sync_from_xmp(db, photo_ids):
     """Re-read XMP sidecars and update database keywords.
 
+    An existing transaction belongs to the caller, including commit/rollback.
+
     Args:
         db: Database instance
         photo_ids: list of photo ids to re-sync
@@ -1219,9 +1221,11 @@ def sync_from_xmp(db, photo_ids):
             # Update xmp_mtime in the same transaction as reconciliation.
             xmp_mtime = os.path.getmtime(xmp_path)
             db.scanning.set_xmp_mtime(photo_id, xmp_mtime)
-            db.commit()
+            if owns_transaction:
+                db.commit()
         except Exception:
-            db.rollback()
+            if owns_transaction:
+                db.rollback()
             raise
 
         log.info(
