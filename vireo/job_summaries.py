@@ -293,9 +293,16 @@ def _cull(result: dict, config: dict) -> tuple[str, list[str]]:
         f"{_n(total, 'photo')} reviewed: {keepers:,} suggested keepers, "
         f"{rejects:,} suggested rejects"
     )
+    if "suggested_reviews" in result:
+        summary = (
+            f"{_n(total, 'photo')} analyzed: {keepers:,} kept by you, "
+            f"{_int(result, 'suggested_reviews'):,} need review, {rejects:,} rejected by you"
+        )
     if species:
         summary += f" across {_n(species, 'species', 'species')}"
     details = []
+    if result.get("keep_review_message"):
+        details.append(result["keep_review_message"])
     missing = _int(result, "photos_missing_phash")
     if missing:
         details.append(
