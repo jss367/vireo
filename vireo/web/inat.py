@@ -21,6 +21,7 @@ from config import read_raw_config_file, settings_write_lock
 from db import Database
 from file_replace import replace_file
 from flask import Blueprint, jsonify, request
+from keyword_normalization import keyword_match_key
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
 )
@@ -52,6 +53,66 @@ def _prediction_scientific_name(db, pred):
     callers then fall back to the label.
     """
     return resolved_prediction_taxonomy(pred, SpeciesResolver(db=db))["scientific_name"]
+
+
+def _confirmed_species_identity(resolver, entry):
+    """Identity of one confirmed species keyword (``get_species_for_photos``
+    entry with ``include_identities``): its linked taxon when it has one,
+    otherwise whatever its name resolves to."""
+    name, key = entry["name"], entry["key"]
+    if key.startswith("taxon:") and key[6:].isdecimal():
+        return resolver.resolve(name, source={"taxon_id": int(key[6:])})
+    return resolver.display(name)
+
+
+def _species_options(db, photo_id, primary, min_conf):
+    """Every species on the photo, for the submission dialog's picker.
+
+    Confirmed species keywords come first, then each detection's top
+    current prediction that no confirmed keyword already names (so a photo
+    of two animals offers both, not just the single best guess). The entry
+    naming ``primary`` -- the top prediction the response's single-valued
+    fields have always carried -- is marked ``primary``. An iNaturalist
+    observation records one taxon, so the user picks among these.
+    """
+    resolver = SpeciesResolver(db=db)
+    options = []
+    seen = []
+
+    def add(name, scientific, source, confidence, identity):
+        if not name:
+            return
+        keys = {identity.key, "name:" + keyword_match_key(name)}
+        if any(keys & other for other in seen):
+            return
+        seen.append(keys)
+        options.append({
+            "species": name,
+            "scientific_name": scientific or "",
+            "source": source,
+            "confidence": confidence,
+            "primary": False,
+        })
+
+    confirmed = db.photo_species.get_species_for_photos(
+        [photo_id], include_identities=True,
+    ).get(photo_id, [])
+    for entry in confirmed:
+        identity = _confirmed_species_identity(resolver, entry)
+        add(entry["name"], identity.scientific_name, "confirmed", None, identity)
+    for row in db.predictions.get_top_per_detection_for_photo(
+        photo_id, min_detector_confidence=min_conf,
+    ):
+        add(row["species"], _prediction_scientific_name(db, row), "prediction",
+            row["confidence"], resolver.prediction(row))
+    if primary:
+        primary_keys = {resolver.prediction(primary).key,
+                        "name:" + keyword_match_key(primary["species"])}
+        for keys, option in zip(seen, options, strict=True):
+            if keys & primary_keys:
+                option["primary"] = True
+                break
+    return options
 
 
 def _normalize_export_submissions(submissions):
@@ -484,6 +545,9 @@ def create_inat_blueprint(
             "species": species,
             "scientific_name": scientific,
             "confidence": pred["confidence"] if pred else 0,
+            # Every species on the photo (confirmed keywords, then each
+            # detection's top prediction); the fields above stay the primary.
+            "species_options": _species_options(db, photo_id, pred, min_conf),
             "timestamp": photo["timestamp"],
             "latitude": lat,
             "longitude": lng,

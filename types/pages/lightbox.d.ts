@@ -220,14 +220,20 @@ declare function openExternal(url: string): Promise<boolean>;
 declare function showExternalOpenFailure(url: string, message: string): void;
 declare function copyExternalUrl(url: string): Promise<boolean>;
 declare function pickDirectory(title: string): Promise<string | null>;
+/** One species on the photo (``/api/inat/prepare``): confirmed keywords first, then each detection's top prediction. */
+interface InatSpeciesOption {
+  species: string; scientific_name: string; source: 'confirmed' | 'prediction';
+  confidence: number | null; primary: boolean;
+}
 interface InatPreparedPhoto {
   error?: string; mode?: string; scientific_name?: string; species?: string;
+  species_options?: InatSpeciesOption[];
   timestamp?: string; latitude?: number | null; longitude?: number | null;
   filename: string; edit_recipe?: LightboxRecipe | null; already_submitted?: boolean;
   existing_observation_url?: string; upload_url?: string;
 }
 interface InatQueueItem {
-  photo_id: number; taxon_name: string; observed_on: string;
+  photo_id: number; taxon_name: string; observed_on: string; species_options?: InatSpeciesOption[];
   latitude: number | string; longitude: number | string;
   description: string; geoprivacy: string; filename: string;
   edit_recipe?: LightboxRecipe | null; already_submitted?: boolean;

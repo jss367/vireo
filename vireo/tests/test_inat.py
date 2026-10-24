@@ -1330,3 +1330,74 @@ def test_api_inat_validate_token(app_and_db):
         resp = client.post('/api/inat/validate-token', json={'token': 'fake'})
     data = resp.get_json()
     assert data['login'] == 'birder42'
+
+
+def _add_second_subject(db, pid, species="Blue Jay", confidence=0.8,
+                        scientific="Cyanocitta cristata", detector_confidence=0.85):
+    # save() replaces the model's boxes for the photo; content-addressed ids
+    # keep the fixture's cardinal box (and its prediction) as it was.
+    det_ids = db.detections.save(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4},
+         "confidence": detector_confidence, "category": "animal"},
+    ], detector_model="MDV6")
+    db.predictions.add(det_ids[1], species, confidence, "test-model",
+                       taxonomy={"scientific_name": scientific})
+    return det_ids[1]
+
+
+def test_api_inat_prepare_single_species_keeps_primary_and_one_option(app_and_db):
+    """A one-subject photo keeps the same prefill and offers just that taxon."""
+    app, _db, pid = app_and_db
+    data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
+    assert data["species"] == "Northern Cardinal"
+    assert data["scientific_name"] == "Cardinalis cardinalis"
+    assert data["confidence"] == pytest.approx(0.95)
+    assert data["species_options"] == [{
+        "species": "Northern Cardinal", "scientific_name": "Cardinalis cardinalis",
+        "source": "prediction", "confidence": pytest.approx(0.95), "primary": True,
+    }]
+
+
+def test_api_inat_prepare_offers_each_detections_top_species(app_and_db):
+    """Two animals in one frame: both species are offered, the primary
+    single-valued fields still name the most confident one."""
+    app, db, pid = app_and_db
+    det = _add_second_subject(db, pid)
+    # A lower guess on the same detection is not a separate species.
+    db.predictions.add(det, "Steller's Jay", 0.1, "test-model",
+                       taxonomy={"scientific_name": "Cyanocitta stelleri"})
+    data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
+    assert data["species"] == "Northern Cardinal"
+    assert data["scientific_name"] == "Cardinalis cardinalis"
+    assert [(o["species"], o["source"], o["primary"]) for o in data["species_options"]] == [
+        ("Northern Cardinal", "prediction", True),
+        ("Blue Jay", "prediction", False),
+    ]
+
+
+def test_api_inat_prepare_lists_confirmed_species_first(app_and_db):
+    """Confirmed species keywords come first; a prediction a keyword already
+    names is not offered twice, and the primary marker follows it."""
+    app, db, pid = app_and_db
+    _add_second_subject(db, pid)
+    for name in ("Northern Cardinal", "House Finch"):
+        db.tag_photo(pid, db.add_keyword(name, is_species=True))
+    data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
+    assert data["species"] == "Northern Cardinal"
+    assert [(o["species"], o["source"], o["primary"]) for o in data["species_options"]] == [
+        ("House Finch", "confirmed", False),
+        ("Northern Cardinal", "confirmed", True),
+        ("Blue Jay", "prediction", False),
+    ]
+    cardinal = data["species_options"][1]
+    assert cardinal["scientific_name"] == "Cardinalis cardinalis"
+    assert cardinal["confidence"] is None
+
+
+def test_api_inat_prepare_options_respect_detector_threshold(app_and_db):
+    """A second box the workspace threshold hides does not add a species."""
+    app, db, pid = app_and_db
+    _add_second_subject(db, pid, detector_confidence=0.05)
+    data = app.test_client().get(f'/api/inat/prepare/{pid}').get_json()
+    assert [o["species"] for o in data["species_options"]] == ["Northern Cardinal"]
