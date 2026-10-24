@@ -138,12 +138,8 @@ def _remove_cached_files_for_photo(pid, dirs):
     # bytes. A recycled id therefore can't surface a previous owner's
     # snapshot — a brand-new photo has no local section at all, and a
     # ref match would mean byte-identical masks. Deleting them by id
-    # only creates a data-loss window: ``transfer_snapshots`` swallows
-    # OSError when a rename fails (locked destination on Windows), so
-    # an id-keyed purge in the companion-merge path would destroy the
-    # sole remaining copy of a snapshot whose recipe has already been
-    # reassigned to the primary, silently disabling that local
-    # adjustment forever. ``local_masks.gc_edit_masks`` owns this
+    # risks deleting snapshots retained for a failed or rolled-back
+    # companion merge. ``local_masks.gc_edit_masks`` owns this
     # directory instead and reaps by ref — the correct key — with a
     # grace period and a re-stat guard.
     for orphan in [path for directory in dirs.mask_dirs for pattern in (
