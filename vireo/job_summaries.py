@@ -908,6 +908,12 @@ def _generic(result: dict, config: dict) -> tuple[str, list[str]]:
             continue
         if isinstance(value, dict):
             continue
+        if key.endswith("_notice") and isinstance(value, str):
+            # A sentence the job wrote for the user (the import's
+            # ``working_copy_notice``): a detail line, never a "Key: value" part.
+            if value.strip():
+                details.append(value.strip())
+            continue
         if key.endswith("_total") and isinstance(result.get(key[:-6]), list):
             continue  # folded into the list it counts, below
         if isinstance(value, list):

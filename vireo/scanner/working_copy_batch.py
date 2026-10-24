@@ -279,6 +279,9 @@ class _WorkingCopyBatch:
         # generated from the previous state.
         self.retained_new_snapshots = {}
         self.stop_after_current = False
+        # Cataloged paths of the rows whose extraction failed this pass, so
+        # a caller can tell the user which photos have no working copy.
+        self.failed_paths: list[str] = []
 
     def _adopt_quota(self, quota_mb: int) -> None:
         self.quota_mb = quota_mb
@@ -949,6 +952,7 @@ class _WorkingCopyBatch:
         # a failure marker.
         self.db.working_copies.mark_failed(row, extraction.failure_source)
         self.db.commit_with_retry()
+        self.failed_paths.append(os.path.join(row["folder_path"], row["filename"]))
 
     # -- staying under the quota -------------------------------------
 

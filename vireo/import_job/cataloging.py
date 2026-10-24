@@ -640,17 +640,18 @@ def _extract_deferred_working_copies(
             )
 
         try:
-            _extract_working_copies(
+            state.wc_failed_paths = list(_extract_working_copies(
                 db, params.vireo_dir,
                 scope=[(d, "exact") for d in sorted(state.wc_dest_folders)],
                 source_paths=state.wc_source_paths,
                 status_callback=_working_copy_status,
                 cancel_check=lambda: runner.is_cancelled(job["id"]),
-            )
-        except Exception:  # broad: working copies are derived and re-extracted later; the imported originals stand
+            ) or [])
+        except Exception as exc:  # broad: working copies are derived and re-extracted later; the imported originals stand and the result's notice says what happened
             log.exception(
                 "Working-copy extraction failed for %s",
                 sorted(state.wc_dest_folders),
             )
+            state.wc_pass_error = str(exc) or type(exc).__name__
         if runner.is_cancelled(job["id"]):
             state.cancelled = True

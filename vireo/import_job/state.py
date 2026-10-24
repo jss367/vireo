@@ -155,6 +155,11 @@ class _ImportRunState:
     run_verified_hashes: dict[DupToken, str | None] = field(default_factory=dict)
     wc_source_paths: WorkingCopySources = field(default_factory=dict)
     wc_dest_folders: set[str] = field(default_factory=set)
+    # What the deferred working-copy pass could not do, for the result's
+    # notice: the photos it failed (cataloged paths) and the error that
+    # stopped the whole pass, if one did.
+    wc_failed_paths: list[str] = field(default_factory=list)
+    wc_pass_error: str | None = None
 
 
 @dataclass

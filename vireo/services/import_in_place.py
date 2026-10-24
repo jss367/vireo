@@ -804,6 +804,10 @@ class _InPlaceImportRun:
             "source_index": 0,
         }
         self.working_copy_scope: list[_WorkingCopyScopeEntry] = []
+        # Photos the deferred working-copy pass could not make a copy for;
+        # the result's notice names them (a crash of the whole pass is a
+        # job error instead, see ``_extract_deferred_working_copies``).
+        self.working_copy_failures: list[str] = []
         self.working_copy_scope_baselines: dict[_WorkingCopyScopeEntry, dict[str, bool]] = {}
         self.working_copy_scope_identities: dict[_WorkingCopyScopeEntry, dict[str, object]] = {}
         self.source_mount_baselines: dict[str, dict[str, bool]] = {}
@@ -1537,13 +1541,13 @@ class _InPlaceImportRun:
         revalidated_scope = self._revalidated_working_copy_scope()
         if revalidated_scope:
             try:
-                self.extract_working_copies(
+                self.working_copy_failures = list(self.extract_working_copies(
                     self.thread_db,
                     self.plan.vireo_dir,
                     status_callback=self._status_cb,
                     scope=revalidated_scope,
                     cancel_check=self._cancel_check,
-                )
+                ) or [])
             except Exception as exc:
                 log.exception(
                     "In-place import working-copy generation failed",
@@ -1663,6 +1667,21 @@ class _InPlaceImportRun:
         self._apply_import_tags(result)
         return result
 
+    def _add_working_copy_notice(self, result: JsonDict) -> None:
+        """Name the photos left without a working copy (a notice, not an error).
+
+        The photos were cataloged either way; failing the import over a
+        derived copy would skip after-import processing.
+        """
+        if not self.working_copy_failures:
+            return
+        from scanner import import_working_copy_notice
+
+        result["working_copy_failures"] = list(self.working_copy_failures)
+        result["working_copy_notice"] = import_working_copy_notice(
+            self.working_copy_failures, None,
+        )
+
     def _completed_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
         snapshot_missing = self.snapshot_missing
         snapshot_unreadable = self.snapshot_unreadable
@@ -1715,6 +1734,7 @@ class _InPlaceImportRun:
         }
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
+        self._add_working_copy_notice(result)
         self._apply_import_tags(result)
         # Pause before publishing the collection or handing off to a
         # child job. Once the handoff starts, late parent requests must

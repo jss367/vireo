@@ -11,6 +11,7 @@ from import_job.file_selection import (
     _selection_summary,
 )
 from import_job.snapshots import _capture_photo_fingerprints
+from scanner.working_copies import import_working_copy_notice
 
 if TYPE_CHECKING:
     from db import Database
@@ -183,12 +184,42 @@ def _import_partial_scope(params: ImportParams) -> bool:
     return partial_scope
 
 
+def _with_working_copy_notice(result: JsonDict, state: _ImportRunState) -> JsonDict:
+    """Add the working-copy notice when the deferred pass fell short.
+
+    A notice, not a failure: ``ok``, ``errors`` and the card-safety verdict
+    describe the originals, which were imported either way. Marking the
+    import failed would skip after-import processing and offer a Retry that
+    has nothing to copy. Absent when every working copy was made.
+    """
+    notice = import_working_copy_notice(state.wc_failed_paths, state.wc_pass_error)
+    if notice:
+        result["working_copy_notice"] = notice
+    if state.wc_failed_paths:
+        result["working_copy_failures"] = list(state.wc_failed_paths)
+    return result
+
+
 def _import_result(
     db: Database, state: _ImportRunState, params: ImportParams, *, discovered: int,
     source_snapshots: dict[str, SourceSnapshot], safe_to_format: bool,
     unverified_duplicates_only: bool, vanished_paths: set[str], appeared: int,
 ) -> JsonDict:
     """The import's result dict, shared by both transports."""
+    return _with_working_copy_notice(_import_result_fields(
+        db, state, params, discovered=discovered,
+        source_snapshots=source_snapshots, safe_to_format=safe_to_format,
+        unverified_duplicates_only=unverified_duplicates_only,
+        vanished_paths=vanished_paths, appeared=appeared,
+    ), state)
+
+
+def _import_result_fields(
+    db: Database, state: _ImportRunState, params: ImportParams, *, discovered: int,
+    source_snapshots: dict[str, SourceSnapshot], safe_to_format: bool,
+    unverified_duplicates_only: bool, vanished_paths: set[str], appeared: int,
+) -> JsonDict:
+    """Every key of the import's result except the working-copy notice."""
     return {
         "discovered": discovered,
         "copied": state.copied,
