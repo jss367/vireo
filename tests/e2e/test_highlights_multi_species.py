@@ -10,6 +10,7 @@ import time
 
 import pytest
 from playwright.sync_api import expect
+from services import photo_ingest
 
 from e2e.module_pages import expose_page_modules
 from e2e.viewport_test_support import install_viewport_test_helpers
@@ -124,3 +125,108 @@ def test_picking_a_two_species_photo_updates_both_cards(live_server, page):
         expect(cards.nth(i)).to_have_class(
             re.compile(r"\bpick-flag-card\b"), timeout=5000,
         )
+
+
+def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page):
+    """Pick must refresh every confirmed-species bucket the photo belongs to,
+    including one whose current loaded window hasn't reached the photo yet.
+
+    Regression for Codex feedback on PR #2291 (flag-changes.js:68): a photo
+    tagged with two species that sits past the 20-photo window of its second
+    bucket is only visible in the first bucket. ``picked_first`` on the server
+    promotes the photo to the top of the second bucket after a pick, but the
+    client used to refetch only the loaded hit — leaving the second bucket's
+    loaded prefix stale (and the Save-as-Collection payload for it short the
+    newly promoted photo) until a full reload.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+
+    # Tag the target photo with BOTH keywords: this photo belongs to the
+    # Red-tailed Hawk AND American Robin buckets. Its quality score (0.65) is
+    # higher than the fillers below so it stays in the Hawk bucket's loaded
+    # window, but lower than the robin fillers so it falls past the Robin
+    # bucket's 20-photo prefix.
+    pid = data["photos"][0]
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    robin_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("American Robin",)
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.65 WHERE id = ?", (pid,),
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, robin_kid),
+    )
+
+    folder_id = data["folders"][1]
+    for i in range(21):
+        filler = photo_ingest.add_photo(
+            db, folder_id=folder_id,
+            filename=f"filler-robin-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-06-15T11:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.95 - i * 0.001, filler),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (filler, robin_kid),
+        )
+    db.conn.commit()
+
+    _goto_highlights(page, live_server["url"])
+
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(f'.highlights-card[data-photo-id="{pid}"]')).to_be_visible(
+        timeout=5000,
+    )
+
+    def _robin_bucket_has_pid():
+        return page.evaluate(
+            "pid => {"
+            "  const b = highlightsState.currentData.buckets.find("
+            "    x => x.species === 'American Robin');"
+            "  return !!(b && b.photos.some(p => p.id === pid));"
+            "}",
+            pid,
+        )
+
+    # The Robin bucket is loaded (21 fillers outrank pid), but pid is past
+    # the 20-photo loaded window — the client cannot see it yet.
+    assert _robin_bucket_has_pid() is False, (
+        "setup: Robin bucket should NOT contain pid in its loaded prefix "
+        "(the 21 fillers push it out)"
+    )
+
+    hawk_section.locator(f'.highlights-card[data-photo-id="{pid}"]').click()
+    page.wait_for_function(
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
+        arg=pid,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+
+    assert _wait_for(lambda: db.photos.get(pid)["flag"] == "flagged"), (
+        db.photos.get(pid)
+    )
+
+    # The fix: picked_first promotes pid to the top of the Robin bucket, and
+    # the pick handler refetches that bucket (using confirmed_species_list)
+    # even though pid wasn't in the loaded hits.
+    page.wait_for_function(
+        "pid => {"
+        "  const b = highlightsState.currentData.buckets.find("
+        "    x => x.species === 'American Robin');"
+        "  return !!(b && b.photos.some(p => p.id === pid && p.flag === 'flagged'));"
+        "}",
+        arg=pid,
+        timeout=5000,
+    )
