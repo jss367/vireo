@@ -270,6 +270,30 @@ def test_model_batch_retry_keeps_completed_files(app_and_db, tmp_path, monkeypat
         assert listings == ["a" * 40, "a" * 40, "b" * 40]
 
 
+def test_custom_import_recovers_when_model_is_added_after_empty_scan(fake_hub, tmp_path, monkeypatch):
+    import models
+
+    calls, _state = fake_hub
+    hub = sys.modules["huggingface_hub"]
+    revision = "a" * 40
+    hub.HfApi = lambda: types.SimpleNamespace(model_info=lambda _: types.SimpleNamespace(sha=revision))
+    hub.list_repo_files = lambda _, revision: (["README.md"] if revision == "a" * 40 else ["model.onnx"])
+    hub.try_to_load_from_cache = lambda **_: None
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path))
+    monkeypatch.setattr(models, "register_model", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="No ONNX model files"):
+        models.download_hf_model("owner/new-model")
+    assert not calls
+    assert not (tmp_path / "new-model/.vireo-download-progress.json").exists()
+
+    revision = "b" * 40
+    result = models.download_hf_model("owner/new-model")
+    assert result["weights_path"] == str(tmp_path / "new-model")
+    assert calls[0]["revision"] == revision
+    assert (tmp_path / "new-model/model.onnx").is_file()
+
+
 @pytest.mark.parametrize("change", ["other-repository", "modified", "missing", "unrecorded"])
 def test_download_batch_does_not_reuse_unrelated_or_changed_files(tmp_path, monkeypatch, change):
     import huggingface_hub

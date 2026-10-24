@@ -1852,6 +1852,7 @@ def download_hf_model(repo_id, progress_callback=None):
     onnx_files = [f for f in files if f.endswith(".onnx")]
 
     if not onnx_files:
+        batch.finish()
         raise RuntimeError(
             f"No ONNX model files found in {repo_id}. "
             f"Files: {', '.join(files[:10])}"
