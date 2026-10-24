@@ -16,6 +16,7 @@ Callers reach it as ``db.audit`` (a fresh repository per access, see
 ``Database.audit``); there are no forwarding wrappers on ``Database``.
 """
 
+import json
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -172,6 +173,27 @@ class AuditRepository:
             self.conn.commit()
 
     # -- repairs ---------------------------------------------------------------
+
+    def drift_history_state(self, photo_id: int) -> str:
+        """Small audit snapshot of the metadata and queue a drift repair changes."""
+        workspace_id = self.workspace_id_fn()
+        keywords = [dict(row) for row in self.conn.execute(
+            "SELECT pk.keyword_id, k.name, pk.source FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? ORDER BY pk.keyword_id", (photo_id,),
+        )]
+        pending = [dict(row) for row in self.conn.execute(
+            "SELECT id, change_type, value FROM pending_changes "
+            "WHERE photo_id = ? AND workspace_id = ? ORDER BY id",
+            (photo_id, workspace_id),
+        )]
+        photo = self.conn.execute(
+            "SELECT xmp_mtime FROM photos WHERE id = ?", (photo_id,),
+        ).fetchone()
+        return json.dumps({
+            'keywords': keywords, 'pending_changes': pending,
+            'xmp_mtime': photo['xmp_mtime'] if photo else None,
+        }, sort_keys=True)
 
     def remove_orphan_rows(self, photo_ids: Sequence[int]) -> None:
         """Delete the catalog rows of orphaned photos, in the caller's transaction.

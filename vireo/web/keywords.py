@@ -18,6 +18,7 @@ import logging
 import math
 
 from flask import Blueprint, jsonify, request
+from services.maintenance_history import clean_keywords_with_history
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from web.settings import LOCATION_KEYWORDS_SETTING, workspace_effective_setting
 
@@ -326,7 +327,7 @@ def create_keywords_blueprint(get_db, json_error):
     def api_clean_keywords():
         """Merge case-insensitive duplicate keywords."""
         db = get_db()
-        merged = db.keyword_tree.merge_duplicates()
+        merged = clean_keywords_with_history(db)
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 

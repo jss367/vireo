@@ -1159,7 +1159,8 @@ def sync_from_xmp(db, photo_ids):
         # one writer transaction. Background migrations use the same SQLite
         # writer lock, so they cannot act on a pre-reconciliation association
         # snapshot between this read and the final xmp_mtime update.
-        db.begin_immediate()
+        if not db.in_transaction:
+            db.begin_immediate()
         try:
             sidecar = _read_sidecar_keywords(db, photo_id, xmp_path)
             if sidecar is None:
