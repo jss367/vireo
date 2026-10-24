@@ -522,3 +522,22 @@ def test_intermediate_commit_does_not_discard_an_explicit_undo_snapshot(app_and_
                    [{'photo_id': 1, 'old_value': '', 'new_value': str(kid)}])
     db.undo_last_edit()
     assert db.species_provenance.state(1, kid) == before
+
+
+def test_bulk_species_additions_preserve_existing_evidence_through_undo(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    confirm(client, 'Robin', provenance={'method': 'adjacent_frames', 'reason': 'Earlier burst review'})
+    original = assignments(client)['Robin']
+    response = client.post('/api/encounters/species/bulk', json={'assignments': [
+        {'species': 'Mallard', 'photo_ids': [1, 2]},
+        {'species': 'Blue Jay', 'photo_ids': [1]},
+    ]})
+    assert response.status_code == 200, response.get_json()
+    assert assignments(client)['Robin'] == original
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client)['Robin'] == original
+    assert 'Mallard' not in assignments(client)
+    assert client.post('/api/redo').status_code == 200
+    assert assignments(client)['Robin'] == original
+    assert assignments(client)['Mallard']['method'] == 'manual_unspecified'

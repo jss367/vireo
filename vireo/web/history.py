@@ -186,6 +186,15 @@ def create_history_blueprint(
         undone = []
 
         def _apply():
+            body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                return json_error("Expected a JSON object")
+            if "edit_id" in body:
+                if type(body["edit_id"]) is not int:
+                    return json_error("edit_id must be an integer")
+                latest = db.edit_history.latest_undoable()
+                if latest is None or latest["id"] != body["edit_id"]:
+                    return json_error("This edit is no longer the latest undoable edit", 409)
             entry = db.undo_last_edit()
             if entry is None:
                 return json_error("nothing to undo")

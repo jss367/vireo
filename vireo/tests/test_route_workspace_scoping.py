@@ -1139,3 +1139,16 @@ def test_scan_conflict_sees_queued_folder_stage_destination(staged, tmp_path):
         )
         is None
     )
+
+
+@pytest.mark.parametrize('route', ['/api/encounters/species/bulk', '/api/v1/encounters/species/bulk'])
+def test_bulk_species_rejects_foreign_targets_atomically(scoped, route):
+    client, db = scoped['client'], scoped['db']
+    before = db.photo_species.get_species_for_photos([scoped['visible_pid'], scoped['foreign_pid']])
+    response = client.post(route, headers={'X-Vireo-Token': 'test-token-123'}, json={'assignments': [
+        {'species': 'Blue Jay', 'photo_ids': [scoped['visible_pid']]},
+        {'species': 'Eared Grebe', 'photo_ids': [scoped['foreign_pid']]},
+    ]})
+    assert response.status_code == 403
+    assert 'Assignment 1:' in response.json['error']
+    assert db.photo_species.get_species_for_photos([scoped['visible_pid'], scoped['foreign_pid']]) == before
