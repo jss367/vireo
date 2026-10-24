@@ -69,6 +69,38 @@ def test_corrupt_sidecar_is_reported_as_unreadable_with_only_use_db(scanned):
     assert row["resolutions"] == ["use_db"]
 
 
+def test_corrupt_sidecar_with_empty_db_keywords_offers_no_resolution(tmp_path):
+    """``resolve_drift('use_db')`` queues one write per DB keyword; with none it
+    queues nothing and the next sync never rewrites the sidecar. The row says
+    so rather than advertising a repair that would silently be a no-op."""
+    from audit import check_drift
+    from db import Database
+    from scanner import scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    Image.new("RGB", (100, 100)).save(root / "bird.jpg")
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        scan(str(root), db)
+        xmp_path = str(root / "bird.xmp")
+        with open(xmp_path, "w") as f:
+            f.write(CORRUPT_XMP)
+
+        [row] = check_drift(db)
+        assert row["direction"] == "sidecar_unreadable"
+        assert row["xmp_problem"] == "corrupt"
+        assert row["db_value"] == []
+        assert row["resolutions"] == []
+        assert row["advice"] == (
+            "This photo has no keywords in Vireo, so Use DB would not rewrite "
+            "the sidecar. Delete the sidecar file to clear the drift, or add "
+            "keywords to the photo first."
+        )
+    finally:
+        db.close()
+
+
 @needs_posix_permissions
 def test_unopenable_sidecar_is_reported_with_no_resolution(scanned):
     from audit import check_drift
@@ -143,6 +175,37 @@ def test_resolve_refuses_a_direction_the_row_does_not_offer(app_and_db, tmp_path
 
     resp = client.post("/api/audit/resolve", json={"photo_id": photo_id, "direction": "use_db"})
     assert resp.status_code == 200
+
+
+def test_resolve_refuses_use_db_for_corrupt_sidecar_with_empty_db_keywords(app_and_db, tmp_path):
+    """``use_db`` on a corrupt sidecar whose photo has no catalog keywords is a
+    silent no-op (nothing is queued, the sync never rewrites the sidecar); the
+    row offers no resolution and the API refuses the attempt with the advice
+    telling the user what to do instead."""
+    app, db = app_and_db
+    root = _point_folder_at(db, "/photos/2024", tmp_path)
+    Image.new("RGB", (100, 100)).save(root / "bird3.jpg")
+    (root / "bird3.xmp").write_text(CORRUPT_XMP)
+    photo_id = db.conn.execute("SELECT id FROM photos WHERE filename = 'bird3.jpg'").fetchone()["id"]
+    # bird3 is created by the ``app_and_db`` fixture without any keyword tags.
+    assert db.photo_keywords.get_for_photo(photo_id) == []
+    client = app.test_client()
+
+    resp = client.post("/api/audit/resolve", json={"photo_id": photo_id, "direction": "use_db"})
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["code"] == "drift_resolution_unavailable"
+    assert body["error"].startswith(
+        "Vireo could not read the XMP sidecar for bird3.jpg: it is not valid XMP ("
+    )
+    assert body["message"] == (
+        "This photo has no keywords in Vireo, so Use DB would not rewrite "
+        "the sidecar. Delete the sidecar file to clear the drift, or add "
+        "keywords to the photo first."
+    )
+
+    resp = client.post("/api/audit/resolve", json={"photo_id": photo_id, "direction": "use_xmp"})
+    assert resp.status_code == 409
 
 
 def test_resolve_all_skips_rows_that_do_not_offer_the_direction(app_and_db, tmp_path):

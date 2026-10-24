@@ -23,8 +23,12 @@ AUDIT_CHECKS = ("drift", "orphans", "untracked", "sidecars", "integrity")
 # What each drift row may be resolved with. A readable sidecar takes either
 # direction. A corrupt one can only be replaced: the next Sync to XMP writes a
 # fresh sidecar in its place (``SidecarEditor`` starts a new tree over a file
-# that does not parse), but there is nothing in it to read. One that cannot be
-# opened takes neither: the sync cannot write over it and nothing can be read.
+# that does not parse), but there is nothing in it to read -- and only when the
+# catalog has keywords for the photo, because ``resolve_drift('use_db')`` queues
+# one ``keyword_add`` per current keyword and an empty catalog set queues
+# nothing, so the sync never invokes ``SidecarEditor`` and the corrupt file
+# stays. One that cannot be opened takes neither: the sync cannot write over it
+# and nothing can be read.
 DRIFT_RESOLUTIONS = ["use_db", "use_xmp"]
 _UNREADABLE_SIDECAR_RESOLUTIONS = {"corrupt": ["use_db"], "unreadable": []}
 _UNREADABLE_SIDECAR_ADVICE = {
@@ -37,6 +41,11 @@ _UNREADABLE_SIDECAR_ADVICE = {
         "permissions or reconnect its drive, then check for drift again."
     ),
 }
+_CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE = (
+    "This photo has no keywords in Vireo, so Use DB would not rewrite the "
+    "sidecar. Delete the sidecar file to clear the drift, or add keywords to "
+    "the photo first."
+)
 _UNREADABLE_SIDECAR_ERROR = {
     "corrupt": "it is not valid XMP ({})",
     "unreadable": "it could not be opened ({})",
@@ -48,7 +57,19 @@ def _unreadable_sidecar_drift(photo, folder_path, db_keywords, problem, detail):
 
     Claims nothing about the sidecar's keywords (``xmp_value`` is None and
     nothing is listed as added or removed): Vireo never saw them.
+
+    A corrupt sidecar normally offers ``use_db`` -- the next Sync to XMP
+    rewrites the file from the catalog's keywords. When the catalog has no
+    keywords for the photo, ``resolve_drift('use_db')`` would queue nothing
+    and the sync would not touch the sidecar, so the row offers no resolution
+    and the advice says what to do instead.
     """
+    if problem == "corrupt" and not db_keywords:
+        resolutions = []
+        advice = _CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE
+    else:
+        resolutions = list(_UNREADABLE_SIDECAR_RESOLUTIONS[problem])
+        advice = _UNREADABLE_SIDECAR_ADVICE[problem]
     return {
         "photo_id": photo["id"],
         "filename": photo["filename"],
@@ -61,8 +82,8 @@ def _unreadable_sidecar_drift(photo, folder_path, db_keywords, problem, detail):
         "direction": "sidecar_unreadable",
         "xmp_problem": problem,
         "xmp_error": _UNREADABLE_SIDECAR_ERROR[problem].format(detail),
-        "advice": _UNREADABLE_SIDECAR_ADVICE[problem],
-        "resolutions": list(_UNREADABLE_SIDECAR_RESOLUTIONS[problem]),
+        "advice": advice,
+        "resolutions": resolutions,
     }
 
 

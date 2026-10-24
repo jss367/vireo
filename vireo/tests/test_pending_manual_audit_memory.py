@@ -126,7 +126,9 @@ def _drift(snapshot, *, stat_error=None):
         "sidecar_read_problem": lambda path: ("corrupt", "invented parse error"),
         **{name: getattr(audit, name) for name in (
             "DRIFT_RESOLUTIONS", "_UNREADABLE_SIDECAR_RESOLUTIONS",
-            "_UNREADABLE_SIDECAR_ADVICE", "_UNREADABLE_SIDECAR_ERROR",
+            "_UNREADABLE_SIDECAR_ADVICE",
+            "_CORRUPT_SIDECAR_NO_KEYWORDS_ADVICE",
+            "_UNREADABLE_SIDECAR_ERROR",
         )},
     }
     for helper in ("_unreadable_sidecar_drift", "_photo_drift"):
