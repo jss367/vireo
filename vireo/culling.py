@@ -1,11 +1,11 @@
-"""Culling engine: find redundant photos and suggest keepers.
+"""Culling engine: find similar photos and rank candidates for review.
 
 The culling pipeline:
 1. Group photos by species (from predictions)
 2. Within each species, group by scene (timestamp proximity + perceptual hash similarity)
 3. Within each scene, cluster by embedding redundancy (~0.88)
-4. For each redundancy cluster, pick the best quality photo as keeper
-5. Everything else becomes a reject candidate
+4. For each redundancy cluster, rank the best quality photo for inspection
+5. Apply the shared usability safeguard and preserve photographer decisions
 """
 
 import logging
@@ -15,6 +15,7 @@ from datetime import datetime
 import imagehash
 import numpy as np
 from image_loader import load_image, load_working_image
+from keep_safety import review_culling_suggestions
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def analyze_for_culling(
             species_groups: list of species group dicts
             total_photos: int
             suggested_keepers: int
+            suggested_reviews: int
             suggested_rejects: int
             photos_missing_phash: count of photos that couldn't be hashed
     """
@@ -96,13 +98,13 @@ def analyze_for_culling(
 
     photo_ids = [p["id"] for p in photos]
     if not photo_ids:
-        return {
+        return review_culling_suggestions({
             "species_groups": [],
             "total_photos": 0,
             "suggested_keepers": 0,
             "suggested_rejects": 0,
             "photos_missing_phash": 0,
-        }
+        }, {})
 
     predictions = _load_top_predictions(db, photo_ids, pause_callback)
 
@@ -117,9 +119,6 @@ def analyze_for_culling(
 
     # Analyze each species group
     species_groups = []
-    total_keepers = 0
-    total_rejects = 0
-
     for group_key, group_data in sorted(species_map.items(), key=lambda x: -len(x[1]["pids"])):
         if pause_callback:
             pause_callback()
@@ -129,18 +128,14 @@ def analyze_for_culling(
             cross_bucket_merge,
         )
         species_groups.append(group)
-        total_keepers += group["keepers"]
-        total_rejects += group["rejects"]
 
     photos_missing_phash = sum(1 for pid in photo_ids if pid not in phashes)
 
-    return {
+    return review_culling_suggestions({
         "species_groups": species_groups,
         "total_photos": len(photo_ids),
-        "suggested_keepers": total_keepers,
-        "suggested_rejects": total_rejects,
         "photos_missing_phash": photos_missing_phash,
-    }
+    }, {p["id"]: p["flag"] for p in photos})
 
 
 def _load_top_predictions(db, photo_ids, pause_callback):

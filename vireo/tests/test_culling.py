@@ -590,15 +590,15 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
 
 
 def test_analyze_for_culling_with_predictions(tmp_path):
-    """Full pipeline produces keepers and rejects."""
+    """The public analysis exposes provisional ranks without keep/reject promotion."""
     from culling import analyze_for_culling
 
     db, photo_ids = _setup_culling_db(tmp_path)
     result = analyze_for_culling(db)
 
     assert result["total_photos"] == 4
-    assert result["suggested_keepers"] >= 1
-    assert result["suggested_keepers"] + result["suggested_rejects"] == 4
+    assert result["suggested_keepers"] == result["suggested_rejects"] == 0
+    assert result["suggested_reviews"] == 4
     assert len(result["species_groups"]) >= 1
 
     # Check structure of species group
@@ -610,19 +610,37 @@ def test_analyze_for_culling_with_predictions(tmp_path):
     # The pairwise similarity map was O(n^2) per species group, written into
     # the culling results file, and read by nothing — it must stay gone.
     assert "embedding_sims" not in sg
+    photos = [p for scene in sg["scene_groups"] for p in scene["photos"]]
+    assert any(p["ranking_selected"] for p in photos)
+    assert all(p["action"] == "review" and not p["automatic_keep_eligible"] for p in photos)
 
 
 def test_analyze_for_culling_no_embeddings(tmp_path):
-    """Pipeline works even without embeddings (no clustering, all kept)."""
+    """Singletons without embeddings remain review candidates."""
     from culling import analyze_for_culling
 
     db, photo_ids = _setup_culling_db(tmp_path, with_embeddings=False)
     result = analyze_for_culling(db)
 
     assert result["total_photos"] == 4
-    # Without embeddings, each photo is its own cluster — all keepers
-    assert result["suggested_keepers"] == 4
+    assert result["suggested_keepers"] == 0
+    assert result["suggested_reviews"] == 4
     assert result["suggested_rejects"] == 0
+
+
+def test_analyze_for_culling_preserves_current_explicit_decisions(tmp_path):
+    db, photo_ids = _setup_culling_db(tmp_path)
+    db.photo_review.set_flag(photo_ids[0], "flagged")
+    db.photo_review.set_flag(photo_ids[1], "rejected")
+    result = analyze_for_culling(db)
+    photos = {p["photo_id"]: p for group in result["species_groups"]
+              for scene in group["scene_groups"] for p in scene["photos"]}
+    assert photos[photo_ids[0]]["action"] == "keep"
+    assert photos[photo_ids[1]]["action"] == "reject"
+    assert photos[photo_ids[2]]["action"] == photos[photo_ids[3]]["action"] == "review"
+    assert result["suggested_keepers"] == result["suggested_rejects"] == 1
+    assert result["suggested_reviews"] == 2
+    assert all(p["automatic_keep_eligible"] is False for p in photos.values())
 
 
 def test_analyze_for_culling_collection_scope(tmp_path):

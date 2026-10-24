@@ -70,3 +70,43 @@ def best_batch_application_error(photos, best_id, reject_ids):
     if any(explicit_decision(dict(photos[pid])) != "REJECT" for pid in reject_ids):
         return "Relative ranking cannot reject the remaining photos. Review and flag individual photos manually."
     return None
+
+
+def _review_culling_photo(photo, flag):
+    """Apply trusted live flags; cached flags and relative ranks are not decisions."""
+    photo["ranking_selected"] = photo.get("ranking_selected", photo.get("action") == "keep")
+    photo["flag"] = flag
+    assessment = automatic_keep_assessment(photo)
+    photo.update(automatic_keep_eligible=assessment["eligible"], keep_status=assessment["status"],
+                 keep_reasons=assessment["reasons"])
+    decision = explicit_decision(photo)
+    photo["label"] = decision or "REVIEW"
+    photo["action"] = photo["label"].lower()
+    photo["decision_source"] = "confirmed" if decision else "auto"
+
+
+def review_culling_suggestions(result, photo_flags):
+    """Guard the legacy culling job and old caches using current catalog flags.
+
+    Redundancy similarity does not establish a usable winner or justify rejecting
+    its neighbors. Keep the grouping and quality measurements for inspection,
+    but expose only photographer decisions until a validated producer exists.
+    Refresh the raw regrouping data too so it cannot revive cached approval.
+    """
+    result["ranking_status"] = "provisional"
+    result["keep_review_message"] = KEEP_REVIEW_MESSAGE
+    totals = {"keep": 0, "review": 0, "reject": 0}
+    for group in result.get("species_groups", []):
+        counts = {"keep": 0, "review": 0, "reject": 0}
+        for scene in group.get("scene_groups", group.get("pose_groups", [])):
+            for photo in scene["photos"]:
+                _review_culling_photo(photo, photo_flags.get(photo["photo_id"], "none"))
+                counts[photo["action"]] += 1
+        for photo in group.get("photos_data", []):
+            _review_culling_photo(photo, photo_flags.get(photo["photo_id"], "none"))
+        for action, field in (("keep", "keepers"), ("review", "reviews"), ("reject", "rejects")):
+            group[field] = counts[action]
+            totals[action] += counts[action]
+    result.update(suggested_keepers=totals["keep"], suggested_reviews=totals["review"],
+                  suggested_rejects=totals["reject"])
+    return result

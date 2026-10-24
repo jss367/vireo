@@ -18,6 +18,7 @@ import os
 import tempfile
 
 from flask import Blueprint, jsonify, make_response, request
+from keep_safety import review_culling_suggestions
 from photo_payload import attach_nested_edit_recipes
 from services import detection_store
 
@@ -306,16 +307,18 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
             results = json.load(f)
 
         # Enrich with photo metadata for the UI
-        db = get_db()
+        photo_flags = {}
         for sg in results["species_groups"]:
             for pg in sg.get("scene_groups", sg.get("pose_groups", [])):
                 for photo in pg["photos"]:
                     p = db.photos.get(photo["photo_id"])
                     if p:
+                        photo_flags[photo["photo_id"]] = p["flag"]
                         photo["filename"] = p["filename"]
                         photo["sharpness"] = p["sharpness"]
                         photo["subject_sharpness"] = p["subject_sharpness"]
                         photo["quality_score"] = p["quality_score"]
+        review_culling_suggestions(results, photo_flags)
         attach_nested_edit_recipes(db, results)
 
         return jsonify(results)

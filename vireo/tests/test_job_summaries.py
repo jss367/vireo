@@ -281,6 +281,16 @@ def test_previews_report_failures_and_cull_reports_missing_phash():
     assert describe_result("cull", {"total_photos": 1, "photos_missing_phash": 0})["details"] == []
 
 
+def test_culling_summary_explains_provisional_ranking_and_photographer_decisions():
+    from keep_safety import KEEP_REVIEW_MESSAGE
+
+    result = {"total_photos": 10, "suggested_keepers": 1, "suggested_rejects": 2,
+              "suggested_reviews": 7, "species_count": 2, "keep_review_message": KEEP_REVIEW_MESSAGE}
+    out = describe_result("cull", result)
+    assert out["summary"] == "10 photos analyzed: 1 kept by you, 7 need review, 2 rejected by you across 2 species"
+    assert out["details"] == [KEEP_REVIEW_MESSAGE]
+
+
 def test_card_cleanup_scan_surfaces_nested_totals():
     out = describe_result("card-cleanup-scan", {
         "cancelled": False,
