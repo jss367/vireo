@@ -541,3 +541,55 @@ def test_bulk_species_additions_preserve_existing_evidence_through_undo(app_and_
     assert client.post('/api/redo').status_code == 200
     assert assignments(client)['Robin'] == original
     assert assignments(client)['Mallard']['method'] == 'manual_unspecified'
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+@pytest.mark.parametrize('failure', ['stale', 'database'])
+def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and_db, monkeypatch, direction, failure):
+    from repositories.identity_alternatives import IdentityAlternativesRepository
+    from services.identity_alternatives import IdentityHistoryStale, resolve_alternatives, save_alternatives
+
+    app, db = app_and_db
+    candidate, other = 'Tropical Kingbird', "Couch's Kingbird"
+    kid = db.add_keyword(candidate, is_species=True)
+    old_evidence = {'method': 'direct_visual', 'reason': 'Old evidence'}
+    if direction == 'redo':
+        for pid in (1, 2):
+            db.tag_photo(pid, kid, provenance=old_evidence)
+    save_alternatives(db, [1, 2], [candidate, other], 'Need calls', 'Audio')
+    db.commit()
+    if direction == 'redo':
+        db.undo_last_edit()
+    else:
+        resolve_alternatives(db, [1, 2], candidate)
+        db.commit()
+        db.tag_photo(1, kid, provenance=old_evidence)
+    if failure == 'stale':
+        db.tag_photo(2, db.add_keyword(other, is_species=True))
+        expected_error = IdentityHistoryStale
+    else:
+        original = IdentityAlternativesRepository.set_state
+        def fail_second(self, photo_id, state):
+            if photo_id == 2:
+                raise sqlite3.OperationalError('Injected replay failure')
+            return original(self, photo_id, state)
+        monkeypatch.setattr(IdentityAlternativesRepository, 'set_state', fail_second)
+        expected_error = sqlite3.OperationalError
+    db.commit()
+    before = db.species_provenance.state(1, kid)
+    with pytest.raises(expected_error):
+        (db.undo_last_edit if direction == 'undo' else db.redo_last_undo)()
+    assert db.species_provenance.state(1, kid) == before
+    assert db._species_provenance_before == {}
+    # The evidence-only endpoint uses another connection; the later keyword
+    # action reuses the Database that just experienced the failed replay.
+    client = app.test_client()
+    current = assignments(client)[candidate]
+    assert evidence(client, current, method='direct_visual', reason='New evidence').status_code == 200
+    independent = db.add_keyword('Independent species', is_species=True)
+    db.tag_photo(1, independent)
+    db.record_edit('keyword_add', 'Independent edit', str(independent), [
+        {'photo_id': 1, 'old_value': '', 'new_value': str(independent)},
+    ])
+    db.undo_last_edit()
+    assert assignments(client)[candidate]['reason'] == 'New evidence'

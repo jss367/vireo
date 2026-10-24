@@ -5352,18 +5352,23 @@ class Database:
 
         history = self._edit_history_repository()
         stale = False
-        with self._commits_held():
-            try:
-                with history.identity_replay():
-                    if undo:
-                        self._apply_undo(entry, items)
-                        history.mark_undone(entry['id'])
-                    else:
-                        self._apply_redo(entry, items)
-                        history.mark_redone(entry['id'])
-            except IdentityHistoryStale:
-                history.retire_superseded_identity_entry(entry['id'])
-                stale = True
+        try:
+            with self._commits_held():
+                try:
+                    with history.identity_replay():
+                        if undo:
+                            self._apply_undo(entry, items)
+                            history.mark_undone(entry['id'])
+                        else:
+                            self._apply_redo(entry, items)
+                            history.mark_redone(entry['id'])
+                except IdentityHistoryStale:
+                    history.retire_superseded_identity_entry(entry['id'])
+                    stale = True
+        finally:
+            # SQL savepoint rollback cannot undo Python-side snapshots. A
+            # failed/retired replay must never contaminate a later edit.
+            self._species_provenance_before = {}
         if stale:
             raise IdentityHistoryStale(
                 'That identification was changed elsewhere. History has been refreshed; '
