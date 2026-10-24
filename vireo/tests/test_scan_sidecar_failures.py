@@ -109,9 +109,14 @@ def test_readable_sidecars_report_nothing(tmp_path):
     assert reported == []
 
 
-def test_scan_job_fails_and_names_the_photo(app_and_db, tmp_path):
+def test_scan_job_fails_and_names_the_photo(app_and_db, tmp_path, monkeypatch):
+    import metadata
     from wait import wait_for_job_via_client
 
+    # Isolate the test from whether exiftool is installed on the host: the
+    # scan-step summary appends an "ExifTool not found" warning when it isn't,
+    # and this test is about the sidecar-failure claim, not exiftool.
+    monkeypatch.setattr(metadata, "scan_metadata_warning", lambda: None)
     app, _db = app_and_db
     root = tmp_path / "scanme"
     root.mkdir()
