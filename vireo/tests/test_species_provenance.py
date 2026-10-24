@@ -240,3 +240,143 @@ def test_keyword_merge_retargets_evidence_and_undo(app_and_db):
     assert client.delete(f'/api/photos/1/keywords/{survivor}').status_code == 200
     assert client.post('/api/undo').status_code == 200
     assert assignments(client)['Surviving Robin']['method'] == 'adjacent_frames'
+
+
+def test_sidecar_reconciliation_does_not_leak_into_later_undo(app_and_db):
+    from sync import _untag_keywords_missing_from_sidecar
+
+    app, db = app_and_db
+    kid = db.add_keyword('Sidecar species', is_species=True)
+    db.tag_photo(1, kid, provenance={'method': 'adjacent_frames', 'reason': 'Original evidence'})
+    assert db._species_provenance_before == {}
+    _untag_keywords_missing_from_sidecar(db, 1, db.photo_keywords.get_for_photo(1), {}, set(), set())
+    db.commit()
+    assert db._species_provenance_before == {}
+    new = {'method': 'direct_visual', 'reason': 'New independent confirmation'}
+    db.tag_photo(1, kid, provenance=new)
+    client = app.test_client()
+    confirm(client, 'Other bird')
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client)['Sidecar species']['method'] == 'direct_visual'
+    assert assignments(client)['Sidecar species']['reason'] == new['reason']
+    assert client.post('/api/redo').status_code == 200
+    assert assignments(client)['Sidecar species']['reason'] == new['reason']
+
+
+def test_non_undoable_species_removals_do_not_accumulate_snapshots(db):
+    from services import photo_ingest
+
+    fid = db.add_folder('/photos')
+    pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
+    for index in range(100):
+        kid = db.add_keyword(f'Species {index}', is_species=True)
+        db.tag_photo(pid, kid, provenance={'method': 'direct_visual', 'reason': 'x' * 4000})
+        db.untag_photo(pid, kid, _commit=False)
+    db.commit()
+    assert db._species_provenance_before == {}
+
+
+@pytest.mark.parametrize('operation', ['pairing', 'folder_collision', 'duplicate_resolution',
+                                       'pending_edits'])
+@pytest.mark.parametrize('existing_evidence', [False, True])
+def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, existing_evidence):
+    from services import photo_ingest
+
+    source_dir, target_dir = tmp_path / 'source', tmp_path / 'target'
+    source_dir.mkdir()
+    target_dir.mkdir()
+    source_folder = db.add_folder(str(source_dir))
+    target_folder = db.add_folder(str(target_dir))
+    losing = photo_ingest.add_photo(db, source_folder, 'bird.jpg', '.jpg', 100, 1.0)
+    survivor = photo_ingest.add_photo(db, target_folder, 'bird.jpg', '.jpg', 100, 1.0)
+    kid = db.add_keyword('Mallard', is_species=True)
+    original = {'method': 'adjacent_frames', 'reviewer': 'Field reviewer',
+                'reason': 'Same bird across frames', 'evidence_source': 'Burst review',
+                'supporting_photo_ids': [survivor], 'confidence': None,
+                'confidence_meaning': 'No calibrated value'}
+    db.tag_photo(losing, kid, provenance=original)
+    db.photo_keywords.record_embedded_offered_keys(losing, ['mallard'])
+    if existing_evidence:
+        expected = {'method': 'direct_visual', 'reason': 'Survivor markings'}
+        db.tag_photo(survivor, kid, provenance=expected)
+    else:
+        expected = original
+    if operation == 'pairing':
+        db.keyword_provenance.carry_companion_keywords(losing, survivor)
+    elif operation == 'folder_collision':
+        db.folders.merge_into_existing(source_folder, target_folder, str(target_dir))
+        assert db.photos.get(losing) is None
+    elif operation == 'duplicate_resolution':
+        db._apply_winner_loser_merge(survivor, [losing])
+        assert db.photos.get(losing)['flag'] == 'rejected'
+    else:
+        db.queue_change(losing, 'keyword_add', 'Mallard', _commit=False)
+        db.moves_merge.reconcile_conflicting_keyword_edits(losing, survivor)
+    db.commit()
+    copied = db.species_provenance.assignments(survivor)[0]
+    assert {key: copied[key] for key in expected} == expected
+    assert db._species_provenance_before == {}
+
+
+def test_copied_subject_evidence_keeps_origin_and_remains_editable(app_and_db):
+    app, db = app_and_db
+    did = db.detections.save(1, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5},
+                                 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    kid = db.add_keyword('Mallard', is_species=True)
+    db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did,
+                                  'reason': 'Visible markings'})
+    db.keyword_provenance.carry_companion_keywords(1, 2)
+    db.commit()
+    client = app.test_client()
+    copied = assignments(client, 2)['Mallard']
+    assert copied['detection_id'] == did
+    assert copied['subject_photo_id'] == 1
+    response = evidence(client, copied, method='direct_visual', detection_id=did,
+                        subject_photo_id=1, reason='Added a source explanation')
+    assert response.status_code == 200, response.get_json()
+    assert assignments(client, 2)['Mallard']['subject_photo_id'] == 1
+    for invalid in ({'detection_id': did, 'subject_photo_id': 3},
+                    {'detection_id': True, 'subject_photo_id': 1}):
+        assert evidence(client, copied, method='direct_visual', **invalid).status_code == 400
+
+
+def test_copied_historical_subject_can_be_preserved_after_source_deletion(app_and_db):
+    app, db = app_and_db
+    did = db.detections.save(1, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5},
+                                 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    kid = db.add_keyword('Mallard', is_species=True)
+    db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did, 'supporting_photo_ids': [1]})
+    db.keyword_provenance.carry_companion_keywords(1, 2)
+    db.delete_photos([1])
+    db.commit()
+    client = app.test_client()
+    copied = assignments(client, 2)['Mallard']
+    response = evidence(client, copied, method='direct_visual', detection_id=did,
+                        subject_photo_id=1, reason='Historical subject reference', supporting_photo_ids=[1])
+    assert response.status_code == 200, response.get_json()
+    assert assignments(client, 2)['Mallard']['detection_id'] == did
+
+
+    assert assignments(client, 2)['Mallard']['supporting_photo_ids'] == [1]
+    assert evidence(client, copied, method='direct_visual', detection_id=did,
+                    subject_photo_id=1, supporting_photo_ids=[1, 99999]).status_code == 400
+
+
+@pytest.mark.parametrize('same_hash', [False, True])
+def test_archive_photo_merge_preserves_evidence(db, tmp_path, same_hash):
+    from test_db_moves_merge import _collision_tree
+
+    tree = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = ((tree['staged'], tree['survivor']) if same_hash
+                        else (tree['survivor'], tree['staged']))
+    kid = db.add_keyword('Mallard', is_species=True)
+    original = {'method': 'adjacent_frames', 'reviewer': 'Reviewer',
+                'reason': 'Adjacent frame', 'supporting_photo_ids': [survivor],
+                'confidence': None, 'confidence_meaning': 'No calibrated value'}
+    db.tag_photo(losing, kid, provenance=original)
+    db.photo_keywords.record_embedded_offered_keys(losing, ['mallard'])
+    db.commit()
+    db.merge_staged_tree_into_archive(tree['stage_root'], tree['arch'])
+    copied = next(a for a in db.species_provenance.assignments(survivor) if a['keyword_id'] == kid)
+    assert {key: copied[key] for key in original} == original
+    assert db.photos.get(losing) is None

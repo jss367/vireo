@@ -13,13 +13,14 @@ METHODS = frozenset({'manual_unspecified', 'direct_visual', 'adjacent_frames',
                      'model_proposed', 'imported_unknown'})
 
 
-def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[str, Any]:
+def validate_provenance(db: Database, photo_ids: list[int], value: Any, *,
+                        existing_assignment: dict[str, Any] | None = None) -> dict[str, Any]:
     """Validate confidence meaning, accessible evidence, and subject ownership."""
     if (not isinstance(value, dict) or not isinstance(value.get('method'), str)
             or value['method'] not in METHODS):
         raise ValueError('provenance.method must be one of ' + ', '.join(sorted(METHODS)))
     allowed = {'method', 'reviewer', 'reason', 'evidence_source', 'supporting_photo_ids',
-               'detection_id', 'confidence', 'confidence_meaning'}
+               'detection_id', 'subject_photo_id', 'confidence', 'confidence_meaning'}
     if set(value) - allowed:
         raise ValueError('Unknown species provenance fields: ' + ', '.join(sorted(set(value) - allowed)))
     result = {'method': value['method']}
@@ -44,17 +45,29 @@ def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[
             or any(type(pid) is not int or not 0 < pid < 2**63 for pid in supporting)):
         raise ValueError('supporting_photo_ids must contain at most 100 positive photo IDs')
     for pid in supporting:
-        if not db.photos.get(pid, verify_workspace=True):
+        retained = pid in (existing_assignment or {}).get('supporting_photo_ids', [])
+        if not retained and not db.photos.get(pid, verify_workspace=True):
             raise ValueError('Supporting frames must be in the active workspace')
     result['supporting_photo_ids'] = list(dict.fromkeys(supporting))
     if result['method'] == 'adjacent_frames' and not (supporting or result['reason']):
         raise ValueError('Adjacent-frame inference requires supporting frames or an explanation')
     detection_id = value.get('detection_id')
+    origin = value.get('subject_photo_id')
+    if origin is not None and (type(origin) is not int or not 0 < origin < 2**63):
+        raise ValueError('subject_photo_id must be a positive photo ID')
     if detection_id is not None:
-        subject_photo = (db.species_provenance.detection_photo_id(detection_id)
-                         if type(detection_id) is int and 0 < detection_id < 2**63 else None)
-        if len(photo_ids) != 1 or subject_photo != photo_ids[0]:
+        if type(detection_id) is not int or not 0 < detection_id < 2**63:
+            raise ValueError('detection_id must be a positive detection ID')
+        subject_photo = db.species_provenance.detection_photo_id(detection_id)
+        retained = existing_assignment is not None and all(
+            existing_assignment.get(key) == value.get(key) for key in ('detection_id', 'subject_photo_id')
+        )
+        if not retained and (len(photo_ids) != 1 or subject_photo != photo_ids[0] or origin not in (None, photo_ids[0])):
             raise ValueError('detection_id must identify a subject in the assigned photo')
+    elif origin is not None:
+        raise ValueError('subject_photo_id requires a detection_id')
+    if origin is not None:
+        result['subject_photo_id'] = origin
     result['detection_id'] = detection_id
     return result
 

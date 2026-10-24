@@ -558,7 +558,7 @@ def create_batch_blueprint(
         name = keyword_row["name"]
         is_location = (keyword_row["type"] or "") == "location"
         for pid in removed_ids:
-            db.untag_photo(pid, keyword_id)
+            db.untag_photo(pid, keyword_id, _record_provenance=True)
             queue_keyword_remove(db, pid, name)
             # See ``api_remove_keyword``: a ``keyword_remove`` on a
             # ``type='location'`` tag leaves the sidecar's

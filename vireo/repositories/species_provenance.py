@@ -29,6 +29,27 @@ class SpeciesProvenanceRepository:
             (json.dumps(provenance, sort_keys=True), photo_id, keyword_id),
         )
 
+    def carry(self, losing_id: int, survivor_id: int, *, keyword_id: int | None = None) -> None:
+        """Carry evidence only for links the normal merge chose to keep.
+
+        An explicit survivor record wins a collision. Subject references retain
+        their original photo identity rather than implying a new detection on
+        the surviving photo. The caller owns the association write transaction.
+        """
+        rows = self.conn.execute(
+            """SELECT src.keyword_id, src.species_provenance FROM photo_keywords src
+               JOIN photo_keywords dst ON dst.keyword_id=src.keyword_id AND dst.photo_id=?
+               WHERE src.photo_id=? AND src.species_provenance IS NOT NULL
+                 AND dst.species_provenance IS NULL AND (? IS NULL OR src.keyword_id=?)
+               ORDER BY src.keyword_id""",
+            (survivor_id, losing_id, keyword_id, keyword_id),
+        ).fetchall()
+        for row in rows:
+            evidence = json.loads(row['species_provenance'])
+            if evidence.get('detection_id') is not None:
+                evidence.setdefault('subject_photo_id', losing_id)
+            self.set(survivor_id, row['keyword_id'], evidence)
+
     def detection_photo_id(self, detection_id: int) -> int | None:
         row = self.conn.execute('SELECT photo_id FROM detections WHERE id=?', (detection_id,)).fetchone()
         return row[0] if row else None

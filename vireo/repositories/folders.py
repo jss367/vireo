@@ -700,6 +700,8 @@ class FolderRepository:
                         "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
                         (existing["id"], keyword["id"], keyword["source"]),
                     )
+                from repositories.species_provenance import SpeciesProvenanceRepository
+                SpeciesProvenanceRepository(self.conn).carry(photo["id"], existing["id"])
                 transfer_embedded_offered(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
                 collection_remap[photo["id"]] = existing["id"]

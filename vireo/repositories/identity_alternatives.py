@@ -287,6 +287,8 @@ def remap_identity_for_photo_merge(
         if kid not in uncertain and name not in removed:
             conn.execute('INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) '
                          + KEYWORD_SOURCE_CONFLICT_SQL, (survivor_id, kid, source))
+            from repositories.species_provenance import SpeciesProvenanceRepository
+            SpeciesProvenanceRepository(conn).carry(losing_id, survivor_id, keyword_id=kid)
 
 
 

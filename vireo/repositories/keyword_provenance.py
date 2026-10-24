@@ -1136,6 +1136,8 @@ class KeywordProvenanceRepository:
                 "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
                 (primary_id, kw["id"], kw["source"]),
             )
+        from repositories.species_provenance import SpeciesProvenanceRepository
+        SpeciesProvenanceRepository(self.conn).carry(companion_id, primary_id)
 
     def merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.

@@ -19,7 +19,8 @@ export function renderSpeciesProvenance(/** @type {BrowsePhoto} */ photo, /** @t
     const notes = [assignment.reviewer && 'Reviewer: ' + assignment.reviewer,
       assignment.reason && 'Reason: ' + assignment.reason,
       assignment.evidence_source && 'Evidence: ' + assignment.evidence_source,
-      assignment.detection_id && 'Subject detection: ' + assignment.detection_id,
+      assignment.detection_id && 'Subject detection: ' + assignment.detection_id +
+        (assignment.subject_photo_id ? ' (source photo ' + assignment.subject_photo_id + ')' : ''),
       assignment.confidence == null ? 'Confidence: not recorded — ' + (assignment.confidence_meaning || 'Not recorded') :
         'Confidence: ' + assignment.confidence + ' — ' + assignment.confidence_meaning];
     notes.filter(Boolean).forEach(note => {
@@ -76,6 +77,7 @@ function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAss
       const body = {method: select.value, reviewer: inputs.reviewer.value, reason: inputs.reason.value,
         evidence_source: inputs.evidence_source.value, confidence: inputs.confidence.value.trim() ? Number(inputs.confidence.value) : null,
         confidence_meaning: inputs.confidence_meaning.value, detection_id: assignment.detection_id ?? null,
+        subject_photo_id: assignment.subject_photo_id ?? null,
         supporting_photo_ids: inputs.supporting_photo_ids.value.trim() ?
           inputs.supporting_photo_ids.value.split(',').map(id => Number(id.trim())) : []};
       const response = await safeFetch('/api/photos/' + photoId + '/species/' + assignment.keyword_id + '/provenance',

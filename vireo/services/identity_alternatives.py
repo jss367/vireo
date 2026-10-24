@@ -189,7 +189,7 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     old_links = {link['keyword_id']: link for link in before['links']}
     new_links = {link['keyword_id']: link for link in after['links']}
     for kid in old_links.keys() - new_links.keys():
-        db.untag_photo(photo_id, kid, _commit=False)
+        db.untag_photo(photo_id, kid, _commit=False, _record_provenance=True)
     for kid in new_links.keys() - old_links.keys():
         name = db.keywords.name_of(kid)
         if name:

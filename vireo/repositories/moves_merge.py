@@ -2087,6 +2087,8 @@ class _StagedTreeMerge:
                 + self.KEYWORD_SOURCE_CONFLICT_SQL,
                 (survivor_id, row["id"], row["source"]),
             )
+        from repositories.species_provenance import SpeciesProvenanceRepository
+        SpeciesProvenanceRepository(self.conn).carry(losing_id, survivor_id)
 
     def delete_folded_staged_folders(self):
         """Delete the staged folder rows folded into existing targets.

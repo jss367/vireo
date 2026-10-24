@@ -214,6 +214,6 @@ interface BrowseFolderStatusResult {statuses: Record<string, BrowseFolderStatus>
 interface BrowseSpeciesAssignment {
   photo_id: number; keyword_id: number; species: string; method: string;
   reviewer?: string | null; reason?: string | null; evidence_source?: string | null;
-  supporting_photo_ids?: number[]; detection_id?: number | null;
+  supporting_photo_ids?: number[]; detection_id?: number | null; subject_photo_id?: number | null;
   confidence?: number | null; confidence_meaning?: string;
 }

@@ -2217,6 +2217,7 @@ class Database:
                     source = keyword_source_max(
                         self.moves_merge.photo_keyword_source(losing_id, kw_id))
                     self.tag_photo(surviving_id, kw_id, source=source, _commit=False)
+                    self.species_provenance.carry(losing_id, surviving_id, keyword_id=kw_id)
             elif newest_loser["change_type"] == "keyword_remove":
                 for kw_id in self.moves_merge.photo_keyword_ids_matching(
                         surviving_id, match_key):
@@ -2552,7 +2553,8 @@ class Database:
             # tag_photo's upsert folds against the winner's own stamp, so a
             # weak loser can never pull a stronger winner down.
             loser_keyword_sources = {}
-            for row in repo.loser_keyword_rows(loser_ids, survivor_id=winner_id):
+            loser_keywords = repo.loser_keyword_rows(loser_ids, survivor_id=winner_id)
+            for row in loser_keywords:
                 kw_id = row["keyword_id"]
                 loser_keyword_sources[kw_id] = keyword_source_max(
                     row["source"], loser_keyword_sources.get(kw_id),
@@ -2561,6 +2563,8 @@ class Database:
                 self.tag_photo(
                     winner_id, kw_id, source=merged_source, _commit=False,
                 )
+            for row in loser_keywords:
+                self.species_provenance.carry(row["photo_id"], winner_id, keyword_id=row["keyword_id"])
             # Rejected losers remain in the catalog and can be reopened.
             # Copy their suppression state after choosing carried tags, so
             # both identities retain removals and one loser's detached key
@@ -4165,7 +4169,7 @@ class Database:
 
     def tag_photo(
         self, photo_id, keyword_id, source: str | None = KEYWORD_SOURCE_MANUAL, _commit=True,
-        *, provenance=None,
+        *, provenance=None, _record_provenance=False,
     ):
         """Associate a keyword with a photo.
 
@@ -4187,11 +4191,14 @@ class Database:
                     re-tagging with ``KEYWORD_SOURCE_UNKNOWN`` keeps a
                     recorded ``'manual'`` (and a future ``'accept'`` re-tag
                     would too).
+            _record_provenance: Opt in only when the caller will record an
+                undoable species/keyword edit. Import and merge writers leave
+                this false so their writes cannot leak into a later edit.
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
         from services.species_provenance import remember_before
-        if provenance is not None:
+        if provenance is not None and _record_provenance:
             remember_before(self, photo_id, keyword_id, force=True)
         self._keyword_provenance_repository().tag(
             photo_id, keyword_id, source=source, _commit=False,
@@ -4285,7 +4292,7 @@ class Database:
         from repositories.species_provenance import SpeciesProvenanceRepository
         return SpeciesProvenanceRepository(self.conn)
 
-    def untag_photo(self, photo_id, keyword_id, _commit=True):
+    def untag_photo(self, photo_id, keyword_id, _commit=True, *, _record_provenance=False):
         """Remove a keyword association from a photo.
 
         Stays a ``Database`` method beside ``tag_photo``: the structural
@@ -4293,11 +4300,15 @@ class Database:
         species curation, predictions) find both writers by these names.
 
         Args:
+            _record_provenance: Capture attribution only when the caller will
+                record an undoable keyword/species edit. Reconciliation and
+                history replay leave this false so no stale state accumulates.
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
         from services.species_provenance import remember_before
-        remember_before(self, photo_id, keyword_id)
+        if _record_provenance:
+            remember_before(self, photo_id, keyword_id)
         return self._photo_keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
     def get_photos_with_equivalent_species(

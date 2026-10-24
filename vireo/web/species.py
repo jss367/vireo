@@ -49,7 +49,7 @@ def create_species_blueprint(get_db):
             if assignment is None:
                 return jsonify({"error": "species assignment not found"}), 404
             try:
-                provenance = validate_provenance(db, [photo_id], body)
+                provenance = validate_provenance(db, [photo_id], body, existing_assignment=assignment)
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
             before = db.species_provenance.state(photo_id, keyword_id)

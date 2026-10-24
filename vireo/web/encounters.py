@@ -761,7 +761,7 @@ class _SpeciesConfirmation:
         for pid, old_rows in self.old_rows_by_photo.items():
             remove_names = []
             for old in old_rows:
-                self.db.untag_photo(pid, old["id"], _commit=False)
+                self.db.untag_photo(pid, old["id"], _commit=False, _record_provenance=True)
                 # A same-taxon alias replace re-adds ``kid`` right
                 # after, so its sidecar remove is skipped; a remove
                 # must queue every untagged row.
@@ -776,7 +776,8 @@ class _SpeciesConfirmation:
 
     def tag_new_species(self, ws_id):
         for pid in self.newly_tagged:
-            self.db.tag_photo(pid, self.kid, source="manual", _commit=False, provenance=self.provenance)
+            self.db.tag_photo(pid, self.kid, source="manual", _commit=False,
+                              provenance=self.provenance, _record_provenance=True)
             queue_keyword_add(
                 self.db, pid, self.species, workspace_id=ws_id, _commit=False,
             )
