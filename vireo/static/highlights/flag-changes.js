@@ -30,8 +30,14 @@ export function onHighlightFlagChanged(e) {
     // eligible_only server-side drops that stored row, but the local prune
     // path leaves has_highlight_selection / has_species_representative
     // stale. Reload authoritatively so the visible buckets match the
-    // backend's filter state.
-    if (photo && curationFilterAffectedByReject(photo)) {
+    // backend's filter state. Check every bucket entry: a two-species photo
+    // may be the highlight or representative only in a bucket other than the
+    // one the lightbox was opened from, and findHighlightPhoto returns the
+    // preferred entry whose is_highlighted/is_species_representative would
+    // then be false even though another bucket's state goes stale.
+    var filterAffected = findAllHighlightPhotoContainers(detail.photoId)
+      .some(function(h) { return curationFilterAffectedByReject(h.photo); });
+    if (filterAffected) {
       removeRejectedPhotoFromModel(detail.photoId);
       loadHighlights();
     } else if (removeRejectedPhotoFromModel(detail.photoId)) {

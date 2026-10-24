@@ -1082,6 +1082,13 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({
             "ok": True,
             "keyword_id": kid,
+            # The canonical stored spelling (after resolve_species_display_name
+            # and add_keyword's casing convention). The lightbox retargets its
+            # active bucket to this exact string, so a request submitted as
+            # ``black phoebe`` points the still-open controls at the stored
+            # ``Black Phoebe`` bucket rather than falling back to another
+            # bucket of a multi-species photo.
+            "species": relabel.species,
             "affected": relabel.items,
             "rejected_prediction_ids": relabel.rejected_prediction_ids,
         })

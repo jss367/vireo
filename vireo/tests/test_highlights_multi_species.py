@@ -307,3 +307,26 @@ def test_relabel_candidate_keeps_the_tagged_species(app_and_db):
     keywords = _keywords(db, pid)
     assert "Green-winged Teal" in keywords
     assert "Eurasian Wigeon" not in keywords
+
+
+def test_relabel_response_returns_canonical_stored_species(app_and_db):
+    """Lightbox retargets its active bucket to the response's ``species``, so
+    a request submitted in a non-canonical case still points the still-open
+    controls at the bucket the server actually created."""
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, _teal_pred, _wigeon_pred = _teal_photo_with_wigeon_subject(db, fid)
+
+    resp = app.test_client().post("/api/highlights/relabel", json={
+        "photo_ids": [pid],
+        "species": "eurasian wigeon",
+        "from_species": "American Wigeon",
+    })
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    kid = payload["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert payload["species"] == stored

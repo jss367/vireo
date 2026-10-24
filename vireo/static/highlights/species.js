@@ -139,8 +139,17 @@ export async function submitSpeciesModal() {
   if (!species || !state.speciesModalPhotoIds.length) return;
   var submit = /** @type {HTMLButtonElement} */ (document.getElementById('speciesModalSubmit'));
   submit.disabled = true;
+  // Capture before closeSpeciesModal() resets it: when the lightbox was
+  // opened from the bucket being replaced, retarget its active bucket to
+  // the relabel destination so findHighlightPhotoWithContainer prefers that
+  // bucket on the next updateHighlightsLightboxControls — otherwise the
+  // bucket entry is gone after the reload and the controls fall back to the
+  // first remaining entry, which for a multi-species photo may be a species
+  // the user didn't choose.
+  var replacedBucket = state.speciesModalFromSpecies;
   try {
-    await safeFetch('/api/highlights/relabel', {
+    /** @type {{species?: string} | null} */
+    var resp = await safeFetch('/api/highlights/relabel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(Object.assign(
@@ -149,6 +158,11 @@ export async function submitSpeciesModal() {
       )),
     });
     closeSpeciesModal();
+    if (resp && typeof resp.species === 'string'
+        && replacedBucket != null
+        && state.activeLightboxSpecies === replacedBucket) {
+      state.activeLightboxSpecies = resp.species;
+    }
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);
     if (typeof showToast === 'function') showToast('Species updated', 'success');
