@@ -1504,7 +1504,7 @@ def test_classify_plan_names_a_species_list_it_cannot_read(
     classify = plan["stages"]["Classify"]
     error = (
         f'Vireo could not read the species list "Birds of Here" '
-        f"([Errno 13] Permission denied: '{labels_file}')"
+        f"([Errno 13] Permission denied: {str(labels_file)!r})"
     )
     assert classify["state"] == "blocked"
     assert classify["detail"]["blocked_models"] == ["BioCLIP 2"]
