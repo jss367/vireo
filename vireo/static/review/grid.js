@@ -6,7 +6,14 @@
 function getVisibleItems(includeGroupMembers) {
   var filtered = predictions.slice(); // copy for sorting
 
-  // Filter by minimum confidence
+  if (reviewEvidenceFilter !== 'all') {
+    filtered = filtered.filter(function(p) {
+      if (reviewEvidenceFilter === 'deferred') return reviewEvidenceDeferred(p);
+      return Boolean(p.evidence?.reasons.length);
+    });
+  }
+
+  // Filter by minimum relative score
   if (minConfidence > 0) {
     filtered = filtered.filter(function(p) { return p.confidence >= minConfidence; });
   }
@@ -46,6 +53,12 @@ function getVisibleItems(includeGroupMembers) {
   // Deduplicate groups — show only the first photo per group
   /** @type {Record<string,boolean>} */ var seenGroups = {};
   return filtered.filter(function(p) {
+    if (reviewEvidenceFilter !== 'all') {
+      var subject = 'detection:' + p.detection_id;
+      if (seenGroups[subject]) return false;
+      seenGroups[subject] = true;
+      return true;
+    }
     if (!p.group_id) return true;
     if (seenGroups[p.group_id]) return false;
     seenGroups[p.group_id] = true;
@@ -128,8 +141,8 @@ function bindReviewGridClicks() {
     ? window.vireoThumbnailUrl(pred)
     : '/thumbnails/' + pred.photo_id + '.jpg';
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
-  var confPct = Math.round(pred.confidence * 100);
-  var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';
+  var confPct = reviewRelativeScore(pred.confidence);
+  var confColor = 'var(--info)';
   var cardClass = 'card';
   if (pred.status === 'accepted') cardClass += ' accepted';
   if (pred.status === 'rejected') cardClass += ' skipped';
@@ -169,58 +182,27 @@ function bindReviewGridClicks() {
     } catch(e) {}
   }
 
-  // Action buttons
-  var actionsHtml;
-  var species = escapeHtml(displaySpecies || '');
-  if (pred.status === 'accepted') {
-    actionsHtml = '<div class="card-actions"><button class="btn-done">Accepted as ' + species + '</button></div>';
-  } else if (pred.status === 'rejected') {
-    actionsHtml = '<div class="card-actions"><button class="btn-done skipped-btn">Rejected</button></div>';
-  } else {
-    var acceptLabel = pred.group_id
-      ? 'Tag ' + pred.total_votes + ' photos as "' + species + '"'
-      : 'Tag as "' + species + '"';
-    actionsHtml =
-      '<div class="card-actions">' +
-        '<button class="btn-accept" onclick="acceptPrediction(' + pred.id + ')">' + acceptLabel + '</button>' +
-        '<button class="btn-skip" onclick="rejectPrediction(' + pred.id + ')">Not ' + species + '</button>' +
-      '</div>';
-  }
+  var actionsHtml = reviewPredictionActions(pred, displaySpecies);
 
   // Model badge — always show
   var modelHtml = '<span style="font-size:10px;background:var(--bg-tertiary);color:var(--info);padding:1px 6px;border-radius:3px;margin-left:4px;">' + escapeHtml(pred.model || '') + '</span>';
 
-  // Other models' predictions for the same photo
-  var otherModelsHtml = '';
-  if (availableModels.length > 1) {
-    var others = predictions.filter(function(p) {
-      return p.photo_id === pred.photo_id && p.model !== pred.model;
-    });
-    if (others.length > 0) {
-      parts = [];
-      others.forEach(function(o) {
-        var oPct = Math.round(o.confidence * 100);
-        var oColor = o.species === pred.species ? 'var(--accent)' : 'var(--warning)';
-        parts.push('<span style="color:' + oColor + '">' + escapeHtml(o.model) + ': ' + escapeHtml(o.species) + ' (' + oPct + '%)</span>');
-      });
-      otherModelsHtml = '<div class="individual-preds" style="margin-top:4px;border-top:1px solid var(--border-primary);padding-top:4px;">' + parts.join('') + '</div>';
-    }
-  }
+  var otherModelsHtml = reviewModelEvidenceHtml(pred);
 
   // Alternative predictions
   var alternativesHtml = '';
-  if (pred.alternatives && pred.alternatives.length > 0 && pred.status === 'pending') {
+  if (pred.alternatives && pred.alternatives.length > 0 && pred.status === 'pending' && !reviewEvidenceBlocksAccept(pred.id)) {
     var altItems = '';
     pred.alternatives.forEach(function(alt) {
-      var altPct = Math.round(alt.confidence * 100);
-      var altColor = altPct >= 70 ? 'var(--accent)' : altPct >= 50 ? 'var(--warning)' : 'var(--danger)';
+      var altPct = reviewRelativeScore(alt.confidence);
+      var altColor = 'var(--info)';
       altItems +=
         '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">' +
           '<span style="flex:1;font-size:13px;">' + escapeHtml(alt.species) + '</span>' +
           '<div style="flex:0 0 60px;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">' +
             '<div style="width:' + altPct + '%;height:100%;background:' + altColor + ';border-radius:3px;"></div>' +
           '</div>' +
-          '<span style="flex:0 0 35px;font-size:11px;color:var(--text-secondary);text-align:right;">' + altPct + '%</span>' +
+          '<span style="flex:0 0 35px;font-size:11px;color:var(--text-secondary);text-align:right;">' + altPct + '% relative</span>' +
           '<button onclick="acceptAlternative(' + alt.id + ',' + pred.id + ')" ' +
             'style="flex:0 0 auto;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">Accept</button>' +
         '</div>';
@@ -257,7 +239,7 @@ function bindReviewGridClicks() {
       '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
-      ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
+      ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' · ' + confPct + '% relative</span>' +
       '</div></div>';
   } else {
     imgHtml = '<div class="card-img-wrap">' + imgTag + representativeBadge + '</div>';
@@ -271,7 +253,8 @@ function bindReviewGridClicks() {
       '<div class="card-prediction">' + escapeHtml(displaySpecies) + '</div>' +
       voteHtml +
       '<div class="confidence-bar"><div class="confidence-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>' +
-      '<div class="card-confidence">' + confPct + '% confidence' + (pred.group_id ? ' (consensus)' : '') + '</div>' +
+      '<div class="card-confidence">' + confPct + '% relative score for ' + escapeHtml(pred.species) + '</div>' +
+      reviewEvidenceHtml(pred) +
       otherModelsHtml +
       alternativesHtml +
       actionsHtml +
@@ -304,4 +287,30 @@ function reviewVoteCounts(raw) {
 function reviewPredictionBox(prediction) {
   if (prediction.box_x == null || prediction.box_y == null || prediction.box_w == null || prediction.box_h == null) return null;
   return {x:prediction.box_x,y:prediction.box_y,w:prediction.box_w,h:prediction.box_h};
+}
+
+/** @param {ReviewPrediction} pred @param {string} displaySpecies */
+function reviewPredictionActions(pred, displaySpecies) {
+  var actionsHtml;
+  var species = escapeHtml(displaySpecies || '');
+  if (pred.status === 'accepted') {
+    actionsHtml = '<div class="card-actions"><button class="btn-done">Accepted as ' + species + '</button></div>';
+  } else if (pred.status === 'rejected') {
+    actionsHtml = '<div class="card-actions"><button class="btn-done skipped-btn">Rejected</button></div>';
+  } else if (reviewEvidenceDeferred(pred)) {
+    actionsHtml = '<p>Identification deferred. Clear the subject assessment above to review species again.</p>';
+  } else if (reviewEvidenceBlocksAccept(pred.id)) {
+    actionsHtml = '<p>Species confirmation is on hold. Revisit the subject assessments for this region and its burst.</p>';
+  } else {
+    var acceptLabel = pred.group_id
+      ? 'Tag ' + pred.total_votes + ' photos as "' + species + '"'
+      : 'Tag as "' + species + '"';
+    actionsHtml =
+      '<div class="card-actions">' +
+        '<button class="btn-accept" onclick="acceptPrediction(' + pred.id + ')">' + acceptLabel + '</button>' +
+        '<button class="btn-skip" onclick="rejectPrediction(' + pred.id + ')">Not ' + species + '</button>' +
+      '</div>';
+  }
+
+  return actionsHtml;
 }

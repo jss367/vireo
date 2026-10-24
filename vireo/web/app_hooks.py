@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 from db import Database
 from flask import g, jsonify, request
 from jobs import WorkspaceBusyError
+from repositories.predictions import DeferredIdentificationError
 from services import search_lanes
 from web.responses import json_error
 from werkzeug.exceptions import HTTPException
@@ -303,6 +304,8 @@ def _finish_response(response, config):
 
 # Catch uncaught exceptions so they don't disappear silently
 def _handle_error(e):
+    if isinstance(e, DeferredIdentificationError):
+        return json_error(str(e), 409, code='identification_deferred')
     if isinstance(e, WorkspaceBusyError):
         return json_error(str(e), 409)
     if isinstance(e, HTTPException):
