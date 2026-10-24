@@ -541,6 +541,7 @@ def collect_highlight_buckets(
             r, canonicalize_species, confidence_threshold,
         )
         confirmed = [m.species for m in memberships if m.accepted_name]
+        all_buckets = [m.species for m in memberships]
         if not memberships:
             if confirmation_filter != "confirmed":
                 subjects = _candidate_subjects(r)
@@ -548,7 +549,7 @@ def collect_highlight_buckets(
                     r, HighlightMembership(
                         None, None, subjects[0] if subjects else None,
                     ),
-                    confirmed,
+                    confirmed, all_buckets,
                 ))
             continue
         for membership in memberships:
@@ -562,7 +563,7 @@ def collect_highlight_buckets(
             )
             entry["is_accepted"] = entry["is_accepted"] and is_accepted
             entry["photos"].append(
-                _highlight_candidate_photo(r, membership, confirmed)
+                _highlight_candidate_photo(r, membership, confirmed, all_buckets)
             )
 
     buckets = []
@@ -581,12 +582,14 @@ def collect_highlight_buckets(
     return buckets, unidentified_photos
 
 
-def _highlight_candidate_photo(r, membership, confirmed_species):
+def _highlight_candidate_photo(r, membership, confirmed_species, bucket_species):
     """The Highlights photo entry for one candidate row in one bucket.
 
     ``confirmed_species`` lists every species the photo carries as a
     keyword, so an entry in one species' bucket can say what else the
-    photo is already tagged with.
+    photo is already tagged with. ``bucket_species`` lists every bucket the
+    photo is in, confirmed or not, so the page can refresh each of them
+    after a change even where the photo is past the loaded window.
     """
     accepted = membership.accepted_name
     species = membership.species
@@ -619,6 +622,7 @@ def _highlight_candidate_photo(r, membership, confirmed_species):
         "canonical_species": species if accepted is not None else None,
         "bucket_species": species,
         "confirmed_species_list": list(confirmed_species),
+        "bucket_species_list": list(bucket_species),
         "prediction_id": prediction.get("prediction_id"),
         "predicted_species": prediction.get("species"),
         "predicted_confidence": prediction.get("confidence"),

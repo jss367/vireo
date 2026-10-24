@@ -11,6 +11,8 @@ interface HighlightsPhoto {
   bucket_species?: string | null;
   /** Every species the photo carries as a keyword, whichever bucket this entry is in. */
   confirmed_species_list?: string[];
+  /** Every bucket the photo is in, confirmed or predicted. */
+  bucket_species_list?: string[];
   [key: string]: unknown;
 }
 /** A species bucket or the unidentified section: the photos loaded so far. */

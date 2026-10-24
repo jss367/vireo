@@ -86,6 +86,11 @@ def test_photo_with_a_second_subject_joins_both_buckets(app_and_db):
     assert wigeon[0]["bucket_species"] == "American Wigeon"
     # Each entry says what the photo is already tagged with.
     assert wigeon[0]["confirmed_species_list"] == ["Green-winged Teal"]
+    # ...and every bucket it is in, so the page can refresh each one.
+    for entry in (teal[0], wigeon[0]):
+        assert entry["bucket_species_list"] == [
+            "Green-winged Teal", "American Wigeon",
+        ]
     # One photo, even though it shows in two buckets.
     assert data["meta"]["eligible"] == 1
 

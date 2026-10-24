@@ -127,9 +127,10 @@ def test_picking_a_two_species_photo_updates_both_cards(live_server, page):
         )
 
 
-def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page):
-    """Pick must refresh every confirmed-species bucket the photo belongs to,
-    including one whose current loaded window hasn't reached the photo yet.
+@pytest.mark.parametrize("robin_by", ["keyword", "prediction"])
+def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page, robin_by):
+    """Pick must refresh every bucket the photo belongs to, confirmed or
+    predicted, including one whose loaded window hasn't reached the photo yet.
 
     Regression for Codex feedback on PR #2291 (flag-changes.js:68): a photo
     tagged with two species that sits past the 20-photo window of its second
@@ -157,10 +158,26 @@ def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page):
     db.conn.execute(
         "UPDATE photos SET quality_score = 0.65 WHERE id = ?", (pid,),
     )
-    db.conn.execute(
-        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-        (pid, robin_kid),
-    )
+    if robin_by == "keyword":
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, robin_kid),
+        )
+    else:
+        # Tagged Red-tailed Hawk, with a second subject predicted as a robin:
+        # the photo is an unconfirmed candidate in the Robin bucket.
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+        hawk_det, robin_det = db.detections.save(
+            pid,
+            [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9,
+              "category": "animal"} for x in (0.1, 0.6)],
+            detector_model="MDV6",
+        )
+        db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
+        db.predictions.add(robin_det, "American Robin", 0.9, "m")
 
     folder_id = data["folders"][1]
     for i in range(21):
@@ -219,8 +236,8 @@ def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page):
     )
 
     # The fix: picked_first promotes pid to the top of the Robin bucket, and
-    # the pick handler refetches that bucket (using confirmed_species_list)
-    # even though pid wasn't in the loaded hits.
+    # the pick handler refetches that bucket (listed in the entry's
+    # bucket_species_list) even though pid wasn't in the loaded hits.
     page.wait_for_function(
         "pid => {"
         "  const b = highlightsState.currentData.buckets.find("

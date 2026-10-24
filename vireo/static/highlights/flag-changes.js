@@ -96,26 +96,24 @@ function handleHighlightPickChange(detail) {
     var target = isUnidentified ? /** @type {HighlightsData} */ (state.currentData).unidentified : hit.bucket;
     return target ? refetchBucketFromZero(target, isUnidentified) : Promise.resolve(true);
   });
-  // A photo also belongs to any species bucket that lists its keyword even
-  // when the loaded window for that bucket doesn't currently contain it (e.g.
-  // the bucket has more than perRow photos and the picked photo was past the
+  // A photo can also sit in a bucket whose loaded window doesn't contain it
+  // (the bucket has more than perRow photos and the picked photo was past the
   // window). The server's picked_first ordering now promotes the photo into
-  // that bucket's loaded prefix, so its unloaded window would stay stale
-  // until the next full reload — the Save-as-Collection payload for that
-  // bucket would omit it. Refetch each such bucket too.
+  // that bucket's loaded prefix, so the window would stay stale until the next
+  // full reload, and the Save-as-Collection payload for that bucket would omit
+  // it. Every entry lists all of the photo's buckets, confirmed or predicted
+  // (bucket_species_list), so refetch each one not already refetched above.
   var hitBucketSpecies = new Set();
-  /** @type {string[]} */
-  var confirmedSpecies = [];
+  /** @type {Set<string>} */
+  var memberBuckets = new Set();
   hits.forEach(function(hit) {
     if (hit.bucket) hitBucketSpecies.add(hit.bucket.species);
-    if (!confirmedSpecies.length) {
-      confirmedSpecies = hit.photo.confirmed_species_list || [];
-    }
+    (hit.photo.bucket_species_list || []).forEach(function(name) { memberBuckets.add(name); });
   });
   var allBuckets = (state.currentData && state.currentData.buckets) || [];
   allBuckets.forEach(function(bucket) {
     if (hitBucketSpecies.has(bucket.species)) return;
-    if (confirmedSpecies.indexOf(bucket.species) < 0) return;
+    if (!memberBuckets.has(bucket.species)) return;
     refetches.push(refetchBucketFromZero(bucket, false));
   });
   // Render after every refetch settles so the Pick badge/outline and the
@@ -126,9 +124,12 @@ function handleHighlightPickChange(detail) {
   // rejection, and a sibling that then resolves and mutates target.photos
   // would leave that bucket visually stale without a second render.
   Promise.allSettled(refetches).then(function(results) {
-    var anyApplied = results.some(function(r) {
-      return r.status === 'fulfilled' && r.value;
+    // Render when any refetch applied, and also when one failed: the pick
+    // flag was already set on the loaded entries above, so the cards must
+    // show it even if the server's new order could not be fetched.
+    var shouldRender = results.some(function(r) {
+      return r.status === 'rejected' || r.value;
     });
-    if (anyApplied) render();
+    if (shouldRender) render();
   });
 }
