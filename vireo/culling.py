@@ -135,7 +135,20 @@ def analyze_for_culling(
         "species_groups": species_groups,
         "total_photos": len(photo_ids),
         "photos_missing_phash": photos_missing_phash,
-    }, {p["id"]: p["flag"] for p in photos})
+    }, _current_photo_flags(db, photo_ids))
+
+
+def _current_photo_flags(db, photo_ids):
+    """Return a fresh ``{photo_id: flag}`` map read at analysis completion.
+
+    The initial ``photos`` snapshot is taken before clustering and pHash
+    backfill, which can take minutes on a fresh import. A flag the
+    photographer changes during that work must land in the persisted job
+    result and the job-history summary, otherwise "kept/rejected by you"
+    claims a decision that is no longer the catalog's.
+    """
+    live = db.photos.flags_ratings_and_eyes(photo_ids)
+    return {pid: (live[pid]["flag"] if pid in live else "none") for pid in photo_ids}
 
 
 def _load_top_predictions(db, photo_ids, pause_callback):

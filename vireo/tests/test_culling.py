@@ -643,6 +643,42 @@ def test_analyze_for_culling_preserves_current_explicit_decisions(tmp_path):
     assert all(p["automatic_keep_eligible"] is False for p in photos.values())
 
 
+def test_analyze_for_culling_rereads_flags_at_completion(tmp_path):
+    """A flag changed during the run must land in the persisted result.
+
+    The initial photo snapshot is taken before pHash backfill and
+    clustering, which can take minutes. Re-reading flags right before
+    applying the shared keeper policy prevents the saved result and the
+    job-history summary from reporting a decision the photographer has
+    since reversed.
+    """
+    db, photo_ids = _setup_culling_db(tmp_path)
+    # Start the run with no explicit decisions on the catalog snapshot.
+    assert all(
+        row["flag"] in (None, "none")
+        for row in db.photos.flags_ratings_and_eyes(photo_ids).values()
+    )
+
+    # Flip two flags during the analysis via a pause callback that runs
+    # after the initial photo list has been read but before the final
+    # keeper policy is applied.
+    seen = {"flipped": False}
+
+    def flip_once():
+        if not seen["flipped"]:
+            db.photo_review.set_flag(photo_ids[0], "flagged")
+            db.photo_review.set_flag(photo_ids[1], "rejected")
+            seen["flipped"] = True
+
+    result = analyze_for_culling(db, pause_callback=flip_once)
+    assert seen["flipped"]
+    photos = {p["photo_id"]: p for group in result["species_groups"]
+              for scene in group["scene_groups"] for p in scene["photos"]}
+    assert photos[photo_ids[0]]["action"] == "keep"
+    assert photos[photo_ids[1]]["action"] == "reject"
+    assert result["suggested_keepers"] == result["suggested_rejects"] == 1
+
+
 def test_analyze_for_culling_collection_scope(tmp_path):
     """Scoping to a collection limits which photos are analyzed."""
     import json as _json
