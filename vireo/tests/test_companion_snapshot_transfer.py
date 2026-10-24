@@ -18,7 +18,7 @@ def catalog(tmp_path):
     db = Database(str(tmp_path / "catalog.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"))
     ids = {}
-    for extension in (".jpg", ".cr3"):
+    for extension in (".cr3", ".jpg"):
         ids[extension] = photo_ingest.add_photo(
             db, folder_id=folder_id, filename=f"bird{extension}",
             extension=extension, file_size=100, file_mtime=1.0,
@@ -201,6 +201,26 @@ def test_pairing_never_renames_original_snapshots(catalog, monkeypatch):
     monkeypatch.setattr(local_masks, "replace_file", locked_source)
     assert _pair(catalog) == {catalog.jpeg: catalog.raw}
     _assert_masks(catalog, catalog.raw)
+
+
+def test_cleanup_preserves_masks_owned_by_recycled_companion_id(catalog, monkeypatch):
+    original = companions._run_post_commit_fs_actions
+
+    def recycle_before_cleanup(actions):
+        photo_id = photo_ingest.add_photo(
+            catalog.db, folder_id=catalog.folder_id, filename="new.jpg",
+            extension=".jpg", file_size=100, file_mtime=1.0,
+        )
+        assert photo_id == catalog.jpeg
+        catalog.db.set_photo_edit_recipe(photo_id, catalog.recipes[-1])
+        catalog.db.commit()
+        original(actions)
+
+    monkeypatch.setattr(companions, "_run_post_commit_fs_actions", recycle_before_cleanup)
+    assert _pair(catalog) == {catalog.jpeg: catalog.raw}
+    _assert_masks(catalog, catalog.raw)
+    with local_masks.load_snapshot(catalog.root, catalog.jpeg, catalog.recipes[-1]) as mask:
+        assert mask.getextrema() == (250, 250)
 
 
 def test_mask_failure_does_not_block_unrelated_pairs(catalog, monkeypatch):

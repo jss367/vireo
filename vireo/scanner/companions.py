@@ -489,7 +489,14 @@ def _defer_recipe_snapshot_cleanup(
         pid: int = _primary_id, cid: int = _companion_id, tcd: StrPath | None = _tcd, vd: StrPath = _vd,
     ) -> None:
         from local_masks import cleanup_snapshot_transfer
-        cleanup_snapshot_transfer(vd, cid, pid, refs)
+
+        # A concurrent insert can reuse the deleted companion's id after
+        # commit. Keep its new owner's snapshots and hold the writer lock
+        # from this ownership check through cleanup.
+        if not db.in_transaction:
+            db.begin_immediate()
+        if db.photos.get(cid) is None:
+            cleanup_snapshot_transfer(vd, cid, pid, refs)
         _invalidate_derived_caches(
             db, vd, pid, thumb_cache_dir=tcd,
         )
