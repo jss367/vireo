@@ -22,6 +22,7 @@ from classify_job.common import (
     _load_job_taxonomy,
     log,
     taxonomy_step_summary,
+    taxonomy_step_warning,
     with_taxonomy_notice,
 )
 from classify_job.detection import _detect_subjects
@@ -506,6 +507,7 @@ class _ClassifyJobRun:
         runner.update_step(
             job["id"], "load_taxonomy", status="completed",
             summary=f"{tax_summary}, {labels_summary}",
+            **taxonomy_step_warning(job),
         )
 
         log.info(

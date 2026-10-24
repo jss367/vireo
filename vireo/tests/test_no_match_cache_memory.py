@@ -166,6 +166,7 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         "_photo_timestamp": lambda p: None,
         "_load_job_taxonomy": lambda job: None,
         "taxonomy_step_summary": lambda job, tax: "No taxonomy",
+        "taxonomy_step_warning": lambda job: {},
         "with_taxonomy_notice": lambda job, result: result,
         "_cached_prediction_taxonomy": lambda p: {},
         "_finalize_remaining_steps": lambda *a, **kw: None,

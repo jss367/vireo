@@ -4902,21 +4902,24 @@ def test_run_classify_job_full_pipeline(tmp_path, monkeypatch, taxonomy_file):
     mock_db_instance.predictions.add.assert_called_once()
     assert mock_db_instance.predictions.add.call_args.kwargs["refresh_output"] is True
 
-    taxonomy_summaries = [
-        kwargs["summary"] for step, kwargs in runner.steps
+    taxonomy_steps = [
+        kwargs for step, kwargs in runner.steps
         if step == "load_taxonomy" and kwargs.get("status") == "completed"
     ]
     details = describe_result("classify", result)["details"]
     if taxonomy_file == "absent":
-        assert taxonomy_summaries == ["No taxonomy, 1 labels"]
+        assert [s["summary"] for s in taxonomy_steps] == ["No taxonomy, 1 labels"]
+        assert "error" not in taxonomy_steps[0]
         assert "taxonomy_notice" not in result
         assert details == []
     else:
-        assert taxonomy_summaries == ["Taxonomy unreadable, 1 labels"]
+        assert [s["summary"] for s in taxonomy_steps] == ["Taxonomy unreadable, 1 labels"]
         assert result["taxonomy_notice"].startswith(
             f"This run had no taxonomy: Vireo could not read {tax_path} "
         )
-        # The Jobs page's detail panel leads with it.
+        # The Jobs page shows a completed step's ``error`` as a warning
+        # under the step, and the result's prose details lead with it.
+        assert taxonomy_steps[0]["error"] == result["taxonomy_notice"]
         assert details[0] == result["taxonomy_notice"]
 
 

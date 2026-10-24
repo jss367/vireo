@@ -14,6 +14,7 @@ from classify_job.common import (
     _load_job_taxonomy,
     _photo_timestamp,
     taxonomy_step_summary,
+    taxonomy_step_warning,
     with_taxonomy_notice,
 )
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
@@ -104,6 +105,7 @@ def _finalize_cached_only(
         job["id"], "load_taxonomy",
         status="completed",
         summary=taxonomy_step_summary(job, tax),
+        **taxonomy_step_warning(job),
     )
     _finalize_remaining_steps(
         runner, job["id"], ["load_model", "detect"],

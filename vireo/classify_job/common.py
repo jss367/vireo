@@ -118,6 +118,16 @@ def taxonomy_step_summary(job: JobDict, tax: Taxonomy | None) -> str:
     return "Taxonomy loaded" if tax else "No taxonomy"
 
 
+def taxonomy_step_warning(job: JobDict) -> dict[str, str]:
+    """``update_step`` fields that show the notice under the taxonomy step.
+
+    A completed step with an ``error`` reads as a warning on the Jobs page,
+    which lists a job's steps instead of its result details.
+    """
+    notice = job.get("_taxonomy_notice")
+    return {"error": notice} if notice else {}
+
+
 def with_taxonomy_notice(job: JobDict, result: JsonDict) -> JsonDict:
     """Add the run's taxonomy notice to its result, when there is one."""
     notice = job.get("_taxonomy_notice")

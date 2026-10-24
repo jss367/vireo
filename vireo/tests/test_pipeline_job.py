@@ -3784,12 +3784,21 @@ def _run_pipeline_with_taxonomy_files(
 
 
 def _model_loader_summary(runner):
-    summaries = [
-        kwargs["summary"] for _job, step, kwargs in runner.step_updates
+    """The completed model step's summary; its warning text rides along."""
+    updates = [
+        kwargs for _job, step, kwargs in runner.step_updates
         if step == "model_loader" and kwargs.get("status") == "completed"
     ]
-    assert summaries
-    return summaries[-1]
+    assert updates
+    return updates[-1]["summary"]
+
+
+def _model_loader_warning(runner):
+    updates = [
+        kwargs for _job, step, kwargs in runner.step_updates
+        if step == "model_loader" and kwargs.get("status") == "completed"
+    ]
+    return updates[-1].get("error")
 
 
 def test_pipeline_notes_a_failed_taxonomy_download(tmp_path, monkeypatch):
@@ -3818,6 +3827,8 @@ def test_pipeline_notes_a_failed_taxonomy_download(tmp_path, monkeypatch):
     assert _model_loader_summary(runner).endswith(
         " — no taxonomy (taxonomy download failed)"
     )
+    # The Jobs page shows a completed step's ``error`` as a warning.
+    assert _model_loader_warning(runner) == notes[0].removeprefix("[taxonomy] ")
 
 
 def test_pipeline_notes_an_unreadable_taxonomy_file(tmp_path, monkeypatch):
@@ -3843,6 +3854,7 @@ def test_pipeline_notes_an_unreadable_taxonomy_file(tmp_path, monkeypatch):
     assert _model_loader_summary(runner).endswith(
         " — no taxonomy (taxonomy file unreadable)"
     )
+    assert _model_loader_warning(runner) == notes[0].removeprefix("[taxonomy] ")
 
 
 def test_pipeline_without_a_requested_taxonomy_has_no_taxonomy_note(
@@ -3860,6 +3872,7 @@ def test_pipeline_without_a_requested_taxonomy_has_no_taxonomy_note(
 
     assert not [n for n in result["notes"] if n.startswith("[taxonomy] ")]
     assert "no taxonomy" not in _model_loader_summary(runner)
+    assert _model_loader_warning(runner) is None
 
 
 def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(

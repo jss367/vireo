@@ -725,9 +725,14 @@ def _load_run_taxonomy(run: PipelineRun, loaded_models: dict) -> Taxonomy | None
     notice = taxonomy_fallback_notice(tax, failures, download_error)
     if notice:
         run.note(f"[taxonomy] {notice}")
-        loaded_models["taxonomy_notice"] = (
+        loaded_models["taxonomy_notice"] = notice
+        reason = (
             "taxonomy download failed" if download_error
             else "taxonomy file unreadable"
+        )
+        loaded_models["taxonomy_summary"] = (
+            f"no taxonomy ({reason})" if tax is None
+            else f"older taxonomy copy ({reason})"
         )
     # Portable identity for the taxonomy backing this pipeline.
     # Threaded through publish and cache-match paths so that
@@ -770,7 +775,10 @@ def _mark_models_loaded(
     summary = ", ".join(s["name"] for s in resolved_specs)
     if "preload_error" in loaded_models:
         summary += f" ({first_name} failed to preload)"
-    if "taxonomy_notice" in loaded_models:
-        summary += f" — no taxonomy ({loaded_models['taxonomy_notice']})"
+    if "taxonomy_summary" in loaded_models:
+        summary += f" — {loaded_models['taxonomy_summary']}"
+    # A completed step with an ``error`` reads as a warning on the Jobs
+    # page, which shows the full notice under the step.
+    notice = {"error": loaded_models["taxonomy_notice"]} if "taxonomy_notice" in loaded_models else {}
     run.runner.update_step(run.job["id"], "model_loader", status="completed",
-                       summary=summary)
+                       summary=summary, **notice)

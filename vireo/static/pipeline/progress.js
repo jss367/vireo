@@ -277,7 +277,7 @@ function _humanizePipelineError(msg) {
 function _pipelineNotesTitle(notes) {
   var skips = notes.filter(function(note) {
     var match = String(note).match(/^\[(\w+)\]/);
-    var stage = match ? match[1] : '';
+    var stage = (match && match[1]) || '';
     return !!(_stageToCard[stage] || _failureOnlyStageToCard[stage]);
   }).length;
   if (skips === notes.length) return 'Some stages were skipped';
