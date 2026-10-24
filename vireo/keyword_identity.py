@@ -68,7 +68,8 @@ def embedded_keyword_associations_for_merge(conn, losing_id, survivor_id, *,
     if not source_keys and not include_non_embedded:
         return
     for row in conn.execute(
-            "SELECT k.id, k.name, k.parent_id, pk.source FROM photo_keywords pk "
+            "SELECT k.id, k.name, k.parent_id, pk.source, pk.species_provenance "
+            "FROM photo_keywords pk "
             "JOIN keywords k ON k.id = pk.keyword_id WHERE pk.photo_id = ?",
             (losing_id,)).fetchall():
         parts, parent_id, seen = [row["name"]], row["parent_id"], {row["id"]}

@@ -15,7 +15,7 @@ function harness() {
     URL, URLSearchParams, console, Number, JSON, Set, Map,
     window: {location: {search: ''}},
     currentCollection: 'all', currentTab: 'all', currentModel: 'all', currentSort: 'filename',
-    minConfidence: 0, currentLabelsFingerprint: null, currentPhotoIdFilter: null,
+    reviewEvidenceFilter: 'all', minConfidence: 0, currentLabelsFingerprint: null, currentPhotoIdFilter: null,
     VireoFilter: {getRules: () => ({mode:'all',rules:[]}), getVisual: () => null},
     getVisibleItems: () => [], allPredictions: [], _predictionsReloading: false,
     reviewErrorMessage: (e, fallback) => e?.message || fallback,

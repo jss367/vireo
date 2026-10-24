@@ -63,20 +63,15 @@ function renderSignalCell(photo) {
       ' additional species suggestion' + (signal.additional_subject_count === 1 ? '' : 's') + '</span>');
   }
   if ((signal.model_disagreement_score || 0) > 0) {
-    // The score is the weaker side's confidence — a disagreement is only as
-    // strong as the least-confident model in the pair.
     pills.push('<span class="signal-pill hot" title="' + escapeAttr(
-        signal.model_disagreement_label +
-        ' — strength is the less-confident model’s ' +
-        Math.round(signal.model_disagreement_score || 0) + '%') +
-      '">Models disagree ' + Math.round(signal.model_disagreement_score || 0) + '%</span>');
+      signal.model_disagreement_label + ' — compare species names; model scores use different scales and candidate lists') +
+      '">Models disagree</span>');
   }
   if ((signal.keyword_conflict_count || 0) > 0) {
     pills.push('<span class="signal-pill hot" title="' + escapeAttr(
         signal.keyword_conflict_count + ' model prediction' +
         (signal.keyword_conflict_count === 1 ? '' : 's') +
-        ' conflict with the current species keyword (strongest at ' +
-        Math.round((signal.max_keyword_conflict_confidence || 0) * 100) + '%)') +
+        ' conflict with the current species keyword; see each model’s relative score') +
       '">' + signal.keyword_conflict_count + ' vs keyword</span>');
   }
   if ((signal.consensus_count || 0) >= 2) {
@@ -242,7 +237,7 @@ function renderPredictionCell(photo, model) {
         : '';
       return '<div class="pred' + (belowThreshold ? ' below-threshold' : '') + '">' +
         '<div class="pred-main"><span class="pred-species">' + escapeHtml(pred.species) + '</span>' +
-        '<span class="pred-confidence">' + Math.round((pred.confidence || 0) * 100) + '%</span>' +
+        '<span class="pred-confidence">' + ((pred.confidence || 0) * 100).toFixed(2) + '% relative</span>' +
         '<span class="category-pill ' + escapeAttr(displayedCategory) + '">' + escapeHtml(displayedLabel) + '</span>' +
         '<span class="status-pill ' + escapeAttr(status) + '">' + escapeHtml(status) + '</span></div>' +
         '<div class="pred-detail">' + escapeHtml(detail) + '</div>' +

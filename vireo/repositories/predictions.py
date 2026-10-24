@@ -91,6 +91,10 @@ FACADE_METHODS = (
 )
 
 
+class DeferredIdentificationError(ValueError):
+    """An acceptance would confirm a subject whose evidence was deferred."""
+
+
 class PredictionRepository:
     # Bound ``Database`` methods that ``__init__`` installs from
     # ``FACADE_METHODS``, declared so the type checker sees them.
@@ -925,6 +929,74 @@ class PredictionRepository:
         if rules is not None:
             rows = self._filter_prediction_rows_by_rules(rows, rules)
         return rows
+
+    def require_identifiable_subjects(self, prediction_ids):
+        """Prevent stale accepts and hidden burst members from bypassing deferral."""
+        for chunk in self._chunks(list(dict.fromkeys(prediction_ids))):
+            placeholders = ','.join('?' for _ in chunk)
+            deferred = self.conn.execute(
+                f"""SELECT 1 FROM predictions pr
+                    JOIN detection_evidence_reviews er ON er.detection_id = pr.detection_id
+                    WHERE er.workspace_id = ? AND pr.id IN ({placeholders})
+                      AND er.decision IN ('not_enough_evidence', 'invalid_subject') LIMIT 1""",
+                [self.workspace_id, *chunk],
+            ).fetchone()
+            if deferred:
+                raise DeferredIdentificationError(
+                    'Identification was deferred for a subject in this selection or burst. '
+                    'Revisit its subject assessment in Review before accepting a species.'
+                )
+
+    def evidence_context(self, prediction_ids):
+        """Batch evidence at the exact prediction/run key, scoped to this workspace."""
+        result = {}
+        for chunk in self._chunks(list(dict.fromkeys(prediction_ids))):
+            placeholders = ','.join('?' for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT pr.id, d.category AS subject_category,
+                           p.latitude, p.longitude, cms.score_kind,
+                           cms.max_match_score, cms.match_margin, cms.label_count,
+                           COALESCE(er.decision, 'unreviewed') AS decision,
+                           COALESCE(er.revision, 0) AS revision
+                    FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    JOIN photos p ON p.id = d.photo_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                    LEFT JOIN detection_evidence_reviews er
+                      ON er.detection_id = d.id AND er.workspace_id = wf.workspace_id
+                    LEFT JOIN classifier_match_scores cms
+                      ON cms.detection_id = pr.detection_id
+                     AND cms.classifier_model = pr.classifier_model
+                     AND cms.labels_fingerprint = pr.labels_fingerprint
+                    WHERE wf.workspace_id = ? AND pr.id IN ({placeholders})""",
+                [self.workspace_id, *chunk],
+            )
+            result.update((row['id'], dict(row)) for row in rows)
+        return result
+
+    def evidence_review(self, detection_id):
+        """Read the observed subject assessment, or None outside this workspace."""
+        return self.conn.execute(
+            """SELECT COALESCE(er.decision, 'unreviewed') AS decision,
+                      COALESCE(er.revision, 0) AS revision
+               FROM detections d
+               JOIN photo_workspace_visibility wf ON wf.photo_id = d.photo_id
+               LEFT JOIN detection_evidence_reviews er
+                 ON er.detection_id = d.id AND er.workspace_id = wf.workspace_id
+               WHERE d.id = ? AND wf.workspace_id = ?""",
+            (detection_id, self.workspace_id),
+        ).fetchone()
+
+    def set_evidence_review(self, detection_id, decision):
+        """Write under the caller's transaction; no prediction/keyword/flag changes."""
+        self.conn.execute(
+            """INSERT INTO detection_evidence_reviews
+                   (detection_id, workspace_id, decision) VALUES (?, ?, ?)
+               ON CONFLICT(detection_id, workspace_id) DO UPDATE SET
+                   decision = excluded.decision, revision = revision + 1,
+                   updated_at = datetime('now')""",
+            (detection_id, self.workspace_id, decision),
+        )
 
     def update_status(self, prediction_id, status, _commit=True):
         """Update per-workspace review status for a prediction.

@@ -240,3 +240,143 @@ def test_keyword_merge_retargets_evidence_and_undo(app_and_db):
     assert client.delete(f'/api/photos/1/keywords/{survivor}').status_code == 200
     assert client.post('/api/undo').status_code == 200
     assert assignments(client)['Surviving Robin']['method'] == 'adjacent_frames'
+
+
+def test_duplicate_resolution_carries_species_evidence_from_loser(app_and_db):
+    """The winner inherits a loser's species evidence when it has none itself."""
+    app, db = app_and_db
+    client = app.test_client()
+    # Give photo 2 (soon-to-be-loser) a reviewer-recorded identification.
+    confirm(client, 'Robin', photos=(2,), provenance={
+        'method': 'direct_visual', 'reviewer': 'Reviewer',
+        'reason': 'Hand-identified on the losing frame'})
+    loser_robin = assignments(client, 2)['Robin']
+    # Winner has no Robin yet; resolve 2 → 1 and verify the evidence rides along.
+    db._apply_winner_loser_merge(1, [2], winner_flag=None)
+    db.commit()
+    winner_robin = assignments(client)['Robin']
+    assert winner_robin['method'] == 'direct_visual'
+    assert winner_robin['reviewer'] == 'Reviewer'
+    assert winner_robin['reason'] == 'Hand-identified on the losing frame'
+    # The loser's evidence survived the row rewrite onto the winner.
+    assert winner_robin['keyword_id'] == loser_robin['keyword_id']
+
+
+def test_duplicate_resolution_keeps_winner_evidence_over_loser(app_and_db):
+    """A winner's own evidence is not overwritten by the loser's."""
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Robin', photos=(1,), provenance={
+        'method': 'direct_visual', 'reviewer': 'Winner reviewer',
+        'reason': 'Original call'})
+    confirm(client, 'Robin', photos=(2,), provenance={
+        'method': 'adjacent_frames', 'reviewer': 'Loser reviewer',
+        'reason': 'Adjacent inference'})
+    db._apply_winner_loser_merge(1, [2], winner_flag=None)
+    db.commit()
+    winner_robin = assignments(client)['Robin']
+    assert winner_robin['method'] == 'direct_visual'
+    assert winner_robin['reviewer'] == 'Winner reviewer'
+    assert winner_robin['reason'] == 'Original call'
+
+
+def test_shared_upsert_folds_species_provenance_in_sql(app_and_db):
+    """The shared KEYWORD_SOURCE_CONFLICT_SQL clause carries the loser's evidence
+    onto a surviving row that has none, and keeps the survivor's own when both have one."""
+    import json
+
+    import db as db_mod
+
+    app, db = app_and_db
+    kid = db.add_keyword('Robin', is_species=True)
+    loser_payload = json.dumps({'method': 'direct_visual', 'reviewer': 'Loser'}, sort_keys=True)
+    # First row: survivor without evidence, loser incoming with evidence.
+    db.conn.execute("INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, 'manual')",
+                    (1, kid))
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance) "
+        "VALUES (?, ?, 'manual', ?) " + db_mod.KEYWORD_SOURCE_CONFLICT_SQL,
+        (1, kid, loser_payload),
+    )
+    actual = db.conn.execute(
+        "SELECT species_provenance FROM photo_keywords WHERE photo_id=? AND keyword_id=?",
+        (1, kid),
+    ).fetchone()[0]
+    assert actual == loser_payload
+    # Second case: survivor already has its own evidence, incoming must not replace it.
+    survivor_payload = json.dumps({'method': 'adjacent_frames', 'reviewer': 'Survivor'}, sort_keys=True)
+    db.conn.execute(
+        "UPDATE photo_keywords SET species_provenance=? WHERE photo_id=? AND keyword_id=?",
+        (survivor_payload, 1, kid),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance) "
+        "VALUES (?, ?, 'manual', ?) " + db_mod.KEYWORD_SOURCE_CONFLICT_SQL,
+        (1, kid, loser_payload),
+    )
+    actual = db.conn.execute(
+        "SELECT species_provenance FROM photo_keywords WHERE photo_id=? AND keyword_id=?",
+        (1, kid),
+    ).fetchone()[0]
+    assert actual == survivor_payload
+
+
+def test_sync_untag_does_not_leak_into_later_record_edit(app_and_db, tmp_path, monkeypatch):
+    """A sync-triggered untag must not attach stale evidence to a later edit."""
+    import os
+
+    import sync as sync_mod
+
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Robin', photos=(1,), provenance={
+        'method': 'direct_visual', 'reviewer': 'Original reviewer',
+        'reason': 'Recorded before reconcile'})
+    assert db._species_provenance_before == {}
+    # Simulate an XMP reconcile that drops the Robin keyword by writing an
+    # empty-keywords sidecar beside photo 1 and running sync_from_xmp.
+    folder_row = db.folders.get(db.photos.get(1)['folder_id'])
+    folder_path = str(tmp_path / 'photos_folder')
+    os.makedirs(folder_path, exist_ok=True)
+    db.conn.execute("UPDATE folders SET path=? WHERE id=?", (folder_path, folder_row['id']))
+    db.commit()
+    xmp_path = os.path.join(folder_path, 'bird1.xmp')
+    with open(xmp_path, 'w') as handle:
+        handle.write(
+            '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            '<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:subject><rdf:Bag/></dc:subject>'
+            '</rdf:Description></rdf:RDF></x:xmpmeta>'
+            '<?xpacket end="w"?>'
+        )
+    sync_mod.sync_from_xmp(db, [1])
+    # After a reconcile commit, no snapshot may linger on the Database.
+    assert db._species_provenance_before == {}
+    # A later unrelated species edit on the same photo must not pick up the
+    # pre-reconcile Robin state; its edit-history row carries only its own
+    # before/after values.
+    confirm(client, 'Mallard', photos=(1,), provenance={
+        'method': 'direct_visual', 'reviewer': 'Later reviewer', 'reason': 'New call'})
+    newest = db.conn.execute(
+        "SELECT species_provenance FROM edit_history_items ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    assert newest is not None
+    assert 'Original reviewer' not in newest
+    assert 'Recorded before reconcile' not in newest
+
+
+def test_commit_clears_dangling_species_provenance_snapshot(app_and_db):
+    """A commit discards snapshots that no record_edit consumed, so they cannot
+    attach to a later unrelated edit on the same Database instance."""
+    app, db = app_and_db
+    kid = db.add_keyword('Robin', is_species=True)
+    db.tag_photo(1, kid, source='accept')
+    # Simulate a non-undoable caller that remembered the before-state and
+    # committed without recording an edit (sync-style path).
+    from services.species_provenance import remember_before
+    remember_before(db, 1, kid, force=True)
+    assert db._species_provenance_before != {}
+    db.commit()
+    assert db._species_provenance_before == {}

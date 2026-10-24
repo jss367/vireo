@@ -1083,7 +1083,7 @@ class KeywordProvenanceRepository:
         return self._resolve_workspace_id()
 
     def tag(
-        self, photo_id, keyword_id, *, source, _commit=True,
+        self, photo_id, keyword_id, *, source, species_provenance=None, _commit=True,
     ):
         """Associate a keyword with a photo.
 
@@ -1105,13 +1105,19 @@ class KeywordProvenanceRepository:
                     re-tagging with ``KEYWORD_SOURCE_UNKNOWN`` keeps a
                     recorded ``'manual'`` (and a future ``'accept'`` re-tag
                     would too).
+            species_provenance: Optional pre-serialized species evidence JSON
+                    (the loser's row in a merge). The shared conflict clause
+                    folds it in only when the surviving row has no evidence of
+                    its own, so a user-recorded identification on the winner
+                    is never overwritten by a loser's.
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
         self.conn.execute(
-            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-            "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
-            (photo_id, keyword_id, source),
+            "INSERT INTO photo_keywords "
+            "(photo_id, keyword_id, source, species_provenance) "
+            "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+            (photo_id, keyword_id, source, species_provenance),
         )
         if _commit:
             self.conn.commit()
@@ -1129,12 +1135,18 @@ class KeywordProvenanceRepository:
             # Move the association's provenance with it: pairing a RAW with
             # its camera JPEG must not turn the user's hand-added keywords
             # into "unknown" rows a retirement pass would treat as generated.
+            # Species evidence rides along for the same reason -- a RAW
+            # whose only representation of a reviewer's identification is
+            # the companion's row must not silently become a bare
+            # ``manual_unspecified``/``imported_unknown`` on the primary.
             # The shared conflict clause keeps whichever side's claim is
-            # stronger when the primary already carries the keyword.
+            # stronger when the primary already carries the keyword, and
+            # keeps the primary's existing evidence over the incoming one.
             self.conn.execute(
-                "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-                "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
-                (primary_id, kw["id"], kw["source"]),
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source, species_provenance) "
+                "VALUES (?, ?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                (primary_id, kw["id"], kw["source"], kw["species_provenance"]),
             )
 
     def merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
@@ -1286,12 +1298,14 @@ class KeywordProvenanceRepository:
                         f"disambiguation"
                     ) from inner_err
         # Re-point photo_keywords from old → canonical, carrying
-        # each association's durable provenance with it. On a
-        # conflict the canonical row keeps the stronger of the two
-        # claims rather than silently dropping a stamp.
+        # each association's durable provenance and species evidence
+        # with it. On a conflict the canonical row keeps the stronger
+        # of the two claims rather than silently dropping a stamp,
+        # and keeps its existing species evidence over the incoming
+        # one.
         self.conn.execute(
-            f"""INSERT INTO photo_keywords (photo_id, keyword_id, source)
-                           SELECT photo_id, ?, source
+            f"""INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance)
+                           SELECT photo_id, ?, source, species_provenance
                            FROM photo_keywords WHERE keyword_id = ?
                            {self.KEYWORD_SOURCE_CONFLICT_SQL}""",
             (canonical_id, keyword_id),
@@ -1877,6 +1891,7 @@ class KeywordProvenanceRepository:
             if not targets:
                 return _out_of_scope_result(self.conn, species, identity)
 
+            self.db.predictions.require_identifiable_subjects([pred_id for _, pred_id in targets])
             source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
             kid = self.add_keyword(species, is_species=True, _commit=False, **source_args)
             species = _stored_keyword_name(self.conn, kid, species)

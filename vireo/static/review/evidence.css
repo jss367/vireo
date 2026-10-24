@@ -1,0 +1,9 @@
+.evidence-explanation {margin:12px 24px;font-size:13px;line-height:1.5;color:var(--text-secondary)}
+.species-evidence {font-size:12px;line-height:1.5;border-top:1px solid var(--border-primary);margin-top:8px;padding-top:8px;overflow-wrap:anywhere}
+.species-evidence ul {padding-left:18px;margin:6px 0}
+.species-evidence summary {cursor:pointer;color:var(--text-secondary)}
+.species-evidence p {margin:8px 0}
+.evidence-reasons {color:var(--warning)}
+.evidence-actions {display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.evidence-actions button {padding:4px 8px;border:1px solid var(--border-primary);border-radius:4px;background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer}
+.evidence-actions button:disabled {opacity:.5;cursor:default}

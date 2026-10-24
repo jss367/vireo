@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -142,6 +142,18 @@ def create_current_flag_attribution(conn):
         conn.execute(statement)
 
 
+def create_detection_evidence_reviews(conn):
+    """Workspace-local subject assessments, independent of species and flags."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS detection_evidence_reviews (
+        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        decision TEXT NOT NULL CHECK(decision IN ('unreviewed', 'not_enough_evidence', 'invalid_subject', 'subject_valid')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (detection_id, workspace_id)
+    )""")
+
+
 def create_identity_alternatives(conn):
     """Catalog-wide uncertainty follows the same identity scope as species tags."""
     conn.execute("""CREATE TABLE IF NOT EXISTS photo_identity_alternatives (
@@ -173,6 +185,7 @@ def create_auxiliary_schema_objects(conn):
     create_current_flag_attribution(conn)
     create_subject_ranking_analysis(conn)
     create_identity_alternatives(conn)
+    create_detection_evidence_reviews(conn)
 
 
 class CanonicalSchema:

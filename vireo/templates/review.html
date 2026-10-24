@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/static/vireo-base.css">
 <link rel="stylesheet" href="/static/review/identity-alternatives.css">
 <link rel="stylesheet" href="/static/review/queue.css">
+<link rel="stylesheet" href="/static/review/evidence.css">
 <title>Vireo - Classify</title>
 <style>
   /* ---------- Header ---------- */
@@ -818,6 +819,7 @@
 </div>
 
 <!-- Action Bar -->
+<p class="evidence-explanation">Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
 <div class="settings-panel open" id="reviewBar">
   <div class="setting-group">
     <select class="model-selector" id="collectionFilter" onchange="switchCollection(this.value)">
@@ -828,13 +830,20 @@
     </select>
     <select class="model-selector" id="sortSelect" onchange="changeSort(this.value)"
             data-view-preference="vireo.review.sort">
-      <option value="confidence_desc">Confidence (highest)</option>
-      <option value="confidence_asc">Confidence (lowest)</option>
+      <option value="confidence_desc">Relative score (highest)</option>
+      <option value="confidence_asc">Relative score (lowest)</option>
       <option value="species">Species (A-Z)</option>
       <option value="filename" selected>Filename (A-Z)</option>
       <option value="date">Date (oldest)</option>
       <option value="date_desc">Date (newest)</option>
     </select>
+    <label>Detection review
+      <select id="reviewEvidenceFilter" class="model-selector">
+        <option value="all">All predictions</option>
+        <option value="questionable">Questionable detections</option>
+        <option value="deferred">Not enough evidence / invalid subject</option>
+      </select>
+    </label>
     <button class="btn-batch-accept" id="acceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept All</button>
     <button type="button" class="model-selector" id="toggleDetectionBoxesBtn"
             onclick="toggleReviewDetectionBoxes()"
@@ -848,7 +857,7 @@
       <span class="value" id="thumbSizeVal">400px</span>
     </label>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#888);margin-left:12px;">
-      Min confidence:
+      Min relative score:
       <input type="range" id="confFilter" min="0" max="90" step="5" value="0"
              style="width:80px;accent-color:var(--accent,#24E5CA);"
              oninput="document.getElementById('confFilterVal').textContent=this.value+'%'; setMinConfidence(this.value/100)">
@@ -888,6 +897,7 @@
 <script defer src="/static/review/loading.js"></script>
 <script defer src="/static/review/deep-links.js"></script>
 <script defer src="/static/review/controls.js"></script>
+<script defer src="/static/review/evidence.js"></script>
 <script defer src="/static/review/grid.js"></script>
 <script defer src="/static/review/decisions.js"></script>
 <script defer src="/static/review/keyboard.js"></script>

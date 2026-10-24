@@ -24349,11 +24349,15 @@ def _run_review_accept(html, payload, call):
     assert grid_start != -1 and grid_end > grid_start, (
         "Review's getVisibleItems could not be located"
     )
+    evidence_start = html.find('// Subject evidence and saved uncertainty')
+    evidence_end = html.find('</script>', evidence_start)
+    assert evidence_start != -1 and evidence_end > evidence_start
     import json as _json
 
     source = "\n".join([
         _grouped_decision_server_stub("safeFetch"), _grouped_decision_module(),
-        _REVIEW_ACCEPT_STUB, html[grid_start:grid_end], html[start:end],
+        _REVIEW_ACCEPT_STUB, html[evidence_start:evidence_end],
+        html[grid_start:grid_end], html[start:end],
         call + ".then(__report);",
     ])
     return _run_node(source, [_json.dumps(payload)])

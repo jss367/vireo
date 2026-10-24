@@ -417,6 +417,7 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
+  <p>Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. <a href="/review">Inspect questionable detections in Review</a>.</p>
   <div class="compare-toolbar">
     <div class="control">
       <label for="collectionPicker">Collection</label>
@@ -444,7 +445,7 @@ body { padding-bottom: 36px; }
       </select>
     </div>
     <div class="control">
-      <label for="conflictThreshold">Conflict threshold</label>
+      <label for="conflictThreshold">Minimum relative score for conflicts</label>
       <div class="range-control">
         <input id="conflictThreshold" type="range" min="0" max="1" step="0.05" data-compare-on="input:previewConflictThreshold change:setConflictThreshold">
         <span id="conflictThresholdValue" class="range-value">40%</span>

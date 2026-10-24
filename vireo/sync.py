@@ -1131,7 +1131,11 @@ def _untag_keywords_missing_from_sidecar(
         if kw["type"] == "location":
             continue
         if kw_key not in xmp_keywords_by_key and kw['id'] not in resolved_ids and not preserve_hierarchy:
-            db.untag_photo(photo_id, kw["id"], _commit=False)
+            # Reconcile is not an undoable edit (``record_edit`` never runs
+            # here), so suppress the species-evidence snapshot that would
+            # otherwise leak into a later unrelated ``record_edit`` call on
+            # the same ``Database`` instance.
+            db.untag_photo(photo_id, kw["id"], _commit=False, _record_history=False)
 
 
 def sync_from_xmp(db, photo_ids):

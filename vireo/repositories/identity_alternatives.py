@@ -259,10 +259,11 @@ def remap_identity_for_photo_merge(
     decision = old or new or {'candidates': json.dumps(names), 'status': 'resolved'}
     if not after_reconciliation:
         _check_merge_confirmations(conn, losing_id, survivor_id, decision)
-    links = {}
+    links: dict[int, dict[int, tuple[str | None, str | None]]] = {}
     for pid in (losing_id, survivor_id):
-        links[pid] = {r['keyword_id']: r['source'] for r in conn.execute(
-            'SELECT pk.keyword_id, pk.source FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
+        links[pid] = {r['keyword_id']: (r['source'], r['species_provenance']) for r in conn.execute(
+            'SELECT pk.keyword_id, pk.source, pk.species_provenance '
+            'FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id '
             "WHERE pk.photo_id=? AND (k.is_species=1 OR k.type='taxonomy')", (pid,),
         )}
     _remap_identity_history(conn, losing_id, survivor_id)
@@ -282,11 +283,16 @@ def remap_identity_for_photo_merge(
             conn, [losing_id], json.loads(decision['candidates']),
             lookup_taxon_id=partial(lookup_species_taxon_id, conn),
         ).get(losing_id, [])}
-    for kid, source in links[losing_id].items():
+    for kid, (source, species_provenance) in links[losing_id].items():
         name = keyword_match_key(conn.execute('SELECT name FROM keywords WHERE id=?', (kid,)).fetchone()[0])
         if kid not in uncertain and name not in removed:
-            conn.execute('INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) '
-                         + KEYWORD_SOURCE_CONFLICT_SQL, (survivor_id, kid, source))
+            # Carry the losing side's species evidence onto the survivor as
+            # well; the shared conflict clause keeps the survivor's existing
+            # evidence when both sides had one.
+            conn.execute(
+                'INSERT INTO photo_keywords (photo_id, keyword_id, source, species_provenance) '
+                'VALUES (?, ?, ?, ?) ' + KEYWORD_SOURCE_CONFLICT_SQL,
+                (survivor_id, kid, source, species_provenance))
 
 
 
