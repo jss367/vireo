@@ -210,3 +210,20 @@ test('timeout during body decoding cannot apply a late success', async () => {
   assert.equal(h.context.activeJobs.length, 0);
   assert.equal(h.context.jobsPollState.active.error, true);
 });
+
+test('an unreadable history says so in the server\'s words, not "no jobs"', async () => {
+  const h = harness();
+  const reason = 'Vireo could not read the job history from its catalog (database is locked).';
+  const failed = h.context.fetchHistory();
+  h.respond(0, {error: reason, code: 'job_history_unavailable'}, false);
+  assert.equal(await failed, false);
+  assert.equal(h.context.jobsPollState.history.loaded, false);
+  assert.equal(h.context.jobsPollState.history.errorDetail, reason);
+  assert.equal(h.elements.jobsPollMessage.textContent,
+    'Job history could not be loaded. ' + reason + ' Retrying automatically.');
+  const recovered = h.context.fetchHistory();
+  h.respond(1, []);
+  await recovered;
+  assert.equal(h.context.jobsPollState.history.errorDetail, '');
+  assert.equal(h.elements.jobsPollWarning.hidden, true);
+});

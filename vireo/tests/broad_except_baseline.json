@@ -35,7 +35,6 @@
   "importer.py": 2,
   "ingest.py": 2,
   "job_runner/checkpoints.py": 1,
-  "job_runner/history.py": 1,
   "job_summaries.py": 1,
   "jobs.py": 3,
   "keypoints.py": 1,

@@ -21,6 +21,14 @@ log = logging.getLogger("jobs")
 INTERRUPTED_BY_RESTART = "Interrupted by Vireo restart"
 
 
+class JobHistoryUnavailable(RuntimeError):
+    """The ``job_history`` rows could not be read from the catalog.
+
+    Raised instead of returning ``[]``: an empty list reads as "no jobs have
+    run", which is not what happened. The message is user-facing.
+    """
+
+
 def _load_json(blob):
     """Decode a job_history JSON column, tolerating NULL and junk."""
     if not blob or not isinstance(blob, str):
@@ -418,6 +426,9 @@ class JobHistory:
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
+
+        Raises:
+            JobHistoryUnavailable: the rows could not be read.
         """
         try:
             ws_id = db.active_workspace_id
@@ -432,9 +443,38 @@ class JobHistory:
                             d[field] = json.loads(d[field])
                         except (json.JSONDecodeError, TypeError):
                             pass
-                attach_result_text(d)
+                # The Jobs page reads ``tree.length`` and iterates with
+                # ``forEach``; a stored ``tree`` that decoded to anything
+                # other than a list (``{"length": 1}``, a bare int) would
+                # abort rendering of the whole history pane. Iterating a
+                # dict visits its keys without raising, so the per-row
+                # guard below never fires on that shape — drop it here.
+                if d.get("tree") is not None and not isinstance(d["tree"], list):
+                    log.warning(
+                        "Dropping malformed tree in history row %r", d.get("id"),
+                    )
+                    d["tree"] = []
+                try:
+                    attach_result_text(d)
+                except (TypeError, ValueError, AttributeError, LookupError):
+                    # A stored field decoded to an unexpected shape (e.g. a
+                    # ``tree`` that is not a list, which ``attach_result_text``
+                    # iterates). Describer bugs already fall back inside
+                    # ``describe_result``; keep this handler for the stored
+                    # row itself so one bad row cannot poison the whole
+                    # response. The row still ships with its raw fields.
+                    log.warning(
+                        "Could not render job history row %r", d.get("id"),
+                        exc_info=True,
+                    )
                 result.append(d)
             return result
-        except Exception:  # broad: history rows hold arbitrary stored JSON; the Jobs page gets an empty list rather than a 500
+        except sqlite3.Error as exc:
+            # Stored JSON is already tolerated per field above, and describer
+            # bugs fall back to the generic summary in ``describe_result``; a
+            # failure here is the catalog itself (locked, corrupt, missing
+            # table). Say so rather than answering "no jobs have run".
             log.warning("Could not read job history", exc_info=True)
-            return []
+            raise JobHistoryUnavailable(
+                f"Vireo could not read the job history from its catalog ({exc})."
+            ) from exc

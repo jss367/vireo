@@ -9,8 +9,8 @@
 // Active jobs and history refresh independently. A new explicit refresh retires
 // its lane's older request; scheduled polls wait for that lane to settle.
 /** @type {Record<'active'|'history',JobsPollLane>} */ var jobsPollState = {
-  active: {generation: 0, pending: false, loaded: false, error: false, controller: null},
-  history: {generation: 0, pending: false, loaded: false, error: false, controller: null},
+  active: {generation: 0, pending: false, loaded: false, error: false, errorDetail: '', controller: null},
+  history: {generation: 0, pending: false, loaded: false, error: false, errorDetail: '', controller: null},
 };
 /** @type {string | null} */ var historyRefreshSelectionId = null;
 /** @type {EventSource | null} */ var sseSource = null;
