@@ -90,7 +90,7 @@ document.addEventListener('contextmenu', function(e) {
   if (!(e.target instanceof Element)) return;
   var card = e.target.closest(/** @type {'div'} */ ('.dup-card[data-photo-id]'));
   var results = /** @type {HTMLElement} */ (document.getElementById('results'));
-  if (!card || !results || !results.contains(card)) return;
+  if (!card || !results || (!results.contains(card) && !card.closest('#sameShotResults'))) return;
   var photoId = Number(card.dataset.photoId);
   if (!Number.isInteger(photoId) || photoId <= 0) return;
   e.preventDefault();

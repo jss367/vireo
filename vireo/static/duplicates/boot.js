@@ -18,6 +18,17 @@ onDuplicatesClick('#catalogRefreshBtn', function() { return tryRestoreLastScan(t
 onDuplicatesClick('#applyBtn', applyRejections);
 onDuplicatesClick('#clearResultsBtn', clearResults);
 
+duplicatesEl('sameShotResults').addEventListener('click', function(event) {
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest('[data-same-shot-more]') && _lastScanResult && !_scanInProgress) {
+    _sameShotVisibleLimit += 50;
+    renderSameShotResults(_lastScanResult);
+    return;
+  }
+  var button = event.target.closest('[data-same-shot-reveal]');
+  if (button) revealDuplicatePhoto(Number(button.getAttribute('data-same-shot-reveal')));
+});
+
 document.addEventListener('DOMContentLoaded', () => VireoFilter.init({
   page: 'duplicates',
   root: document.getElementById('vireoFilterBar'),

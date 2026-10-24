@@ -75,8 +75,8 @@ def test_duplicates_page_restores_prior_scan(live_server, page):
     expect(page.locator("#emptyState")).not_to_be_visible()
     expect(page.locator("#results")).to_contain_text("HFAKE")
     expect(banner).not_to_contain_text("no longer")
-    expect(banner).to_contain_text("Still up to date")
-    expect(banner).not_to_contain_text("Scan again")
+    expect(banner).to_contain_text("Exact-byte groups are unchanged")
+    expect(banner).to_contain_text("Scan again to refresh possible same-shot copies")
 
 
 def test_duplicates_page_says_when_duplicates_appeared_since_the_scan(
@@ -98,7 +98,7 @@ def test_duplicates_page_says_when_duplicates_appeared_since_the_scan(
     expect(banner).to_contain_text(
         "Since then, 1 new duplicate group has appeared. Scan again"
     )
-    expect(banner).not_to_contain_text("Still up to date")
+    expect(banner).not_to_contain_text("Exact-byte groups are unchanged")
 
 
 def test_duplicates_page_hides_restored_groups_that_no_longer_match(
@@ -155,9 +155,9 @@ def test_duplicates_page_all_stale_with_no_duplicates_left_is_clean(
     _seed_prior_scan(live_server["db"], only_stale=True)
     page.goto(f"{live_server['url']}/duplicates")
 
-    expect(page.locator("#results")).to_contain_text("No duplicates found")
+    expect(page.locator("#results")).to_contain_text("No exact-byte duplicates found")
     expect(page.locator("#results")).not_to_contain_text("out of date")
-    expect(page.locator("#restoredBanner")).to_contain_text("Still up to date")
+    expect(page.locator("#restoredBanner")).to_contain_text("Exact-byte groups are unchanged")
 
 
 def test_duplicates_page_empty_restore_names_duplicates_added_since(

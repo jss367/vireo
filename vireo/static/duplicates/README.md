@@ -15,6 +15,7 @@ files did.
 | `resolved.js` | Pruning resolved hashes from the last scan, rendering unresolved and resolved groups, and the protected-winner rule |
 | `trash-progress.js` | The batched Trash progress line and which skips are actionable |
 | `card.js` | Photo cards and their context menu (was `duplicates-card.js`) |
+| `same-shot.js` | Review-only camera identity candidates, visual evidence, capture times and file-manager reveal; never feeds exact-byte resolution or cleanup |
 | `restore.js` | Restoring the last scan or the catalog's rejected copies (was `duplicates-restore.js`) |
 | `reveal.js` | Reveal in the file manager (was `duplicates-reveal.js`) |
 | `categories.js` | Filename/folder pattern categories, pure (was `duplicates-categories.js`; unit-tested by `tests/frontend/duplicates-categories.test.mjs`) |
@@ -36,5 +37,8 @@ Keep these intact when changing this code:
   last-scan restore until the first refresh settles, and
   `renderScanWhenFilterReady` waits for any refresh in flight.
 - While a scan runs (`_scanInProgress`), nothing re-renders a cached snapshot.
+- Same-shot candidates have no keeper/loser designation or cleanup actions.
+  Photo filters reveal the whole matching group; filename categories apply
+  only to exact-byte groups. Render candidates 50 groups at a time.
 - Bucket indexes stay stable: buckets are rendered from the unfiltered list,
   and one-group buckets are skipped inline.

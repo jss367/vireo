@@ -7,6 +7,7 @@ import os
 
 from duplicate_buckets import bucket_unresolved_proposals
 from duplicates import DupCandidate, resolve_duplicates
+from services.same_shot_duplicates import revalidate_same_shot_groups, scan_same_shot_candidates
 from volume_reachability import get_shared as _volume_reachability
 
 _EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -104,8 +105,11 @@ def revalidate_scan_result(db, result):
     new_group_count, changed_group_count = _changes_since_scan(
         db, proposals, kept,
     )
+    same_shot_groups = revalidate_same_shot_groups(db, result.get("same_shot_groups") or [])
     return dict(
         result,
+        same_shot_groups=same_shot_groups,
+        same_shot_stale_group_count=len(result.get("same_shot_groups") or []) - len(same_shot_groups),
         proposals=kept,
         buckets=bucket_unresolved_proposals(kept),
         group_count=len(kept),
@@ -593,7 +597,9 @@ def run_duplicate_scan(job, db, include_resolved=True, cancel_check=None):
 
     _attach_edit_recipes(db, proposals)
     attach_workspace_names(db, proposals)
+    same_shot = scan_same_shot_candidates(db, job, cancel_check)
     return {
+        **same_shot,
         "proposals": proposals,
         "buckets": bucket_unresolved_proposals(proposals),
         "group_count": total,

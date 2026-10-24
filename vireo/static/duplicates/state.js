@@ -16,6 +16,7 @@ var _scanInProgress = false;
 // full re-scan to refresh the UI.
 /** @type {DuplicateScan | null} */
 var _lastScanResult = null;
+var _sameShotVisibleLimit = 50;
 
 // Photo ids matching the filter bar's expression (null = no filters).
 // Groups come from the library-wide scan and are never re-derived from

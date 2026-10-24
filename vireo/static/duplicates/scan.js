@@ -44,6 +44,8 @@ async function startScan() {
   // Successful completion repopulates ``_lastScanResult`` via
   // ``renderResults``.
   _lastScanResult = null;
+  _sameShotVisibleLimit = 50;
+  /** @type {HTMLElement} */ (document.getElementById('sameShotResults')).innerHTML = '';
   showProgress('Starting scan...');
 
   try {

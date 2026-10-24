@@ -110,6 +110,8 @@
   }
   .dup-card.winner { border-color: var(--accent); }
   .dup-card.loser { opacity: 0.65; }
+  .same-shot-group .section-sub { font-size: 12px; line-height: 1.5; color: var(--text-secondary); margin-bottom: 12px; }
+  .same-shot-capture-time { font-size: 12px; line-height: 1.5; color: var(--text-primary); margin: 6px 0; }
   .dup-card .thumb {
     width: 100%; aspect-ratio: 4/3; object-fit: cover;
     border-radius: 4px; background: var(--bg-primary);
@@ -340,7 +342,7 @@
   <div class="page-header">
     <div>
       <h1>Duplicate Files</h1>
-      <div class="sub">Find exact-byte duplicate photos and remove the extra copies.</div>
+      <div class="sub">Find exact-byte duplicates and review possible copies of the same shot after metadata changes.</div>
     </div>
     <div>
       <button id="scanBtn" type="button" class="btn-primary" disabled>Scan for duplicate files</button>
@@ -380,6 +382,7 @@
   <div class="trash-progress" id="trashAllProgress" hidden aria-live="polite"></div>
 
   <div id="results"></div>
+  <section id="sameShotResults" aria-label="Possible same-shot copies"></section>
 
   <div id="emptyState" class="empty-state" style="display:none;">
     <div class="label">Click <b>Scan for duplicate files</b> to find exact-byte duplicates in your library.</div>
@@ -400,6 +403,7 @@
 <script defer src="/static/duplicates/resolved.js"></script>
 <script defer src="/static/duplicates/trash-progress.js"></script>
 <script defer src="/static/duplicates/card.js"></script>
+<script defer src="/static/duplicates/same-shot.js"></script>
 <script defer src="/static/duplicates/restore.js"></script>
 <script defer src="/static/duplicates/reveal.js"></script>
 <script defer src="/static/duplicates/categories.js"></script>
