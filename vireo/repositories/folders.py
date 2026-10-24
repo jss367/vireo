@@ -695,13 +695,19 @@ class FolderRepository:
 
                 for keyword in embedded_keyword_associations_for_merge(
                         self.conn, photo["id"], existing["id"]):
+                    # Species evidence rides along for the same reason as the
+                    # ``source`` stamp: a folder collision that collapses two
+                    # rows must not silently discard a reviewer's identification
+                    # claim recorded only on the losing side. The shared
+                    # conflict clause keeps the survivor's existing evidence
+                    # over the incoming one.
                     self.conn.execute(
-                        "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-                        "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-                        (existing["id"], keyword["id"], keyword["source"]),
+                        "INSERT INTO photo_keywords "
+                        "(photo_id, keyword_id, source, species_provenance) "
+                        "VALUES (?, ?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
+                        (existing["id"], keyword["id"],
+                         keyword["source"], keyword["species_provenance"]),
                     )
-                from repositories.species_provenance import SpeciesProvenanceRepository
-                SpeciesProvenanceRepository(self.conn).carry(photo["id"], existing["id"])
                 transfer_embedded_offered(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
                 collection_remap[photo["id"]] = existing["id"]

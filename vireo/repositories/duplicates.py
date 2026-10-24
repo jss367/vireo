@@ -539,7 +539,7 @@ class DuplicatesRepository:
         for chunk in self._chunks(loser_ids):
             loser_placeholders = ",".join("?" * len(chunk))
             rows.extend(self.conn.execute(
-                f"""SELECT photo_id, keyword_id, source
+                f"""SELECT photo_id, keyword_id, source, species_provenance
                     FROM photo_keywords
                     WHERE photo_id IN ({loser_placeholders})""",
                 chunk,

@@ -761,7 +761,7 @@ class _SpeciesConfirmation:
         for pid, old_rows in self.old_rows_by_photo.items():
             remove_names = []
             for old in old_rows:
-                self.db.untag_photo(pid, old["id"], _commit=False, _record_provenance=True)
+                self.db.untag_photo(pid, old["id"], _commit=False, _record_history=True)
                 # A same-taxon alias replace re-adds ``kid`` right
                 # after, so its sidecar remove is skipped; a remove
                 # must queue every untagged row.

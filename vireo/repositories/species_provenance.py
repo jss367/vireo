@@ -10,6 +10,17 @@ from collections.abc import Callable
 from typing import Any  # Evidence payloads contain caller-supplied JSON fields.
 
 
+def evidence_for_photo_copy(value: str | None, photo_id: int) -> str | None:
+    """Retain the original photo for copied subject evidence."""
+    if value is None:
+        return None
+    evidence = json.loads(value)
+    if evidence.get('detection_id') is None or evidence.get('subject_photo_id') is not None:
+        return value
+    evidence['subject_photo_id'] = photo_id
+    return json.dumps(evidence, sort_keys=True)
+
+
 class SpeciesProvenanceRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -45,10 +56,9 @@ class SpeciesProvenanceRepository:
             (survivor_id, losing_id, keyword_id, keyword_id),
         ).fetchall()
         for row in rows:
-            evidence = json.loads(row['species_provenance'])
-            if evidence.get('detection_id') is not None:
-                evidence.setdefault('subject_photo_id', losing_id)
-            self.set(survivor_id, row['keyword_id'], evidence)
+            evidence = evidence_for_photo_copy(row['species_provenance'], losing_id)
+            if evidence is not None:
+                self.set(survivor_id, row['keyword_id'], json.loads(evidence))
 
     def detection_photo_id(self, detection_id: int) -> int | None:
         row = self.conn.execute('SELECT photo_id FROM detections WHERE id=?', (detection_id,)).fetchone()

@@ -2078,17 +2078,23 @@ class _StagedTreeMerge:
         )
 
     def _carry_embedded_keyword_associations(self, losing_id, survivor_id):
-        """Keep attached embedded tags without undoing a survivor's removal."""
+        """Keep attached embedded tags without undoing a survivor's removal.
+
+        Species evidence rides along with the ``source`` stamp: a staged
+        merge must not silently discard a reviewer's identification recorded
+        only on the losing side. The shared conflict clause keeps the
+        survivor's existing evidence when both rows carried one.
+        """
         from keyword_identity import embedded_keyword_associations_for_merge
 
         for row in embedded_keyword_associations_for_merge(self.conn, losing_id, survivor_id):
             self.conn.execute(
-                "INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) "
+                "INSERT INTO photo_keywords "
+                "(photo_id, keyword_id, source, species_provenance) "
+                "VALUES (?, ?, ?, ?) "
                 + self.KEYWORD_SOURCE_CONFLICT_SQL,
-                (survivor_id, row["id"], row["source"]),
+                (survivor_id, row["id"], row["source"], row["species_provenance"]),
             )
-        from repositories.species_provenance import SpeciesProvenanceRepository
-        SpeciesProvenanceRepository(self.conn).carry(losing_id, survivor_id)
 
     def delete_folded_staged_folders(self):
         """Delete the staged folder rows folded into existing targets.
