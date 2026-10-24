@@ -51,17 +51,19 @@ function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAss
   });
   select.value = assignment.method;
   form.appendChild(select);
-  const inputs = /** @type {Record<'reviewer' | 'reason' | 'evidence_source' | 'supporting_photo_ids', HTMLInputElement>} */ (/** @type {unknown} */ ({}));
+  const inputs = /** @type {Record<'reviewer' | 'reason' | 'evidence_source' | 'supporting_photo_ids' | 'confidence' | 'confidence_meaning', HTMLInputElement>} */ (/** @type {unknown} */ ({}));
   const fields = {reviewer: 'Reviewer', reason: 'Reason or explanation', evidence_source: 'Evidence source',
-    supporting_photo_ids: 'Supporting frame IDs, separated by commas'};
+    supporting_photo_ids: 'Supporting frame IDs, separated by commas',
+    confidence: 'Confidence (optional, 0–1)', confidence_meaning: 'What confidence measures'};
   Object.entries(fields).forEach(([key, label]) => {
     const field = document.createElement('label');
     field.textContent = label;
     field.style.display = 'block';
     const input = document.createElement('input');
-    input.type = 'text'; input.style.width = '100%';
+    input.type = key === 'confidence' ? 'number' : 'text'; input.style.width = '100%';
+    if (key === 'confidence') { input.min = '0'; input.max = '1'; input.step = 'any'; }
     input.value = key === 'supporting_photo_ids' ? (assignment.supporting_photo_ids || []).join(', ') :
-      String(assignment[/** @type {'reviewer' | 'reason' | 'evidence_source'} */ (key)] || '');
+      String(assignment[/** @type {'reviewer' | 'reason' | 'evidence_source' | 'confidence' | 'confidence_meaning'} */ (key)] ?? '');
     field.appendChild(input); inputs[/** @type {keyof typeof inputs} */ (key)] = input; form.appendChild(field);
   });
   const save = document.createElement('button');
@@ -71,8 +73,8 @@ function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAss
     event.preventDefault(); save.disabled = true;
     try {
       const body = {method: select.value, reviewer: inputs.reviewer.value, reason: inputs.reason.value,
-        evidence_source: inputs.evidence_source.value, confidence: assignment.confidence ?? null,
-        confidence_meaning: assignment.confidence_meaning, detection_id: assignment.detection_id ?? null,
+        evidence_source: inputs.evidence_source.value, confidence: inputs.confidence.value.trim() ? Number(inputs.confidence.value) : null,
+        confidence_meaning: inputs.confidence_meaning.value, detection_id: assignment.detection_id ?? null,
         supporting_photo_ids: inputs.supporting_photo_ids.value.trim() ?
           inputs.supporting_photo_ids.value.split(',').map(id => Number(id.trim())) : []};
       const response = await safeFetch('/api/photos/' + photoId + '/species/' + assignment.keyword_id + '/provenance',

@@ -13,9 +13,8 @@ METHODS = frozenset({'manual_unspecified', 'direct_visual', 'adjacent_frames',
                      'model_proposed', 'imported_unknown'})
 
 
-
 def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[str, Any]:
-    """Reject invented confidence, inaccessible evidence, and mismatched subjects."""
+    """Validate confidence meaning, accessible evidence, and subject ownership."""
     if (not isinstance(value, dict) or not isinstance(value.get('method'), str)
             or value['method'] not in METHODS):
         raise ValueError('provenance.method must be one of ' + ', '.join(sorted(METHODS)))
@@ -64,8 +63,6 @@ def remember_before(db: Database, photo_id: int, keyword_id: int, *, force: bool
     state = db.species_provenance.state(photo_id, keyword_id)
     if not force and (state is None or not state['is_species']):
         return
-    if not hasattr(db, '_species_provenance_before'):
-        db._species_provenance_before = {}
     db._species_provenance_before.setdefault((photo_id, keyword_id), state)
 
 
@@ -75,14 +72,17 @@ def history_items(db: Database, action: str, items: Any) -> list[dict[str, Any]]
     if action not in {'keyword_add', 'keyword_remove', 'species_replace', 'prediction_accept',
                       'identity_alternatives'}:
         return items
-    pending = getattr(db, '_species_provenance_before', {})
+    pending = db._species_provenance_before
+    by_photo = {}
+    for (pid, keyword_id), before in pending.items():
+        by_photo.setdefault(pid, {})[keyword_id] = before
     for item in items:
         pid = item['photo_id']
         changes = {}
-        for key in list(pending):
-            if key[0] == pid:
-                changes[str(key[1])] = {'before': pending.pop(key),
-                                       'after': db.species_provenance.state(*key)}
+        for keyword_id, before in by_photo.pop(pid, {}).items():
+            changes[str(keyword_id)] = {'before': before,
+                'after': db.species_provenance.state(pid, keyword_id)}
+            pending.pop((pid, keyword_id))
         if changes:
             item['species_provenance'] = json.dumps(changes, sort_keys=True)
     return items
