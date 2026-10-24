@@ -443,7 +443,19 @@ class JobHistory:
                             d[field] = json.loads(d[field])
                         except (json.JSONDecodeError, TypeError):
                             pass
-                attach_result_text(d)
+                try:
+                    attach_result_text(d)
+                except (TypeError, ValueError, AttributeError, LookupError):
+                    # A stored field decoded to an unexpected shape (e.g. a
+                    # ``tree`` that is not a list, which ``attach_result_text``
+                    # iterates). Describer bugs already fall back inside
+                    # ``describe_result``; keep this handler for the stored
+                    # row itself so one bad row cannot poison the whole
+                    # response. The row still ships with its raw fields.
+                    log.warning(
+                        "Could not render job history row %r", d.get("id"),
+                        exc_info=True,
+                    )
                 result.append(d)
             return result
         except sqlite3.Error as exc:
