@@ -29,6 +29,17 @@ Life List and Location Review now refresh after global Undo/Redo. Location Revie
 
 **Reversible gaps that should be tracked**
 
+Remove orphans, audit drift repairs (including Resolve All), and duplicate
+keyword cleanup now appear in the active workspace's History. These are
+audit-only entries marked “cannot undo”; they do not add Undo or Redo steps.
+Orphan-removal records retain the deleted photo IDs and paths after the catalog
+rows are gone. Drift repairs record the direction and metadata/queue changes;
+Resolve All records each changed photo separately, so completed repairs remain
+in history if a later photo fails. Keyword cleanup records the merge count.
+Empty cleanup and skipped or unchanged repairs do not add entries. Catalog
+changes and their records commit together. Full reversal still needs the
+snapshots described below.
+
 | Area | Missing actions and required before-state |
 | --- | --- |
 | Replace species from a prediction | `/api/predictions/<id>/replace-keywords` still logs an excluded `prediction_replace_species` entry. Needs removed keyword IDs/provenance, all changed prediction statuses, and the highlight/representative rows moved by replacement. |

@@ -19,6 +19,7 @@ from services.local_folder import (
     stage_boundary_lock,
     stage_pending_source_paths,
 )
+from services.maintenance_history import remove_orphans_with_history, resolve_drift_with_history
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +215,7 @@ def create_audit_blueprint(
         # touch a photo that workspace can see -- the same set drift lists.
         if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
             return json_error("photo not found", 404)
-        from audit import drift_for_photo, resolve_drift
+        from audit import drift_for_photo
 
         # A sidecar Vireo cannot read takes only some directions (or none);
         # refuse the others rather than answer ok for a no-op, or for queued
@@ -228,7 +229,7 @@ def create_audit_blueprint(
                 code="drift_resolution_unavailable",
                 message=drift["advice"],
             )
-        resolve_drift(db, photo_id, direction)
+        resolve_drift_with_history(db, photo_id, direction)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/audit/resolve-all", methods=["POST"])
@@ -238,7 +239,7 @@ def create_audit_blueprint(
         direction = body.get("direction")
         if direction not in ("use_db", "use_xmp"):
             return json_error("direction must be 'use_db' or 'use_xmp'")
-        from audit import check_drift, resolve_drift
+        from audit import check_drift
 
         drifts = check_drift(db)
         resolved = skipped = 0
@@ -246,7 +247,7 @@ def create_audit_blueprint(
             if direction not in d["resolutions"]:
                 skipped += 1
                 continue
-            resolve_drift(db, d["photo_id"], direction)
+            resolve_drift_with_history(db, d["photo_id"], direction)
             resolved += 1
         response = {"ok": True, "resolved": resolved}
         if skipped:
@@ -279,10 +280,7 @@ def create_audit_blueprint(
         if not photo_ids:
             return jsonify({"ok": True, "removed": 0})
 
-        from audit import confirmed_orphan_ids
-
-        confirmed = confirmed_orphan_ids(db, photo_ids)
-        result = db.delete_photos(confirmed) if confirmed else {"deleted": 0}
+        result = remove_orphans_with_history(db, photo_ids)
         cleanup_cached_files_for_deleted_photos(result.get("files", []))
         if result.get("deleted"):
             invalidate_missing_originals()
