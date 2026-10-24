@@ -32,7 +32,7 @@ def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[
     confidence = value.get('confidence')
     if confidence is not None:
         if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+                or not 0 <= confidence <= 1 or not math.isfinite(confidence)):
             raise ValueError('confidence must be a finite number between 0 and 1, or null')
         if not result['confidence_meaning']:
             raise ValueError('confidence_meaning is required when confidence is supplied')
@@ -59,7 +59,7 @@ def validate_provenance(db: Database, photo_ids: list[int], value: Any) -> dict[
 
 
 def remember_before(db: Database, photo_id: int, keyword_id: int, *, force: bool = False) -> None:
-    """Track explicit evidence before tag/removal; record_edit consumes the snapshot."""
+    """Track assignment attribution before mutation; record_edit consumes the snapshot."""
     state = db.species_provenance.state(photo_id, keyword_id)
     if not force and (state is None or not state['is_species']):
         return

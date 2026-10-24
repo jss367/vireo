@@ -118,6 +118,7 @@ def test_mixed_new_and_existing_confirmation_undo(app_and_db):
 @pytest.mark.parametrize('value', [
     {}, {'method': 'bogus'}, {'method': 'adjacent_frames'},
     {'method': 'direct_visual', 'confidence': 0.8},
+    {'method': 'model_proposed', 'confidence': 10**400, 'confidence_meaning': 'Invalid score'},
     {'method': 'model_proposed', 'confidence': True, 'confidence_meaning': 'Model score'},
     {'method': 'model_proposed', 'confidence': float('nan'), 'confidence_meaning': 'Model score'},
     {'method': 'direct_visual', 'supporting_photo_ids': [True]},
