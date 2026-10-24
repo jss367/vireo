@@ -1317,17 +1317,24 @@ def invalidate_new_images_after_scan(db, root):
     Lives in this module (not ``app.py``) so non-Flask code paths such as
     ``pipeline_job.py`` can import it without pulling in the app module.
     """
-    # Canonicalize the root to match what the scanner stores. scanner.scan passes
-    # folder paths through str(Path(...)), which strips trailing slashes but
-    # preserves `..` segments. Using os.path.normpath here would resolve `..` and
-    # produce a mismatch against the stored path, leaving the cache stale after a
-    # successful scan.
-    root = str(Path(root))
-    # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
+    from file_identity import catalog_scan_root
+
+    # Match both the caller's spelling and the one the scan cataloged.
+    # ``str(Path(...))`` strips trailing slashes but keeps ``..`` segments, so
+    # it still meets a folder row stored with them. ``catalog_scan_root`` is
+    # the spelling ``scanner.scan`` files a root under: a root reached through
+    # a symlink (``/tmp`` -> ``/private/tmp`` on macOS) or a case alias of a
+    # cataloged folder is stored resolved, which the supplied spelling misses.
+    roots = dict.fromkeys((str(Path(root)), catalog_scan_root(db, root)))
+    # LIKE wildcards (%, _) in a root are not escaped. Worst case is a harmless
     # over-invalidation that triggers a re-walk. The descendant pattern uses
     # os.sep so it matches what the scanner stores via str(Path(...)) on both
     # POSIX and Windows.
-    touched_ids = [r["id"] for r in db.workspace_folders.folder_ids_at_or_like(
-        root, root.rstrip("/\\") + os.sep + "%",
-    )]
+    touched_ids = list(dict.fromkeys(
+        r["id"]
+        for spelling in roots
+        for r in db.workspace_folders.folder_ids_at_or_like(
+            spelling, spelling.rstrip("/\\") + os.sep + "%",
+        )
+    ))
     db.invalidate_new_images_cache_for_folders(touched_ids)

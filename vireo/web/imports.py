@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 import source_discovery
 from db import Database
-from file_identity import catalog_scan_root
+from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
@@ -997,10 +997,15 @@ class _ImportFullRun:
         thread_db = self.thread_db
         photo_ids = []
         if self.params.copy:
-            # Collection from copied files (existing logic)
+            # Collection from copied files. Ingest reports them under the
+            # destination the user typed; the scanner filed them under the
+            # catalog's spelling of their folders (resolved through a
+            # symlinked destination, or a case alias's stored spelling).
             copied_paths = self.copied_paths
             if copied_paths:
-                photo_ids = thread_db.photos.ids_at_paths(copied_paths)
+                photo_ids = thread_db.photos.ids_at_paths(
+                    catalog_file_paths(thread_db, copied_paths)
+                )
         else:
             # Collection from all photos in the scanned folder. The scanner
             # filed them under the catalog's spelling of the root, which
