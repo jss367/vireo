@@ -422,12 +422,10 @@ async function grmConfirmSpeciesCall(species, memberIds, groupChanges) {
   if (!reviewed) return false;
   var resp = await safeFetch('/api/encounters/species', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(reviewed),
+    body: JSON.stringify({...reviewed, response_mode: 'compact'}),
   });
-  // Adopt authoritative structure (mirrors confirmSpecies()).
-  if (resp && resp.encounters) {
-    currentReviewResults().encounters = resp.encounters;
-    if (resp.summary) currentReviewResults().summary = resp.summary;
+  if (resp && resp.ok) {
+    await applySpeciesResponse(resp, encounterStructureSignature(currentReviewResults().encounters));
   }
   return resp;
 }

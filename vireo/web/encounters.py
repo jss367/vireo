@@ -73,6 +73,10 @@ def create_encounters_blueprint(get_db, json_error, db_path):
     def _confirm_encounter_species(db):
         """Confirm species while holding the grouping and database writer locks."""
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("Expected a JSON object")
+        if body.get("response_mode", "full") not in ("full", "compact"):
+            return json_error("response_mode must be full or compact")
         species = body.get("species", "")
         if not isinstance(species, str):
             return json_error("species must be a string")
@@ -100,14 +104,13 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         error = _photo_ids_error(db, photo_ids, json_error)
         if error is not None:
             return error
-        from pipeline import load_results_raw, save_results_raw
+        from pipeline import load_results_raw
 
         confirmation = _SpeciesConfirmation(
             db, json_error, species, photo_ids, burst_index,
             add_mode=add_mode,
             remove_mode=remove_mode,
             cache_dir=os.path.dirname(db_path),
-            save_results_raw=save_results_raw,
         )
         confirmation.load_cache(load_results_raw)
         error = confirmation.burst_error()
@@ -126,48 +129,122 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         if error is not None:
             return error
 
-        ws_id = db.require_workspace_id()
         confirmation.resolve_old_species_rows()
         error = _review_preview(db, confirmation, body, json_error)
         if error is not None:
             return error
         low_confidence_photo_ids = _low_confidence_photo_ids(db, photo_ids)
 
-        # Run all mutations in a single transaction so that a mid-loop failure
-        # (SQLite lock, disk error, etc.) can't leave half the photos retagged
-        # while the other half still carry the old species.
-        try:
-            confirmation.resolve_target_keyword()
-            confirmation.untag_previous_species(ws_id)
-            confirmation.tag_new_species(ws_id)
-            confirmation.record_photo_edit()
-            confirmation.compute_cache_state()
-            confirmation.record_cache_only_confirmation()
-            confirmation.apply_cache_mutation()
-            db.commit()
-        except Exception:  # broad: rollback and restore the saved cache before re-raising the confirmation failure
-            # A failed rollback must not skip the cache restore below or
-            # replace the original error.
-            try:
-                db.rollback()
-            except Exception:  # broad: any rollback failure still restores the cache and re-raises below
-                log.exception("Rollback failed after species confirmation failed")
-            if confirmation.cache_saved:
-                try:
-                    save_results_raw(
-                        confirmation.before_cached,
-                        confirmation.cache_dir,
-                        db.active_workspace_id,
-                    )
-                except Exception:  # broad: restoring the cache is best-effort; the original error re-raises below
-                    log.exception("Failed to restore pipeline cache after species confirmation failed")
-            raise
-        # Prune oldest edit-history rows now that the transaction has landed.
-        db._prune_edit_history()
+        return _commit_species_edit(
+            db, confirmation.before_cached, confirmation.cache_dir,
+            lambda: _apply_confirmation(confirmation, low_confidence_photo_ids, body.get("response_mode", "full")),
+        )
 
-        return jsonify(confirmation.response(low_confidence_photo_ids))
+    @blueprint.route("/api/encounters/species/bulk", methods=["POST"])
+    def api_encounter_species_bulk():
+        """Add distinct species selections atomically, with one compact result."""
+        from pipeline_locks import acquire_workspace_regroup
+        db = get_db()
+        with acquire_workspace_regroup(db.require_workspace_id()):
+            return prediction_decisions.under_prediction_decision_lock(
+                db, lambda: _bulk_species(db, request.get_json(silent=True), db_path, json_error),
+                json_error=json_error,
+            )
 
     return blueprint
+
+
+def _apply_confirmation(confirmation, low_confidence_photo_ids, response_mode):
+    """Stage an individual confirmation without committing or saving the cache."""
+    ws_id = confirmation.db.require_workspace_id()
+    confirmation.resolve_target_keyword()
+    confirmation.untag_previous_species(ws_id)
+    confirmation.tag_new_species(ws_id)
+    confirmation.record_photo_edit()
+    confirmation.compute_cache_state()
+    confirmation.record_cache_only_confirmation()
+    confirmation.apply_cache_mutation()
+    return confirmation.response(low_confidence_photo_ids, response_mode), confirmation.cached
+
+
+def _commit_species_edit(db, before_cached, cache_dir, work):
+    """Commit catalog and cache together, restoring both after a failed write."""
+    from pipeline import save_results_raw
+    attempted_save = False
+    try:
+        result, cached = work()
+        if cached and cached != before_cached:
+            attempted_save = True
+            save_results_raw(cached, cache_dir, db.active_workspace_id)
+        if cached:
+            result["summary"] = cached.get("summary", {})
+        db.commit()
+    except Exception:  # broad: rollback and restore the saved cache before re-raising the confirmation failure
+        try:
+            db.rollback()
+        except Exception:  # broad: any rollback failure still restores the cache and re-raises below
+            log.exception("Rollback failed after species confirmation failed")
+        if attempted_save:
+            try:
+                save_results_raw(before_cached, cache_dir, db.active_workspace_id)
+            except Exception:  # broad: restoring the cache is best-effort; the original error re-raises below
+                log.exception("Failed to restore pipeline cache after species confirmation failed")
+        raise
+    db._prune_edit_history()
+    return jsonify(result)
+
+
+def _bulk_species(db, body, db_path, json_error):
+    """Validate every target before starting an all-or-nothing additive batch."""
+    if not isinstance(body, dict) or set(body) - {"assignments", "response_mode"}:
+        return json_error("Expected assignments and optional response_mode")
+    if body.get("response_mode", "compact") != "compact":
+        return json_error("Bulk assignments require response_mode compact")
+    assignments = body.get("assignments")
+    if not isinstance(assignments, list) or not assignments or len(assignments) > 100:
+        return json_error("assignments must contain between 1 and 100 selections")
+    validated = []
+    for i, assignment in enumerate(assignments):
+        def invalid(message, status=400, index=i):
+            return json_error(f"Assignment {index}: {message}; no assignments applied", status)
+        if not isinstance(assignment, dict) or set(assignment) - {"species", "photo_ids", "detection_ids"}:
+            return invalid("Expected species, photo_ids and optional detection_ids (additive only)")
+        species = assignment.get("species")
+        if not isinstance(species, str) or not normalize_keyword_display(species):
+            return invalid("species must be a nonempty string")
+        ids = assignment.get("photo_ids")
+        error = _photo_ids_error(db, ids, invalid)
+        if error is not None:
+            return error
+        error = _detection_ids_error(db, assignment, invalid)
+        if error is not None:
+            return error
+        validated.append({**assignment, "species": normalize_keyword_display(species),
+                          "low_confidence_photo_ids": _low_confidence_photo_ids(db, ids)})
+    from pipeline import load_results_raw
+    from services.bulk_species_assignments import apply_assignments
+    cache_dir = os.path.dirname(db_path)
+    cached = load_results_raw(cache_dir, db.active_workspace_id)
+    before = copy.deepcopy(cached)
+    return _commit_species_edit(
+        db, before, cache_dir, lambda: (apply_assignments(db, cached, validated, before=before), cached),
+    )
+
+
+def _detection_ids_error(db, assignment, json_error):
+    """Subject selections must belong to exactly the submitted photos."""
+    if "detection_ids" not in assignment:
+        return None
+    ids = assignment["detection_ids"]
+    if (not isinstance(ids, list) or not ids or any(type(did) is not int for did in ids)
+            or len(ids) != len(set(ids))):
+        return json_error("detection_ids must be a nonempty list of unique integers")
+    selected = set(ids)
+    owners = db.detections.get_ids_for_photos(assignment["photo_ids"])
+    if (not selected <= set().union(*owners.values())
+            or any(not selected.intersection(owners.get(pid, set())) for pid in assignment["photo_ids"])):
+        return json_error("detection_ids must belong to exactly the selected photo_ids")
+    return None
 
 
 def _review_preview(db, confirmation, body, json_error):
@@ -334,7 +411,7 @@ class _SpeciesConfirmation:
 
     def __init__(
         self, db, json_error, species, photo_ids, burst_index, *,
-        add_mode, remove_mode, cache_dir, save_results_raw,
+        add_mode, remove_mode, cache_dir,
     ):
         self.db = db
         self.json_error = json_error
@@ -344,7 +421,6 @@ class _SpeciesConfirmation:
         self.add_mode = add_mode
         self.remove_mode = remove_mode
         self.cache_dir = cache_dir
-        self.save_results_raw = save_results_raw
 
         self.group_plan = None
         self.group_photo_states = None
@@ -352,7 +428,6 @@ class _SpeciesConfirmation:
         self.split = False
         self.cached = None
         self.before_cached = None
-        self.cache_saved = False
         self.target_enc = None
         self.target_enc_idx = None
         self.current_species_list = []
@@ -378,6 +453,7 @@ class _SpeciesConfirmation:
         self.old_rows_by_photo = {}
         self.had_old = set()
         self.photo_edit_id = None
+        self.undo_edit_id = None
 
         self.new_species_list = []
         self.cache_description = None
@@ -395,14 +471,13 @@ class _SpeciesConfirmation:
         )
         self.before_cached = copy.deepcopy(self.cached)
         if self.cached:
-            for enc in self.cached.get("encounters", []):
-                enc["bursts"] = [{"photo_ids": burst} if isinstance(burst, list) else burst
-                                 for burst in enc.get("bursts", [])]
             photo_id_set = set(self.photo_ids)
             for enc_idx, enc in enumerate(self.cached.get("encounters", [])):
                 enc_ids = set(enc.get("photo_ids", []))
                 if not photo_id_set.issubset(enc_ids):
                     continue
+                enc["bursts"] = [{"photo_ids": burst} if isinstance(burst, list) else burst
+                                 for burst in enc.get("bursts", [])]
                 self.target_enc = enc
                 self.target_enc_idx = enc_idx
                 break
@@ -995,7 +1070,7 @@ class _SpeciesConfirmation:
                 current_override != self.new_burst_override
                 and not self.will_auto_detach
             ):
-                record_species_confirm_cache(
+                self.undo_edit_id = record_species_confirm_cache(
                     self.db, species=self.species, target_enc=target_enc,
                     burst_index=self.burst_index,
                     submitted_photo_ids=self.photo_ids,
@@ -1011,7 +1086,7 @@ class _SpeciesConfirmation:
                 "species_confirmed": bool(target_enc.get("species_confirmed")),
             }
             if current_state != self.new_encounter_state:
-                record_species_confirm_cache(
+                self.undo_edit_id = record_species_confirm_cache(
                     self.db, species=self.species, target_enc=target_enc,
                     burst_index=None,
                     submitted_photo_ids=self.photo_ids,
@@ -1022,14 +1097,11 @@ class _SpeciesConfirmation:
                 )
 
     def apply_cache_mutation(self):
-        """Apply the cache mutation and persist it.
+        """Stage cache and history changes inside the caller's transaction.
 
-        Apply the pipeline-cache mutation and persist inside the same
-        transaction so a failed ``save_results_raw`` rolls back the
-        species/keyword edits that would otherwise leave undo pointing
-        at a change that never landed on disk. Legacy requests use the
-        validated burst/encounter scope. Previewed requests derive all
-        affected summaries after staged removals establish final membership.
+        The shared commit helper persists the cache and restores it on failure.
+        Legacy requests use the validated burst/encounter scope. Previewed
+        requests derive summaries after removals establish final membership.
         """
         cached = self.cached
         if not (cached and self.target_enc is not None):
@@ -1067,13 +1139,9 @@ class _SpeciesConfirmation:
         if (self.group_plan is None and self.preview_scope and self.photo_edit_id is None
                 and before_cached["encounters"] != cached["encounters"]):
             from services.grouping_history import record_grouping_edit
-            record_grouping_edit(self.db, self.cache_description + f"{len(self.photo_ids)} photos", {
+            self.undo_edit_id = record_grouping_edit(self.db, self.cache_description + f"{len(self.photo_ids)} photos", {
                 "before": before_cached["encounters"], "after": cached["encounters"],
             })
-        # An atomic replacement may land before a late save error is raised.
-        # Restore the prior snapshot on every attempted write, not just returns.
-        self.cache_saved = True
-        self.save_results_raw(cached, self.cache_dir, self.db.active_workspace_id)
 
     def _apply_combined_group(self, flag_items):
         """Record the completed species/cull decision as one history entry."""
@@ -1091,7 +1159,7 @@ class _SpeciesConfirmation:
         elif flag_items or change["before"] != change["after"]:
             if flag_items:
                 change["photo_edit"] = {"action_type": "flag", "new_value": "pipeline_group_apply"}
-            record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
+            self.undo_edit_id = record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
 
     def _apply_burst_override(self):
         self.target_enc["bursts"][self.burst_index]["species_override"] = (
@@ -1109,7 +1177,7 @@ class _SpeciesConfirmation:
         }
         if self.photo_edit_id is None:
             from services.grouping_history import record_grouping_edit
-            record_grouping_edit(
+            self.undo_edit_id = record_grouping_edit(
                 self.db, self.cache_description + "1 burst", change, [],
             )
 
@@ -1148,7 +1216,7 @@ class _SpeciesConfirmation:
 
     # -- response ----------------------------------------------------
 
-    def response(self, low_confidence_photo_ids):
+    def response(self, low_confidence_photo_ids, response_mode="full"):
         """The JSON body for a landed confirmation."""
         # Report `replaced` consistent with the actual replacement decision
         # (is_replacement, which uses keyword_match_key to match SQLite's
@@ -1179,7 +1247,18 @@ class _SpeciesConfirmation:
         }
         if self.group_photo_states is not None:
             response["group_photos"] = self.group_photo_states
-        if self.cached:
+        response["response_mode"] = response_mode
+        if response_mode == "compact":
+            from services.species_assignment_results import assignment_result, encounter_changes, undo_reference
+            response.update(assignment_result(
+                self.db, self.kid, self.photo_ids,
+                added=self.newly_tagged, removed=self.had_old, low_confidence=low_confidence_photo_ids,
+            ))
+            response["encounter_changes"] = encounter_changes(self.before_cached, self.cached)
+            response["cache_changed"] = bool(response["encounter_changes"]["removed"] or response["encounter_changes"]["upserts"])
+            response["undo"] = undo_reference(self.undo_edit_id or self.photo_edit_id)
+            response["summary"] = (self.cached or {}).get("summary", {})
+        elif self.cached:
             response["encounters"] = self.cached.get("encounters", [])
             response["summary"] = self.cached.get("summary", {})
         return response
