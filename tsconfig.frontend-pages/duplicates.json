@@ -10,6 +10,7 @@
     "../vireo/static/duplicates/resolved.js",
     "../vireo/static/duplicates/trash-progress.js",
     "../vireo/static/duplicates/card.js",
+    "../vireo/static/duplicates/same-shot.js",
     "../vireo/static/duplicates/restore.js",
     "../vireo/static/duplicates/reveal.js",
     "../vireo/static/duplicates/patterns.js",
