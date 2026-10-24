@@ -269,6 +269,7 @@ POST         /api/duplicates/keep
 POST         /api/duplicates/scan
 POST         /api/edit-preview/cancel
 POST         /api/encounters/species
+POST         /api/encounters/species/bulk
 POST         /api/export/presets
 POST         /api/files/reveal
 POST         /api/folders/<int:folder_id>/relocate
@@ -442,6 +443,7 @@ POST         /api/system/mcp-check
 POST         /api/undo
 POST         /api/v1/batch/flag
 POST         /api/v1/encounters/species
+POST         /api/v1/encounters/species/bulk
 POST         /api/v1/photos/<int:photo_id>/flag
 POST         /api/v1/photos/analysis-readiness
 POST         /api/v1/photos/analysis-retry

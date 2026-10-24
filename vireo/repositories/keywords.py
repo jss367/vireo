@@ -696,6 +696,14 @@ class KeywordRepository:
             "SELECT id, name FROM keywords WHERE id = ?", (row["id"],),
         ).fetchone()
 
+    def species_assignment_identity(self, keyword_id: int) -> dict[str, Any] | None:
+        """Return the exact stored keyword identity used by a confirmation."""
+        row = self.conn.execute(
+            "SELECT id, name, parent_id, type, is_species, taxon_id, source_taxon_id "
+            "FROM keywords WHERE id = ?", (keyword_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def species_confirmation_target(self, name: str) -> dict[str, Any]:
         """Snapshot the exact add target, its source identity and inferred taxon.
 

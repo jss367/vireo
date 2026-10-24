@@ -70,7 +70,8 @@ declare function safeFetch(url: '/api/collections', init: RequestInit & {method:
 
 interface ReviewSearchOptions {matchCase: boolean; wholeWord: boolean;}
 interface ReviewFolderNode {total: number; folder: ReviewFolder; children: ReviewFolderNode[];}
-interface ReviewSpeciesResponse {group_photos?: Record<string, ReviewDbPhoto>; photos?: ReviewSpeciesPreviewPhoto[]; preview_token?: string; previous_species_choices?: string[]; photo_count?: number; ok?: boolean; encounters?: ReviewEncounter[]; summary?: ReviewSummary; low_confidence_photo_ids?: number[];}
+interface ReviewEncounterChanges {removed: number[][]; upserts: {index: number; encounter: ReviewEncounter}[];}
+interface ReviewSpeciesResponse {response_mode?: "full" | "compact"; encounter_changes?: ReviewEncounterChanges;group_photos?: Record<string, ReviewDbPhoto>; photos?: ReviewSpeciesPreviewPhoto[]; preview_token?: string; previous_species_choices?: string[]; photo_count?: number; ok?: boolean; encounters?: ReviewEncounter[]; summary?: ReviewSummary; low_confidence_photo_ids?: number[];}
 declare function safeFetch(url: '/api/encounters/species', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewSpeciesResponse>;
 
 interface ReviewGroupApplyResponse {photos?: Record<string,ReviewDbPhoto>; encounters?: ReviewEncounter[]; summary?: ReviewSummary; [key: string]: unknown;}

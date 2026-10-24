@@ -352,8 +352,6 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
 /** @param {ReviewSpeciesEdit} body @param {number} encIdx @param {number | null | undefined} burstIdx */
 async function applyReviewedSpecies(body, encIdx, burstIdx) {
   if (isScopedReviewView() || currentReviewResults().source === 'browse-selection') return;
-  var enc = requireReviewValue(currentReviewResults().encounters[encIdx]);
-  var speciesName = body.species;
   var pendingKey = speciesConfirmPhotoKey(body.photo_ids);
   if (speciesConfirmInFlight[pendingKey]) return;
   speciesConfirmInFlight[pendingKey] = true;
@@ -366,7 +364,7 @@ async function applyReviewedSpecies(body, encIdx, burstIdx) {
     resp = await safeFetch('/api/encounters/species', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({...body, response_mode: 'compact'}),
     });
   } catch (e) {
     delete speciesConfirmInFlight[pendingKey];
@@ -379,26 +377,7 @@ async function applyReviewedSpecies(body, encIdx, burstIdx) {
     return;
   }
 
-  // Prefer the server's encounter list — the endpoint may auto-detach a burst
-  // into a new or adjacent encounter when its confirmed species differs from
-  // the encounter's, and a stale local list would lose that change on the
-  // next save-cache POST.
-  var forceFullRender = false;
-  if (resp.encounters) {
-    forceFullRender = encounterStructureSignature(resp.encounters) !== previousStructure;
-    currentReviewResults().encounters = resp.encounters;
-    if (resp.summary) {
-      currentReviewResults().summary = resp.summary;
-      updateSummaryBar(currentReviewResults().summary);
-    }
-  } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx ?? -1]) {
-    requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).species_override = { species: speciesName, confirmed: true };
-    updateSummaryBar(refreshLocalSummaryCounts());
-  } else {
-    enc.species_confirmed = true;
-    enc.confirmed_species = speciesName;
-    updateSummaryBar(refreshLocalSummaryCounts());
-  }
+  var forceFullRender = applySpeciesResponse(resp, previousStructure);
   if (resp.low_confidence_photo_ids && resp.low_confidence_photo_ids.length) {
     showToast(
       'Tagged ' + resp.low_confidence_photo_ids.length + ' low-confidence detector ' +
@@ -409,6 +388,24 @@ async function applyReviewedSpecies(body, encIdx, burstIdx) {
   refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender);
   checkPendingSync();
   refreshLatestScopeSnapshotIfCurrent();
+}
+
+/** @param {ReviewSpeciesResponse} resp @param {string} previousStructure */
+function applySpeciesResponse(resp, previousStructure) {
+  var results = currentReviewResults();
+  if (resp.response_mode === 'compact' && resp.encounter_changes) {
+    var delta = resp.encounter_changes;
+    var removed = new Set(delta.removed.map(ids => JSON.stringify(ids)));
+    var encounters = results.encounters.filter(enc => !removed.has(JSON.stringify(enc.photo_ids)));
+    delta.upserts.forEach(function(update) {
+      encounters.splice(update.index, 0, update.encounter);
+    });
+    results.encounters = encounters;
+  } else if (resp.encounters) {
+    results.encounters = resp.encounters;
+  }
+  if (resp.summary) results.summary = resp.summary;
+  return encounterStructureSignature(results.encounters) !== previousStructure;
 }
 
 /** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] */
