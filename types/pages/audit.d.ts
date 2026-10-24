@@ -1,6 +1,10 @@
 // The Audit page (vireo/static/audit/): the /api/audit/* payloads it renders
 // and the shared globals its shared.js reads.
-interface AuditDrift {photo_id: number; filename: string; field: string; db_value: unknown; xmp_value: unknown}
+interface AuditDrift {
+  photo_id: number; filename: string; field: string; db_value: unknown; xmp_value: unknown;
+  direction?: string; resolutions?: string[];
+  xmp_problem?: 'corrupt' | 'unreadable'; xmp_error?: string; advice?: string;
+}
 interface AuditOrphan {photo_id: number; filename: string; folder_path: string}
 interface AuditFileEntry {path: string; folder: string}
 interface AuditFlaggedHash {photo_id: number; filename: string; folder_path: string; hash_status: string; hash_checked_at: string}

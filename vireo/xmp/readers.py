@@ -45,6 +45,28 @@ def _parse_xmp(xmp_path):
     return root, tree
 
 
+def sidecar_read_problem(xmp_path):
+    """Why a sidecar that is present cannot be read, or None.
+
+    Returns ``("corrupt", detail)`` when the file is not valid XMP,
+    ``("unreadable", detail)`` when it cannot be opened (a permission error,
+    a directory at the path, an I/O error on a share), and None when it
+    parses or is missing. ``_parse_xmp`` only answers None for all three;
+    callers that show the failure to the user need to know which, because
+    a sync can replace a corrupt sidecar but cannot write over one it
+    cannot open.
+    """
+    try:
+        ET.parse(xmp_path)
+    except FileNotFoundError:
+        return None
+    except ET.ParseError as error:
+        return "corrupt", str(error)
+    except OSError as error:
+        return "unreadable", error.strerror or str(error)
+    return None
+
+
 def _bag_values(root, prop):
     """The non-empty item values of every photo-scoped ``prop`` bag, in order."""
     values = []
