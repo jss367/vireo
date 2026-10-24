@@ -1655,9 +1655,13 @@ class _InPlaceImportRun:
         )
 
     def _cancelled_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
+        summary = f"{indexed} photos (cancelled)"
+        if self.working_copy_failures:
+            n = len(self.working_copy_failures)
+            summary += f", {n:,} without a working copy"
         self.runner.update_step(
             self.job["id"], "scan", status="cancelled",
-            summary=f"{indexed} photos (cancelled)",
+            summary=summary,
         )
         result = {
             "mode": "in_place",
@@ -1671,6 +1675,11 @@ class _InPlaceImportRun:
         }
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
+        # The working-copy pass commits a 24h failure marker on every
+        # photo it marked failed before cancel. Carry those paths through
+        # so the result and step summary say so, matching the completed
+        # path; the per-photo markers would otherwise stay silent.
+        self._add_working_copy_notice(result)
         self._apply_import_tags(result)
         return result
 

@@ -167,6 +167,64 @@ def test_in_place_import_names_photos_without_a_working_copy(app_and_db, tmp_pat
     assert scan_step["summary"] == "1 photos, 1 without a working copy"
 
 
+def test_cancel_mid_working_copy_pass_still_names_the_committed_failures(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Cancelling during the deferred pass keeps the failures it recorded.
+
+    The pass commits a 24-hour ``working_copy_failed_at`` marker per
+    photo as it fails each row. If the user cancels before the next row,
+    ``_finish`` routes to ``_cancelled_result``: without this test the
+    cancelled branch dropped the notice, hiding the committed markers
+    from both the result and the step summary even though the catalog
+    row would stay skipped for 24h.
+    """
+    import threading
+
+    import scanner
+    from wait import wait_for_job_via_client
+
+    _stub_extractor(monkeypatch, lambda src: True)
+    app, _db = app_and_db
+    card = _raw_card(tmp_path, ["DSC_0001.NEF"])
+    client = app.test_client()
+    failed_path = str(card / "DSC_0001.NEF")
+
+    job_ready = threading.Event()
+    holder: dict = {}
+
+    def fake_extract(*_args, **kwargs):
+        # Wait for the main thread to publish the job id so the cancel
+        # below targets this run and not a stale one from a previous test.
+        job_ready.wait(timeout=10)
+        sink = kwargs.get("failed_paths_sink")
+        if sink is not None:
+            sink.append(failed_path)
+        jid = holder.get("job_id")
+        if jid is not None:
+            app._job_runner.cancel_job(jid)
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", fake_extract)
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [str(card)], "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    holder["job_id"] = resp.get_json()["job_id"]
+    job_ready.set()
+    job = wait_for_job_via_client(client, holder["job_id"])
+
+    assert job["status"] == "cancelled", job
+    result = job["result"]
+    assert result["cancelled"] is True
+    assert result["working_copy_failures"] == [failed_path]
+    assert result["working_copy_notice"].startswith(
+        "Vireo could not create a working copy for 1 photo."
+    )
+    scan_step = next(step for step in job["steps"] if step["id"] == "scan")
+    assert scan_step["summary"] == "1 photos (cancelled), 1 without a working copy"
+
+
 def test_a_mid_pass_crash_still_names_the_photos_already_marked(tmp_path, monkeypatch):
     """A pass that commits per-photo failures then raises keeps those paths.
 
