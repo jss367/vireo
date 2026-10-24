@@ -61,8 +61,8 @@ def _make_job(job_id="classify-test"):
     }
 
 
-def test_taxonomy_loads_when_file_exists(tmp_path):
-    """Phase 1: taxonomy.json is loaded when present."""
+def test_taxonomy_loads_when_file_exists(tmp_path, monkeypatch):
+    """Phase 1: taxonomy.json is loaded when present, with no notice."""
     tax_data = {
         "last_updated": "2024-01-01",
         "taxa_by_common": {
@@ -87,19 +87,74 @@ def test_taxonomy_loads_when_file_exists(tmp_path):
     tax_path = tmp_path / "taxonomy.json"
     tax_path.write_text(json.dumps(tax_data))
 
-    from classify_job.common import _load_taxonomy
+    _use_taxonomy_paths(monkeypatch, tax_path, tmp_path / "no-legacy.json")
+    from classify_job.common import _load_job_taxonomy, taxonomy_step_summary
 
-    tax = _load_taxonomy(str(tax_path))
+    job = _make_job()
+    tax = _load_job_taxonomy(job)
     assert tax is not None
     assert tax.taxa_count >= 1
+    assert "_taxonomy_notice" not in job
+    assert taxonomy_step_summary(job, tax) == "Taxonomy loaded"
 
 
-def test_taxonomy_returns_none_when_missing(tmp_path):
-    """Phase 1: returns None when taxonomy.json doesn't exist."""
-    from classify_job.common import _load_taxonomy
+def _use_taxonomy_paths(monkeypatch, persistent, legacy):
+    import taxonomy
 
-    tax = _load_taxonomy(str(tmp_path / "nonexistent.json"))
+    monkeypatch.setattr(taxonomy, "TAXONOMY_JSON_PATH", str(persistent))
+    monkeypatch.setattr(taxonomy, "LEGACY_TAXONOMY_JSON_PATH", str(legacy))
+    taxonomy.clear_taxonomy_cache()
+    monkeypatch.setattr(taxonomy, "_taxonomy_failed_stats", {})
+    monkeypatch.setattr(taxonomy, "_taxonomy_failed_reasons", {})
+
+
+def test_taxonomy_returns_none_when_missing(tmp_path, monkeypatch):
+    """Phase 1: returns None when taxonomy.json doesn't exist. An install
+    without a taxonomy runs without one on purpose, so there is no notice."""
+    _use_taxonomy_paths(
+        monkeypatch, tmp_path / "nonexistent.json", tmp_path / "no-legacy.json",
+    )
+    from classify_job.common import _load_job_taxonomy, taxonomy_step_summary
+
+    job = _make_job()
+    tax = _load_job_taxonomy(job)
     assert tax is None
+    assert "_taxonomy_notice" not in job
+    assert taxonomy_step_summary(job, tax) == "No taxonomy"
+
+
+def test_unreadable_taxonomy_is_named_in_the_classify_result(tmp_path, monkeypatch):
+    """A taxonomy file that cannot be parsed left the classify job running
+    without it, and its step summary read like an install that never
+    downloaded one ("No taxonomy"). The step now says the file is unreadable
+    and the result carries a notice naming the file and the error."""
+    broken = tmp_path / "taxonomy.json"
+    broken.write_text('{"taxa_by_scientific": {')
+    _use_taxonomy_paths(monkeypatch, broken, tmp_path / "no-legacy.json")
+    from classify_job.common import (
+        _load_job_taxonomy,
+        taxonomy_step_summary,
+        with_taxonomy_notice,
+    )
+
+    # Twice: the second load short-circuits on the remembered parse failure
+    # and must still say why.
+    for _attempt in range(2):
+        job = _make_job()
+        tax = _load_job_taxonomy(job)
+        assert tax is None
+        assert taxonomy_step_summary(job, tax) == "Taxonomy unreadable"
+        notice = with_taxonomy_notice(job, {"total": 1})["taxonomy_notice"]
+        assert notice.startswith(
+            f"This run had no taxonomy: Vireo could not read {broken} "
+            "(JSONDecodeError: "
+        )
+        assert notice.endswith(
+            "Without it, predictions are not checked against your photos' "
+            "existing keywords (each one goes to review as new), and they get "
+            "no order, family or genus from the taxonomy. Download it again "
+            "in Settings › Taxonomy."
+        )
 
 
 def test_load_labels_from_file(tmp_path):
@@ -4760,12 +4815,23 @@ def test_classify_cleanup_reports_closed_and_releases_owned_handle(tmp_path, mon
         owned.close()
 
 
-def test_run_classify_job_full_pipeline(tmp_path):
-    """run_classify_job orchestrates all phases end-to-end."""
+@pytest.mark.parametrize("taxonomy_file", ["absent", "unreadable"])
+def test_run_classify_job_full_pipeline(tmp_path, monkeypatch, taxonomy_file):
+    """run_classify_job orchestrates all phases end-to-end.
+
+    With no taxonomy installed the run says "No taxonomy" and nothing more;
+    with one that cannot be read, its step summary and result say so.
+    """
     from unittest.mock import MagicMock, patch
 
     import numpy as np
     from classify_job import ClassifyParams, run_classify_job
+    from job_summaries import describe_result
+
+    tax_path = tmp_path / "taxonomy.json"
+    if taxonomy_file == "unreadable":
+        tax_path.write_text('{"taxa_by_scientific": {')
+    _use_taxonomy_paths(monkeypatch, tax_path, tmp_path / "no-legacy.json")
 
     runner = FakeRunner()
     job = _make_job()
@@ -4825,7 +4891,6 @@ def test_run_classify_job_full_pipeline(tmp_path):
     with patch("classify_job.run.Database", return_value=mock_db_instance), \
          patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
          patch("classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, [])), \
          patch("classify_job.job_run.Classifier", return_value=mock_clf), \
          patch("classify_job.job_run._detect_subjects", return_value=({}, 0)):
@@ -4836,6 +4901,23 @@ def test_run_classify_job_full_pipeline(tmp_path):
     assert result["failed"] == 0
     mock_db_instance.predictions.add.assert_called_once()
     assert mock_db_instance.predictions.add.call_args.kwargs["refresh_output"] is True
+
+    taxonomy_summaries = [
+        kwargs["summary"] for step, kwargs in runner.steps
+        if step == "load_taxonomy" and kwargs.get("status") == "completed"
+    ]
+    details = describe_result("classify", result)["details"]
+    if taxonomy_file == "absent":
+        assert taxonomy_summaries == ["No taxonomy, 1 labels"]
+        assert "taxonomy_notice" not in result
+        assert details == []
+    else:
+        assert taxonomy_summaries == ["Taxonomy unreadable, 1 labels"]
+        assert result["taxonomy_notice"].startswith(
+            f"This run had no taxonomy: Vireo could not read {tax_path} "
+        )
+        # The Jobs page's detail panel leads with it.
+        assert details[0] == result["taxonomy_notice"]
 
 
 # ── Task 7: Integration test — route delegates to run_classify_job ─────────
@@ -5084,7 +5166,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch(
             "classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
@@ -5119,7 +5201,7 @@ def test_cache_shortcut_does_not_swallow_an_unusable_label_set(tmp_path):
     # finish "successfully" without ever loading the real labels.
     with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch("classify_job.job_run._all_photos_cache_satisfied", return_value=True), \
          patch("classify_job.job_run._finalize_cached_only",
                return_value={"classified": 2, "cached": True}) as finalize, \
@@ -5197,7 +5279,7 @@ def test_classify_job_publishes_label_source_on_classify_step(tmp_path):
     runner = FakeRunner()
     with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch("classify_job.label_loading.get_saved_labels", return_value=saved), \
          patch("classify_job.label_source.get_saved_labels", return_value=saved), \
          patch(
@@ -5327,7 +5409,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
 
     with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch(
             "classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
@@ -6617,7 +6699,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     with patch("classify_job.run.Database", return_value=mock_db_instance), \
          patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch("classify_job.job_run._load_labels",
                return_value=(["NewProcessed"], False, [])), \
          patch("classify_job.job_run.Classifier", return_value=mock_clf), \
@@ -6764,7 +6846,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
         patch("classify_job.run.Database", return_value=mock_db_instance),
         patch("classify_job.job_run.get_active_model", return_value=fake_model),
         patch("classify_job.job_run.get_models", return_value=[fake_model]),
-        patch("classify_job.common._load_taxonomy", return_value=None),
+        patch("classify_job.job_run._load_job_taxonomy", return_value=None),
         patch("classify_job.job_run._load_labels",
               return_value=(["Restored"], False, [])),
         patch("classify_job.job_run.Classifier", return_value=mock_clf),
@@ -7144,7 +7226,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     with patch("classify_job.run.Database", return_value=mock_db_instance), \
          patch("classify_job.job_run.get_active_model", return_value=fake_model), \
          patch("classify_job.job_run.get_models", return_value=[fake_model]), \
-         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_job_taxonomy", return_value=None), \
          patch("classify_job.job_run._load_labels",
                return_value=(["NewEmpty"], False, [])), \
          patch("classify_job.job_run.Classifier", return_value=mock_clf), \

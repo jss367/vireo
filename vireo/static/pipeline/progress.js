@@ -269,15 +269,34 @@ function _humanizePipelineError(msg) {
   return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
 }
 
-// Show why stages of a run that did not fail were skipped. Warning-styled,
-// not the red failure banner: nothing failed, but the user should know why
-// a stage did nothing (e.g. every detection below detector_confidence).
-/** @param {string[]} messages @param {boolean} offerReview */
-function _showPipelineNotes(messages, offerReview) {
+// The notes banner's heading. A note tagged with a stage that has a card
+// explains why that stage skipped; any other note (``[taxonomy]``: the run
+// went without the taxonomy) describes a run whose stages all ran, so the
+// heading must not claim a stage was skipped.
+/** @param {string[]} notes */
+function _pipelineNotesTitle(notes) {
+  var skips = notes.filter(function(note) {
+    var match = String(note).match(/^\[(\w+)\]/);
+    var stage = match ? match[1] : '';
+    return !!(_stageToCard[stage] || _failureOnlyStageToCard[stage]);
+  }).length;
+  if (skips === notes.length) return 'Some stages were skipped';
+  if (skips === 0) return notes.length === 1 ? 'This run finished with a note' : 'This run finished with notes';
+  return 'Some stages were skipped, and this run has notes';
+}
+
+// Show the notes of a run that did not fail: why a stage skipped, or what
+// the run went without. Warning-styled, not the red failure banner: nothing
+// failed, but the user should know why a stage did nothing (e.g. every
+// detection below detector_confidence) or ran without the taxonomy.
+/** @param {string[]} notes raw ``[stage] message`` notes @param {boolean} offerReview */
+function _showPipelineNotes(notes, offerReview) {
   var banner = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteBanner'));
   var text = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteText'));
   if (!banner || !text) return;
-  text.textContent = messages.join('\n');
+  var title = document.getElementById('pipelineNoteTitle');
+  if (title) title.textContent = _pipelineNotesTitle(notes);
+  text.textContent = notes.map(_humanizePipelineError).join('\n');
   var link = /** @type {HTMLAnchorElement} */ (document.getElementById('pipelineNoteReviewLink'));
   if (link) link.style.display = offerReview ? 'inline-block' : 'none';
   banner.style.display = '';

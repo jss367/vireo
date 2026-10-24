@@ -872,6 +872,7 @@ def test_pipeline_notes_render_as_skipped_not_failed(live_server, page):
     expect(page.get_by_test_id("pipeline-note-banner")).to_contain_text(
         "detector_confidence"
     )
+    expect(page.locator("#pipelineNoteTitle")).to_have_text("Some stages were skipped")
     # A completed run with only notes stays here (no auto-redirect) so the
     # notes are read, and the banner offers the way on to Review.
     expect(page).to_have_url(re.compile(r"/pipeline$"))
@@ -893,6 +894,54 @@ def test_pipeline_notes_render_as_skipped_not_failed(live_server, page):
     expect(page.locator("#statusScan")).to_contain_text("Failed: [scan] PERMISSION_DENIED")
     expect(page.get_by_test_id("pipeline-error-banner")).to_be_visible()
     expect(page.locator("#pipelineNoteReviewLink")).to_be_hidden()
+
+
+def test_pipeline_taxonomy_note_does_not_mark_a_stage_skipped(live_server, page):
+    """A run that went without the taxonomy (its download failed) classified
+    every photo, so the notes banner shows why without claiming that a stage
+    was skipped, and the Classify card keeps its own outcome."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate("""
+        var note = '[taxonomy] This run had no taxonomy: downloading it ' +
+          'failed (Network is unreachable). Download it in Settings › ' +
+          'Taxonomy before the next run.';
+        _onPipelineComplete({
+          status: 'completed',
+          result: {
+            ok: true,
+            stages: {classify: {classified: 3, total: 3}},
+            errors: [note],
+            notes: [note],
+          },
+        });
+    """)
+    banner = page.get_by_test_id("pipeline-note-banner")
+    expect(banner).to_be_visible()
+    expect(page.locator("#pipelineNoteTitle")).to_have_text(
+        "This run finished with a note"
+    )
+    expect(page.locator("#pipelineNoteText")).to_have_text(
+        "This run had no taxonomy: downloading it failed (Network is "
+        "unreachable). Download it in Settings › Taxonomy before the next run."
+    )
+    expect(page.locator("#statusClassify")).not_to_contain_text("Skipped")
+    expect(page.locator("#pillClassify")).not_to_have_text("Skipped")
+    expect(page.get_by_test_id("pipeline-error-banner")).to_be_hidden()
+    expect(page.locator("#pipelineNoteReviewLink")).to_be_visible()
+
+    # A skip note alongside it: the heading names both.
+    page.evaluate("""
+        var tax = '[taxonomy] This run had no taxonomy.';
+        var skip = '[eye_keypoints] Failed to download superanimal-bird weights';
+        _onPipelineComplete({
+          status: 'completed',
+          result: {ok: true, stages: {}, errors: [tax, skip], notes: [tax, skip]},
+        });
+    """)
+    expect(page.locator("#pipelineNoteTitle")).to_have_text(
+        "Some stages were skipped, and this run has notes"
+    )
 
 
 def test_pipeline_collection_failure_fails_scan_card_on_terminal_path(

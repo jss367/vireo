@@ -2868,6 +2868,63 @@ def test_clear_taxonomy_cache_also_clears_failure_records(tmp_path, monkeypatch)
         assert tax_mod._taxonomy_failed_stats == {}
 
 
+def test_load_local_taxonomy_reports_unreadable_candidates(tmp_path, monkeypatch):
+    """A caller that goes on without the taxonomy, or on the legacy copy,
+    needs to tell the user why. ``failures`` names every candidate that
+    exists but could not be read, with the parse error, including on later
+    loads that short-circuit on the remembered failure; an absent file is
+    not a failure."""
+    import taxonomy as tax_mod
+
+    tax_mod.clear_taxonomy_cache()
+    preferred = tmp_path / "persistent.json"
+    preferred.write_text("{ not valid json")
+    legacy = tmp_path / "legacy.json"
+    monkeypatch.setattr(tax_mod, "TAXONOMY_JSON_PATH", str(preferred))
+    monkeypatch.setattr(tax_mod, "LEGACY_TAXONOMY_JSON_PATH", str(legacy))
+    try:
+        for _attempt in range(2):
+            failures = []
+            assert tax_mod.load_local_taxonomy(failures=failures) is None
+            assert [f["path"] for f in failures] == [str(preferred)]
+            assert failures[0]["error"].startswith("JSONDecodeError: ")
+
+        _write_taxonomy_json(legacy, "test species")
+        failures = []
+        tax = tax_mod.load_local_taxonomy(failures=failures)
+        assert tax is not None
+        assert [f["path"] for f in failures] == [str(preferred)]
+        notice = tax_mod.taxonomy_fallback_notice(tax, failures)
+        assert notice == (
+            f"Vireo could not read {preferred} ({failures[0]['error']}), so "
+            f"this run used the older taxonomy file at {legacy}. Download it "
+            "again in Settings › Taxonomy."
+        )
+
+        preferred.unlink()
+        failures = []
+        assert tax_mod.load_local_taxonomy(failures=failures) is tax
+        assert failures == []
+        assert tax_mod.taxonomy_fallback_notice(tax, failures) is None
+    finally:
+        tax_mod.clear_taxonomy_cache()
+
+
+def test_taxonomy_fallback_notice_is_silent_for_an_install_without_one():
+    """No taxonomy and nothing asked for or broken: Settings already says
+    classification works without it, so a run adds nothing."""
+    import taxonomy as tax_mod
+
+    assert tax_mod.taxonomy_fallback_notice(None, []) is None
+    assert tax_mod.taxonomy_fallback_notice(None, [], "HTTP Error 503") == (
+        "This run had no taxonomy: downloading it failed (HTTP Error 503). "
+        "Without it, predictions are not checked against your photos' "
+        "existing keywords (each one goes to review as new), and they get no "
+        "order, family or genus from the taxonomy. Download it in Settings › "
+        "Taxonomy before the next run."
+    )
+
+
 def test_exhausted_retries_chain_the_last_parse_error(tmp_path, monkeypatch):
     """"File kept changing" alone doesn't say which byte was malformed."""
     import taxonomy as tax_mod

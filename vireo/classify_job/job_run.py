@@ -14,7 +14,16 @@ from classify_job.classify_pass import (
     _classify_summary_parts,
     _publish_classifier_runs_for_raw_results,
 )
-from classify_job.common import ClassificationCancelled, Classifier, TimmClassifier, UnusableLabelsError, log
+from classify_job.common import (
+    ClassificationCancelled,
+    Classifier,
+    TimmClassifier,
+    UnusableLabelsError,
+    _load_job_taxonomy,
+    log,
+    taxonomy_step_summary,
+    with_taxonomy_notice,
+)
 from classify_job.detection import _detect_subjects
 from classify_job.label_loading import _load_labels, _record_labels_fingerprint, _reuse_saved_label_embeddings
 from classify_job.label_source import _sources_from_metas, describe_label_source
@@ -444,8 +453,7 @@ class _ClassifyJobRun:
         self._progress(
             0, self.total, "Loading taxonomy...", "Step 2/5: Loading taxonomy",
         )
-        from taxonomy import load_local_taxonomy
-        tax = self.tax = load_local_taxonomy()
+        tax = self.tax = _load_job_taxonomy(job)
 
         # Phase 3: Load labels (uses model_type/model_str from above)
         labels, use_tol, label_metas = _load_labels(
@@ -493,7 +501,7 @@ class _ClassifyJobRun:
         from computation_cache import taxonomy_identity as _taxonomy_identity
         job["_taxonomy_identity"] = _taxonomy_identity(tax)
 
-        tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+        tax_summary = taxonomy_step_summary(job, tax)
         labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
         runner.update_step(
             job["id"], "load_taxonomy", status="completed",
@@ -1100,7 +1108,7 @@ class _ClassifyJobRun:
             self.failed,
         )
 
-        return {
+        return with_taxonomy_notice(self.job, {
             "total": total,
             "predictions_stored": group_result["predictions_stored"],
             "burst_groups": group_result["burst_groups"],
@@ -1108,4 +1116,4 @@ class _ClassifyJobRun:
             "already_labeled": group_result["already_labeled"],
             "detected": self.detected,
             "failed": self.failed,
-        }
+        })

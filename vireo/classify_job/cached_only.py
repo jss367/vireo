@@ -10,7 +10,12 @@ import os
 from typing import TYPE_CHECKING, cast
 
 from classify_job.cache_coverage import _cache_run_filter
-from classify_job.common import _photo_timestamp
+from classify_job.common import (
+    _load_job_taxonomy,
+    _photo_timestamp,
+    taxonomy_step_summary,
+    with_taxonomy_notice,
+)
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
 from classify_job.store_predictions import _cached_prediction_taxonomy, _store_grouped_predictions
 from services import detection_store
@@ -91,16 +96,14 @@ def _finalize_cached_only(
     Returns the count dict ``run_classify_job`` returns to the runner.
     """
 
-    from taxonomy import load_local_taxonomy
-
     total = len(photos)
 
     runner.update_step(job["id"], "load_taxonomy", status="running")
-    tax = load_local_taxonomy()
+    tax = _load_job_taxonomy(job)
     runner.update_step(
         job["id"], "load_taxonomy",
         status="completed",
-        summary="Taxonomy loaded" if tax else "No taxonomy",
+        summary=taxonomy_step_summary(job, tax),
     )
     _finalize_remaining_steps(
         runner, job["id"], ["load_model", "detect"],
@@ -145,7 +148,7 @@ def _finalize_cached_only(
         thread_db, runner, job, params, tax, total,
         raw_results, resolved_model, resolved_fingerprint,
     )
-    return {
+    return with_taxonomy_notice(job, {
         "total": total,
         "predictions_stored": group_result["predictions_stored"],
         "burst_groups": group_result["burst_groups"],
@@ -153,7 +156,7 @@ def _finalize_cached_only(
         "already_labeled": group_result["already_labeled"],
         "detected": 0,
         "failed": 0,
-    }
+    })
 
 
 def _finalize_cached_results(

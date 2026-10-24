@@ -241,7 +241,11 @@ def _classify(result: dict, config: dict) -> tuple[str, list[str]]:
         summary += f" in {_n(groups, 'group')}"
     if failed:
         summary += f", {failed:,} failed"
-    return summary, _error_details(result)
+    # A run that went without the taxonomy (or on its older copy) finished
+    # validly but not the way the user set it up; say so first.
+    notice = result.get("taxonomy_notice")
+    notice_lines = [str(notice)] if notice else []
+    return summary, notice_lines + _error_details(result)
 
 
 def _panorama(result: dict, config: dict) -> tuple[str, list[str]]:
