@@ -124,6 +124,14 @@ class ScanHooks:
     before publication, new_id and path_str are None: discard old_id
     without adopting a missing or unrelated replacement row."""
 
+    sidecar_error: Callable[..., Any] | None = None
+    """Optional callable(xmp_path_str, photo_filename, reason) invoked once
+    per sidecar whose keywords this scan could not import: a photo's own
+    sidecar it could not read, or a companion JPEG's sidecar that could not
+    be read or imported. The scan continues, and the next scan tries again
+    (an unread sidecar stays pending). Without this hook the photo's
+    keywords go missing with nothing but a log line to say so."""
+
     permission_error: Callable[..., Any] | None = None
     """Optional callable(path_str) invoked once per directory the kernel
     refuses to enumerate (EPERM from macOS TCC, EACCES from POSIX mode
