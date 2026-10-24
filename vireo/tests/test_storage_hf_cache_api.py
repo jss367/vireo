@@ -124,16 +124,17 @@ def test_storage_page_manages_the_cache_itself(app_and_db):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
-def test_remove_by_key_rechecks_installed_status_server_side(seeded):
-    """An entry that became installed after the page loaded answers 409."""
+def test_remove_by_key_frees_a_duplicate_of_an_installed_model(seeded, tmp_path):
+    """The install is its own full copy, so its cache twin is removable."""
     app, blobs = seeded
     resp = app.test_client().post(
         "/api/storage/hf-cache/remove",
         json={"keys": ["jss367/vireo-onnx-models/dinov2-vit-b14"]},
     )
-    assert resp.status_code == 409
-    assert "backs an installed model" in resp.get_json()["error"]
-    assert blobs["live"].exists()
+    assert resp.status_code == 200
+    assert resp.get_json()["freed"] == 300
+    assert not blobs["live"].exists()
+    assert (tmp_path / "vireo-models" / "dinov2-vit-b14" / "model.onnx").read_bytes() == b"installed"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")

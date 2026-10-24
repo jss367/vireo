@@ -1,13 +1,15 @@
 """The Hugging Face hub cache entries Vireo downloaded, and their cleanup.
 
-Every model Vireo fetches goes through ``hf_hub_download``, which stores the
-bytes in the hub cache (``blobs/<oid>`` plus ``snapshots/<rev>/<path>``
-symlinks, or plain copies where symlinks are unavailable) before
-``models.py`` clones them into ``~/.vireo/models``. The runtime only ever
-reads ``~/.vireo/models``, so a cache entry is useful exactly while the model
-it came from is installed: it lets Repair or a re-download skip the network.
-Once the model is removed, or a newer snapshot replaces it, the entry is dead
-weight that Settings never shows (Settings reads only the install folder).
+Vireo used to fetch every model into the hub cache (``blobs/<oid>`` plus
+``snapshots/<rev>/<path>`` symlinks, or plain copies where symlinks are
+unavailable) and then byte-copy it into ``~/.vireo/models``, so each model
+took its size twice. Downloads now write straight into ``~/.vireo/models``
+(``hub_download.fetch_hub_file``) and add nothing here, but the entries older
+downloads left stay until removed. The runtime only ever reads
+``~/.vireo/models``, so every entry is a removable duplicate: one for an
+installed model only spares the network if that model is downloaded again,
+and one for a removed or superseded model is dead weight that Settings never
+shows (Settings reads only the install folder).
 
 ``inventory`` lists the cache per model with that distinction, ``remove``
 deletes chosen entries, and ``purge_model`` / ``purge_subfolder`` are the
@@ -608,19 +610,16 @@ def _result(groups: Iterable[JsonDict], freed: int, failures: list[CacheRemovalF
 def remove(keys: Sequence[str], cache_dir: str | None = None, models_dir: str | None = None) -> CacheRemoval:
     """Remove the entries named by ``keys``.
 
-    Unknown keys raise ``KeyError``; a key whose entry backs an installed
-    model raises ``ValueError``. Both are decided on state collected under
-    the download locks, not on what the page inventoried earlier.
+    Unknown keys raise ``KeyError``, decided on state collected under the
+    download locks, not on what the page inventoried earlier. An entry that
+    duplicates an installed model is removable too: the install is its own
+    full copy and never reads the cache.
     """
     def select(found: dict[str, JsonDict]) -> list[JsonDict]:
         missing = [k for k in keys if k not in found]
         if missing:
             raise KeyError(missing[0])
-        groups = [found[k] for k in dict.fromkeys(keys)]
-        installed = [g["key"] for g in groups if g["installed"]]
-        if installed:
-            raise ValueError(installed[0])
-        return groups
+        return [found[k] for k in dict.fromkeys(keys)]
 
     result = _delete_selected(_cache_dir(cache_dir), _models_dir(models_dir), select)
     log.info("Removed HF cache entries %s (%d bytes, %d failures)",

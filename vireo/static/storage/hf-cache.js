@@ -1,9 +1,9 @@
 /* Hugging Face cache card and modal on the Storage page.
  *
- * The cache is where every model download lands before Vireo clones it into
- * its models folder; Settings only ever shows that folder. This modal lists
- * the cache per model, says which entries still back an installed model, and
- * removes the rest. Depends on storageFormatBytes / storageEscapeHtml and
+ * Older Vireo downloads landed here before being copied into the models
+ * folder, so each model took its size twice; downloads now skip the cache.
+ * Settings only ever shows the models folder. This modal lists the cache per
+ * model, says which entries duplicate an installed model, and removes them. Depends on storageFormatBytes / storageEscapeHtml and
  * safeFetch (navbar), and on loadStoragePanel to refresh the cards.
  */
 /** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
@@ -15,7 +15,9 @@ function hfCacheCardNote(hf) {
     return storageFormatBytes(hf.unused_size) + ' backs no installed model';
   }
   if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained cache payloads';
-  return hf.installed_size ? 'All entries back installed models' : 'No removable payloads';
+  return hf.installed_size
+    ? storageFormatBytes(hf.installed_size) + ' duplicates installed models'
+    : 'No removable payloads';
 }
 
 async function openHfCacheModal() {
@@ -72,9 +74,11 @@ function _hfCacheRow(entry) {
   if (entry.retained_size) files.textContent += ' · ' + storageFormatBytes(entry.retained_size) + ' retained';
   meta.appendChild(files);
   var tag = document.createElement('span');
-  tag.className = 'stat-kind ' + (entry.installed || entry.removable === false ? 'keep' : 'safe');
-  tag.textContent = entry.installed ? 'Backs installed model' : 'No installed model uses this';
-  if (entry.installed && entry.install_path) tag.title = entry.install_path;
+  tag.className = 'stat-kind ' + (entry.removable === false ? 'keep' : 'safe');
+  tag.textContent = entry.installed ? 'Duplicate of installed model' : 'No installed model uses this';
+  if (entry.installed && entry.install_path) {
+    tag.title = 'Vireo reads only its own copy at ' + entry.install_path + ', so removing this frees its full size.';
+  }
   meta.appendChild(tag);
   label.appendChild(meta);
   li.appendChild(label);
@@ -84,10 +88,6 @@ function _hfCacheRow(entry) {
   if (entry.retained_reason) {
     btn.disabled = true;
     btn.title = entry.retained_reason;
-  } else if (entry.installed) {
-    btn.disabled = true;
-    btn.title = 'Remove the model in Settings → Models; its cache entry goes with it. ' +
-      'The installed copy may share disk blocks with this entry, so removing it alone frees little.';
   } else if (entry.removable === false) {
     btn.disabled = true;
     btn.title = 'Snapshot copies are retained because their download lock cannot be verified.';

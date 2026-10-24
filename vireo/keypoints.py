@@ -24,7 +24,6 @@ import threading
 
 import numpy as np
 import onnx_runtime
-from file_replace import replace_file
 from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
@@ -128,25 +127,14 @@ def _hf_download_keypoint_weights(model_name, progress_callback=None):
         log.info("%s weights missing — downloading from Hugging Face", model_name)
 
         try:
-            import shutil
-
-            import huggingface_hub
+            from hub_download import fetch_hub_file
             from models import ONNX_REPO
 
             for filename, final_path in (
                 ("model.onnx", onnx_path),
                 ("config.json", config_path),
             ):
-                cached = huggingface_hub.hf_hub_download(
-                    repo_id=ONNX_REPO,
-                    filename=filename,
-                    subfolder=model_name,
-                )
-                # hf_hub_download returns its cache path; copy into the
-                # model dir so the inference code can find it consistently.
-                tmp = final_path + ".download"
-                shutil.copy2(cached, tmp)
-                replace_file(tmp, final_path)
+                fetch_hub_file(ONNX_REPO, filename, final_path, subfolder=model_name)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to download {model_name} weights: {e}. "
