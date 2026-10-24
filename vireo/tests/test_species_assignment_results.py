@@ -71,7 +71,8 @@ def test_compact_noop_has_no_unrelated_undo_reference(app_and_db):
     assert second['counts']['changed'] == 0
     assert second['counts']['unchanged'] == len(ids)
     assert second['cache_changed'] is False
-    assert second['encounter_changes'] == {'removed': [], 'upserts': []}
+    assert second['encounter_changes']['removed'] == []
+    assert second['encounter_changes']['upserts'] == []
 
 
 def test_compact_split_returns_only_affected_encounters(app_and_db):
@@ -273,3 +274,18 @@ def test_bulk_failure_after_first_addition_rolls_back_all_selections(app_and_db,
     assert not db.photo_species.get_species_for_photos(ids)
     assert not db.pending_changes.list_all()
     assert not db.edit_history.list_recent()
+
+
+def test_compact_patch_digest_binds_ordered_encounter_and_burst_memberships():
+    import hashlib
+
+    from services.species_assignment_results import encounter_changes, encounter_structure_digest
+    before = {'encounters': [{'photo_ids': [2, 1], 'bursts': [[2], {'photo_ids': [1]}]}]}
+    expected = hashlib.sha256(b'[{"photo_ids":[2,1],"bursts":[[2],[1]]}]').hexdigest()
+    assert encounter_structure_digest(before) == expected
+    after = copy.deepcopy(before)
+    after['encounters'][0]['confirmed_species'] = 'Blue Jay'
+    assert encounter_changes(before, after)['base_structure_digest'] == expected
+    assert encounter_structure_digest(after) == expected
+    after['encounters'][0]['bursts'].reverse()
+    assert encounter_structure_digest(after) != expected

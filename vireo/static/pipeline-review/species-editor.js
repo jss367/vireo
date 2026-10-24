@@ -377,7 +377,7 @@ async function applyReviewedSpecies(body, encIdx, burstIdx) {
     return;
   }
 
-  var forceFullRender = applySpeciesResponse(resp, previousStructure);
+  var forceFullRender = await applySpeciesResponse(resp, previousStructure);
   if (resp.low_confidence_photo_ids && resp.low_confidence_photo_ids.length) {
     showToast(
       'Tagged ' + resp.low_confidence_photo_ids.length + ' low-confidence detector ' +
@@ -391,10 +391,24 @@ async function applyReviewedSpecies(body, encIdx, burstIdx) {
 }
 
 /** @param {ReviewSpeciesResponse} resp @param {string} previousStructure */
-function applySpeciesResponse(resp, previousStructure) {
+async function applySpeciesResponse(resp, previousStructure) {
   var results = currentReviewResults();
   if (resp.response_mode === 'compact' && resp.encounter_changes) {
     var delta = resp.encounter_changes;
+    var signature = encounterStructureSignature(results.encounters);
+    var digest = await speciesStructureDigest(signature);
+    if (isScopedReviewView()) return false;
+    // Another tab or an in-flight response may have regrouped this review.
+    // Never splice server indices into a different local structure.
+    if (!digest || digest !== delta.base_structure_digest ||
+        signature !== encounterStructureSignature(currentReviewResults().encounters)) {
+      return reloadReviewAfterSpeciesChange();
+    }
+    results = currentReviewResults();
+    var memberships = new Set(results.encounters.map(enc => JSON.stringify(enc.photo_ids)));
+    if (!delta.removed.every(ids => memberships.has(JSON.stringify(ids)))) {
+      return reloadReviewAfterSpeciesChange();
+    }
     var removed = new Set(delta.removed.map(ids => JSON.stringify(ids)));
     var encounters = results.encounters.filter(enc => !removed.has(JSON.stringify(enc.photo_ids)));
     delta.upserts.forEach(function(update) {
@@ -406,6 +420,33 @@ function applySpeciesResponse(resp, previousStructure) {
   }
   if (resp.summary) results.summary = resp.summary;
   return encounterStructureSignature(results.encounters) !== previousStructure;
+}
+
+/** @param {string} signature @returns {Promise<string | null>} */
+async function speciesStructureDigest(signature) {
+  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
+  var bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signature));
+  return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function reloadReviewAfterSpeciesChange() {
+  var seq = ++reviewScopeRequestSeq;
+  var workspaceId = pipelineReviewWorkspaceId;
+  try {
+    var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
+    if (seq !== reviewScopeRequestSeq || workspaceId !== pipelineReviewWorkspaceId || isScopedReviewView()) return false;
+    if (!data.results || (data.workspace_id != null && data.workspace_id !== workspaceId)) {
+      showToast('Species saved, but the review changed. Reload to see the latest photo groups.', 'info');
+      return false;
+    }
+    cachedPipelineResults = cloneReviewData(data.results);
+    cachedResultsCacheInfo = cloneReviewData(data.results_cache_info || null);
+    applyReviewResults(data.results, data.results_cache_info || null);
+    return true;
+  } catch (_) {
+    showToast('Species saved, but the latest photo groups could not be loaded. Reload the review.', 'error');
+    return false;
+  }
 }
 
 /** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] */

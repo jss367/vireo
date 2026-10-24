@@ -37,10 +37,15 @@ Group Review choices explicitly request that change.
 encounter to remove. `upserts` contains `{index, encounter}` records in ascending
 final index order. Remove the old memberships first, then insert the upserts at
 their final indices. This handles label changes, splits and adjacent merges without
-returning unchanged encounters. No encounter cache produces an empty patch. Summary
-counts describe the saved result. The review grid and Group Review request compact
+returning unchanged encounters. `base_structure_digest` binds the patch to the
+ordered encounter and burst memberships before the edit. The client checks this
+digest and the removed memberships before splicing; stale grouping state triggers
+an authoritative reload, with no partial patch or summary update. Reload responses
+cannot overwrite a newer workspace or scope navigation. No encounter cache produces
+an empty patch. Summary counts describe the saved result. The review grid and Group Review request compact
 responses and apply these changes locally, preserving unrelated encounter objects.
-They do not fetch or POST a complete encounter tree after a species addition.
+They do not fetch or POST a complete encounter tree after a species addition when
+the grouping still matches. A stale grouping triggers one authoritative fetch.
 
 An undo reference is either null (no edit was recorded) or:
 
@@ -103,7 +108,7 @@ These measurements do not rerun the original private wildlife review.
 | Work for all 30 species | Full individual responses | Compact individual responses | One bulk request |
 | --- | ---: | ---: | ---: |
 | HTTP requests | 30 | 30 | 1 |
-| Response bytes, uncompressed | 151,583,433 | 313,331 | 24,813 |
+| Response bytes, uncompressed | 151,583,433 | 316,061 | 24,904 |
 | Responses serializing the complete encounter tree | 30 | 0 | 0 |
 | Cache loads | 30 | 30 | 1 |
 | Cache saves | 30 | 30 | 1 |

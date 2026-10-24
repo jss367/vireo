@@ -425,7 +425,7 @@ async function grmConfirmSpeciesCall(species, memberIds, groupChanges) {
     body: JSON.stringify({...reviewed, response_mode: 'compact'}),
   });
   if (resp && resp.ok) {
-    applySpeciesResponse(resp, encounterStructureSignature(currentReviewResults().encounters));
+    await applySpeciesResponse(resp, encounterStructureSignature(currentReviewResults().encounters));
   }
   return resp;
 }
