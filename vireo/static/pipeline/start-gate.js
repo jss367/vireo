@@ -76,9 +76,7 @@ function updateStartButton() {
     } else if (_classifyBlocked()) {
       btn.disabled = true;
       if (actionStatus) {
-        actionStatus.textContent =
-          'Classify needs a species list — download one in Settings › Labels, '
-          + 'or turn Classify off to run the other stages.';
+        actionStatus.textContent = _classifyBlockedMessage();
         actionStatus.className = 'status-msg error';
       }
     }

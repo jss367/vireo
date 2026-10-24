@@ -1462,6 +1462,60 @@ def test_classify_plan_blocked_when_no_detections_and_no_labels(tmp_path, monkey
     assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
 
 
+@pytest.mark.parametrize("scope", ["all", "some"])
+def test_classify_plan_names_a_species_list_it_cannot_read(
+    tmp_path, monkeypatch, scope,
+):
+    """A selected species list that exists but cannot be read used to read
+    as "no labels": the plan told the user to download a species list they
+    already have. The job fails on the same read, so Classify stays blocked,
+    and the plan names the list and the error instead."""
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+
+    labels_file = tmp_path / "Birds of Here.txt"
+    labels_file.write_text("Robin\n")
+    meta = {"labels_file": str(labels_file), "name": "Birds of Here"}
+    models = [
+        {"id": "m1", "name": "BioCLIP 2", "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ]
+    if scope == "some":
+        models.append(
+            {"id": "t1", "name": "iNat21", "model_str": "hf-hub:timm/x",
+             "model_type": "timm", "downloaded": True},
+        )
+    monkeypatch.setattr(models_mod, "get_models", lambda: models)
+    monkeypatch.setattr(models_mod, "tree_of_life_ready", lambda *a, **k: True)
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [meta])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [meta])
+
+    def unreadable(_sets):
+        raise PermissionError(13, "Permission denied", str(labels_file))
+
+    monkeypatch.setattr(labels_mod, "load_merged_labels", unreadable)
+
+    plan = compute_plan(
+        db, _params(model_ids=[m["id"] for m in models]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    error = (
+        f'Vireo could not read the species list "Birds of Here" '
+        f"([Errno 13] Permission denied: '{labels_file}')"
+    )
+    assert classify["state"] == "blocked"
+    assert classify["detail"]["blocked_models"] == ["BioCLIP 2"]
+    assert classify["detail"]["label_read_error"] == error
+    assert classify["summary"] == (
+        f"Blocked — {error}. Fix the file or pick another list in "
+        "Settings › Labels, or turn Classify off."
+    )
+    assert "download a species list" not in classify["summary"]
+
+
 def test_classify_plan_blocked_when_every_selected_label_is_ambiguous(
     tmp_path, monkeypatch,
 ):

@@ -101,7 +101,7 @@ function _formatPillLabel(stage, planEntry, state) {
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'skipped')   return 'Skipped';
   if (state === 'will-skip') return 'Will skip';
-  if (state === 'blocked')   return 'Needs labels';
+  if (state === 'blocked')   return _classifyLabelReadError(planEntry) ? "Can't read labels" : 'Needs labels';
   if (state === 'needs-source') return 'Select a source';
   if (state === 'checking-plan') return 'Checking plan…';
 
@@ -206,6 +206,26 @@ function _stageStateFor(stage) {
   if (!_pipelinePlan) return _pipelineRunning ? 'will-run' : 'checking-plan';
   if (!fromPlan) return 'will-run';
   return fromPlan.state || 'will-run';
+}
+
+// The plan's account of a species list it could not read (blocking Classify),
+// or '' when Classify is blocked for another reason or not at all.
+/** @param {PipelinePlanEntry | null | undefined} planEntry */
+function _classifyLabelReadError(planEntry) {
+  return (planEntry && planEntry.detail && planEntry.detail.label_read_error) || '';
+}
+
+// Why Start is disabled while Classify is blocked. A selected list that
+// could not be read is not a missing list, so it must not say "download one".
+function _classifyBlockedMessage() {
+  var entry = _pipelinePlan && _pipelinePlan.stages ? _pipelinePlan.stages.Classify : null;
+  var readError = _classifyLabelReadError(entry);
+  if (readError) {
+    return readError + '. Fix the file or pick another list in Settings › Labels, '
+      + 'or turn Classify off to run the other stages.';
+  }
+  return 'Classify needs a species list — download one in Settings › Labels, '
+    + 'or turn Classify off to run the other stages.';
 }
 
 // True when the Classify stage is enabled but the plan reports it can't run

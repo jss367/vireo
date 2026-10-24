@@ -160,6 +160,20 @@ def _resolve_models(model_ids):
     return out
 
 
+def _label_read_error(active_sets, err):
+    """Name the species list(s) a failed read covered, with the error."""
+    names = [
+        (ls.get("name") or "").strip()
+        or os.path.basename(ls.get("labels_file") or "")
+        for ls in active_sets
+        if os.path.exists(ls.get("labels_file") or "")
+    ] or [os.path.basename(ls.get("labels_file") or "") for ls in active_sets]
+    quoted = ", ".join(f'"{n}"' for n in names if n)
+    noun = "species list" if len(names) == 1 else "species lists"
+    detail = str(err) or type(err).__name__
+    return f"Vireo could not read the {noun} {quoted} ({detail})"
+
+
 def _resolve_labels_for_models(models, labels_files, db):
     """Per-model: resolve the labels list and its content fingerprint.
 
@@ -173,9 +187,10 @@ def _resolve_labels_for_models(models, labels_files, db):
     saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
 
     selected = False
+    read_error = None
 
     def _load(active_sets):
-        nonlocal selected
+        nonlocal selected, read_error
         # A selection naming only deleted files falls back rather than
         # blocking — same rule as classify_job._any_present.
         selected = any(
@@ -183,8 +198,9 @@ def _resolve_labels_for_models(models, labels_files, db):
         )
         try:
             return load_merged_labels(active_sets) if active_sets else []
-        except Exception as e:  # broad: label files raise a wide set; the plan shows no labels
+        except Exception as e:  # broad: label files raise a wide set; the plan names the failure and blocks Classify
             log.warning("plan: failed to load labels %s: %s", active_sets, e, exc_info=True)
+            read_error = _label_read_error(active_sets, e)
             return []
 
     if labels_files:
@@ -218,6 +234,13 @@ def _resolve_labels_for_models(models, labels_files, db):
             # computes the same sentinel by calling compute_fingerprint(None),
             # and the inventory page keys intrinsic timm coverage this way too.
             out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
+        elif read_error:
+            # classify_job._load_labels fails on the same read, so the
+            # model is blocked; the plan says why instead of "no labels".
+            out[m["id"]] = {
+                "fingerprint": None, "n": 0, "blocked": True,
+                "label_read_error": read_error,
+            }
         elif unusable:
             out[m["id"]] = {"fingerprint": None, "n": 0, "blocked": True}
         elif not labels:
@@ -300,17 +323,17 @@ def _classify_plan(
     # mid-pipeline at classify_job._load_labels (which is exactly the
     # fresh-install failure this guards against).
     if plan.unblocked_count == 0:
-        return plan.all_models_blocked_result()
+        return plan.name_label_read_error(plan.all_models_blocked_result())
 
     plan.count_stale()
 
     if plan.classifiable_units == 0:
-        return plan.no_targets_result()
+        return plan.name_label_read_error(plan.no_targets_result())
 
     plan.count_pending()
 
     if plan.blocked:
-        return plan.some_models_blocked_result()
+        return plan.name_label_read_error(plan.some_models_blocked_result())
 
     if plan.pending_total == 0:
         return plan.nothing_pending_result()
@@ -500,6 +523,28 @@ class _ClassifyPlan:
                 self.pending_total += pending
 
     # -- results -----------------------------------------------------
+
+    def name_label_read_error(self, result):
+        """Say a blocked Classify could not read its species list.
+
+        The other blocked summaries tell the user to download a list, which
+        is wrong when the list they picked is on disk but unreadable.
+        """
+        if result.get("state") != "blocked":
+            return result
+        error = next(
+            (info["label_read_error"] for info in self.label_resolution.values()
+             if info.get("label_read_error")),
+            None,
+        )
+        if not error:
+            return result
+        result["summary"] = (
+            f"Blocked — {error}. Fix the file or pick another list in "
+            "Settings › Labels, or turn Classify off."
+        )
+        result["detail"]["label_read_error"] = error
+        return result
 
     def all_models_blocked_result(self):
         blocked_all = [m["name"] for m in self.models]
