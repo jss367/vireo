@@ -3467,14 +3467,12 @@ def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
 
 
 def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
-    """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
+    """Pairing makes referenced snapshots loadable under the primary id.
 
-    Snapshot lookup uses ``<photo_id>.<ref>.png``. Without renaming the
-    files when the recipe row's photo_id changes, ``load_snapshot`` misses
-    the file and every render silently disables the local pass.
+    Unreferenced files stay with reference-based garbage collection.
     """
     from db import Database
-    from local_masks import edit_masks_dir, snapshot_path
+    from local_masks import create_snapshot, edit_masks_dir, load_snapshot, snapshot_path
     from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
@@ -3491,17 +3489,20 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
         file_size=2000, file_mtime=1.0,
     )
 
-    # Set a recipe on the JPEG (any recipe — this test is about the file
-    # rename, not recipe schema). The pairing code moves the row to the RAW.
-    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
-
-    # Drop a snapshot file at <jpeg_id>.<ref>.png as if we'd called the
-    # snapshot endpoint on the JPEG before pairing.
-    ref = "abcdef012345"
-    os.makedirs(edit_masks_dir(str(tmp_path)), exist_ok=True)
+    source = tmp_path / "subject.png"
+    Image.new("L", (8, 6), 255).save(source)
+    mask = create_snapshot(
+        photo_id=jpeg_id, mask_row={"path": str(source)}, vireo_dir=str(tmp_path),
+    )
+    recipe = {"local": {"mask": mask, "regions": [
+        {"region": "subject", "adjustments": {"exposure": 1}},
+    ]}}
+    db.set_photo_edit_recipe(jpeg_id, recipe)
+    ref = mask["ref"]
     src_snap = snapshot_path(str(tmp_path), jpeg_id, ref)
-    with open(src_snap, "wb") as f:
-        f.write(b"snapshot-bytes")
+    unreferenced = snapshot_path(str(tmp_path), jpeg_id, "111111111111")
+    with open(unreferenced, "wb") as stream:
+        stream.write(b"unreferenced snapshot")
     # Also leave a decoy file for a different photo_id so the transfer
     # doesn't over-match.
     decoy = os.path.join(edit_masks_dir(str(tmp_path)), f"99999.{ref}.png")
@@ -3520,8 +3521,13 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     # The companion's snapshot file must have moved to the primary id.
     assert not os.path.exists(src_snap)
     assert os.path.exists(snapshot_path(str(tmp_path), primary_id, ref))
+    with load_snapshot(str(tmp_path), primary_id, recipe) as snapshot:
+        assert snapshot.getextrema() == (255, 255)
+    assert os.path.exists(unreferenced)
+    assert not os.path.exists(snapshot_path(str(tmp_path), primary_id, "111111111111"))
     # Decoy for an unrelated photo id must not be touched.
     assert os.path.exists(decoy)
+    db.close()
 
 
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
