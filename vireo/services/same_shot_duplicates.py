@@ -103,8 +103,14 @@ def _attach_photo_context(db: Database, groups: list[JsonDict]) -> None:
 def scan_same_shot_candidates(
     db: Database, job: JobDict, cancel_check: Callable[[], bool] | None = None,
 ) -> JsonDict:
-    """One streaming pass over saved metadata; never opens original files."""
-    by_identity: dict[ShotIdentity, list[JsonDict]] = defaultdict(list)
+    """Tally identities first, then materialize only duplicate groups.
+
+    Pass 1 holds just an id per eligible photo. Pass 2 reads the small
+    subset that formed groups, so scan-time memory never scales with the
+    whole catalog of singleton eligible photos.
+    """
+    seen_once: dict[ShotIdentity, int] = {}
+    duplicated_ids: dict[ShotIdentity, list[int]] = defaultdict(list)
     examined = eligible = 0
     job["progress"] = {"phase": "Checking camera identities for possible same-shot copies", "current": 0}
     for row in db.duplicates.same_shot_rows():
@@ -114,9 +120,24 @@ def scan_same_shot_candidates(
         identity = shot_identity(row)
         if identity:
             eligible += 1
-            by_identity[identity].append(_photo(row))
+            if identity in duplicated_ids:
+                duplicated_ids[identity].append(row["id"])
+            elif identity in seen_once:
+                duplicated_ids[identity] = [seen_once.pop(identity), row["id"]]
+            else:
+                seen_once[identity] = row["id"]
         job["progress"]["current"] = examined
         job["progress"]["phase"] = f"Checking camera identities: {examined:,} catalog photos examined"
+    seen_once.clear()
+    by_identity: dict[ShotIdentity, list[JsonDict]] = defaultdict(list)
+    if duplicated_ids and not (cancel_check and cancel_check()):
+        wanted = sorted({i for ids in duplicated_ids.values() for i in ids})
+        for row in db.duplicates.same_shot_rows(wanted):
+            if cancel_check and cancel_check():
+                break
+            identity = shot_identity(row)
+            if identity in duplicated_ids:
+                by_identity[identity].append(_photo(row))
     groups = [group for identity, photos in by_identity.items() if (group := _group(identity, photos))]
     groups.sort(key=lambda group: (group["visual_evidence"] != "matching", group["identity"]))
     _attach_photo_context(db, groups)
