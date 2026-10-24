@@ -1540,14 +1540,21 @@ class _InPlaceImportRun:
     def _extract_deferred_working_copies(self) -> None:
         revalidated_scope = self._revalidated_working_copy_scope()
         if revalidated_scope:
+            # Share this list with the batch so a crash partway through
+            # still names every photo it had already marked failed;
+            # otherwise ``_record_error`` would carry the pass-level
+            # error alone and the per-photo failures the pass committed
+            # would stay as silent 24h markers on the catalog rows.
+            self.working_copy_failures = []
             try:
-                self.working_copy_failures = list(self.extract_working_copies(
+                self.extract_working_copies(
                     self.thread_db,
                     self.plan.vireo_dir,
                     status_callback=self._status_cb,
                     scope=revalidated_scope,
                     cancel_check=self._cancel_check,
-                ) or [])
+                    failed_paths_sink=self.working_copy_failures,
+                )
             except Exception as exc:
                 log.exception(
                     "In-place import working-copy generation failed",

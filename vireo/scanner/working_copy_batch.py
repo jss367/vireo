@@ -949,10 +949,17 @@ class _WorkingCopyBatch:
         # this id has different extraction inputs and the failure we saw
         # is not its failure. ``working_copy_path IS NULL`` so a concurrent
         # on-demand writer's successful publication is not clobbered with
-        # a failure marker.
-        self.db.working_copies.mark_failed(row, extraction.failure_source)
+        # a failure marker. When ``mark_failed`` matches no rows, the
+        # photo at ``id`` either already has a working copy from another
+        # publisher or is no longer the one we extracted — in either
+        # case telling the user it is "without a working copy" would be
+        # false, so we skip the append and leave the marker off the row.
+        matched = self.db.working_copies.mark_failed(row, extraction.failure_source)
         self.db.commit_with_retry()
-        self.failed_paths.append(os.path.join(row["folder_path"], row["filename"]))
+        if matched:
+            self.failed_paths.append(
+                os.path.join(row["folder_path"], row["filename"]),
+            )
 
     # -- staying under the quota -------------------------------------
 

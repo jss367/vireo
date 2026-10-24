@@ -639,14 +639,21 @@ def _extract_deferred_working_copies(
                 ),
             )
 
+        # Share this list with the batch so a crash partway through still
+        # names every photo it had already marked failed; otherwise the
+        # pass-level error would be the only thing the result mentions
+        # and committed per-photo failures would silently stay as 24h
+        # catalog entries the user never sees.
+        state.wc_failed_paths = []
         try:
-            state.wc_failed_paths = list(_extract_working_copies(
+            _extract_working_copies(
                 db, params.vireo_dir,
                 scope=[(d, "exact") for d in sorted(state.wc_dest_folders)],
                 source_paths=state.wc_source_paths,
                 status_callback=_working_copy_status,
                 cancel_check=lambda: runner.is_cancelled(job["id"]),
-            ) or [])
+                failed_paths_sink=state.wc_failed_paths,
+            )
         except Exception as exc:  # broad: working copies are derived and re-extracted later; the imported originals stand and the result's notice says what happened
             log.exception(
                 "Working-copy extraction failed for %s",

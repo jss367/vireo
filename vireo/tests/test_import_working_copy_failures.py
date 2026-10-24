@@ -165,3 +165,91 @@ def test_in_place_import_names_photos_without_a_working_copy(app_and_db, tmp_pat
     )
     scan_step = next(step for step in job["steps"] if step["id"] == "scan")
     assert scan_step["summary"] == "1 photos, 1 without a working copy"
+
+
+def test_a_mid_pass_crash_still_names_the_photos_already_marked(tmp_path, monkeypatch):
+    """A pass that commits per-photo failures then raises keeps those paths.
+
+    Without this, the ``working_copy_notice`` says "stopped after an error"
+    while the per-photo failures the pass had already committed to the
+    catalog (and that will stay skipped for 24h) are silently dropped from
+    ``working_copy_failures`` and the step summary.
+    """
+    import scanner
+
+    def crashing_extract(*args, **kwargs):
+        # Append to the sink the batch would normally write to, then raise
+        # as if the row that followed hit an unrecoverable error.
+        sink = kwargs.get("failed_paths_sink")
+        folder = tmp_path / "archive" / "card" / "sub"
+        folder.mkdir(parents=True, exist_ok=True)
+        marker = folder / "DSC_0002.NEF"
+        marker.write_bytes(b"placeholder")
+        if sink is not None:
+            sink.append(str(marker))
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", crashing_extract)
+    _stub_extractor(monkeypatch, lambda src: True)
+    card = _raw_card(tmp_path, ["DSC_0001.NEF"])
+
+    _db, _ws, result = _run_import(tmp_path, _params(tmp_path, card))
+
+    assert result["ok"] is True
+    assert result["working_copy_failures"], (
+        "committed per-photo failures must be preserved across a pass crash"
+    )
+    assert any("DSC_0002.NEF" in path for path in result["working_copy_failures"])
+    # Both the per-photo wording and the pass-level wording appear.
+    notice = result["working_copy_notice"]
+    assert "could not create a working copy for 1 photo" in notice
+    assert "stopped creating working copies after an error" in notice
+
+
+def test_a_concurrent_publisher_does_not_turn_into_a_false_failure(tmp_path, monkeypatch):
+    """A guarded ``mark_failed`` that matches no rows must not report the photo.
+
+    Simulates a concurrent on-demand publisher that gave the row a working
+    copy while this batch's extraction was running: ``mark_failed`` returns
+    0 (``working_copy_path IS NULL`` fails), so the batch leaves the photo
+    off ``failed_paths`` and the import notice does not falsely claim it is
+    without a working copy.
+    """
+    from db import Database
+    from scanner import _extract_working_copies
+    from services import photo_ingest
+
+    _stub_extractor(monkeypatch, lambda src: False)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "bird.NEF").write_bytes(b"raw")
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(folder), name="photos")
+    photo_ingest.add_photo(
+        db, folder_id=fid, filename="bird.NEF", extension=".nef",
+        file_size=3, file_mtime=1.0,
+    )
+
+    # Stand in for a concurrent publisher: `mark_failed`'s guard includes
+    # ``working_copy_path IS NULL``, so pre-setting the path makes the
+    # UPDATE match zero rows exactly as a late on-demand publication would.
+    import repositories.working_copies as wc_repo
+    real_mark_failed = wc_repo.WorkingCopyRepository.mark_failed
+
+    def mark_failed_after_publisher(self, row, failure_source):
+        self.conn.execute(
+            "UPDATE photos SET working_copy_path=? WHERE id=?",
+            ("working/999.jpg", row["id"]),
+        )
+        return real_mark_failed(self, row, failure_source)
+
+    monkeypatch.setattr(
+        wc_repo.WorkingCopyRepository, "mark_failed", mark_failed_after_publisher,
+    )
+
+    failures = _extract_working_copies(db, str(tmp_path / "vireo"), scope=[str(folder)])
+
+    assert failures == [], (
+        "mark_failed matched no rows (another writer installed a working "
+        "copy), so the photo must not be reported as without one"
+    )

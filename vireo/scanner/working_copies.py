@@ -122,6 +122,7 @@ def _extract_working_copies(
     status_callback: StatusCallback | None = None,
     scope: Sequence[WorkingCopyScopeEntry] | None = None, cancel_check: CheckCallback | None = None,
     source_paths: SourcePaths | None = None,
+    failed_paths_sink: list[str] | None = None,
 ) -> list[str]:
     """Extract working copies for all RAW photos missing one.
 
@@ -167,6 +168,13 @@ def _extract_working_copies(
     verified archive path. Applies to both the primary and the companion
     lookup; paths absent from the map read from the catalog location as
     usual.
+
+    ``failed_paths_sink``, when supplied, is the list the batch appends
+    cataloged paths to as it marks each per-photo failure. On the normal
+    return path it is the same list the function returns. A caller that
+    wraps this call in a try/except reads the sink after an exception
+    propagates and still has the paths of photos the pass had already
+    marked failed before it stopped.
     """
     import config as cfg
 
@@ -199,6 +207,12 @@ def _extract_working_copies(
         progress_callback=progress_callback,
         status_callback=status_callback,
     )
+    if failed_paths_sink is not None:
+        # Share the caller's list so a mid-pass crash still surfaces the
+        # photos the batch had already committed as failed: the batch
+        # appends to this same object, and the caller reads it even on
+        # the exception path.
+        batch.failed_paths = failed_paths_sink
     batch.run()
     return batch.failed_paths
 
