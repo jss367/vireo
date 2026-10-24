@@ -102,15 +102,18 @@ _HIGHLIGHT_ELIGIBILITY_JOINS = """
 # row named `Puma`) does not satisfy a species highlight —
 # sibling species queries already exclude that photo from the
 # species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
-# The prediction-fallback branch below applies the same
-# `(t.rank = 'species' OR t.rank IS NULL)` filter to the
-# NOT EXISTS condition: a photo carrying only a higher-rank
-# taxonomy keyword (e.g. genus/family) is no longer part of
-# any species accepted bucket, and get_highlights_candidates
-# / collect_highlight_buckets will place it in a prediction
-# bucket (bp.species is NULL). Without the rank filter here,
-# the saved highlight would vanish on reload because the
-# NOT EXISTS still sees the higher-rank taxonomy row.
+# The prediction branch iterates each detection's top
+# non-rejected prediction and checks whether its
+# canonicalized species equals ``sh.species``. This mirrors
+# :meth:`_highlight_subject_predictions` and the
+# per-subject bucket memberships :func:`photo_species_memberships`
+# opens, so a highlight saved from a second subject's bucket
+# (an untagged photo's lower-confidence detection, or an
+# already-tagged photo's secondary subject) survives on
+# reload. Branch 2 therefore does not require the photo to
+# be keyword-free: a Teal-tagged photo whose Wigeon subject
+# predicts Wigeon can hold a Wigeon highlight that
+# ``collect_highlight_buckets`` places in the Wigeon bucket.
 _HIGHLIGHT_ELIGIBILITY_FILTER = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND (
@@ -137,158 +140,134 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = """
                                )
                            )
                      )
-                     OR (
-                         NOT EXISTS (
-                             SELECT 1
-                             FROM photo_keywords pk
-                             JOIN keywords k ON k.id = pk.keyword_id
-                              AND (k.is_species = 1 OR k.type = 'taxonomy')
-                             LEFT JOIN taxa t ON t.id = k.taxon_id
-                             WHERE pk.photo_id = sh.photo_id
-                               AND (t.rank = 'species' OR t.rank IS NULL)
-                         )
-                         AND sh.species = (
-                             SELECT COALESCE(
-                                 (
-                                     -- Root-first, exact spelling:
-                                     -- mirror ``resolve_species_display_name``'s
-                                     -- case 2 preference for an
-                                     -- exact-spelling same-name top-level
-                                     -- species row. Keeps intentional
-                                     -- ASCII/typography homonyms (e.g.
-                                     -- general ``Robin`` +
-                                     -- taxonomy ``robin``) routed to
-                                     -- their own stored spelling instead
-                                     -- of collapsing them onto one.
-                                     -- (SQLite doesn't support
-                                     -- correlated column references in a
-                                     -- subquery ORDER BY, so the exact
-                                     -- preference is expressed as its
-                                     -- own subquery rather than an
-                                     -- ORDER BY key on a NOCASE match.)
-                                     SELECT root_exact.name
-                                     FROM keywords root_exact
-                                     WHERE root_exact.name = pr.species
-                                       AND root_exact.parent_id IS NULL
-                                       AND (
-                                           root_exact.is_species = 1
-                                           OR root_exact.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_exact.type = 'taxonomy') DESC,
-                                              root_exact.id ASC
+                     OR EXISTS (
+                         SELECT 1
+                         FROM detections d
+                         JOIN predictions pr ON pr.detection_id = d.id
+                         LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = sh.workspace_id
+                         WHERE d.photo_id = sh.photo_id
+                           AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
+                           AND pr.species IS NOT NULL
+                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND pr.labels_fingerprint = (
+                               SELECT pr2.labels_fingerprint
+                               FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )
+                           -- Top non-rejected prediction for THIS detection
+                           -- (newest fingerprint per classifier model).
+                           -- Mirrors _highlight_subject_predictions' per-
+                           -- detection ROW_NUMBER() pick, so a photo
+                           -- joins each subject's bucket.
+                           AND pr.id = (
+                               SELECT pr3.id
+                               FROM predictions pr3
+                               LEFT JOIN prediction_review pr3_rev
+                                 ON pr3_rev.prediction_id = pr3.id
+                                AND pr3_rev.workspace_id = sh.workspace_id
+                               WHERE pr3.detection_id = pr.detection_id
+                                 AND pr3.species IS NOT NULL
+                                 AND COALESCE(pr3_rev.status, 'pending') != 'rejected'
+                                 AND pr3.labels_fingerprint = (
+                                     SELECT pr4.labels_fingerprint
+                                     FROM predictions pr4
+                                     WHERE pr4.detection_id = pr3.detection_id
+                                       AND pr4.classifier_model = pr3.classifier_model
+                                     ORDER BY pr4.created_at DESC, pr4.id DESC
                                      LIMIT 1
-                                 ),
-                                 (
-                                     -- Root-first, NOCASE fallback:
-                                     -- mirror
-                                     -- ``resolve_species_display_name``'s
-                                     -- case 1 — when a single same-name
-                                     -- top-level species row exists,
-                                     -- ``add_highlight`` stored
-                                     -- the highlight under its stored
-                                     -- spelling regardless of the
-                                     -- caller's casing. Without this
-                                     -- branch, the hierarchy-alias
-                                     -- canonicalization below could pick
-                                     -- a different-taxon leaf sharing
-                                     -- the label (e.g. root ``Robin``
-                                     -- for one taxon plus a hierarchy
-                                     -- leaf ``Robin`` under a different
-                                     -- taxon), canonicalize to that
-                                     -- leaf's root spelling, and drop
-                                     -- the saved highlight on reload.
-                                     SELECT root_direct.name
-                                     FROM keywords root_direct
-                                     WHERE root_direct.name = pr.species COLLATE NOCASE
-                                       AND root_direct.parent_id IS NULL
-                                       AND (
-                                           root_direct.is_species = 1
-                                           OR root_direct.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_direct.type = 'taxonomy') DESC,
-                                              root_direct.id ASC
-                                     LIMIT 1
-                                 ),
-                                 (
-                                     -- Hierarchy-alias fallback:
-                                     -- canonicalize only when the raw
-                                     -- prediction label resolves to a
-                                     -- unique linked taxon. When multiple
-                                     -- hierarchy leaves share the label
-                                     -- but point at different taxa, keep
-                                     -- the raw ``pr.species`` so buckets
-                                     -- key on the ambiguous label instead
-                                     -- of an arbitrary root.
-                                     -- Ambiguity count and the target-leaf
-                                     -- restriction here must mirror
-                                     -- ``resolve_species_display_name`` — the
-                                     -- canonicalizer ``add_highlight``
-                                     -- and ``collect_highlight_buckets`` use
-                                     -- when writing ``sh.species``. That
-                                     -- helper considers all linked hierarchy
-                                     -- taxa regardless of rank. If this
-                                     -- subquery restricted the count to
-                                     -- species-rank taxa, a mixed
-                                     -- species+higher-rank alias (e.g.
-                                     -- species ``Puma`` and genus ``Puma``)
-                                     -- would count as 1 here and canonicalize
-                                     -- to the species root while
-                                     -- ``add_highlight`` kept the raw
-                                     -- ``pr.species`` — the eligibility
-                                     -- compare below would then drop the
-                                     -- highlight on reload.
-                                     SELECT root.name
-                                     FROM keywords k_pred
-                                     JOIN keywords root
-                                       ON root.parent_id IS NULL
-                                      AND root.taxon_id = k_pred.taxon_id
-                                      AND (
-                                          root.is_species = 1
-                                          OR root.type = 'taxonomy'
-                                      )
-                                     WHERE k_pred.name = pr.species COLLATE NOCASE
-                                       AND k_pred.parent_id IS NOT NULL
-                                       AND k_pred.taxon_id IS NOT NULL
-                                       AND (
-                                           k_pred.is_species = 1
-                                           OR k_pred.type = 'taxonomy'
-                                       )
-                                       AND (
-                                           SELECT COUNT(DISTINCT k2.taxon_id)
-                                           FROM keywords k2
-                                           WHERE k2.name = pr.species COLLATE NOCASE
-                                             AND k2.parent_id IS NOT NULL
-                                             AND k2.taxon_id IS NOT NULL
-                                             AND (
-                                                 k2.is_species = 1
-                                                 OR k2.type = 'taxonomy'
-                                             )
-                                       ) = 1
-                                     ORDER BY root.id
-                                     LIMIT 1
-                                 ),
-                                 pr.species
-                             )
-                             FROM detections d
-                             JOIN predictions pr ON pr.detection_id = d.id
-                             LEFT JOIN prediction_review pr_rev
-                              ON pr_rev.prediction_id = pr.id
-                             AND pr_rev.workspace_id = sh.workspace_id
-                             WHERE d.photo_id = sh.photo_id
-                               AND (d.detector_model = 'full-image' OR d.detector_confidence >= ?)
-                               AND pr.species IS NOT NULL
-                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                               AND pr.labels_fingerprint = (
-                                   SELECT pr2.labels_fingerprint
-                                   FROM predictions pr2
-                                   WHERE pr2.detection_id = pr.detection_id
-                                     AND pr2.classifier_model = pr.classifier_model
-                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                 )
+                               ORDER BY pr3.confidence DESC, pr3.id DESC
+                               LIMIT 1
+                           )
+                           AND sh.species = COALESCE(
+                               (
+                                   -- Root-first, exact spelling:
+                                   -- mirror ``resolve_species_display_name``'s
+                                   -- case 2 preference for an
+                                   -- exact-spelling same-name top-level
+                                   -- species row. Keeps intentional
+                                   -- ASCII/typography homonyms (e.g.
+                                   -- general ``Robin`` +
+                                   -- taxonomy ``robin``) routed to
+                                   -- their own stored spelling instead
+                                   -- of collapsing them onto one.
+                                   SELECT root_exact.name
+                                   FROM keywords root_exact
+                                   WHERE root_exact.name = pr.species
+                                     AND root_exact.parent_id IS NULL
+                                     AND (
+                                         root_exact.is_species = 1
+                                         OR root_exact.type = 'taxonomy'
+                                     )
+                                   ORDER BY (root_exact.type = 'taxonomy') DESC,
+                                            root_exact.id ASC
                                    LIMIT 1
-                               )
-                             ORDER BY pr.confidence DESC, pr.id DESC
-                             LIMIT 1
-                         ) COLLATE NOCASE
+                               ),
+                               (
+                                   -- Root-first, NOCASE fallback:
+                                   -- mirror
+                                   -- ``resolve_species_display_name``'s
+                                   -- case 1 — when a single same-name
+                                   -- top-level species row exists,
+                                   -- ``add_highlight`` stored
+                                   -- the highlight under its stored
+                                   -- spelling regardless of the
+                                   -- caller's casing.
+                                   SELECT root_direct.name
+                                   FROM keywords root_direct
+                                   WHERE root_direct.name = pr.species COLLATE NOCASE
+                                     AND root_direct.parent_id IS NULL
+                                     AND (
+                                         root_direct.is_species = 1
+                                         OR root_direct.type = 'taxonomy'
+                                     )
+                                   ORDER BY (root_direct.type = 'taxonomy') DESC,
+                                            root_direct.id ASC
+                                   LIMIT 1
+                               ),
+                               (
+                                   -- Hierarchy-alias fallback:
+                                   -- canonicalize only when the raw
+                                   -- prediction label resolves to a
+                                   -- unique linked taxon. See
+                                   -- ``resolve_species_display_name``.
+                                   SELECT root.name
+                                   FROM keywords k_pred
+                                   JOIN keywords root
+                                     ON root.parent_id IS NULL
+                                    AND root.taxon_id = k_pred.taxon_id
+                                    AND (
+                                        root.is_species = 1
+                                        OR root.type = 'taxonomy'
+                                    )
+                                   WHERE k_pred.name = pr.species COLLATE NOCASE
+                                     AND k_pred.parent_id IS NOT NULL
+                                     AND k_pred.taxon_id IS NOT NULL
+                                     AND (
+                                         k_pred.is_species = 1
+                                         OR k_pred.type = 'taxonomy'
+                                     )
+                                     AND (
+                                         SELECT COUNT(DISTINCT k2.taxon_id)
+                                         FROM keywords k2
+                                         WHERE k2.name = pr.species COLLATE NOCASE
+                                           AND k2.parent_id IS NOT NULL
+                                           AND k2.taxon_id IS NOT NULL
+                                           AND (
+                                               k2.is_species = 1
+                                               OR k2.type = 'taxonomy'
+                                           )
+                                     ) = 1
+                                   ORDER BY root.id
+                                   LIMIT 1
+                               ),
+                               pr.species
+                           ) COLLATE NOCASE
                      )
                  )"""
 

@@ -853,6 +853,100 @@ def test_species_highlights_eligible_only(db, cur):
     }
 
 
+def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
+    """A highlight saved from a second-species prediction bucket of an
+    already-tagged photo survives on reload.
+
+    ``collect_highlight_buckets`` puts a photo tagged with species A whose
+    second subject predicts species B in both buckets. Before the
+    multi-species fix, the eligibility filter required ``NOT EXISTS``
+    for any species keyword in the prediction branch, so the B highlight
+    was dropped on reload. The prediction branch now matches
+    ``sh.species`` against any detection's top non-rejected prediction,
+    regardless of whether the photo also carries a different species
+    keyword.
+    """
+    p = cur["p"]
+    ws = cur["ws"]
+    # card1 has Northern Cardinal tagged. Give it a second subject whose
+    # top prediction is Blue Jay.
+    _detect(db, p["card1"], [("Blue Jay", 0.8)])
+    db.species_curation.add_highlight("Blue Jay", p["card1"])
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {"Blue Jay": {p["card1"]: 1}}
+
+
+def test_species_highlights_eligible_lower_confidence_subject_bucket(db, cur):
+    """A highlight saved from a lower-confidence subject's prediction
+    bucket of an untagged photo survives on reload.
+
+    ``collect_highlight_buckets`` places the photo in each subject's
+    bucket. Before the fix, the eligibility filter only accepted
+    ``sh.species`` equal to the photo-wide top prediction (``ORDER BY
+    pr.confidence DESC LIMIT 1``), so a highlight starred from the
+    second subject's bucket was dropped. The prediction branch now
+    iterates each detection's top non-rejected prediction.
+    """
+    p = cur["p"]
+    ws = cur["ws"]
+    # Two separate detections on card2 (its genus-rank Turdus keyword
+    # doesn't satisfy the species accepted branch); Blue Jay is the
+    # photo-wide top, Gray Jay is a second subject's top.
+    _detect(db, p["card2"], [("Blue Jay", 0.9)])
+    _detect(db, p["card2"], [("Gray Jay", 0.5)], fingerprint="fp2")
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Gray Jay', ?, 1)",
+        (ws, p["card2"]),
+    )
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Gray Jay", eligible_only=True
+    ) == {"Gray Jay": {p["card2"]: 1}}
+
+
+def test_species_highlights_eligible_rejected_sibling_prediction_dropped(
+    db, cur,
+):
+    """A highlight saved against a prediction species that was then
+    rejected per-detection is dropped on reload — the detection's top
+    non-rejected prediction is now a different species.
+    """
+    p = cur["p"]
+    ws = cur["ws"]
+    did = _detect(db, p["card2"], [("Blue Jay", 0.9), ("Gray Jay", 0.5)])
+    # Blue Jay highlight is eligible: it's the detection's top non-rejected
+    # prediction.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Blue Jay', ?, 1)",
+        (ws, p["card2"]),
+    )
+    db.conn.commit()
+    assert p["card2"] in db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ).get("Blue Jay", {})
+    # Reject the Blue Jay prediction; Gray Jay (0.5) becomes the top
+    # non-rejected prediction for this detection. The Blue Jay highlight
+    # loses eligibility because no detection's top prediction now
+    # canonicalizes to Blue Jay.
+    blue_pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (did, "Blue Jay"),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+        "VALUES (?, ?, 'rejected')",
+        (blue_pred_id, ws),
+    )
+    db.conn.commit()
+    assert db.species_curation.get_highlights(
+        species="Blue Jay", eligible_only=True
+    ) == {}
+
+
 def test_species_highlights_eligible_prediction_root_canonicalization(db, cur):
     p = cur["p"]
     ws = cur["ws"]
