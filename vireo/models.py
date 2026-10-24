@@ -1281,8 +1281,12 @@ def _prepare_existing_download(local_path, expected_sha, progress_callback):
             progress_callback(f"{filename} already verified, skipping")
         return True
     if local_path.endswith((".onnx", ".onnx.data", ".npy")):
-        os.unlink(local_path)
-        log.info("Removed checksum-mismatching weights before replacement: %s", local_path)
+        try:
+            os.unlink(local_path)
+        except OSError as exc:
+            log.warning("Could not release checksum-mismatching weights %s: %s", local_path, exc)
+        else:
+            log.info("Removed checksum-mismatching weights before replacement: %s", local_path)
     return False
 
 

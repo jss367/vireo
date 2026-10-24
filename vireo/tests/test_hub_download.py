@@ -174,6 +174,32 @@ def test_repair_releases_known_bad_weights_before_staging_legacy_cache(tmp_path,
     assert destination.read_bytes() == cache_blob.read_bytes()
 
 
+def test_repair_continues_when_mismatching_weights_cannot_be_unlinked(fake_hub, tmp_path, monkeypatch):
+    import models
+
+    calls, _state = fake_hub
+    destination = tmp_path / "model.onnx"
+    destination.write_bytes(b"corrupt weights")
+    real_unlink = os.unlink
+    blocked = []
+
+    def unlink(path, *args, **kwargs):
+        if str(path) == str(destination):
+            blocked.append(path)
+            raise PermissionError("transient lock")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    sys.modules["huggingface_hub"].try_to_load_from_cache = lambda **_: None
+    expected = b"bytes of weights/model.onnx"
+    models._download_and_verify_file(
+        destination.name, str(tmp_path), "weights",
+        {destination.name: hashlib.sha256(expected).hexdigest()}, None,
+    )
+    assert blocked and len(calls) == 1
+    assert destination.read_bytes() == expected
+
+
 @pytest.mark.parametrize("filename,expected", [
     ("model.onnx", None),
     ("config.json", "mismatching-checksum"),
