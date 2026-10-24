@@ -672,10 +672,20 @@ class _ClassifyJobRun:
 
     def record_loaded_classifier(self) -> None:
         """Close the load step and stamp what the classifier actually read."""
+        from classify_job.run_helpers import _missing_common_names_notice
+
         job, runner, clf = self.job, self.runner, self.clf
+        # A timm model without its common-name file still classifies
+        # validly, so this is a notice (a completed step's warning on the
+        # Jobs page, and ``common_names_notice`` in the result), not a
+        # failure.
+        notice = _missing_common_names_notice(clf, self.effective_name)
+        if notice:
+            job["_common_names_notice"] = notice
         runner.update_step(
             job["id"], "load_model", status="completed",
             summary=self.effective_name,
+            **({"error": notice} if notice else {}),
         )
 
         # Name the label space on the classify step: "Classify species" alone

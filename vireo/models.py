@@ -512,6 +512,25 @@ def _classify_model_state(model_dir, files):
     return "ok"
 
 
+def _add_missing_optional_files(entry, km, model_dir):
+    """Add a downloaded model's absent optional files to its ``get_models`` entry.
+
+    A missing ``label_descriptions.json`` also carries why Vireo's last
+    attempt to fetch it failed, so Settings can say more than "click Repair".
+    """
+    missing_optional = [
+        f for f in km.get("optional_files") or []
+        if not os.path.isfile(os.path.join(model_dir, f))
+    ]
+    if not missing_optional:
+        return
+    entry["missing_optional_files"] = missing_optional
+    if "label_descriptions.json" in missing_optional:
+        failure = label_descriptions_heal_failure(km.get("model_str") or "")
+        if failure:
+            entry["label_descriptions_error"] = failure
+
+
 def get_models():
     """Return list of all models (known + custom) with download status.
 
@@ -568,14 +587,8 @@ def get_models():
         # trigger for absent optionals (that would mark 2.5 unusable for
         # label-list mode). Keep the list on `missing`/'incomplete' entries
         # too so the same repair pass fetches optionals when it repairs.
-        optional_declared = km.get("optional_files") or []
-        if optional_declared and downloaded:
-            missing_optional = [
-                f for f in optional_declared
-                if not os.path.isfile(os.path.join(model_dir, f))
-            ]
-            if missing_optional:
-                entry["missing_optional_files"] = missing_optional
+        if downloaded:
+            _add_missing_optional_files(entry, km, model_dir)
         result.append(entry)
 
     # Add custom models
@@ -1662,6 +1675,32 @@ def label_descriptions_usable(path):
     return load_label_descriptions(path) is not None
 
 
+# Why the last attempt to fetch a timm model's label_descriptions.json failed,
+# per model_str, from the background heal or from Settings' Repair. Kept so
+# Settings › Models and the runs that go on with taxonomy-based names can say
+# why the common-name file is still missing; the next success clears it.
+_LABEL_DESC_HEAL_FAILURES: dict[str, str] = {}
+_LABEL_DESC_HEAL_FAILURES_LOCK = threading.Lock()
+
+
+def _label_desc_heal_ok(model_str):
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        _LABEL_DESC_HEAL_FAILURES.pop(model_str, None)
+    return True
+
+
+def _label_desc_heal_failed(model_str, reason):
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        _LABEL_DESC_HEAL_FAILURES[model_str] = reason
+    return False
+
+
+def label_descriptions_heal_failure(model_str):
+    """Why the last fetch of ``model_str``'s common-name file failed, or None."""
+    with _LABEL_DESC_HEAL_FAILURES_LOCK:
+        return _LABEL_DESC_HEAL_FAILURES.get(model_str)
+
+
 @cache_access
 def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None):
     """Self-heal a missing label_descriptions.json for a timm model.
@@ -1683,7 +1722,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
     target = os.path.join(model_dir, "label_descriptions.json")
     descs, inspected = read_label_descriptions(target)
     if descs is not None:
-        return True
+        return _label_desc_heal_ok(model_str)
 
     # Present but unparseable when we looked — a torn write from an
     # earlier build or a killed process. Drop it so `list_models` stops
@@ -1707,7 +1746,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             # Someone published a usable mapping between our read and
             # now. The repair already happened; report success and, above
             # all, do not delete it.
-            return True
+            return _label_desc_heal_ok(model_str)
         if current is not None and current == inspected:
             with contextlib.suppress(OSError):
                 os.unlink(target)
@@ -1759,7 +1798,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                         "Self-healed label_descriptions.json for %s from %s",
                         model_str, ONNX_REPO,
                     )
-                    return True
+                    return _label_desc_heal_ok(model_str)
         finally:
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
@@ -1771,7 +1810,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             "Predictions keep using taxonomy-based common names.",
             model_str, e, exc_info=True,
         )
-        return False
+        return _label_desc_heal_failed(model_str, f"could not fetch the model's upstream config ({e})")
 
     descs = config.get("label_descriptions")
     if not isinstance(descs, dict) or not descs:
@@ -1779,7 +1818,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             "Upstream timm config for %s has no label_descriptions; "
             "cannot self-heal common names.", model_str,
         )
-        return False
+        return _label_desc_heal_failed(model_str, "the model's upstream config has no common names")
 
     # Stage under a name unique to this invocation, never a shared
     # "<target>.tmp": a background heal and a Settings Repair both reach
@@ -1813,15 +1852,15 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                 "concurrent writer while this heal was staging (%s)",
                 model_str, e,
             )
-            return True
+            return _label_desc_heal_ok(model_str)
         log.warning("Could not write %s: %s", target, e)
-        return False
+        return _label_desc_heal_failed(model_str, f"could not write {target} ({e})")
 
     log.info(
         "Self-healed label_descriptions.json for %s from upstream timm "
         "config (%d entries)", model_str, len(descs),
     )
-    return True
+    return _label_desc_heal_ok(model_str)
 
 
 @cache_access
