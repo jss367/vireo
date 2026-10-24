@@ -1690,8 +1690,9 @@ def _label_desc_heal_ok(model_str):
 
 
 def _label_desc_heal_failed(model_str, reason):
+    # Stored without a closing period: it is quoted mid-sentence.
     with _LABEL_DESC_HEAL_FAILURES_LOCK:
-        _LABEL_DESC_HEAL_FAILURES[model_str] = reason
+        _LABEL_DESC_HEAL_FAILURES[model_str] = reason.rstrip(". ")
     return False
 
 
@@ -1810,7 +1811,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             "Predictions keep using taxonomy-based common names.",
             model_str, e, exc_info=True,
         )
-        return _label_desc_heal_failed(model_str, f"could not fetch the model's upstream config ({e})")
+        return _label_desc_heal_failed(model_str, f"could not fetch the model's upstream config: {e}")
 
     descs = config.get("label_descriptions")
     if not isinstance(descs, dict) or not descs:
@@ -1854,7 +1855,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             )
             return _label_desc_heal_ok(model_str)
         log.warning("Could not write %s: %s", target, e)
-        return _label_desc_heal_failed(model_str, f"could not write {target} ({e})")
+        return _label_desc_heal_failed(model_str, f"could not write {target}: {e}")
 
     log.info(
         "Self-healed label_descriptions.json for %s from upstream timm "

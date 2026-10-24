@@ -138,7 +138,7 @@ async function loadModels() {
       } else if (state === 'unverified' && hasMissingOptional) {
         var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         var missingList = missingOptional.map(escapeHtml).join(', ');
-        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.</div>';
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.' + labelDescriptionsFailureText(m) + '</div>';
       } else if (state === 'unverified') {
         reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
@@ -202,7 +202,7 @@ async function loadModels() {
 // model's common-name file failed, so the card says more than "click Repair".
 /** @param {SettingsModel} m */ function labelDescriptionsFailureText(m) {
   return m.label_descriptions_error
-    ? ' Vireo\'s last attempt to fetch it failed: ' + escapeHtml(m.label_descriptions_error) + '.'
+    ? ' Vireo\'s last attempt to fetch label_descriptions.json failed: ' + escapeHtml(m.label_descriptions_error) + '.'
     : '';
 }
 

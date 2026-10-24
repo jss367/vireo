@@ -9455,7 +9455,7 @@ def test_classify_job_names_a_timm_model_without_common_names(tmp_path, monkeypa
     import models
 
     monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {
-        "hf-hub:timm/x": "could not fetch the model's upstream config (offline)",
+        "hf-hub:timm/x": "could not fetch the model's upstream config: offline",
     })
     img_path = tmp_path / "bird.jpg"
     Image.new("RGB", (200, 200), color="blue").save(str(img_path))
@@ -9498,7 +9498,7 @@ def test_classify_job_names_a_timm_model_without_common_names(tmp_path, monkeypa
         "this run named species from the taxonomy alone, and species the "
         "taxonomy does not name show their scientific name. Vireo's last "
         "attempt to fetch it failed: could not fetch the model's upstream "
-        "config (offline). Click Repair on iNat21 in Settings › Models to "
+        "config: offline. Click Repair on iNat21 in Settings › Models to "
         "fetch it."
     )
     assert result["common_names_notice"] == notice

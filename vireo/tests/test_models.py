@@ -2892,7 +2892,7 @@ def test_failed_label_descriptions_repair_is_remembered_until_one_succeeds(
     monkeypatch.setattr(models, "_load_upstream_timm_config", offline)
     assert models.ensure_timm_label_descriptions(str(tmp_path), _TIMM_MODEL_STR) is False
     assert models.label_descriptions_heal_failure(_TIMM_MODEL_STR) == (
-        "could not fetch the model's upstream config (Network is unreachable)"
+        "could not fetch the model's upstream config: Network is unreachable"
     )
 
     monkeypatch.setattr(

@@ -822,24 +822,29 @@ def test_a_failed_heal_is_named_by_the_runs_that_use_fallback_names(
 
 
 def test_common_names_notice_says_a_heal_is_running(tmp_path, monkeypatch):
-    """While the background heal is still running, the notice says so
-    instead of naming an older failure."""
+    """While the background heal is running again, the notice says so and
+    still names why the previous attempt failed."""
     import models
     import timm_classifier as tc
     from timm_classifier import missing_common_names_notice
 
     _reset_heal_state()
-    monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {"m": "old failure"})
     model_dir = _make_model_dir(tmp_path)
     clf = MagicMock(label_descriptions_missing=True, _model_str="m", _model_dir=str(model_dir))
     with tc._HEAL_LOCK:
         tc._HEAL_STATE[("m", tc._installation_generation(str(model_dir)))] = "in_flight"
     try:
-        notice = missing_common_names_notice(clf, "iNat21")
+        monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {})
+        first = missing_common_names_notice(clf, "iNat21")
+        monkeypatch.setattr(models, "_LABEL_DESC_HEAL_FAILURES", {"m": "OSError: offline"})
+        retry = missing_common_names_notice(clf, "iNat21")
     finally:
         _reset_heal_state()
-    assert "Vireo was fetching the file in the background while this run used the model." in notice
-    assert "old failure" not in notice
+    assert " Vireo was fetching the file in the background while this run used the model. " in first
+    assert (
+        " Vireo's last attempt to fetch it failed (OSError: offline), and it "
+        "was trying again while this run used the model. " in retry
+    )
 
 
 def test_present_label_descriptions_skips_self_heal(tmp_path):

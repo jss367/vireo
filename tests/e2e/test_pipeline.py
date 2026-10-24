@@ -1062,3 +1062,28 @@ def test_extract_step_outcome_prefers_nested_over_top_level_errors(
     assert "Reconnect" in outcome["status"], (
         f"Nested error wins over top-level; got {outcome!r}"
     )
+
+
+def test_pipeline_common_names_note_is_not_a_skip(live_server, page):
+    """A timm model that ran without its common-name file classified every
+    photo, so its note shows in the banner without claiming a stage was
+    skipped, and the Classify card keeps its own outcome."""
+    page.goto(f'{live_server["url"]}/pipeline')
+    page.evaluate("""
+        var note = '[common_names] iNat21 is missing its common-name file ' +
+          '(label_descriptions.json), so this run named species from the ' +
+          'taxonomy alone.';
+        _onPipelineComplete({
+          status: 'completed',
+          result: {ok: true, stages: {classify: {classified: 3, total: 3}},
+                   errors: [note], notes: [note]},
+        });
+    """)
+    expect(page.get_by_test_id("pipeline-note-banner")).to_be_visible()
+    expect(page.locator("#pipelineNoteTitle")).to_have_text("This run finished with a note")
+    expect(page.locator("#pipelineNoteText")).to_have_text(
+        "iNat21 is missing its common-name file (label_descriptions.json), "
+        "so this run named species from the taxonomy alone."
+    )
+    expect(page.locator("#pillClassify")).not_to_have_text("Skipped")
+    expect(page.get_by_test_id("pipeline-error-banner")).to_be_hidden()

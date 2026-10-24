@@ -295,15 +295,20 @@ def missing_common_names_notice(clf, model_name):
         "taxonomy alone, and species the taxonomy does not name show their "
         "scientific name."
     )
-    if _label_desc_heal_in_flight(getattr(clf, "_model_dir", ""), model_str):
+    in_flight = _label_desc_heal_in_flight(getattr(clf, "_model_dir", ""), model_str)
+    failure = _models_mod.label_descriptions_heal_failure(model_str)
+    if failure and in_flight:
+        text += (
+            f" Vireo's last attempt to fetch it failed ({failure}), and it "
+            "was trying again while this run used the model."
+        )
+    elif failure:
+        text += f" Vireo's last attempt to fetch it failed: {failure}."
+    elif in_flight:
         text += (
             " Vireo was fetching the file in the background while this run "
             "used the model."
         )
-    else:
-        failure = _models_mod.label_descriptions_heal_failure(model_str)
-        if failure:
-            text += f" Vireo's last attempt to fetch it failed: {failure}."
     return text + f" Click Repair on {model_name} in Settings › Models to fetch it."
 
 
