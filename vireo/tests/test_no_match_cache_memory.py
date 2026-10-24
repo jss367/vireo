@@ -156,8 +156,6 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
     steps, finalized = ([], [])
 
     def imports(name, *a, **kw):
-        if name == "taxonomy":
-            return types.SimpleNamespace(load_local_taxonomy=lambda: None)
         if name == "db":
             return types.SimpleNamespace(_chunks=lambda rows: (rows[i : i + 2] for i in range(0, len(rows), 2)))
         return forbidden(name)
@@ -166,6 +164,9 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         "__builtins__": {**vars(builtins), "__import__": imports},
         "os": types.SimpleNamespace(path=posixpath),
         "_photo_timestamp": lambda p: None,
+        "_load_job_taxonomy": lambda job: None,
+        "taxonomy_step_summary": lambda job, tax: "No taxonomy",
+        "with_taxonomy_notice": lambda job, result: result,
         "_cached_prediction_taxonomy": lambda p: {},
         "_finalize_remaining_steps": lambda *a, **kw: None,
         "_cached_only_label_source": lambda *a, **kw: None,
