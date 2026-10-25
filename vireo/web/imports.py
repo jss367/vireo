@@ -1338,10 +1338,13 @@ def create_imports_blueprint(
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
+            photo_count, cataloged_bytes = db.pending_archives.cataloged_photo_totals(folder_ids)
             _changes, here, elsewhere, overlap = db.pending_changes.staged_scope(folder_ids)
             items.append({
                 "id": row["id"], "destination": row["destination"],
                 "folder_ids": folder_ids,
+                "created_at": row["created_at"],
+                "photo_count": photo_count, "cataloged_bytes": cataloged_bytes,
                 # Scoped to this archive's staging tree, not the catalog-wide
                 # sync queue: the banner offers to sync *these* photos, so the
                 # number has to be the ones the transfer would leave stale.
