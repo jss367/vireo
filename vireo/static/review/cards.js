@@ -59,7 +59,9 @@ function reviewBaseCardKey(pred) {
   } else if (currentModel === 'all' && !currentLabelsFingerprint && pred.card_id) {
     key = pred.card_id;
   } else {
-    key = JSON.stringify([pred.model, pred.group_id || pred.id, pred.consensus_species_key || pred.species]);
+    // Respect subject splits made by the server even in per-model views:
+    // a legacy burst ID can contain two animals from the same frame.
+    key = JSON.stringify([pred.card_id, pred.model, pred.group_id || pred.id, pred.consensus_species_key || pred.species]);
   }
   return key + ':' + pred.status;
 }

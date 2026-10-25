@@ -94,8 +94,11 @@ changing this code:
 
 `GET /api/predictions` retains individual prediction rows and attaches a
 `card_id`. The server connects burst groups and singletons with the same
-`consensus_species_key`, review status, and overlapping photo membership,
-including transitive overlaps. Species identity is the one Accept applies;
+`consensus_species_key`, review status, and overlapping detected subjects,
+including transitive overlaps. A component containing distinct detections
+from one photo falls back to one card per detection: the burst links cannot
+establish which animal continues across frames. Model and fingerprint
+filters preserve these subject boundaries. Species identity is the one Accept applies;
 raw per-frame labels and stored per-model `group_id`s remain evidence.
 
 `cards.js` indexes visible members within these card boundaries. Model or

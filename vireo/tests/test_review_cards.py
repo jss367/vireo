@@ -352,7 +352,7 @@ def test_merging_uses_the_species_accept_applies_not_a_minority_frame_label(app_
     assert all('Other bird' not in {k['name'] for k in db.photo_keywords.get_for_photo(pid)} for pid in photos)
 
 
-def _seed_two_detections_same_photo(db):
+def _seed_two_detections_same_photo(db, grouped=False):
     """One photo carrying two distinct detections of the same species.
 
     Two models classify each detection as the same taxon. The expected shape
@@ -376,7 +376,8 @@ def _seed_two_detections_same_photo(db):
     for detection in (left, right):
         for model, name in [('BioCLIP', 'Eurasian Blue Tit'), ('iNat21', 'Blue Tit')]:
             db.predictions.add(detection, name, .9, model,
-                               labels_fingerprint='current', taxonomy=BLUE)
+                               labels_fingerprint='current', taxonomy=BLUE,
+                               group_id=f'{model}-shared' if grouped else None)
             ids_by_detection[detection].append(
                 db.conn.execute('SELECT max(id) FROM predictions').fetchone()[0],
             )
@@ -384,9 +385,10 @@ def _seed_two_detections_same_photo(db):
     return photo, ids_by_detection
 
 
-def test_two_detections_in_one_photo_stay_in_separate_cards(app_and_db):
+@pytest.mark.parametrize('grouped', [False, True])
+def test_two_detections_in_one_photo_stay_in_separate_cards(app_and_db, grouped):
     app, db = app_and_db
-    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    _, ids_by_detection = _seed_two_detections_same_photo(db, grouped)
     left_ids, right_ids = ids_by_detection.values()
     rows = {p['id']: p for p in app.test_client().get('/api/predictions').get_json()['predictions']}
     assert {rows[pid]['card_id'] for pid in left_ids} == {rows[left_ids[0]]['card_id']}
@@ -394,12 +396,35 @@ def test_two_detections_in_one_photo_stay_in_separate_cards(app_and_db):
     assert rows[left_ids[0]]['card_id'] != rows[right_ids[0]]['card_id']
 
 
+@pytest.mark.parametrize('reverse_order', [False, True])
+def test_transitive_burst_links_cannot_merge_distinct_subjects_in_one_frame(reverse_order):
+    from services.review_cards import review_card_components
+
+    # Each model's burst visits each frame once, but they disagree on which
+    # subject in frame 10 continues into the shared detection in frame 20.
+    rows = [
+        {'id': 1, 'photo_id': 10, 'detection_id': 100, 'model': 'bio', 'group_id': 'a'},
+        {'id': 2, 'photo_id': 20, 'detection_id': 200, 'model': 'bio', 'group_id': 'a'},
+        {'id': 3, 'photo_id': 20, 'detection_id': 200, 'model': 'inat', 'group_id': 'b'},
+        {'id': 4, 'photo_id': 10, 'detection_id': 101, 'model': 'inat', 'group_id': 'b'},
+    ]
+    for row in rows:
+        row.update(consensus_species_key='taxon:1', status='pending')
+    if reverse_order:
+        rows.reverse()
+    components = review_card_components(rows)
+    assert {frozenset(row['id'] for row in members) for members in components} == {
+        frozenset({1}), frozenset({2, 3}), frozenset({4}),
+    }
+
+
 @pytest.mark.parametrize('decision,status', [('accept', 'accepted'), ('reject', 'rejected')])
+@pytest.mark.parametrize('grouped', [False, True])
 def test_decision_on_one_detection_leaves_the_other_subject_reviewable(
-    app_and_db, decision, status,
+    app_and_db, decision, status, grouped,
 ):
     app, db = app_and_db
-    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    _, ids_by_detection = _seed_two_detections_same_photo(db, grouped)
     left_ids, right_ids = ids_by_detection.values()
     client = app.test_client()
     response = client.post(
@@ -428,9 +453,10 @@ def test_decision_on_one_detection_leaves_the_other_subject_reviewable(
 
 
 @pytest.mark.parametrize('decision', ['accept', 'reject'])
-def test_submitting_both_subjects_as_one_card_is_refused(app_and_db, decision):
+@pytest.mark.parametrize('grouped', [False, True])
+def test_submitting_both_subjects_as_one_card_is_refused(app_and_db, decision, grouped):
     app, db = app_and_db
-    _, ids_by_detection = _seed_two_detections_same_photo(db)
+    _, ids_by_detection = _seed_two_detections_same_photo(db, grouped)
     left_ids, right_ids = ids_by_detection.values()
     merged = [*left_ids, *right_ids]
     response = app.test_client().post(

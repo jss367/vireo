@@ -133,6 +133,27 @@ test('a hidden connecting frame does not merge separate detections in one photo'
   assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[3])), [23]);
 });
 
+test('model and fingerprint filters preserve subject splits inside one legacy burst', () => {
+  const ctx = harness();
+  ctx.predictions = [
+    {...row(10, 20, 'bio', 'shared', .95), detection_id: 100, card_id: 'left'},
+    {...row(11, 20, 'inat', 'shared', .9), detection_id: 100, card_id: 'left'},
+    {...row(12, 20, 'bio', 'shared', .9), detection_id: 200, card_id: 'right'},
+    {...row(13, 20, 'inat', 'shared', .95), detection_id: 200, card_id: 'right'},
+  ];
+  ctx.allPredictions = ctx.predictions;
+  assert.equal(ctx.getVisibleItems().length, 2);
+  ctx.currentModel = 'bio';
+  assert.equal(ctx.getVisibleItems().length, 2);
+  assert.deepEqual(JSON.parse(ctx.reviewCardRequest(ctx.predictions[0]).body).review_prediction_ids, [10]);
+  assert.deepEqual(JSON.parse(ctx.reviewCardRequest(ctx.predictions[2]).body).review_prediction_ids, [12]);
+  ctx.currentModel = 'all';
+  ctx.currentLabelsFingerprint = 'inat';
+  assert.equal(ctx.getVisibleItems().length, 2);
+  assert.deepEqual(JSON.parse(ctx.reviewCardRequest(ctx.predictions[1]).body).review_prediction_ids, [11]);
+  assert.deepEqual(JSON.parse(ctx.reviewCardRequest(ctx.predictions[3]).body).review_prediction_ids, [13]);
+});
+
 test('different species, disjoint cards and previous decisions stay separate', () => {
   const ctx = harness();
   const other = {...row(6, 11, 'other', null, .7), card_id: 'other-species', species: 'Other', consensus_species_key: 'taxon:2'};

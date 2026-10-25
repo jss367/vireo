@@ -57,7 +57,24 @@ def review_card_components(rows: list[JsonDict]) -> list[list[JsonDict]]:
     components: dict[int, list[JsonDict]] = {}
     for index, row in enumerate(rows):
         components.setdefault(root(index), []).append(row)
-    return list(components.values())
+    return [card for members in components.values() for card in _separate_conflicting_subjects(members)]
+
+
+def _separate_conflicting_subjects(members: list[JsonDict]) -> list[list[JsonDict]]:
+    """Fall back to subject cards when burst links cannot distinguish animals.
+
+    A burst can contain two detections from the same frame, directly or via
+    another model's overlapping burst. Their correspondence across frames is
+    ambiguous, so do not propagate any decision through that component.
+    """
+    by_detection: dict[int, list[JsonDict]] = {}
+    by_photo: dict[int, set[int]] = {}
+    for row in members:
+        by_detection.setdefault(row['detection_id'], []).append(row)
+        by_photo.setdefault(row['photo_id'], set()).add(row['detection_id'])
+    if any(len(detections) > 1 for detections in by_photo.values()):
+        return list(by_detection.values())
+    return [members]
 
 
 def attach_review_cards(rows: list[JsonDict]) -> None:
