@@ -2,6 +2,7 @@
 import contextlib
 import os
 
+import pytest
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
 from services import photo_ingest
@@ -208,6 +209,70 @@ def test_extract_working_copies_scope_matches_subtrees(tmp_path, monkeypatch):
 
     assert (vireo_dir / "working" / f"{child_id}.jpg").exists()
     assert not (vireo_dir / "working" / f"{sibling_id}.jpg").exists()
+
+
+@pytest.mark.parametrize("mode", ["exact", "subtree"])
+def test_extract_working_copies_scope_follows_symlinked_folder(tmp_path, monkeypatch, mode):
+    """A scope spelled through a symlink matches the photos the scan filed
+    under the resolved folder (``file_identity.catalog_scan_root``), and
+    still leaves out a sibling."""
+    import config as cfg
+    from db import Database
+    from scanner import _extract_working_copies
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    real = tmp_path / "real"
+    real.mkdir()
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    real_id = _seed_large_jpeg(db, real, "r.jpg")
+    sibling_id = _seed_large_jpeg(db, sibling, "s.jpg")
+
+    _extract_working_copies(db, str(vireo_dir), scope=[(str(link), mode)])
+
+    assert (vireo_dir / "working" / f"{real_id}.jpg").exists()
+    assert not (vireo_dir / "working" / f"{sibling_id}.jpg").exists()
+
+
+def test_extract_working_copies_scope_follows_case_alias(tmp_path, monkeypatch):
+    """A scope spelled as a case alias of a cataloged folder matches the
+    stored spelling, as the scanner's root mapping does. Case folding is
+    simulated through ``samefile`` so the test behaves the same on every
+    host."""
+    import config as cfg
+    import file_identity
+    from db import Database
+    from scanner import _extract_working_copies
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    stored = tmp_path / "Shoot"
+    stored.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    photo_id = _seed_large_jpeg(db, stored, "a.jpg")
+
+    def case_insensitive_samefile(a, b):
+        return (os.path.normpath(os.fspath(a)).casefold()
+                == os.path.normpath(os.fspath(b)).casefold())
+
+    monkeypatch.setattr(file_identity.os.path, "samefile", case_insensitive_samefile)
+
+    _extract_working_copies(
+        db, str(vireo_dir), scope=[(str(tmp_path / "sHOOT"), "exact")],
+    )
+
+    assert (vireo_dir / "working" / f"{photo_id}.jpg").exists()
 
 
 def test_extract_working_copies_empty_scope_is_noop(tmp_path, monkeypatch):

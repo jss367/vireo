@@ -199,14 +199,22 @@ def _extract_working_copies(
 
 
 def _working_copy_scope_clause(db: Database, scope: Iterable[WorkingCopyScopeEntry]) -> str:
-    """Load ``scope`` into a TEMP table; return the SQL clause matching it."""
+    """Load ``scope`` into a TEMP table; return the SQL clause matching it.
+
+    Each scope folder is matched under the spelling a scan of it catalogs
+    (``file_identity.catalog_scan_roots``), not the one the caller holds: an
+    import reached through a symlink scopes ``/tmp/card`` while the scan
+    filed the photos under ``/private/tmp/card``.
+    """
+    from file_identity import catalog_scan_roots
+
+    entries = [
+        entry if isinstance(entry, tuple) else (entry, "subtree")
+        for entry in scope
+    ]
+    paths = catalog_scan_roots(db, [path for path, _mode in entries])
     scope_rows = []
-    for entry in scope:
-        if isinstance(entry, tuple):
-            path, mode = entry
-        else:
-            path, mode = entry, "subtree"
-        path = str(path)
+    for path, (_supplied, mode) in zip(paths, entries, strict=True):
         if mode == "exact":
             scope_rows.append((path, mode, None))
         else:
