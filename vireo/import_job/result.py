@@ -41,9 +41,12 @@ def _finalize_import(job: JobDict, runner: JobRunner, db: Database, state: _Impo
         params, include_paths, discovered=discovered, copied=state.copied,
         skipped_duplicate=state.skipped_duplicate, failed=state.failed,
     ) + _working_copy_summary_suffix(state)
+    sidecar_note = state.sidecar_failures.note()
+    if sidecar_note:
+        summary += f", {sidecar_note}"
     runner.update_step(
         job["id"], "import",
-        status="failed" if status == "failed" else "completed",
+        status="failed" if status == "failed" or sidecar_note else "completed",
         summary=summary,
     )
 
@@ -235,6 +238,12 @@ def _import_result_fields(
     unverified_duplicates_only: bool, vanished_paths: set[str], appeared: int,
 ) -> JsonDict:
     """Every key of the import's result except the working-copy notice."""
+    photos_ok = (
+        state.failed == 0
+        and not state.discovery_errors
+        and not state.dup_link_failed
+    )
+    sidecar_failures = list(state.sidecar_failures.messages)
     return {
         "discovered": discovered,
         "copied": state.copied,
@@ -299,15 +308,17 @@ def _import_result_fields(
         "files_appeared": appeared,
         "files_vanished": len(vanished_paths),
         # JobRunner's mixed-outcome convention: a run with any failed
-        # file, unseen source subtree, or workspace-link failure is
-        # recorded "failed" (with per-file / per-operation reasons),
-        # never "completed".
-        "ok": (
-            state.failed == 0
-            and not state.discovery_errors
-            and not state.dup_link_failed
-        ),
-        "errors": [f"{u['path']}: {u['reason']}" for u in state.unsafe_files],
+        # file, unseen source subtree, workspace-link failure, or sidecar
+        # whose keywords were not imported is recorded "failed" (with
+        # per-file / per-operation reasons), never "completed".
+        "ok": photos_ok and not sidecar_failures,
+        # Every photo was imported, sidecar keywords aside. After-import
+        # processing keys on this: the photos are cataloged either way.
+        "photos_ok": photos_ok,
+        "errors": [
+            f"{u['path']}: {u['reason']}" for u in state.unsafe_files
+        ] + sidecar_failures,
+        "sidecar_failures": sidecar_failures,
     }
 
 

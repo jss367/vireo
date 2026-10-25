@@ -21,7 +21,7 @@ from db import Database
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
 from services import saved_processes
-from services.imports import ImportFailure
+from services.imports import ImportFailure, import_photos_ok
 from services.local_folder import local_copy_scan_conflict, stage_pending_source_paths
 from services.local_workspace import stage_boundary_lock
 
@@ -710,7 +710,7 @@ class _InPlaceImportJob:
         # or enqueue an expensive Process run: this Import admitted
         # nothing new.
         if (
-            result.get("ok")
+            import_photos_ok(result)
             and result.get("source_snapshot_id") is not None
             and result.get("imported") == 0
             and not job_config.get("restarted_from")
@@ -733,7 +733,10 @@ class _InPlaceImportJob:
         if after_import is None:
             result["after_import_skipped"] = "import-only"
             return
-        if not result.get("ok"):
+        # ``photos_ok``: every photo was imported. A sidecar whose keywords
+        # were not imported fails the job but not that: the photos are
+        # cataloged, so processing still runs.
+        if not import_photos_ok(result):
             result["after_import_skipped"] = "import failed"
             return
         if result.get("cancelled"):
@@ -796,6 +799,13 @@ class _InPlaceImportRun:
         self.reported_photo_identities = {}
         self.indexed_paths: set[str] = set()
         self.root_errors: list[str] = []
+        # One line per sidecar whose keywords a scan could not import
+        # (``ScanHooks.sidecar_error``). The photo is cataloged but missing
+        # those keywords, so each line is a failed item: the job ends
+        # "failed" (the rollup rule) while every other photo is imported.
+        from scanner import SidecarFailures
+
+        self.sidecar_failures = SidecarFailures(on_new=self._record_job_error)
         self.scan_acc = {
             "prior": 0,
             "last_current": 0,
@@ -961,6 +971,9 @@ class _InPlaceImportRun:
 
     def _record_error(self, msg: str) -> None:
         self.root_errors.append(msg)
+        self._record_job_error(msg)
+
+    def _record_job_error(self, msg: str) -> None:
         if msg not in self.job["errors"]:
             self.job["errors"].append(msg)
 
@@ -1396,6 +1409,7 @@ class _InPlaceImportRun:
                 photo=self._photo_cb,
                 photo_merged=self._photo_merged_cb,
                 status=self._status_cb,
+                sidecar_error=self.sidecar_failures.record,
             ),
             control=ScanControl(
                 cancel_check=self._cancel_check,
@@ -1670,9 +1684,10 @@ class _InPlaceImportRun:
             "discovered": indexed,
             "indexed": indexed,
             "failed": len(self.root_errors),
-            "errors": self.root_errors,
+            "errors": self.root_errors + self.sidecar_failures.messages,
             "photo_ids": self.photo_ids,
         }
+        self._add_sidecar_failures(result)
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
         # The working-copy pass commits a 24h failure marker on every
@@ -1682,6 +1697,15 @@ class _InPlaceImportRun:
         self._add_working_copy_notice(result)
         self._apply_import_tags(result)
         return result
+
+    def _add_sidecar_failures(self, result: JsonDict) -> None:
+        """Name the photos whose sidecar keywords were not imported.
+
+        The same lines are in ``errors``; this key lets the Import page
+        list them apart from the errors about the photos themselves.
+        """
+        if self.sidecar_failures.messages:
+            result["sidecar_failures"] = list(self.sidecar_failures.messages)
 
     def _add_working_copy_notice(self, result: JsonDict) -> None:
         """Name the photos left without a working copy (a notice, not an error).
@@ -1732,6 +1756,12 @@ class _InPlaceImportRun:
                 f"{'s were' if len(snapshot_unindexed) != 1 else ' was'} "
                 "not indexed"
             )
+        # Every photo was imported unless something above failed; a sidecar
+        # whose keywords were not imported fails the job without that.
+        photos_ok = not all_errors
+        all_errors += self.sidecar_failures.messages
+        if self.sidecar_failures.messages:
+            summary += f", {self.sidecar_failures.note()}"
         self.runner.update_step(
             self.job["id"], "scan",
             status="failed" if all_errors else "completed",
@@ -1742,6 +1772,7 @@ class _InPlaceImportRun:
         result = {
             "mode": "in_place",
             "ok": not all_errors,
+            "photos_ok": photos_ok,
             "discovered": indexed,
             "indexed": indexed,
             "failed": (
@@ -1754,6 +1785,7 @@ class _InPlaceImportRun:
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
         self._add_working_copy_notice(result)
+        self._add_sidecar_failures(result)
         self._apply_import_tags(result)
         # Pause before publishing the collection or handing off to a
         # child job. Once the handoff starts, late parent requests must

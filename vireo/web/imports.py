@@ -870,9 +870,13 @@ class _ImportFullRun:
 
     def _scan(self, do_scan):
         """Phase 2: Scan to index into DB."""
-        from scanner import ScanControl, ScanHooks, ScanOptions
+        from scanner import ScanControl, ScanHooks, ScanOptions, SidecarFailures
 
         ctx, job, thread_db = self.ctx, self.job, self.thread_db
+        # A sidecar whose keywords were not imported is a failed item: its
+        # line goes into the job's errors (so the job ends failed) and the
+        # scan continues with every other photo.
+        sidecar_failures = SidecarFailures(on_new=job["errors"].append)
         scan_target = self.scan_target
         ctx.checkpoint(job)
         ctx.runner.update_step(job["id"], "scan", status="running")
@@ -931,7 +935,7 @@ class _ImportFullRun:
                     thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
                     restrict_dirs=self.restrict_dirs,
                 ),
-                hooks=ScanHooks(progress=scan_cb),
+                hooks=ScanHooks(progress=scan_cb, sidecar_error=sidecar_failures.record),
                 control=ScanControl(
                     cancel_check=scan_cancel_check,
                     pause_check=scan_pause_check,
@@ -955,13 +959,25 @@ class _ImportFullRun:
                     "Failed to invalidate missing-originals cache after import scan of %s",
                     scan_target,
                 )
-        scan_count = job["progress"].get("total", 0)
-        scan_summary = f"{scan_count} photos"
+        self._finish_scan_step(sidecar_failures)
+
+    def _finish_scan_step(self, sidecar_failures):
+        """Close the scan step; it fails on a sidecar whose keywords were not imported."""
+        job = self.job
+        scan_summary = f"{job['progress'].get('total', 0)} photos"
+        sidecar_note = sidecar_failures.note()
+        if sidecar_note:
+            scan_summary += f" ({sidecar_note})"
         metadata_warning = scan_metadata_warning()
         if metadata_warning:
             scan_summary += f" — {metadata_warning}"
-        ctx.runner.update_step(job["id"], "scan", status="completed",
-                           summary=scan_summary)
+        messages = sidecar_failures.messages
+        self.ctx.runner.update_step(
+            job["id"], "scan", status="failed" if messages else "completed",
+            summary=scan_summary,
+            error=messages[0] if messages else None,
+            error_count=len(messages) or None,
+        )
 
     def _generate_thumbnails(self, generate_all):
         """Phase 3: Generate thumbnails."""

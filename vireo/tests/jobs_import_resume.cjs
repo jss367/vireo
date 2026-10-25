@@ -18,7 +18,7 @@ function fn(name) {
 const ctx = vm.createContext({});
 ctx.window = ctx;
 vm.runInContext(fs.readFileSync('vireo/static/vireo-time.js', 'utf8'), ctx);
-for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'importChainProcessJobGroups', 'importChainInvalidated', 'pipelineNeverStarted', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
+for (const name of ['importFailedBeforeStart', 'importPhotosOk', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'importChainProcessJobGroups', 'importChainInvalidated', 'pipelineNeverStarted', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
 ctx.scenarios = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
