@@ -344,7 +344,13 @@ def create_batch_blueprint(
         except ValueError as e:
             return json_error(str(e), 403)
 
-        safety_error = best_batch_application_error(photos_map, best_photo_id, normalized_reject_ids)
+        # Ranking and legacy writes can set raw flags without manual approval.
+        states = db.photo_review.culling_flag_states(photo_ids)
+        gate_rows = {
+            pid: {**dict(photos_map[pid]), "flag": states.get(pid, {}).get("confirmed_flag") or "none"}
+            for pid in photo_ids
+        }
+        safety_error = best_batch_application_error(gate_rows, best_photo_id, normalized_reject_ids)
         if safety_error:
             return json_error(safety_error, 409)
 

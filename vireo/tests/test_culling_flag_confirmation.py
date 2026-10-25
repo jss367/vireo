@@ -323,6 +323,49 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.assertEqual([self.db.photos.get(pid)["flag"] for pid in self.ids],
                          ["flagged", "rejected", "flagged"])
 
+    def test_best_batch_requires_confirmed_flags_without_promoting_raw_flags(self):
+        from flask import Flask, jsonify
+        from web.batch import create_batch_blueprint
+
+        app = Flask(__name__)
+        app.register_blueprint(create_batch_blueprint(
+            lambda: self.db, lambda message, status=400: (jsonify(error=message), status),
+            location_errors=(), bulk_gps_location_payload=None, run_batch_delete=None,
+            invalidate_missing_originals=None,
+        ))
+        client = app.test_client()
+        best, reject = self.ids[:2]
+        for source, reason in [(None, None), ("ranker", None), (None, "automated")]:
+            with self.subTest(source=source, reason=reason):
+                self.db.photo_review.set_flag(best, "none")
+                self.db.photo_review.flag_ranked_candidate(best)
+                if source or reason:
+                    with self.db.photo_review.flag_write():
+                        self.db.photo_review.set_current_flag_note(
+                            [best], "flagged", "ranking", source=source, reason=reason,
+                        )
+                self.service.set_flag(reject, "rejected")
+                before = self.db.photo_review.flag_attributions([best, reject])
+                history = self.db.edit_history.list_recent()
+                response = client.post("/api/batch/best-batch-flags", json={
+                    "best_photo_id": best, "reject_photo_ids": [reject],
+                })
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(self.db.photo_review.flag_attributions([best, reject]), before)
+                self.assertEqual(self.db.edit_history.list_recent(), history)
+                self.assertIsNone(self.db.photo_review.culling_flag_states([best])[best]["confirmed_flag"])
+        # A confirmed keeper cannot turn an unconfirmed raw rejection into a
+        # photographer decision either. Once both are confirmed, replay is valid.
+        self.service.set_flag(best, "flagged")
+        self.db.photo_review.set_flag(reject, "rejected")
+        payload = {"best_photo_id": best, "reject_photo_ids": [reject]}
+        self.assertEqual(client.post("/api/batch/best-batch-flags", json=payload).status_code, 409)
+        self.assertIsNone(self.db.photo_review.culling_flag_states([reject])[reject]["confirmed_flag"])
+        self.service.set_flag(reject, "rejected")
+        self.assertEqual(client.post("/api/batch/best-batch-flags", json=payload).status_code, 200)
+        states = self.db.photo_review.culling_flag_states([best, reject])
+        self.assertEqual([states[pid]["confirmed_flag"] for pid in [best, reject]], ["flagged", "rejected"])
+
     def test_manual_apply_round_trip_is_one_attributed_reversible_edit(self):
         from flask import Flask, jsonify
         from web.caches import create_caches_blueprint
