@@ -9,7 +9,11 @@ Google result-language handling from ``places``. The per-photo equivalents
 live in ``web.photo_location_keywords``.
 """
 
+from __future__ import annotations
+
 import math
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 import places
 from db import KEYWORD_TYPES
@@ -32,31 +36,40 @@ from web.location_edits import (
 )
 from web.request_args import parse_selection_photo_ids
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.gps_locations import ValueOrError
+    from services.service_types import JsonDict, JsonError
+    from web.location_edits import LocationErrors
+    from web.web_types import GetDb, InvalidateMissingOriginals, RunBatchDelete
 
-def _batch_location_photo_ids(raw_ids):
+
+def _batch_location_photo_ids(raw_ids: object) -> tuple[list[int], str | None]:
     """``(photo_ids, error message)`` for a batch location edit.
 
-    The ids are deduplicated in request order.
+    The ids are deduplicated in request order; ``[]`` beside an error.
     """
     if not isinstance(raw_ids, list) or not raw_ids:
-        return None, "photo_ids required"
+        return [], "photo_ids required"
 
-    photo_ids = []
-    seen = set()
+    photo_ids: list[int] = []
+    seen: set[int] = set()
     for raw in raw_ids:
         if isinstance(raw, bool) or not isinstance(raw, int):
-            return None, "photo_ids must contain only integers"
+            return [], "photo_ids must contain only integers"
         if raw not in seen:
             photo_ids.append(raw)
             seen.add(raw)
     if not photo_ids:
-        return None, "photo_ids required"
+        return [], "photo_ids required"
     if len(photo_ids) > 1000:
-        return None, "too many photo_ids"
+        return [], "too many photo_ids"
     return photo_ids, None
 
 
-def _finish_batch_location(db, photo_ids, items, location_name, new_value):
+def _finish_batch_location(db: Database, photo_ids: list[int], items: list[JsonDict], location_name: str, new_value: str) -> Response:
     """Record a batch location edit, commit it, and build the response."""
     if items:
         db.record_edit(
@@ -77,14 +90,14 @@ def _finish_batch_location(db, photo_ids, items, location_name, new_value):
 
 
 def create_batch_blueprint(
-    get_db,
-    json_error,
+    get_db: GetDb,
+    json_error: JsonError,
     *,
-    location_errors,
-    bulk_gps_location_payload,
-    run_batch_delete,
-    invalidate_missing_originals,
-):
+    location_errors: LocationErrors,
+    bulk_gps_location_payload: Callable[[Database, JsonDict], ValueOrError[JsonDict]],
+    run_batch_delete: RunBatchDelete,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+) -> Blueprint:
     """Build the batch-edit blueprint.
 
     Everything injected is shared with routes or startup work still in
@@ -101,7 +114,7 @@ def create_batch_blueprint(
 
     @blueprint.route("/api/batch/location/text", methods=["POST"])
     @atomic_edit(get_db)
-    def api_batch_set_photo_location_text():
+    def api_batch_set_photo_location_text() -> ResponseReturnValue:
         """Attach one free-text location keyword to multiple photos."""
         body = request.get_json(silent=True) or {}
         photo_ids, invalid = _batch_location_photo_ids(body.get("photo_ids", []))
@@ -117,8 +130,9 @@ def create_batch_blueprint(
         # cannot round-trip it.
         if "|" in stripped:
             return json_error(LOCATION_NAME_PIPE_ERROR, 400)
-        latitude = body.get("latitude")
-        longitude = body.get("longitude")
+        # JSON values: float() rejects anything unusable.
+        latitude: Any = body.get("latitude")
+        longitude: Any = body.get("longitude")
         if (latitude is None) != (longitude is None):
             return json_error("latitude and longitude must be provided together", 400)
         if latitude is not None:
@@ -160,7 +174,7 @@ def create_batch_blueprint(
 
     @blueprint.route("/api/batch/location", methods=["POST"])
     @atomic_edit(get_db)
-    def api_batch_set_photo_location():
+    def api_batch_set_photo_location() -> ResponseReturnValue:
         """Attach one Google place location to multiple photos."""
         body = request.get_json(silent=True) or {}
         photo_ids, invalid = _batch_location_photo_ids(body.get("photo_ids", []))
@@ -227,7 +241,7 @@ def create_batch_blueprint(
 
     @blueprint.route("/api/batch/location/from-exif", methods=["POST"])
     @atomic_edit(get_db)
-    def api_batch_set_photo_locations_from_exif():
+    def api_batch_set_photo_locations_from_exif() -> ResponseReturnValue:
         """Resolve each photo's EXIF GPS to a place and optionally apply it.
 
         Body:
@@ -245,6 +259,8 @@ def create_batch_blueprint(
         payload, error = bulk_gps_location_payload(db, body)
         if error is not None:
             return error
+        # Set whenever there is no error.
+        payload = cast("JsonDict", payload)
         if not apply_changes:
             payload.pop("_details_by_place_id", None)
             return jsonify(payload)
@@ -312,7 +328,7 @@ def create_batch_blueprint(
         return jsonify(payload)
 
     @blueprint.route("/api/batch/best-batch-flags", methods=["POST"])
-    def api_batch_best_batch_flags():
+    def api_batch_best_batch_flags() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         best_photo_id = body.get("best_photo_id")
@@ -410,7 +426,7 @@ def create_batch_blueprint(
         })
 
     @blueprint.route("/api/batch/keyword", methods=["POST"])
-    def api_batch_keyword():
+    def api_batch_keyword() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -470,7 +486,7 @@ def create_batch_blueprint(
         return jsonify({"ok": True, "updated": len(added_ids), "keyword_id": kid})
 
     @blueprint.route("/api/batch/wildlife-excluded", methods=["POST"])
-    def api_batch_wildlife_excluded():
+    def api_batch_wildlife_excluded() -> ResponseReturnValue:
         """Include or exclude a selection from wildlife processing.
 
         Missing or out-of-workspace IDs are skipped rather than rejecting
@@ -548,7 +564,7 @@ def create_batch_blueprint(
         })
 
     @blueprint.route("/api/batch/keyword-remove", methods=["POST"])
-    def api_batch_keyword_remove():
+    def api_batch_keyword_remove() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
@@ -609,7 +625,7 @@ def create_batch_blueprint(
         return jsonify({"ok": True, "updated": len(removed_ids)})
 
     @blueprint.route("/api/batch/delete", methods=["POST"])
-    def api_batch_delete():
+    def api_batch_delete() -> ResponseReturnValue:
         """Delete photos from Vireo, optionally moving files to trash."""
         db = get_db()
         body = request.get_json(silent=True) or {}

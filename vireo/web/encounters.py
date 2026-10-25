@@ -1256,7 +1256,7 @@ class _SpeciesConfirmation:
             self.undo_edit_id = record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
             self._record_group_flag_attribution(self.undo_edit_id, group_attribution)
 
-    def _record_group_flag_attribution(self, edit_id, group_attribution):
+    def _record_group_flag_attribution(self, edit_id: int | None, group_attribution: JsonDict) -> None:
         """Attach the pre-write attribution snapshot to the grouping edit.
 
         apply_grouping_photo_edit's undo iterates ``flag_items`` and calls

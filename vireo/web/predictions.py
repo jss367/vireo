@@ -2092,7 +2092,9 @@ def create_predictions_blueprint(
                 _commit=False,
             )
 
-    def _normalize_group_apply_zones(picks, rejects):
+    def _normalize_group_apply_zones(
+        picks: object, rejects: object,
+    ) -> tuple[list[int], list[int], ErrorResponse | None]:
         """Validate shape, dedup, and reject overlap for picks/rejects.
 
         Returns ``(picks, rejects, err_response)``. Validates shape BEFORE
@@ -2104,23 +2106,26 @@ def create_predictions_blueprint(
         """
         for name, value in (("picks", picks), ("rejects", rejects)):
             if not isinstance(value, list):
-                return picks, rejects, json_error(f"{name} must be a list")
+                return [], [], json_error(f"{name} must be a list")
             if any(
                 isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
                 for pid in value
             ):
-                return picks, rejects, json_error(f"{name} must contain valid integer photo ids")
-        picks = list(dict.fromkeys(picks))
-        rejects = list(dict.fromkeys(rejects))
+                return [], [], json_error(f"{name} must contain valid integer photo ids")
+        picks = list(dict.fromkeys(cast("list[int]", picks)))
+        rejects = list(dict.fromkeys(cast("list[int]", rejects)))
         overlap = set(picks) & set(rejects)
         if overlap:
             pid = next(iter(sorted(overlap)))
-            return picks, rejects, json_error(
+            return [], [], json_error(
                 f"Photo {pid} listed in both picks and rejects", 400,
             )
         return picks, rejects, None
 
-    def _apply_prediction_group_decisions(db, picks, rejects, removed, species, observed):
+    def _apply_prediction_group_decisions(
+        db: Database, picks: list[int], rejects: list[int], removed: list[int],
+        species: str, observed: dict[int, str],
+    ) -> ResponseReturnValue:
         """Everything that runs under the prediction-decision lock, in one txn.
 
         The stale filter, flag/keyword writes, and prediction status writes

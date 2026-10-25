@@ -419,7 +419,7 @@ def _count_root_new_images(tally, root, known, reachability, staged_sources,
     tally.per_root.append(entry)
 
 
-def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
+def count_new_images_for_workspace(db, workspace_id, sample_limit: int | None = 5,
                                    progress_callback=None,
                                    progress_every=250,
                                    reachability=None,

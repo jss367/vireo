@@ -5,6 +5,6 @@
   "models.py:ensure_timm_label_descriptions": 159,
   "services/moves_merge.py:merge_staged_tree_into_archive": 119,
   "web/models.py:create_models_blueprint.api_classify_readiness": 160,
-  "web/models.py:create_models_blueprint.api_job_download_darktable": 274,
+  "web/models.py:create_models_blueprint.api_job_download_darktable": 271,
   "web/storage.py:create_storage_blueprint.api_storage": 202
 }

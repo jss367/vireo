@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
 from burst_evidence import (
     DEFAULT_CLOSE_CALL_MARGIN,
@@ -30,17 +31,23 @@ from services.local_folder import (
 from services.local_workspace import folder_has_local_workspace, stage_boundary_lock
 from web.background_jobs import make_background_job
 
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import BuildScanWork, CleanupCachedFiles, GetDb, GetRunner, InvalidateMissingOriginals
+
 
 def create_folders_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
     *,
-    build_scan_work,
-    cleanup_cached_files_for_deleted_photos,
-    invalidate_missing_originals,
-):
+    build_scan_work: BuildScanWork,
+    cleanup_cached_files_for_deleted_photos: CleanupCachedFiles,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+) -> Blueprint:
     """Build the folders blueprint.
 
     ``get_runner`` and ``db_path`` feed the rescan route's ``background_job``.
@@ -60,7 +67,7 @@ def create_folders_blueprint(
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
     @blueprint.route("/api/folders")
-    def api_folders():
+    def api_folders() -> ResponseReturnValue:
         db = get_db()
         # Browse pins its destructive Remove action to the workspace the
         # tree was rendered against. Fetching the tree and the active
@@ -84,7 +91,7 @@ def create_folders_blueprint(
         return jsonify([dict(f) for f in folders])
 
     @blueprint.route("/api/folders/missing")
-    def api_folders_missing():
+    def api_folders_missing() -> ResponseReturnValue:
         db = get_db()
         # Keep the rows and their monotonic observation marker on one read
         # snapshot so clients can compare this response with /api/browse/init
@@ -98,7 +105,7 @@ def create_folders_blueprint(
         return response
 
     @blueprint.route("/api/folders/check-health", methods=["POST"])
-    def api_folders_check_health():
+    def api_folders_check_health() -> ResponseReturnValue:
         db = get_db()
         # ``folders.check_health()`` scans every folder in the DB and returns a
         # global change count, but the client needs to know whether the
@@ -131,7 +138,7 @@ def create_folders_blueprint(
         return response
 
     @blueprint.route("/api/folders/<int:folder_id>", methods=["GET"])
-    def api_folder_get(folder_id):
+    def api_folder_get(folder_id: int) -> ResponseReturnValue:
         """Return a single folder's id, name, and path.
 
         Powers the folder-tree context menu's "Copy Path" action. A lean
@@ -152,7 +159,7 @@ def create_folders_blueprint(
         })
 
     @blueprint.route("/api/folders/<int:folder_id>/bursts", methods=["GET"])
-    def api_folder_bursts(folder_id):
+    def api_folder_bursts(folder_id: int) -> ResponseReturnValue:
         """Every burst in one folder, scored and assessed, with feature coverage.
 
         The folder listing behind burst adjudication (see
@@ -191,7 +198,7 @@ def create_folders_blueprint(
         return jsonify(payload)
 
     @blueprint.route("/api/folders/<int:folder_id>/workspaces", methods=["GET"])
-    def api_folder_workspaces(folder_id):
+    def api_folder_workspaces(folder_id: int) -> ResponseReturnValue:
         """List workspaces in which a Browse-visible folder appears."""
         db = get_db()
         folder = db.folders.get(folder_id)
@@ -227,7 +234,7 @@ def create_folders_blueprint(
         })
 
     @blueprint.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
-    def api_folder_relocate(folder_id):
+    def api_folder_relocate(folder_id: int) -> ResponseReturnValue:
         db = get_db()
         # Folders are global; relocating rewrites the path for every
         # workspace, so only a workspace that owns the folder as a real or
@@ -327,7 +334,7 @@ def create_folders_blueprint(
         })
 
     @blueprint.route("/api/folders/<int:folder_id>", methods=["DELETE"])
-    def api_folder_delete(folder_id):
+    def api_folder_delete(folder_id: int) -> ResponseReturnValue:
         db = get_db()
         # The missing-folder list may contain photo-only grants. Its scoped
         # count never authorizes cascading deletion of hidden sibling rows.
@@ -377,7 +384,7 @@ def create_folders_blueprint(
 
     @blueprint.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
     @background_job
-    def api_folder_rescan(ctx, folder_id):
+    def api_folder_rescan(ctx: JobLaunch, folder_id: int) -> ResponseReturnValue:
         """Queue a scan job scoped to the given folder's path.
 
         Body (optional): {"incremental": bool}
@@ -433,7 +440,7 @@ def create_folders_blueprint(
             )
 
     @blueprint.route("/api/folders/reveal", methods=["POST"])
-    def api_folders_reveal():
+    def api_folders_reveal() -> ResponseReturnValue:
         """Reveal a batch of folder paths in the OS file manager.
 
         Body: ``{"paths": [str, ...]}``. Backs the bulk-decide UI's

@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from config import settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
@@ -39,6 +41,17 @@ from web.settings import (
     workspace_effective_setting,
 )
 
+if TYPE_CHECKING:
+    import threading
+    from sqlite3 import Row
+
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from jobs import JobRunner
+    from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from web.web_types import GetDb, GetRunner, InvalidateMissingOriginals
+
 log = logging.getLogger(__name__)
 
 # How long a request that *starts* a new-images walk waits for it before
@@ -48,8 +61,8 @@ log = logging.getLogger(__name__)
 _NEW_IMAGES_SYNC_WAIT_SECS = 0.4
 
 
-def _inventory_pair(label_set, label_set_path, fingerprint, is_tol,
-                    is_intrinsic, db_pair, total):
+def _inventory_pair(label_set: str, label_set_path: str | None, fingerprint: str, is_tol: bool,
+                    is_intrinsic: bool, db_pair: JsonDict, total: int) -> JsonDict:
     """Build one (model × label-set) row for the classification inventory."""
     classified = db_pair.get("classified_dets", 0)
     pending = max(0, total - classified) if not is_intrinsic else max(
@@ -80,7 +93,7 @@ def _inventory_pair(label_set, label_set_path, fingerprint, is_tol,
     }
 
 
-def _inventory_subtotal(pairs):
+def _inventory_subtotal(pairs: list[JsonDict]) -> JsonDict:
     """Sum classified/pending across a model's pairs into a subtotal dict."""
     classified = sum(p["classified_dets"] for p in pairs)
     pending = sum(p["pending_dets"] for p in pairs)
@@ -93,7 +106,7 @@ def _inventory_subtotal(pairs):
     }
 
 
-def _inventory_label_sets():
+def _inventory_label_sets() -> tuple[list[JsonDict], list[JsonDict]]:
     """Usable saved label sets (deduped by fingerprint) and unusable ones.
 
     Returns ``(label_sets, unusable_label_sets)``.
@@ -146,8 +159,9 @@ def _inventory_label_sets():
     return label_sets, unusable_label_sets
 
 
-def _inventory_model_entry(m, model_name, label_sets, db_pairs, total_dets,
-                           seen_keys):
+def _inventory_model_entry(m: JsonDict, model_name: str, label_sets: list[JsonDict],
+                           db_pairs: dict[tuple[str, str], JsonDict], total_dets: int,
+                           seen_keys: set[tuple[str, str]]) -> JsonDict:
     """One registry model's inventory entry: a pair per label set it uses."""
     from labels_fingerprint import TOL_SENTINEL
     from models import supports_tree_of_life
@@ -203,7 +217,10 @@ def _inventory_model_entry(m, model_name, label_sets, db_pairs, total_dets,
     }
 
 
-def _inventory_legacy_models(db_pairs, registry_names, total_dets, seen_keys):
+def _inventory_legacy_models(
+    db_pairs: dict[tuple[str, str], JsonDict], registry_names: set[str], total_dets: int,
+    seen_keys: set[tuple[str, str]],
+) -> list[JsonDict]:
     """Inventory entries for models in the DB but not in the registry."""
     from labels_fingerprint import TOL_SENTINEL
 
@@ -238,7 +255,9 @@ def _inventory_legacy_models(db_pairs, registry_names, total_dets, seen_keys):
     return models_out
 
 
-def _inventory_stale(db, db_pairs, registry_names, label_sets):
+def _inventory_stale(
+    db: Database, db_pairs: dict[tuple[str, str], JsonDict], registry_names: set[str], label_sets: list[JsonDict],
+) -> list[JsonDict]:
     """Rows from current models whose label fingerprint is no longer on disk."""
     from labels import load_merged_labels
     from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
@@ -282,7 +301,7 @@ def _inventory_stale(db, db_pairs, registry_names, label_sets):
     return stale
 
 
-def _new_images_walk_compute(db_path, ws_id, walk_result, walk_error):
+def _new_images_walk_compute(db_path: str, ws_id: int, walk_result: JsonDict, walk_error: JsonDict) -> Callable[..., JsonDict]:
     """The cache worker's compute: one full new-images walk of ``ws_id``.
 
     Records the result, or the exception, in the holders the recorded job
@@ -292,7 +311,7 @@ def _new_images_walk_compute(db_path, ws_id, walk_result, walk_error):
     from db import Database
     from new_images import count_new_images_for_workspace
 
-    def compute(progress_callback=None):
+    def compute(progress_callback: Callable[..., None] | None = None) -> JsonDict:
         # Close explicitly: this connection lives for the whole walk
         # (minutes on large volumes), and connections left to __del__
         # accumulate and exhaust the per-process fd limit.
@@ -317,7 +336,7 @@ def _new_images_walk_compute(db_path, ws_id, walk_result, walk_error):
     return compute
 
 
-def _new_images_walk_job_payload(progress_state, result):
+def _new_images_walk_job_payload(progress_state: JsonDict, result: JsonDict) -> JsonDict:
     """The recorded new-images job's result: final totals and caveats."""
     payload = {
         "files_checked": progress_state["checked"],
@@ -344,10 +363,10 @@ def _new_images_walk_job_payload(progress_state, result):
     return payload
 
 
-def _new_images_walk_progress_callback(runner, job_id, progress_state):
+def _new_images_walk_progress_callback(runner: JobRunner, job_id: str, progress_state: JsonDict) -> Callable[..., None]:
     """Mirror walk progress into ``progress_state`` and the job's events."""
 
-    def progress_callback(files_checked, new_found):
+    def progress_callback(files_checked: int, new_found: int) -> None:
         progress_state["checked"] = files_checked
         progress_state["found"] = new_found
         runner.push_event(
@@ -367,7 +386,9 @@ def _new_images_walk_progress_callback(runner, job_id, progress_state):
     return progress_callback
 
 
-def _move_folders_local_copy_guard(db, ws_id, folder_ids):
+def _move_folders_local_copy_guard(
+    db: Database, ws_id: int, folder_ids: list[int],
+) -> tuple[dict[int, list[int]], str | None]:
     """Refuse a move that would abandon a local session; map descendant roots.
 
     Returns ``(descendant_root_ids_by_folder, error message)``.
@@ -384,7 +405,7 @@ def _move_folders_local_copy_guard(db, ws_id, folder_ids):
         if local_root_id is not None:
             linked_workspaces = local_folder_workspace_ids(db, local_root_id)
             if linked_workspaces == [ws_id]:
-                return None, (
+                return {}, (
                     "This is the last workspace linked to a local folder. "
                     "Sync or discard its local copy before moving it."
                 )
@@ -393,7 +414,7 @@ def _move_folders_local_copy_guard(db, ws_id, folder_ids):
         for descendant_id in descendant_ids:
             linked_workspaces = local_folder_workspace_ids(db, descendant_id)
             if linked_workspaces == [ws_id]:
-                return None, (
+                return {}, (
                     "This workspace is the last one linked to a subfolder's "
                     "local copy. Sync or discard the local copy before "
                     "moving this folder."
@@ -401,7 +422,7 @@ def _move_folders_local_copy_guard(db, ws_id, folder_ids):
     return descendant_root_ids_by_folder, None
 
 
-def _new_workspace_move_error(db, ws_id, folder_ids):
+def _new_workspace_move_error(db: Database, ws_id: int, folder_ids: list[int]) -> str | None:
     """Why the selected folders cannot seed a new workspace, or None."""
     if not db.workspaces.get(ws_id):
         return f"Source workspace {ws_id} not found"
@@ -426,14 +447,14 @@ def _new_workspace_move_error(db, ws_id, folder_ids):
 
 
 def create_workspace_blueprint(
-    get_db,
-    json_error,
-    all_pages,
+    get_db: GetDb,
+    json_error: JsonError,
+    all_pages: list[dict[str, str]],
     *,
-    get_runner,
-    invalidate_missing_originals,
-    new_images_walk_progress,
-):
+    get_runner: GetRunner,
+    invalidate_missing_originals: InvalidateMissingOriginals,
+    new_images_walk_progress: dict[tuple[str, int], dict[str, int]],
+) -> Blueprint:
     """Build the workspaces blueprint.
 
     Per-app state injected from ``create_app``:
@@ -452,31 +473,32 @@ def create_workspace_blueprint(
     """
     blueprint = Blueprint("workspaces", __name__)
 
-    def _nav_id():
+    def _nav_id() -> tuple[str, ErrorResponse | None]:
+        """``(nav_id, None)``, or ``("", error)``."""
         body = request.get_json(silent=True) or {}
         nav_id = body.get("nav_id")
         if not isinstance(nav_id, str):
-            return None, json_error("nav_id must be a string", 400)
+            return "", json_error("nav_id must be a string", 400)
         if nav_id not in ALL_NAV_IDS:
-            return None, json_error("nav_id is not a known page", 400)
+            return "", json_error("nav_id is not a known page", 400)
         return nav_id, None
 
     @blueprint.post("/api/workspace/tabs/pin")
-    def pin_tab():
+    def pin_tab() -> ResponseReturnValue:
         nav_id, error = _nav_id()
         if error:
             return error
         return jsonify({"ok": True, "tabs": get_db().workspaces.pin_tab(nav_id)})
 
     @blueprint.post("/api/workspace/tabs/unpin")
-    def unpin_tab():
+    def unpin_tab() -> ResponseReturnValue:
         nav_id, error = _nav_id()
         if error:
             return error
         return jsonify({"ok": True, "tabs": get_db().workspaces.unpin_tab(nav_id)})
 
     @blueprint.post("/api/workspace/tabs/reorder")
-    def reorder_tabs():
+    def reorder_tabs() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         tabs = body.get("tabs")
         if not isinstance(tabs, list):
@@ -488,7 +510,7 @@ def create_workspace_blueprint(
         return jsonify({"ok": True, "tabs": result})
 
     @blueprint.get("/api/workspace/tabs")
-    def get_tabs():
+    def get_tabs() -> ResponseReturnValue:
         db = get_db()
         try:
             tabs = db.workspaces.get_tabs()
@@ -498,13 +520,13 @@ def create_workspace_blueprint(
         return jsonify({"tabs": tabs, "all_pages": all_pages})
 
     @blueprint.route("/api/workspaces")
-    def api_get_workspaces():
+    def api_get_workspaces() -> ResponseReturnValue:
         db = get_db()
         workspaces = db.workspaces.list_all()
         return jsonify([dict(w) for w in workspaces])
 
     @blueprint.route("/api/workspaces/active")
-    def api_get_active_workspace():
+    def api_get_active_workspace() -> ResponseReturnValue:
         db = get_db()
         ws = db.workspaces.get(db.active_workspace_id)
         if not ws:
@@ -516,7 +538,7 @@ def create_workspace_blueprint(
             result["folders"] = [dict(f) for f in workspace_folders.get_workspace_folder_roots(db, ws["id"])]
         return jsonify(result)
 
-    def _validate_workspace_config_overrides(overrides, db):
+    def _validate_workspace_config_overrides(overrides: object, db: Database) -> ErrorResponse | None:
         """Validate ``config_overrides`` before persist. Returns an error
         response (from ``json_error``) on rejection, or None on success.
 
@@ -539,7 +561,7 @@ def create_workspace_blueprint(
         # bool) and is stricter than config_schema.validate_value, which
         # coerces strings.
         if LOCATION_KEYWORDS_SETTING in (overrides or {}) and not isinstance(
-            overrides[LOCATION_KEYWORDS_SETTING], bool
+            cast("JsonDict", overrides)[LOCATION_KEYWORDS_SETTING], bool
         ):
             return json_error(f"{LOCATION_KEYWORDS_SETTING} must be a boolean")
         pipeline_overrides = (overrides or {}).get("pipeline")
@@ -593,7 +615,7 @@ def create_workspace_blueprint(
                 return json_error(f"unknown process id: {pid}")
         return None
 
-    def _workspace_name_error(db, name, *, ws_id=None):
+    def _workspace_name_error(db: Database, name: object, *, ws_id: int | None = None) -> ErrorResponse | None:
         """Why ``name`` can't name a workspace, or None when it can.
 
         ``workspaces.name`` is UNIQUE, so a taken name used to surface as a
@@ -610,7 +632,7 @@ def create_workspace_blueprint(
         return None
 
     @blueprint.route("/api/workspaces", methods=["POST"])
-    def api_create_workspace():
+    def api_create_workspace() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         name = body.get("name", "")
@@ -676,13 +698,14 @@ def create_workspace_blueprint(
                     workspace_folders.add_workspace_folder(db, ws_id, folder_id)
                 db.workspace_folders.mark_roots(ws_id, folder_ids)
                 ws = db.workspaces.get(ws_id)
-            return jsonify(dict(ws))
+            # The workspace this request just created.
+            return jsonify(dict(cast("Row", ws)))
         except Exception as e:  # broad: creation failures (duplicate name, bad overrides) answer with the reason
             log.warning("Workspace creation failed", exc_info=True)
             return json_error(str(e))
 
     @blueprint.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
-    def api_update_workspace(ws_id):
+    def api_update_workspace(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         existing_ws = db.workspaces.get(ws_id)
         if not existing_ws:
@@ -726,7 +749,8 @@ def create_workspace_blueprint(
             return json_error(
                 f"A workspace named {kwargs.get('name')!r} already exists", 409,
             )
-        ws = db.workspaces.get(ws_id)
+        # The workspace this request just updated.
+        ws = cast("Row", db.workspaces.get(ws_id))
         warning = None
         if overrides_changing and prev_effective_location_keywords:
             new_effective = workspace_effective_setting(
@@ -739,7 +763,7 @@ def create_workspace_blueprint(
         return jsonify(_with_warning(dict(ws), warning))
 
     @blueprint.route("/api/workspaces/<int:ws_id>", methods=["DELETE"])
-    def api_delete_workspace(ws_id):
+    def api_delete_workspace(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         # Prevent deleting the last workspace
         workspaces = db.workspaces.list_all()
@@ -779,7 +803,7 @@ def create_workspace_blueprint(
         return jsonify({"ok": True, "cleanup_errors": cleanup_errors})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
-    def api_activate_workspace(ws_id):
+    def api_activate_workspace(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         ws = db.workspaces.get(ws_id)
         if not ws:
@@ -816,7 +840,7 @@ def create_workspace_blueprint(
         return jsonify({"ok": True, "workspace": dict(ws), "restore_path": restore_path})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/pin", methods=["POST"])
-    def api_pin_workspace(ws_id):
+    def api_pin_workspace(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         ws = db.workspaces.get(ws_id)
         if not ws:
@@ -830,16 +854,17 @@ def create_workspace_blueprint(
             ws_id,
             pinned_at=datetime.now().isoformat() if pinned else None,
         )
-        return jsonify(dict(db.workspaces.get(ws_id)))
+        # update() above refused an unknown workspace.
+        return jsonify(dict(cast("Row", db.workspaces.get(ws_id))))
 
     @blueprint.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
-    def api_workspace_folders(ws_id):
+    def api_workspace_folders(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         folders = workspace_folders.get_workspace_folder_roots(db, ws_id)
         return jsonify([dict(f) for f in folders])
 
     @blueprint.route("/api/workspaces/<int:ws_id>/folders", methods=["POST"])
-    def api_add_workspace_folder(ws_id):
+    def api_add_workspace_folder(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         folder_id = body.get("folder_id")
@@ -887,7 +912,7 @@ def create_workspace_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
-    def api_remove_workspace_folder(ws_id, folder_id):
+    def api_remove_workspace_folder(ws_id: int, folder_id: int) -> ResponseReturnValue:
         db = get_db()
         # Pre-check the workspace — an unknown id would otherwise hit the
         # workspace_folder_removals FK when we record the tombstone and 500.
@@ -947,7 +972,7 @@ def create_workspace_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
-    def api_move_workspace_folders(ws_id):
+    def api_move_workspace_folders(ws_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         folder_ids = body.get("folder_ids", [])
@@ -998,6 +1023,8 @@ def create_workspace_blueprint(
                     log.warning("Workspace creation for folder move failed", exc_info=True)
                     return json_error(f"Failed to create workspace: {e}")
 
+            # Given in the body, or created just above.
+            target_ws_id = cast(int, target_ws_id)
             try:
                 result = workspace_folders.move_folders_to_workspace(db, ws_id, target_ws_id, folder_ids)
                 result["target_workspace_id"] = target_ws_id
@@ -1026,7 +1053,7 @@ def create_workspace_blueprint(
                 return json_error(str(e))
 
     @blueprint.route("/api/workspaces/active/config")
-    def api_workspace_config():
+    def api_workspace_config() -> ResponseReturnValue:
         """Get the active workspace's config overrides."""
         db = get_db()
         ws = db.workspaces.get(db.active_workspace_id)
@@ -1041,7 +1068,7 @@ def create_workspace_blueprint(
         return jsonify(overrides)
 
     @blueprint.route("/api/workspaces/active/config", methods=["POST"])
-    def api_set_workspace_config():
+    def api_set_workspace_config() -> ResponseReturnValue:
         """Set config overrides for the active workspace."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1051,7 +1078,8 @@ def create_workspace_blueprint(
 
         import config_schema as schema
 
-        def _invalid(k, v):
+        # ``v`` is the request's JSON value for ``k``.
+        def _invalid(k: str, v: Any) -> str | None:
             """Why ``v`` can't be stored for ``k``, or None when it can.
 
             review_min_confidence is Pipeline Review's confidence slider,
@@ -1110,11 +1138,11 @@ def create_workspace_blueprint(
                     existing.pop(k, None)
                 else:
                     existing[k] = v
-            db.workspaces.update(db.active_workspace_id, config_overrides=existing if existing else None)
+            db.workspaces.update(db.require_workspace_id(), config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @blueprint.route("/api/workspaces/active/subject-types", methods=["GET"])
-    def api_get_active_subject_types():
+    def api_get_active_subject_types() -> ResponseReturnValue:
         """Return the active workspace's effective subject_types — global
         defaults merged with workspace overrides. The workspace settings UI
         needs this rather than just the override JSON, so checkboxes render
@@ -1125,7 +1153,7 @@ def create_workspace_blueprint(
         return jsonify({"types": types})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/subject-types", methods=["PUT"])
-    def api_set_subject_types(ws_id):
+    def api_set_subject_types(ws_id: int) -> ResponseReturnValue:
         """Set the subject_types config override for a workspace.
 
         Unknown type values are dropped (logged). An empty list is allowed
@@ -1176,7 +1204,7 @@ def create_workspace_blueprint(
             db.workspaces.update(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    def _new_images_walk_fns(db, ws_id):
+    def _new_images_walk_fns(db: Database, ws_id: int) -> tuple[Callable[..., JsonDict], Callable[..., Callable[..., None]], Callable[[], bool]]:
         """Return ``(compute, on_spawn, spawned)`` for a transparent background
         new-images walk, shared by the navbar probe and the snapshot POST.
 
@@ -1222,12 +1250,12 @@ def create_workspace_blueprint(
         ws_name = ws_row["name"] if ws_row else f"workspace #{ws_id}"
         runner = get_runner()
 
-        def on_spawn(spawn_event):
+        def on_spawn(spawn_event: threading.Event) -> Callable[..., None]:
             spawn_state["spawned"] = True
             progress_state = {"checked": 0, "found": 0}
             new_images_walk_progress[(db_path, ws_id)] = progress_state
 
-            def job_work_fn(job):
+            def job_work_fn(job: JobDict) -> JsonDict:
                 # Mirror the cache worker's lifecycle. ``spawn_event`` fires
                 # in the worker's finally clause, so we wake when the walk
                 # ends regardless of success or failure. Final totals come
@@ -1255,7 +1283,7 @@ def create_workspace_blueprint(
 
         return compute, on_spawn, (lambda: spawn_state["spawned"])
 
-    def _new_images_walk_progress_fields(db_path, ws_id):
+    def _new_images_walk_progress_fields(db_path: str, ws_id: int) -> JsonDict:
         """Live totals of the current/most recent walk for pending payloads."""
         progress = new_images_walk_progress.get((db_path, ws_id)) or {}
         return {
@@ -1263,7 +1291,7 @@ def create_workspace_blueprint(
             "new_count_so_far": progress.get("found", 0),
         }
 
-    def _new_images_walk_blocked_by_move():
+    def _new_images_walk_blocked_by_move() -> bool:
         """True while a storage move owns the source/archive filesystem.
 
         The navbar probe is automatic and can otherwise start a whole-library
@@ -1281,7 +1309,7 @@ def create_workspace_blueprint(
                 return True
         return False
 
-    def _new_images_deferred_reason(*, manual=False):
+    def _new_images_deferred_reason(*, manual: bool = False) -> str | None:
         if _new_images_walk_blocked_by_move():
             return "storage_move_active"
         if manual:
@@ -1293,13 +1321,13 @@ def create_workspace_blueprint(
         return None
 
     @blueprint.route("/api/workspaces/active/new-images")
-    def api_workspace_new_images():
+    def api_workspace_new_images() -> ResponseReturnValue:
         db = get_db()
         ws_id = db.active_workspace_id
         if ws_id is None:
             return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
 
-        def response_payload(result):
+        def response_payload(result: JsonDict) -> JsonDict:
             """Return a small client payload while keeping full paths in cache."""
             payload = dict(result)
             payload["workspace_id"] = ws_id
@@ -1383,7 +1411,7 @@ def create_workspace_blueprint(
         })
 
     @blueprint.route("/api/workspaces/active/new-images/recheck", methods=["POST"])
-    def api_workspace_new_images_recheck():
+    def api_workspace_new_images_recheck() -> ResponseReturnValue:
         """User-initiated "Check again" from the offline banner.
 
         The automatic path already recovers on its own — a result that
@@ -1416,7 +1444,7 @@ def create_workspace_blueprint(
         return jsonify({"workspace_id": ws_id, "rechecked": True})
 
     @blueprint.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
-    def api_workspace_new_images_snapshot_create():
+    def api_workspace_new_images_snapshot_create() -> ResponseReturnValue:
         db = get_db()
         ws_id = db.active_workspace_id
         if ws_id is None:
@@ -1424,7 +1452,7 @@ def create_workspace_blueprint(
         cache = db._new_images_cache
         db_path = db._db_path
 
-        def create_snapshot_from_result(result):
+        def create_snapshot_from_result(result: JsonDict) -> Response:
             file_paths = list(result.get("sample") or [])
             snap_id = db.workspaces.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
@@ -1489,7 +1517,7 @@ def create_workspace_blueprint(
         "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
         methods=["GET"],
     )
-    def api_workspace_new_images_snapshot_get(snapshot_id):
+    def api_workspace_new_images_snapshot_get(snapshot_id: int) -> ResponseReturnValue:
         db = get_db()
         if db.active_workspace_id is None:
             abort(404)
@@ -1510,7 +1538,7 @@ def create_workspace_blueprint(
 
 
     @blueprint.route("/api/workspace/classification-inventory")
-    def api_workspace_classification_inventory():
+    def api_workspace_classification_inventory() -> ResponseReturnValue:
         """Per-(model × label-set) classification coverage for the active workspace.
 
         Builds a cross-product of downloaded or previously used classifier

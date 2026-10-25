@@ -13,6 +13,8 @@ import os
 import re
 import sys
 import uuid
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from app_paths import default_path
 from classification_readiness import classification_readiness
@@ -22,6 +24,12 @@ from flask import Blueprint, jsonify, request
 from services import workspace_config
 from services.hf_cache_lock import cache_access
 from web.background_jobs import make_background_job
+
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import GetDb, GetRunner
 
 log = logging.getLogger(__name__)
 
@@ -65,20 +73,20 @@ PIPELINE_MODELS = {
 }
 
 
-def pipeline_models_dir():
+def pipeline_models_dir() -> str:
     """Directory holding downloaded pipeline model weights."""
     return default_path("models")
 
 
 
 def create_models_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
     *,
-    count_keywords,
-):
+    count_keywords: Callable[[], int],
+) -> Blueprint:
     """Build the models blueprint.
 
     The darktable download records the installed binary through
@@ -91,7 +99,7 @@ def create_models_blueprint(
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
     @blueprint.route("/api/models/status")
-    def api_models_status():
+    def api_models_status() -> ResponseReturnValue:
         """Lightweight model readiness check for first-launch detection."""
         from models import get_models
 
@@ -123,7 +131,7 @@ def create_models_blueprint(
         })
 
     @blueprint.route("/api/darktable/status")
-    def api_darktable_status():
+    def api_darktable_status() -> ResponseReturnValue:
         import config as cfg
         from develop import (
             darktable_search_paths,
@@ -169,7 +177,7 @@ def create_models_blueprint(
         })
 
     @blueprint.route("/api/darktable/install/available")
-    def api_darktable_install_available():
+    def api_darktable_install_available() -> ResponseReturnValue:
         """What a download would fetch, for the confirmation dialog.
 
         Always 200: when this cannot answer, the panel shows a plain
@@ -211,7 +219,7 @@ def create_models_blueprint(
         return jsonify({"available": True, "platform": sys.platform, **release})
 
     @blueprint.route("/api/models")
-    def api_models():
+    def api_models() -> ResponseReturnValue:
         from models import get_active_model, get_models
 
         active = get_active_model()
@@ -223,7 +231,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/models/<path:model_id>", methods=["DELETE"])
-    def api_remove_model(model_id):
+    def api_remove_model(model_id: str) -> ResponseReturnValue:
         """Remove a model's weights from disk and unregister it."""
         from models import remove_model
 
@@ -234,7 +242,7 @@ def create_models_blueprint(
         return jsonify({"ok": True, **removed})
 
     @blueprint.route("/api/models/active", methods=["POST"])
-    def api_set_active_model():
+    def api_set_active_model() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
@@ -245,7 +253,7 @@ def create_models_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/models/custom", methods=["POST"])
-    def api_add_custom_model():
+    def api_add_custom_model() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
@@ -264,14 +272,14 @@ def create_models_blueprint(
         return jsonify({"ok": True, "model_id": model_id})
 
     @blueprint.route("/api/taxonomy/info")
-    def api_taxonomy_info():
+    def api_taxonomy_info() -> ResponseReturnValue:
         from models import get_taxonomy_info
 
         return jsonify(get_taxonomy_info())
 
     @blueprint.route("/api/jobs/download-darktable", methods=["POST"])
     @background_job
-    def api_job_download_darktable(ctx):
+    def api_job_download_darktable(ctx: JobLaunch) -> ResponseReturnValue:
         """Download the latest darktable build and hand it to the platform."""
         import darktable_install
         from job_contract import progress_event
@@ -299,7 +307,7 @@ def create_models_blueprint(
         except (TypeError, ValueError):
             expected_size = None
 
-        def _artifact_matches(stored):
+        def _artifact_matches(stored: JsonDict) -> bool:
             """True when the stored artifact identity matches expected_*."""
             if not stored:
                 return not expected_name
@@ -419,16 +427,13 @@ def create_models_blueprint(
                 f"{target}, {free // (1024 * 1024)} MB free."
             )
 
-        def work(job):
-            try:
-                from .taxonomy import DownloadCancelled
-            except ImportError:
-                from taxonomy import DownloadCancelled
+        def work(job: JobDict) -> JsonDict:
+            from taxonomy import DownloadCancelled
 
             # byte_callback runs on the download thread inside the write loop,
             # so this must stay cheap — a queue put, never a DB write or
             # anything else that can stall the transfer.
-            def on_bytes(done, total):
+            def on_bytes(done: int, total: int) -> None:
                 ctx.runner.push_event(job["id"], "progress", progress_event(
                     phase="Downloading darktable",
                     current=done,
@@ -547,7 +552,7 @@ def create_models_blueprint(
         return jsonify({"job_id": job_id})
 
     @blueprint.route("/api/labels/search-places")
-    def api_labels_search_places():
+    def api_labels_search_places() -> ResponseReturnValue:
         q = request.args.get("q", "")
         if len(q) < 2:
             return jsonify([])
@@ -556,13 +561,13 @@ def create_models_blueprint(
         return jsonify(search_places(q))
 
     @blueprint.route("/api/labels/taxon-groups")
-    def api_labels_taxon_groups():
+    def api_labels_taxon_groups() -> ResponseReturnValue:
         from labels import TAXON_GROUPS
 
         return jsonify([{"key": k, "name": v["name"]} for k, v in TAXON_GROUPS.items()])
 
     @blueprint.route("/api/labels/observation-filters")
-    def api_labels_observation_filters():
+    def api_labels_observation_filters() -> ResponseReturnValue:
         from labels import OBSERVATION_FILTERS
 
         return jsonify([
@@ -571,11 +576,11 @@ def create_models_blueprint(
         ])
 
     @blueprint.route("/api/labels")
-    def api_labels_list():
+    def api_labels_list() -> ResponseReturnValue:
         from labels import get_active_labels as get_global_active_labels
         from labels import get_saved_labels, label_set_summary
 
-        def summarize(meta):
+        def summarize(meta: JsonDict) -> JsonDict:
             """Drop the per-label identity map, keep what it implies.
 
             ``label_identities`` is megabytes on a regional list and the
@@ -633,7 +638,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/labels", methods=["DELETE"])
-    def api_delete_labels():
+    def api_delete_labels() -> ResponseReturnValue:
         from labels import delete_labels
 
         body = request.get_json(silent=True) or {}
@@ -654,7 +659,7 @@ def create_models_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/labels/active", methods=["POST"])
-    def api_set_active_labels():
+    def api_set_active_labels() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         # Accept new list format or old single-path format
         labels_files = body.get("labels_files")
@@ -668,7 +673,7 @@ def create_models_blueprint(
         return jsonify({"ok": True})
 
     @blueprint.route("/api/models/pipeline")
-    def api_models_pipeline():
+    def api_models_pipeline() -> ResponseReturnValue:
         """Return download status of all pipeline models (MegaDetector, SAM2, DINOv2)."""
         models_dir = pipeline_models_dir()
         models = []
@@ -755,7 +760,7 @@ def create_models_blueprint(
 
     @blueprint.route("/api/models/pipeline/download", methods=["POST"])
     @background_job
-    def api_models_pipeline_download(ctx):
+    def api_models_pipeline_download(ctx: JobLaunch) -> ResponseReturnValue:
         """Download a pipeline model (ONNX) by ID from jss367/vireo-onnx-models."""
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
@@ -766,7 +771,7 @@ def create_models_blueprint(
             return json_error(f"Unknown pipeline model: {model_id}")
 
         @cache_access
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from hub_download import DownloadBatch, fetch_hub_file
             from models import ONNX_REPO
 
@@ -829,7 +834,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/models/pipeline/delete", methods=["POST"])
-    def api_models_pipeline_delete():
+    def api_models_pipeline_delete() -> ResponseReturnValue:
         """Delete a pipeline model's ONNX files from ~/.vireo/models/.
 
         ``model_id`` must be a key of :data:`PIPELINE_MODELS`; the directory
@@ -906,7 +911,7 @@ def create_models_blueprint(
             DOWNLOAD_LOCK.release()
 
     @blueprint.route("/api/classify/readiness")
-    def api_classify_readiness():
+    def api_classify_readiness() -> ResponseReturnValue:
         """Check what's ready for classification and what will need work."""
         from classifier import _embedding_is_cached, _resolve_model_dir
         from labels import get_active_labels, get_saved_labels, load_label_set, load_merged_labels
@@ -1068,7 +1073,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/classify/config")
-    def api_classify_config():
+    def api_classify_config() -> ResponseReturnValue:
         """Return classifier configuration from model registry."""
         import config as cfg
         from models import get_active_model, get_taxonomy_info
@@ -1093,7 +1098,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/embedding-cache")
-    def api_embedding_cache():
+    def api_embedding_cache() -> ResponseReturnValue:
         """Return info about cached label embeddings."""
         from classifier import CACHE_DIR
 
@@ -1131,7 +1136,7 @@ def create_models_blueprint(
         return jsonify({"entries": entries, "total_size": total_size})
 
     @blueprint.route("/api/embedding-matrix")
-    def api_embedding_matrix():
+    def api_embedding_matrix() -> ResponseReturnValue:
         """Return which model+labels combinations have cached embeddings."""
         from classifier import _embedding_is_cached, _resolve_model_dir
         from labels import get_saved_labels, normalized_label_set
@@ -1186,7 +1191,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/embedding-cache", methods=["DELETE"])
-    def api_embedding_cache_clear():
+    def api_embedding_cache_clear() -> ResponseReturnValue:
         """Clear all cached label embeddings."""
         import shutil
 
@@ -1199,11 +1204,11 @@ def create_models_blueprint(
 
     @blueprint.route("/api/megadetector/download", methods=["POST"])
     @background_job
-    def api_megadetector_download(ctx):
+    def api_megadetector_download(ctx: JobLaunch) -> ResponseReturnValue:
         """Download MegaDetector ONNX model as a background job."""
 
         @cache_access
-        def work(job):
+        def work(job: JobDict) -> dict[str, str]:
             from detector import MEGADETECTOR_ONNX_DIR, MEGADETECTOR_ONNX_PATH
             from hub_download import fetch_hub_file
             from models import ONNX_REPO
@@ -1229,7 +1234,7 @@ def create_models_blueprint(
         return ctx.start("download-megadetector", work)
 
     @blueprint.route("/api/megadetector/delete", methods=["POST"])
-    def api_megadetector_delete():
+    def api_megadetector_delete() -> ResponseReturnValue:
         """Delete MegaDetector ONNX model from disk."""
         import shutil
 

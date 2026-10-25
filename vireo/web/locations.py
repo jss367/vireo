@@ -14,6 +14,8 @@ saved-place suggestions.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import location_review
 import places
@@ -34,10 +36,20 @@ from web.location_edits import (
 )
 from xmp import read_sync_preview_metadata
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
 
-def _review_coordinates(photos):
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.gps_locations import ValueOrError
+    from services.service_types import JsonDict, JsonError
+    from web.location_edits import LocationErrors
+    from web.web_types import GetDb
+
+
+def _review_coordinates(photos: list[Row]) -> tuple[list[JsonDict], list[JsonDict]]:
     """``(valid, unresolved)``: photos with usable GPS, and the rest with why."""
-    valid = []
+    valid: list[JsonDict] = []
     unresolved = []
     for order, photo in enumerate(photos):
         lat = photo["latitude"]
@@ -75,7 +87,9 @@ def _review_coordinates(photos):
     return valid, unresolved
 
 
-def _review_components(valid, cluster_radius_m, reference_lat, reference_lng):
+def _review_components(
+    valid: list[JsonDict], cluster_radius_m: float, reference_lat: float, reference_lng: float,
+) -> dict[int, list[JsonDict]]:
     """Connected components of points within ``cluster_radius_m``.
 
     Projects each item onto a local plane (setting its ``x`` and ``y``)
@@ -84,7 +98,7 @@ def _review_components(valid, cluster_radius_m, reference_lat, reference_lng):
     """
     earth_radius_m = 6_371_000.0
 
-    def projected(item):
+    def projected(item: JsonDict) -> tuple[float, float]:
         lng_delta = ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
         return (
             earth_radius_m * math.radians(lng_delta) * math.cos(reference_lat),
@@ -93,13 +107,13 @@ def _review_components(valid, cluster_radius_m, reference_lat, reference_lng):
 
     parents = list(range(len(valid)))
 
-    def find(index):
+    def find(index: int) -> int:
         while parents[index] != index:
             parents[index] = parents[parents[index]]
             index = parents[index]
         return index
 
-    def union(left, right):
+    def union(left: int, right: int) -> None:
         left_root = find(left)
         right_root = find(right)
         if left_root != right_root:
@@ -132,7 +146,7 @@ def _review_components(valid, cluster_radius_m, reference_lat, reference_lng):
     return components
 
 
-def _review_group(group_index, items, reference_lng):
+def _review_group(group_index: int, items: list[JsonDict], reference_lng: float) -> JsonDict:
     """The review payload for one coordinate group."""
     center_lat = sum(item["lat"] for item in items) / len(items)
     # Longitudes were normalized around the first input point;
@@ -185,7 +199,7 @@ def _review_group(group_index, items, reference_lng):
     }
 
 
-def _location_review_groups(photos, cluster_radius_m=750.0):
+def _location_review_groups(photos: list[Row], cluster_radius_m: float = 750.0) -> tuple[list[JsonDict], list[JsonDict]]:
     """Cluster photos by their observed coordinates for human review.
 
     Reverse-geocoded place ids are deliberately not involved: they are
@@ -217,7 +231,7 @@ def _location_review_groups(photos, cluster_radius_m=750.0):
     ], unresolved
 
 
-def _record_place_link(db, keyword_id, details, result):
+def _record_place_link(db: Database, keyword_id: int, details: JsonDict, result: JsonDict) -> None:
     """Audit a keyword-to-place link and queue its photos' location sync."""
     # Audit log: this action isn't tied to a single photo (it operates on
     # a keyword), so we omit the per-photo items list. ``photo_id`` in
@@ -248,7 +262,7 @@ def _record_place_link(db, keyword_id, details, result):
         db.commit()
 
 
-def _serialize_keyword(db, keyword_id):
+def _serialize_keyword(db: Database, keyword_id: int) -> JsonDict | None:
     """Return a summary dict for a single ``type='location'`` keyword row.
 
     Same shape as :func:`serialize_photo_location` (leaf fields + a
@@ -272,13 +286,13 @@ def _serialize_keyword(db, keyword_id):
 
 
 def create_locations_blueprint(
-    get_db,
-    json_error,
+    get_db: GetDb,
+    json_error: JsonError,
     *,
-    location_errors,
-    normalize_photo_id_list,
-    bulk_gps_location_source_ids,
-):
+    location_errors: LocationErrors,
+    normalize_photo_id_list: Callable[[object], ValueOrError[list[int]]],
+    bulk_gps_location_source_ids: Callable[[Database, JsonDict], ValueOrError[list[int]]],
+) -> Blueprint:
     """Build the locations blueprint.
 
     ``location_errors`` is the app's one ``web.location_edits.LocationErrors``.
@@ -292,7 +306,7 @@ def create_locations_blueprint(
     blueprint = Blueprint("locations", __name__)
 
     @blueprint.route("/api/location-review/preview", methods=["POST"])
-    def api_location_review_preview():
+    def api_location_review_preview() -> ResponseReturnValue:
         """Preview coordinate, capture-time, or GPS discrepancy groups without edits."""
         body = request.get_json(silent=True) or {}
         mode = body.get("mode", "coordinates")
@@ -369,7 +383,7 @@ def create_locations_blueprint(
         })
 
     @blueprint.route("/api/location-review/resolve-discrepancies", methods=["POST"])
-    def api_resolve_location_discrepancies():
+    def api_resolve_location_discrepancies() -> ResponseReturnValue:
         """Remember an explicit keep decision or re-queue approved GPS corrections."""
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict) or body.get("action") not in ("keep", "assigned"):
@@ -377,6 +391,8 @@ def create_locations_blueprint(
         photo_ids, error = normalize_photo_id_list(body.get("photo_ids"))
         if error is not None:
             return error
+        # Set whenever there is no error.
+        photo_ids = cast("list[int]", photo_ids)
         if len(photo_ids) > 100:
             return json_error("Review at most 100 photos at a time", 400)
         fingerprints = body.get("fingerprints")
@@ -389,9 +405,9 @@ def create_locations_blueprint(
             error = location_errors.photo_location_edit_error(db, photo_id)
             if error is not None:
                 return error
-        sidecars = {}
+        sidecars: dict[str, JsonDict] = {}
 
-        def capture_sidecar(path):
+        def capture_sidecar(path: str) -> JsonDict:
             if path not in sidecars:
                 sidecars[path] = read_sync_preview_metadata(path)
             return sidecars[path]
@@ -446,7 +462,7 @@ def create_locations_blueprint(
         return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
 
     @blueprint.route("/api/location-review/saved-suggestions")
-    def api_location_review_saved_suggestions():
+    def api_location_review_saved_suggestions() -> ResponseReturnValue:
         """Return nearby location keywords already used in this workspace."""
         try:
             lat = float(request.args.get("lat", ""))
@@ -468,7 +484,7 @@ def create_locations_blueprint(
         db = get_db()
         rows = db.locations.located_keywords_in_workspace()
 
-        def distance_m(row):
+        def distance_m(row: Row) -> float:
             lat1 = math.radians(lat)
             lat2 = math.radians(float(row["latitude"]))
             delta_lat = lat2 - lat1
@@ -499,7 +515,7 @@ def create_locations_blueprint(
         return jsonify({"suggestions": suggestions[:8]})
 
     @blueprint.route("/api/places/reverse-geocode", methods=["GET"])
-    def api_reverse_geocode():
+    def api_reverse_geocode() -> ResponseReturnValue:
         """Reverse-geocode (lat, lng) via Google, with a SQLite grid cache.
 
         Query params: ``lat``, ``lng`` (floats). Returns
@@ -576,7 +592,7 @@ def create_locations_blueprint(
         })
 
     @blueprint.route("/api/keywords/<int:keyword_id>/link-place", methods=["POST"])
-    def api_link_keyword_to_place(keyword_id):
+    def api_link_keyword_to_place(keyword_id: int) -> ResponseReturnValue:
         """Attach Google place data to an existing keyword.
 
         Body: ``{"place_id": "ChIJ..."}``, optionally with a normalized

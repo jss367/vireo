@@ -12,10 +12,11 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self, cast
 from urllib.parse import quote
 
 import source_discovery
@@ -38,6 +39,27 @@ from services.move_steps import FOLDER_MOVE_PHASES, MoveSteps, folder_move_steps
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
 from web.request_args import reject_visual_collection
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from sqlite3 import Row
+    from threading import Lock
+
+    from flask.typing import ResponseReturnValue
+    from import_dedup import CatalogIndex, DuplicateChecker
+    from jobs import JobRunner
+    from scanner import SidecarFailures
+    from services.service_types import JobDict, JsonDict, JsonError
+    from web.background_jobs import JobLaunch
+    from web.web_types import (
+        AppConfig,
+        ChainAfterMove,
+        EnqueueProcessJob,
+        GetDb,
+        GetRunner,
+        GuardMoveFolder,
+        InvalidateMissingOriginals,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +85,7 @@ DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS = 0.1
 DUPLICATE_CHECK_PREP_BATCH_SIZE = 100
 
 
-def _folder_ids_under(folders, staging_destination):
+def _folder_ids_under(folders: list[Row], staging_destination: str) -> list[int]:
     """Return the ids of ``folders`` that live inside ``staging_destination``.
 
     Browse badges the sidebar rows for a pending NAS transfer, and the only
@@ -78,7 +100,7 @@ def _folder_ids_under(folders, staging_destination):
     if root in ("", ".", os.sep, os.path.splitdrive(root)[0] + os.sep):
         return []
     prefix = root + os.sep
-    ids = []
+    ids: list[int] = []
     for folder in folders:
         path = os.path.normpath(folder["path"]) if folder["path"] else ""
         if path == root or path.startswith(prefix):
@@ -86,7 +108,7 @@ def _folder_ids_under(folders, staging_destination):
     return ids
 
 
-def _all_folders(db):
+def _all_folders(db: Database) -> list[Row]:
     """Every catalog folder, not just the active workspace's.
 
     A staging tree can be unlinked from the workspace that imported it while
@@ -100,7 +122,7 @@ def _all_folders(db):
     return db.folders.all_rows()
 
 
-def _staging_folder_ids(db, staging_destination):
+def _staging_folder_ids(db: Database, staging_destination: str) -> list[int]:
     """``_folder_ids_under`` for one archive, reading the folder list itself.
 
     The listing route hoists the folder read across every pending row; a job
@@ -119,7 +141,9 @@ def _staging_folder_ids(db, staging_destination):
 _MAX_SYNC_DRAIN_PASSES = 5
 
 
-def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
+def _sync_staged_metadata(
+    db: Database, progress: Callable[..., None], sync_job_lock: Lock, folder_ids: list[int],
+) -> tuple[int, set[str]]:
     """Write the staged import's queued sidecar edits, before it leaves.
 
     Runs against the local staging copy on purpose. A verified transfer
@@ -155,7 +179,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     """
     import sync as sync_mod
 
-    def sync_progress(current, total):
+    def sync_progress(current: int, total: int) -> None:
         progress(current, total, "", "Writing metadata to sidecars")
 
     folder_paths = {row["id"]: row["path"] for row in _all_folders(db)}
@@ -207,7 +231,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     return len(synced_photos), undeliverable
 
 
-def _staged_photo_ids(db, folder_ids):
+def _staged_photo_ids(db: Database, folder_ids: list[int]) -> list[int]:
     """Every photo id currently in the given staging folders.
 
     Captured before ``send_pending_archive`` so the post-transfer residual
@@ -222,7 +246,7 @@ def _staged_photo_ids(db, folder_ids):
     return db.photos.ids_in_folders(folder_ids)
 
 
-def _residual_staged_changes(db, photo_ids, undeliverable):
+def _residual_staged_changes(db: Database, photo_ids: list[int], undeliverable: set[str]) -> int | None:
     """Count edits queued too late to have travelled with the transfer.
 
     Blocking the rating and keyword routes for the length of a NAS transfer
@@ -263,7 +287,7 @@ class _RecoverySource:
     compute_file_hash: Callable
     src_hash_cache: list = field(default_factory=list)
 
-    def _src_hash(self):
+    def _src_hash(self) -> str | None:
         if not self.src_hash_cache:
             try:
                 self.src_hash_cache.append(self.compute_file_hash(
@@ -272,7 +296,7 @@ class _RecoverySource:
                 self.src_hash_cache.append(None)
         return self.src_hash_cache[0]
 
-    def _is_source(self, cand_path):
+    def _is_source(self, cand_path: str) -> bool:
         """Reject destination candidates that ARE the source file itself
         — the run rejects that self-copy overlap (destination is an
         ancestor of the source AND the folder template renders back onto
@@ -293,7 +317,7 @@ class _RecoverySource:
                 == os.path.normpath(cand_path)
             )
 
-    def _bytes_match(self, cand_path):
+    def _bytes_match(self, cand_path: str) -> bool:
         if self._is_source(cand_path):
             return False
         sh = self._src_hash()
@@ -317,21 +341,21 @@ class _DuplicateCheckStream:
 
     def __init__(
         self,
-        db_path,
-        paths,
+        db_path: str,
+        paths: list[str],
         *,
-        verify_by_hash,
-        include_capture_dates,
-        skip_duplicates,
-        recovery_base,
-        folder_template,
-        catalog_index,
-        duplicate_checker,
-        recover_companion_identities,
-        source_capture_timestamps,
-        build_destination_path,
-        compute_file_hash,
-    ):
+        verify_by_hash: bool,
+        include_capture_dates: bool,
+        skip_duplicates: bool,
+        recovery_base: str,
+        folder_template: str,
+        catalog_index: type[CatalogIndex],
+        duplicate_checker: type[DuplicateChecker],
+        recover_companion_identities: Callable[[Database], Iterable[tuple[int, int]]],
+        source_capture_timestamps: Callable[[list[Path]], dict[Path, datetime]],
+        build_destination_path: Callable[..., str],
+        compute_file_hash: Callable[[str], str],
+    ) -> None:
         self.db_path = db_path
         self.paths = paths
         self.verify_by_hash = verify_by_hash
@@ -354,28 +378,29 @@ class _DuplicateCheckStream:
         # mode. It is built inside the stream (see generate()), because
         # indexing the catalog can first have to hash paired JPEGs on a
         # network share.
-        self.checker = None
+        # Late-bound: _index_catalog builds it before any other phase runs.
+        self.checker = cast("DuplicateChecker", None)
 
         # str(path) -> capture datetime for recovery planning and day summaries when
         # verify_by_hash disables the checker's own EXIF batching.
-        self.recovery_times = {}
+        self.recovery_times: dict[str, datetime] = {}
 
         # name -> size per planned destination folder, one scandir each —
         # the destination may be a network mount, so listings are batched
         # rather than stat'ing per candidate file (count round trips).
-        self.dir_listings = {}
+        self.dir_listings: dict[str, dict[str, int]] = {}
 
         self.duplicate_count = 0
         self.recovered_count = 0
 
-    def generate(self):
+    def generate(self) -> Iterator[str]:
         yield from self._index_catalog()
         total = len(self.paths)
         yield from self._prepare_metadata(total)
         yield from self._check_paths(total)
         yield f"data: {json.dumps({'done': True, 'duplicate_count': self.duplicate_count, 'recovered_count': self.recovered_count, 'checked': total, 'total': total})}\n\n"
 
-    def _index_catalog(self):
+    def _index_catalog(self) -> Iterator[str]:
         """Index the catalog before any per-file work. Companion
         identities the catalog is missing are recovered here, a batch per
         frame, instead of before the response starts: a catalog with a
@@ -396,7 +421,7 @@ class _DuplicateCheckStream:
                 verify_by_hash=self.verify_by_hash,
             )
 
-    def _prepare_metadata(self, total):
+    def _prepare_metadata(self, total: int) -> Iterator[str]:
         """Batch the EXIF header reads up front in bounded chunks (no-op
         in verify_by_hash mode). Intra-run duplicate tracking lives in the
         checker: identical source files not yet in the DB are reported as
@@ -428,7 +453,7 @@ class _DuplicateCheckStream:
             # that lets the WSGI server notice a disconnected client
             # between chunks instead of after the entire prep phase.
             prepared = prep_start + len(chunk)
-            frame = {"preparing": prepared, "total": total}
+            frame: JsonDict = {"preparing": prepared, "total": total}
             if self.include_capture_dates:
                 # Share the metadata reads used for duplicate identity
                 # and recovery planning with the day summary. The
@@ -440,12 +465,12 @@ class _DuplicateCheckStream:
                 frame["capture_dates"] = dates
             yield f"data: {json.dumps(frame)}\n\n"
 
-    def _capture_time(self, source_file):
+    def _capture_time(self, source_file: Path) -> datetime | None:
         if self.verify_by_hash:
             return self.recovery_times.get(str(source_file))
         return self.checker.capture_time(source_file)
 
-    def _check_paths(self, total):
+    def _check_paths(self, total: int) -> Iterator[str]:
         batch_duplicates = []
         batch_recovered = []
         last_flush = time.monotonic()
@@ -500,7 +525,7 @@ class _DuplicateCheckStream:
                 batch_recovered = []
                 last_flush = now
 
-    def _planned_folder_listing(self, folder):
+    def _planned_folder_listing(self, folder: str) -> dict[str, int]:
         if folder not in self.dir_listings:
             entries = {}
             try:
@@ -547,7 +572,7 @@ class _DuplicateCheckStream:
             self.dir_listings[folder] = entries
         return self.dir_listings[folder]
 
-    def _planned_folder(self, source_file):
+    def _planned_folder(self, source_file: Path) -> str | None:
         """Folder planning mirrors ingest._source_file_timestamps: EXIF
         capture time falling back to file mtime. In the default mode
         checker.prepare() already batched the EXIF reads and
@@ -571,7 +596,7 @@ class _DuplicateCheckStream:
             else os.path.join(self.recovery_base, rel_folder)
         )
 
-    def _recovery_candidate(self, path):
+    def _recovery_candidate(self, path: str) -> bool:
         """True when the planned destination already holds a byte-
         identical file at the primary name OR at any suffix slot the
         run would adopt — mirrors ``import_job``'s adopt precondition
@@ -641,7 +666,9 @@ class _DuplicateCheckStream:
             source, folder, listing, primary_name, size)
 
 
-def _suffix_slot_recovered(source, folder, listing, primary_name, size):
+def _suffix_slot_recovered(
+    source: _RecoverySource, folder: str, listing: dict[str, int], primary_name: str, size: int,
+) -> bool:
     """Primary slot is taken by a different-sized (or same-sized-
     different-bytes) file. Mirror import_job's collision walk
     (``name_1.ext``, ``name_2.ext``, ...): stop at the first free slot
@@ -667,17 +694,19 @@ class _ImportFullRequest:
     """The ``/api/jobs/import-full`` request body, read in the order the
     view always read it."""
 
-    source: object
-    destination: object
-    file_types: object
-    folder_template: object
-    skip_duplicates: object
+    # Raw request values (``validation_error`` checks the ones the job
+    # needs), so their types are whatever the client sent.
+    source: Any
+    destination: Any
+    file_types: Any
+    folder_template: Any
+    skip_duplicates: Any
     verify_by_hash: bool
-    copy: object
-    exclude_paths: set
+    copy: Any
+    exclude_paths: set[Any]
 
     @classmethod
-    def from_body(cls, body):
+    def from_body(cls, body: JsonDict) -> Self:
         return cls(
             source=body.get("source", ""),
             destination=body.get("destination", ""),
@@ -690,10 +719,10 @@ class _ImportFullRequest:
         )
 
     @property
-    def scan_path(self):
+    def scan_path(self) -> Any:
         return self.destination if self.copy else self.source
 
-    def validation_error(self):
+    def validation_error(self) -> str | None:
         """The first 400 message for this request, or None when it is
         valid."""
         source = self.source
@@ -720,7 +749,7 @@ class _ImportFullRequest:
         return None
 
 
-def _import_scan_conflict(runner, db, scan_paths, workspace_id):
+def _import_scan_conflict(runner: JobRunner, db: Database, scan_paths: list[str], workspace_id: int) -> str | None:
     """The local-copy conflict for an import scanning ``scan_paths``, or
     None. Callers hold ``stage_boundary_lock``."""
     pending_sources = stage_pending_source_paths(
@@ -734,7 +763,7 @@ def _import_scan_conflict(runner, db, scan_paths, workspace_id):
     )
 
 
-def _ingested_restrict_dirs(destination, copied_paths, duplicate_folders):
+def _ingested_restrict_dirs(destination: str, copied_paths: list[str], duplicate_folders: list[str]) -> list[str]:
     """Build restrict_dirs from the folders ingest actually touched
     so the post-ingest scan doesn't re-walk the entire
     destination tree. Without this, importing ~2k RAWs into a
@@ -748,7 +777,7 @@ def _ingested_restrict_dirs(destination, copied_paths, duplicate_folders):
     (there is nothing new to index)."""
     dest_normalized = Path(os.path.normpath(destination))
 
-    def _under_destination(path_str):
+    def _under_destination(path_str: str) -> bool:
         try:
             return Path(os.path.normpath(path_str)).is_relative_to(
                 dest_normalized
@@ -777,20 +806,25 @@ class _ImportFullRun:
     job time.
     """
 
-    def __init__(self, ctx, params, config, invalidate_missing_originals, job):
+    def __init__(
+        self, ctx: JobLaunch, params: _ImportFullRequest, config: AppConfig,
+        invalidate_missing_originals: InvalidateMissingOriginals, job: JobDict,
+    ) -> None:
         self.ctx = ctx
         self.params = params
         self.config = config
         self.invalidate_missing_originals = invalidate_missing_originals
         self.job = job
-        self.thread_db = None
-        self.scan_target = None
-        self.restrict_dirs = None
-        self.ingest_result = None
-        self.copied_paths = None
-        self.vireo_dir = None
+        # Late-bound: run() opens the worker database and each phase sets
+        # what the next reads.
+        self.thread_db = cast("Database", None)
+        self.scan_target = cast(str, None)
+        self.restrict_dirs: list[str] | None = None
+        self.ingest_result: JsonDict = {}
+        self.copied_paths: list[str] | None = None
+        self.vireo_dir = cast(str, None)
 
-    def run(self):
+    def run(self) -> JsonDict:
         from scanner import scan as do_scan
         from thumbnails import generate_all
 
@@ -817,7 +851,7 @@ class _ImportFullRun:
         self._generate_thumbnails(generate_all)
         return self._create_collection()
 
-    def _set_steps(self):
+    def _set_steps(self) -> None:
         # Define steps based on whether we're copying
         steps = []
         if self.params.copy:
@@ -829,14 +863,14 @@ class _ImportFullRun:
         ])
         self.ctx.runner.set_steps(self.job["id"], steps)
 
-    def _ingest(self):
+    def _ingest(self) -> None:
         """Phase 1: Copy files."""
         from ingest import ingest as do_ingest
 
         ctx, job, params = self.ctx, self.job, self.params
         ctx.runner.update_step(job["id"], "ingest", status="running")
 
-        def ingest_cb(current, total, filename):
+        def ingest_cb(current: int, total: int, filename: str) -> None:
             job["progress"]["current"] = current
             job["progress"]["total"] = total
             job["progress"]["current_file"] = filename
@@ -859,18 +893,18 @@ class _ImportFullRun:
             skip_paths=params.exclude_paths or None,
         )
         self.ingest_result = ingest_result
-        self.copied_paths = ingest_result.get("copied_paths", [])
+        self.copied_paths = copied_paths = ingest_result.get("copied_paths", [])
         duplicate_folders = ingest_result.get("duplicate_folders", [])
         self.scan_target = params.destination
 
         self.restrict_dirs = _ingested_restrict_dirs(
-            params.destination, self.copied_paths, duplicate_folders,
+            params.destination, copied_paths, duplicate_folders,
         )
 
         ctx.runner.update_step(job["id"], "ingest", status="completed",
                            summary=f"{ingest_result.get('copied', 0)} copied")
 
-    def _scan(self, do_scan):
+    def _scan(self, do_scan: Callable[..., object]) -> None:
         """Phase 2: Scan to index into DB."""
         from scanner import ScanControl, ScanHooks, ScanOptions, SidecarFailures
 
@@ -883,7 +917,7 @@ class _ImportFullRun:
         ctx.checkpoint(job)
         ctx.runner.update_step(job["id"], "scan", status="running")
 
-        def scan_cb(current, total):
+        def scan_cb(current: int, total: int) -> None:
             job["progress"]["current"] = current
             job["progress"]["total"] = total
             ctx.runner.push_event(job["id"], "progress", {
@@ -909,15 +943,15 @@ class _ImportFullRun:
         # ledger wait is active, so it's safe on non-pausable
         # invocations too. Mirrors what ``_pause_checkpoint``
         # does for pipeline participants (pipeline_job.py:1567).
-        def scan_cancel_check():
+        def scan_cancel_check() -> bool:
             from resource_ledger import suspend_resource_wait_timing
             with suspend_resource_wait_timing():
                 return ctx.runner.is_cancelled(job["id"])
 
-        def scan_pause_check():
+        def scan_pause_check() -> bool:
             return ctx.runner.pause_requested(job["id"])
 
-        def scan_cancel_only_check():
+        def scan_cancel_only_check() -> bool:
             return ctx.runner.cancellation_requested(job["id"])
 
         self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
@@ -963,7 +997,7 @@ class _ImportFullRun:
                 )
         self._finish_scan_step(sidecar_failures)
 
-    def _finish_scan_step(self, sidecar_failures):
+    def _finish_scan_step(self, sidecar_failures: SidecarFailures) -> None:
         """Close the scan step; it fails on a sidecar whose keywords were not imported."""
         job = self.job
         scan_summary = f"{job['progress'].get('total', 0)} photos"
@@ -981,7 +1015,7 @@ class _ImportFullRun:
             error_count=len(messages) or None,
         )
 
-    def _generate_thumbnails(self, generate_all):
+    def _generate_thumbnails(self, generate_all: Callable[..., JsonDict]) -> None:
         """Phase 3: Generate thumbnails."""
         ctx, job = self.ctx, self.job
         ctx.checkpoint(job)
@@ -992,7 +1026,7 @@ class _ImportFullRun:
             "phase": "Generating thumbnails",
         })
 
-        def thumb_cb(current, total):
+        def thumb_cb(current: int, total: int) -> None:
             job["progress"]["current"] = current
             job["progress"]["total"] = total
             ctx.runner.push_event(job["id"], "progress", {
@@ -1011,9 +1045,9 @@ class _ImportFullRun:
         ctx.runner.update_step(job["id"], "thumbnails", status="completed",
                            summary=thumb_summary(thumb_result))
 
-    def _imported_photo_ids(self):
+    def _imported_photo_ids(self) -> list[int]:
         thread_db = self.thread_db
-        photo_ids = []
+        photo_ids: list[int] = []
         if self.params.copy:
             # Collection from copied files. Ingest reports them under the
             # destination the user typed; the scanner filed them under the
@@ -1034,7 +1068,7 @@ class _ImportFullRun:
             )
         return photo_ids
 
-    def _create_collection(self):
+    def _create_collection(self) -> JsonDict:
         """Phase 4: Create collection."""
         ctx, job = self.ctx, self.job
         ctx.checkpoint(job)
@@ -1052,7 +1086,7 @@ class _ImportFullRun:
         ctx.runner.update_step(job["id"], "collection", status="completed",
                            summary=col_summary)
 
-        result = {
+        result: JsonDict = {
             "photos_indexed": len(photo_ids),
             "collection_id": collection_id,
             "collection_name": collection_name,
@@ -1067,8 +1101,8 @@ class _ImportFullRun:
         return result
 
 
-def _send_request_body(raw):
-    """The send request's JSON object body: ``(body, error message)``."""
+def _send_request_body(raw: str) -> tuple[JsonDict, str | None]:
+    """The send request's JSON object body: ``(body, error message)``, ``{}`` on error."""
     # ``get_json(silent=True)`` returns None for both an absent body and a
     # parse failure, and ``or {}`` would additionally swallow the falsy
     # literals false / 0 / [] / "". Any of those would start the one-way
@@ -1077,15 +1111,15 @@ def _send_request_body(raw):
         try:
             body = json.loads(raw)
         except ValueError:
-            return None, "Request body must be valid JSON"
+            return {}, "Request body must be valid JSON"
         if not isinstance(body, dict):
-            return None, "Request body must be a JSON object"
+            return {}, "Request body must be a JSON object"
     else:
         body = {}
     return body, None
 
 
-def _send_archive_steps(runner, job, archive, sync_first):
+def _send_archive_steps(runner: JobRunner, job: JobDict, archive: JsonDict, sync_first: bool) -> MoveSteps:
     """The send-to-NAS job's step tree (with the metadata sync step first)."""
     remote = json.loads(archive["target_json"]).get("transport") != "mounted"
     return MoveSteps(
@@ -1098,10 +1132,10 @@ def _send_archive_steps(runner, job, archive, sync_first):
     )
 
 
-def _send_archive_progress(runner, job, steps):
+def _send_archive_progress(runner: JobRunner, job: JobDict, steps: MoveSteps) -> Callable[..., None]:
     """The send-to-NAS progress callback: job counters, step and SSE event."""
 
-    def progress(current, total, filename, phase="Sending to NAS"):
+    def progress(current: int, total: int, filename: str, phase: str = "Sending to NAS") -> None:
         job["progress"].update(current=current, total=total, current_file=filename)
         if not steps.report(current, total, filename, phase):
             return
@@ -1114,7 +1148,7 @@ def _send_archive_progress(runner, job, steps):
     return progress
 
 
-def _with_metadata_sync_summary(result, synced, residual):
+def _with_metadata_sync_summary(result: JsonDict, synced: int, residual: int | None) -> JsonDict:
     """The send result with the pre-transfer metadata sync folded in."""
     summary = result["summary"]
     if synced:
@@ -1145,7 +1179,7 @@ def _with_metadata_sync_summary(result, synced, residual):
     }
 
 
-def _finish_send_steps(steps, result, archive, sync_first, synced, residual):
+def _finish_send_steps(steps: MoveSteps, result: JsonDict, archive: JsonDict, sync_first: bool, synced: int, residual: int | None) -> None:
     """Close the send job's steps with the outcomes each one produced."""
     # A stepped job's panel shows only its steps, so the
     # outcomes that need the user's attention go on the
@@ -1167,13 +1201,13 @@ def _finish_send_steps(steps, result, archive, sync_first, synced, residual):
             f"{result['cleanup_error']}"))
 
 
-def _snapshot_preview_roots(root_paths):
+def _snapshot_preview_roots(root_paths: list[str]) -> list[tuple[str, str]]:
     """``(root path, display name)`` pairs, longest path first."""
     # Build unique display names across roots by taking the shortest
     # trailing path segments that are unique — so /mnt/cardA/DCIM and
     # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
     # colliding on "DCIM". Mirrors folder-preview's disambiguation.
-    root_names = {}
+    root_names: dict[str, str] = {}
     if len(root_paths) > 1:
         parts = [Path(rp).parts for rp in root_paths]
         for depth in range(1, max(len(p) for p in parts) + 1):
@@ -1197,7 +1231,7 @@ def _snapshot_preview_roots(root_paths):
     return roots
 
 
-def _snapshot_subfolder(roots, path):
+def _snapshot_subfolder(roots: list[tuple[str, str]], path: str) -> str:
     """The preview subfolder label for ``path`` under its deepest root."""
     for root_path, root_name in roots:
         try:
@@ -1209,7 +1243,9 @@ def _snapshot_subfolder(roots, path):
     return os.path.dirname(path) or "."
 
 
-def _template_managed_archives(db, result, archive_photo_count):
+def _template_managed_archives(
+    db: Database, result: JsonDict, archive_photo_count: Callable[[str], int],
+) -> tuple[list[JsonDict], JsonDict | None]:
     """Tracked archives the previewed folders land in, with their coverage.
 
     Returns ``(managed_archives, managed_archive)``; ``managed_archive`` is
@@ -1287,18 +1323,18 @@ def _template_managed_archives(db, result, archive_photo_count):
 
 
 def create_imports_blueprint(
-    get_db,
-    json_error,
-    get_runner,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    get_runner: GetRunner,
+    db_path: str,
+    config: AppConfig,
     *,
-    invalidate_missing_originals,
-    enqueue_process_job,
-    chain_after_move,
-    guard_move_folder,
-    sync_job_lock,
-):
+    invalidate_missing_originals: InvalidateMissingOriginals,
+    enqueue_process_job: EnqueueProcessJob,
+    chain_after_move: ChainAfterMove,
+    guard_move_folder: GuardMoveFolder,
+    sync_job_lock: Lock,
+) -> Blueprint:
     """Build the imports blueprint.
 
     ``config`` is the Flask app's config mapping (read at request and job
@@ -1316,7 +1352,7 @@ def create_imports_blueprint(
         chain_after_move=chain_after_move,
     )
 
-    def import_response(result):
+    def import_response(result: JsonDict | ImportFailure) -> tuple[Response, int] | Response:
         if isinstance(result, ImportFailure):
             if result.details is not None:
                 return jsonify({"error": result.message, **result.details}), result.status
@@ -1324,25 +1360,25 @@ def create_imports_blueprint(
         return jsonify(result)
 
     @blueprint.post("/api/jobs/import-in-place")
-    def api_job_import_in_place():
+    def api_job_import_in_place() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         return import_response(imports.import_in_place(get_db(), body))
 
     @blueprint.post("/api/jobs/import-in-place/<job_id>/restart")
-    def api_job_import_in_place_restart(job_id):
+    def api_job_import_in_place_restart(job_id: str) -> ResponseReturnValue:
         return import_response(imports.restart_in_place(get_db(), job_id))
 
     @blueprint.post("/api/jobs/import-photos")
-    def api_job_import_photos():
+    def api_job_import_photos() -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         return import_response(imports.import_photos(get_db(), body))
 
     @blueprint.get("/api/import/<job_id>/recovery-options")
-    def api_import_recovery_options(job_id):
+    def api_import_recovery_options(job_id: str) -> ResponseReturnValue:
         return import_response(imports.recovery_options(get_db(), job_id))
 
     @blueprint.get("/api/import/pending-archives")
-    def api_pending_archives():
+    def api_pending_archives() -> ResponseReturnValue:
         from pending_archives import active_archive_jobs
         db = get_db()
         jobs = active_archive_jobs(get_runner(), db.require_workspace_id())
@@ -1388,7 +1424,7 @@ def create_imports_blueprint(
         return jsonify({"items": items})
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/discard")
-    def api_discard_pending_archive(archive_id):
+    def api_discard_pending_archive(archive_id: str) -> ResponseReturnValue:
         from pending_archives import active_archive_jobs, get_pending_archive
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -1409,8 +1445,9 @@ def create_imports_blueprint(
             db.pending_archives.delete(archive_id)
         return jsonify({"ok": True})
 
-    def _transfer_pending_archive(thread_db, runner, job, archive, sync_first,
-                                  progress, send_pending_archive):
+    def _transfer_pending_archive(thread_db: Database, runner: JobRunner, job: JobDict, archive: JsonDict, sync_first: bool,
+                                  progress: Callable[..., None],
+                                  send_pending_archive: Callable[..., JsonDict]) -> tuple[JsonDict, int, int | None]:
         """Sync staged metadata (when asked), then send the archive to NAS.
 
         Returns ``(result, synced, residual)``; ``residual`` counts edits
@@ -1507,7 +1544,7 @@ def create_imports_blueprint(
         return result, synced, residual
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
-    def api_send_pending_archive(archive_id):
+    def api_send_pending_archive(archive_id: str) -> ResponseReturnValue:
         from pending_archives import active_archive_jobs, get_pending_archive, send_pending_archive
         db = get_db()
         runner = get_runner()
@@ -1549,7 +1586,7 @@ def create_imports_blueprint(
                 return json_error(
                     f"Wait for {describe_jobs(active)} to finish before sending these photos to NAS", 409)
 
-            def work(job):
+            def work(job: JobDict) -> JsonDict:
                 with Database(db_path) as thread_db:
                     thread_db.set_active_workspace(workspace_id)
                     thread_db.pending_archives.set_state(archive_id, "sending")
@@ -1588,7 +1625,7 @@ def create_imports_blueprint(
             )
         return jsonify({"job_id": job_id})
     @blueprint.route("/api/import/preview", methods=["POST"])
-    def api_import_preview():
+    def api_import_preview() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         catalogs = body.get("catalogs", [])
@@ -1604,7 +1641,7 @@ def create_imports_blueprint(
             return json_error(str(e), 500)
 
     @blueprint.route("/api/import/folder-preview-stream", methods=["POST"])
-    def api_import_folder_preview_stream():
+    def api_import_folder_preview_stream() -> ResponseReturnValue:
         """One storage-aware traversal streams per-folder scan progress and
         ends with the preview payload — the source-row counters and the
         preview grid share a single walk instead of scanning twice."""
@@ -1629,7 +1666,7 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/new-images-preview", methods=["POST"])
-    def api_import_new_images_preview():
+    def api_import_new_images_preview() -> ResponseReturnValue:
         """Preview grid data for a new-images snapshot, matching the
         folder-preview response shape so the same client renderer works."""
         body = request.get_json(silent=True) or {}
@@ -1670,7 +1707,7 @@ def create_imports_blueprint(
 
         roots = _snapshot_preview_roots(root_paths)
 
-        def _subfolder_for(path):
+        def _subfolder_for(path: str) -> str:
             return _snapshot_subfolder(roots, path)
 
         files = []
@@ -1720,7 +1757,7 @@ def create_imports_blueprint(
         })
 
     @blueprint.route("/api/import/check-duplicates", methods=["POST"])
-    def api_import_check_duplicates():
+    def api_import_check_duplicates() -> ResponseReturnValue:
         """Stream duplicate detection results via SSE.
 
         Accepts {"paths": [...], "verify_by_hash": bool} and streams
@@ -1813,7 +1850,7 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/location-suggestions", methods=["POST"])
-    def api_import_location_suggestions():
+    def api_import_location_suggestions() -> ResponseReturnValue:
         """Stream suggested locations for the files an import would bring in.
 
         Accepts ``{"paths": [...]}`` (the preview's source files) and streams
@@ -1844,7 +1881,7 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/collection-preview", methods=["POST"])
-    def api_import_collection_preview():
+    def api_import_collection_preview() -> ResponseReturnValue:
         """Return preview data for photos in a collection."""
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
@@ -1902,7 +1939,7 @@ def create_imports_blueprint(
         })
 
     @blueprint.route("/api/import/destination-preview", methods=["POST"])
-    def api_import_destination_preview():
+    def api_import_destination_preview() -> ResponseReturnValue:
         """Preview destination folder structure without copying files."""
         body = request.get_json(silent=True) or {}
         sources = body.get("sources", [])
@@ -1946,7 +1983,7 @@ def create_imports_blueprint(
         from move import _tracked_destination_ancestor
         db = get_db()
 
-        def _archive_photo_count(archive_path):
+        def _archive_photo_count(archive_path: str) -> int:
             # Count only ok/partial folders — the same set ingest treats as
             # "the archive" — so the callout's "N photos" matches what the
             # merge actually considers present. Pure catalog read; no on-disk
@@ -1979,7 +2016,7 @@ def create_imports_blueprint(
         return jsonify(result)
 
     @blueprint.route("/api/import/folder-preview/thumbnail")
-    def api_import_folder_preview_thumbnail():
+    def api_import_folder_preview_thumbnail() -> ResponseReturnValue:
         """Generate an on-the-fly thumbnail for a source file (not yet imported).
 
         Cache policy: only success responses are cacheable. Failures emit
@@ -2015,13 +2052,13 @@ def create_imports_blueprint(
         return resp
 
     @blueprint.route("/api/import/readiness")
-    def api_import_readiness():
+    def api_import_readiness() -> ResponseReturnValue:
         """Report metadata tooling and repairable degraded-import rows."""
         from image_loader import is_excluded_scan_path
         from metadata import exiftool_status
 
         db = get_db()
-        active_ws = db.active_workspace_id
+        active_ws = db.require_workspace_id()
         status = exiftool_status()
         roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, active_ws)]
         # Filter macOS app-managed library bundles before ``os.path.isdir``:
@@ -2053,7 +2090,7 @@ def create_imports_blueprint(
 
     @blueprint.route("/api/jobs/import-full", methods=["POST"])
     @background_job
-    def api_job_import_full(ctx):
+    def api_job_import_full(ctx: JobLaunch) -> ResponseReturnValue:
         """Full-chain import: copy files -> scan -> create collection."""
         # A full import without an active workspace would copy files and
         # then leave catalog rows invisible to every workspace: the
@@ -2105,7 +2142,7 @@ def create_imports_blueprint(
         # takes. See ``local_folder._busy_job`` for the reverse direction.
         _scan_path = [params.scan_path]
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             return _ImportFullRun(
                 ctx, params, config, invalidate_missing_originals, job,
             ).run()
@@ -2123,7 +2160,7 @@ def create_imports_blueprint(
 
     @blueprint.route("/api/jobs/import", methods=["POST"])
     @background_job
-    def api_job_import(ctx):
+    def api_job_import(ctx: JobLaunch) -> ResponseReturnValue:
         body = request.get_json(silent=True) or {}
         catalogs = body.get("catalogs", [])
         strategy = body.get("strategy", "merge_all")
@@ -2131,12 +2168,12 @@ def create_imports_blueprint(
         if not catalogs:
             return json_error("catalogs required")
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             from importer import execute_import
 
             thread_db = ctx.thread_db()
 
-            def progress_cb(current, total):
+            def progress_cb(current: int, total: int) -> None:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 ctx.runner.push_event(
@@ -2162,7 +2199,7 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/orphaned-staging", methods=["GET"])
-    def api_import_orphaned_staging():
+    def api_import_orphaned_staging() -> ResponseReturnValue:
         """List old pipeline staging folders that need verified recovery."""
         from staging_recovery import discover_orphaned_staging
 
@@ -2171,7 +2208,7 @@ def create_imports_blueprint(
 
     @blueprint.route("/api/import/orphaned-staging/verify", methods=["POST"])
     @background_job
-    def api_import_orphaned_staging_verify(ctx):
+    def api_import_orphaned_staging_verify(ctx: JobLaunch) -> ResponseReturnValue:
         """Start a verification job for one old pipeline staging folder."""
         from staging_recovery import verify_orphaned_staging
 
@@ -2182,7 +2219,7 @@ def create_imports_blueprint(
 
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
-        def work(job):
+        def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
             return verify_orphaned_staging(
                 thread_db, vireo_dir, path, pause_callback=lambda: ctx.checkpoint(job),
@@ -2196,7 +2233,7 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/orphaned-staging", methods=["DELETE"])
-    def api_import_orphaned_staging_delete():
+    def api_import_orphaned_staging_delete() -> ResponseReturnValue:
         """Delete old staging only when a fresh verification is fully green."""
         from staging_recovery import delete_verified_staging
 
