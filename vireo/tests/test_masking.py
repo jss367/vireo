@@ -687,7 +687,10 @@ def test_ensure_sam2_weights_noop_when_present(tmp_path, monkeypatch):
         download_calls.append(kwargs)
         raise AssertionError("hf_hub_download must not be called when files exist")
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -725,7 +728,10 @@ def test_ensure_sam2_weights_downloads_both_files(tmp_path, monkeypatch):
         seen_requests.append((kwargs["filename"], kwargs["subfolder"]))
         return str(cache_dir / kwargs["filename"])
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -773,7 +779,10 @@ def test_ensure_sam2_weights_downloads_only_missing_file(tmp_path, monkeypatch):
         requested.append(kwargs["filename"])
         return str(cache_dir / kwargs["filename"])
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 
@@ -800,7 +809,10 @@ def test_ensure_sam2_weights_raises_on_download_failure(tmp_path, monkeypatch):
     def fake_hf_hub_download(**kwargs):
         raise ConnectionError("network unreachable")
 
+    from huggingface_hub import errors
+
     fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.errors = errors
     fake_hf.hf_hub_download = fake_hf_hub_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
 

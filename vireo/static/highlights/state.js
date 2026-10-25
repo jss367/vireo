@@ -18,6 +18,11 @@ export var WORKSPACE_SCOPE = '__workspace__';
  * @property {boolean} speciesSuggestionsLoaded Whether the species modal's datalist is filled.
  * @property {number[]} speciesModalPhotoIds The photos the species modal will relabel.
  * @property {number | null} activeLightboxPhotoId The photo the lightbox shows.
+ * @property {string | null} activeLightboxSpecies The bucket the lightbox was
+ *   opened from (null for unidentified), so a photo in two species' buckets
+ *   shows and acts on the entry the user opened.
+ * @property {string | null} speciesModalFromSpecies The bucket species the
+ *   species modal replaces (null to set the photo's species outright).
  * @property {Set<number>} rejectedFromGrid Photos the user has rejected from the
  *   lightbox this session and not since un-rejected. Drives grid removal AND
  *   guards reloads (see loadHighlights).
@@ -47,6 +52,8 @@ export const state = {
   speciesSuggestionsLoaded: false,
   speciesModalPhotoIds: [],
   activeLightboxPhotoId: null,
+  activeLightboxSpecies: null,
+  speciesModalFromSpecies: null,
   rejectedFromGrid: new Set(),
   lastHighlightReject: null,
   highlightsLoadSeq: 0,

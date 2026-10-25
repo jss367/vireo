@@ -189,7 +189,7 @@ export function bindBucketActionButtons(content, buckets) {
         if (action === 'confirm-bucket') {
           var species = btn.getAttribute('data-species');
           var bucket = buckets.find(function(b) { return b.species === species; });
-          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), btn);
+          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), bucket.species, btn);
         } else if (action === 'change-bucket') {
           var changeSpecies = btn.getAttribute('data-species');
           var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
@@ -199,6 +199,7 @@ export function bindBucketActionButtons(content, buckets) {
               'Change species',
               changeIds.length + ' photo' + (changeIds.length === 1 ? '' : 's'),
               changeIds,
+              changeBucket.species,
               changeBucket.species
             );
           }
@@ -208,7 +209,8 @@ export function bindBucketActionButtons(content, buckets) {
             'Set species',
             ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),
             ids,
-            ''
+            '',
+            null
           );
         }
       } finally {

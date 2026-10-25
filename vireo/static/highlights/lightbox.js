@@ -143,7 +143,7 @@ export function updateHighlightsLightboxControls(photoId) {
       } else if (!photo) {
         return;
       } else if (action === 'confirm') {
-        confirmPhotoIds([photo.id], btn);
+        confirmPhotoIds([photo.id], photo.bucket_species || photoSpeciesName(photo), btn);
       } else if (action === 'add-highlight') {
         addSpeciesHighlight(photoSpeciesName(photo), photo.id, btn);
       } else if (action === 'remove-highlight') {
@@ -158,7 +158,10 @@ export function updateHighlightsLightboxControls(photoId) {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'
           : 'Set species';
-        showSpeciesModal(modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo));
+        showSpeciesModal(
+          modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo),
+          photo.bucket_species || null
+        );
       }
     });
   });

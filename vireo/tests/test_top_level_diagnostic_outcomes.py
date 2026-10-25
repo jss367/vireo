@@ -206,18 +206,17 @@ def test_existing_revision_fallback_diagnostic_keeps_default_branch():
     import builtins
 
     downloads = []
-    copies = []
     original = RuntimeError("invented revision lookup failure")
 
-    def download(**kwargs):
+    def fetch(*args, **kwargs):
         downloads.append(kwargs)
-        return "invented-memory://" + kwargs["filename"]
+        return args[2] if len(args) >= 3 else kwargs.get("dest_path")
 
     def fake_import(name, *args, **kwargs):
-        if name == "shutil":
-            return SimpleNamespace(copy2=lambda *args: copies.append(args))
+        if name == "hub_download":
+            return SimpleNamespace(fetch_hub_file=fetch)
         if name == "huggingface_hub":
-            return SimpleNamespace(HfApi=lambda: SimpleNamespace(model_info=Mock(side_effect=original)), hf_hub_download=download)
+            return SimpleNamespace(HfApi=lambda: SimpleNamespace(model_info=Mock(side_effect=original)))
         assert name == "models"
         return SimpleNamespace(ONNX_REPO="invented/repo")
 
@@ -227,7 +226,7 @@ def test_existing_revision_fallback_diagnostic_keeps_default_branch():
         __builtins__={**vars(builtins), "__import__": fake_import},
     )
     fn("invented-variant", "invented-memory://graph", "invented-memory://data", None)
-    assert len(downloads) == len(copies) == 2
+    assert len(downloads) == 2
     assert all(call["revision"] is None for call in downloads)
     logger.info.assert_called_once()
     assert logger.info.call_args.kwargs == {"exc_info": True}
