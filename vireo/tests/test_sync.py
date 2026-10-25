@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
-from services import pending_changes, photo_ingest
+from services import pending_changes, photo_ingest, workspace_folders
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -18,7 +18,7 @@ def _setup_photo_with_xmp(tmp_path, db, keywords=None):
     root = str(tmp_path / "photos")
     os.makedirs(root, exist_ok=True)
 
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     img_path = os.path.join(root, 'bird.jpg')
     Image.new('RGB', (100, 100)).save(img_path)
 
@@ -218,8 +218,8 @@ def test_sync_to_xmp_clears_sibling_workspace_flat_removals(tmp_path, monkeypatc
         tmp_path, db, keywords={"Wildlife"},
     )
     folder_id = db.photos.get(pid)["folder_id"]
-    db.add_workspace_folder(ws1, folder_id)
-    db.add_workspace_folder(ws2, folder_id)
+    workspace_folders.add_workspace_folder(db, ws1, folder_id)
+    workspace_folders.add_workspace_folder(db, ws2, folder_id)
     db.queue_change(
         pid, "keyword_remove_flat", "Wildlife", workspace_id=ws1,
     )
@@ -450,7 +450,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder('/nonexistent', name='gone')
+    fid = workspace_folders.add_folder(db, '/nonexistent', name='gone')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     db.queue_change(pid, 'keyword_add', 'Test')
@@ -1293,7 +1293,7 @@ def test_sync_failure_reasons_are_deduplicated(tmp_path, monkeypatch):
     # /nonexistent path is not, and on hosts where it exists the test would
     # silently exercise a different code path.
     missing_dir = tmp_path / 'gone'
-    fid = db.add_folder(str(missing_dir), name='gone')
+    fid = workspace_folders.add_folder(db, str(missing_dir), name='gone')
     for i in range(3):
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=f'missing{i}.jpg',
                            extension='.jpg', file_size=100, file_mtime=1.0)
@@ -1663,7 +1663,7 @@ def test_sync_serializes_photos_reached_through_folder_alias(tmp_path):
     real_folder = os.path.dirname(xmp_path)
     alias_folder = str(tmp_path / "alias")
     os.symlink(real_folder, alias_folder)
-    alias_fid = db.add_folder(alias_folder, name="alias")
+    alias_fid = workspace_folders.add_folder(db, alias_folder, name="alias")
     raw_id = photo_ingest.add_photo(
         db, folder_id=alias_fid, filename="bird.nef", extension=".nef",
         file_size=100, file_mtime=1.0,
@@ -1915,7 +1915,7 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     # The same directory on a case-insensitive host, a sibling on a
     # case-sensitive one; either way the two rows must share a worker.
     os.makedirs(upper_folder, exist_ok=True)
-    upper_fid = db.add_folder(upper_folder, name="PHOTOS")
+    upper_fid = workspace_folders.add_folder(db, upper_folder, name="PHOTOS")
     # Same basename as the photo in the lower-case row, so the two sidecar
     # paths differ only in the folder's spelling.
     b_id = photo_ingest.add_photo(db, folder_id=upper_fid, filename="bird.nef",
@@ -2756,7 +2756,7 @@ def test_shared_sidecar_preserves_interleaved_edits(tmp_path, db, alias, kind):
     elif alias == "folder_symlink":
         link = tmp_path / "alias"
         os.symlink(os.path.dirname(path), link)
-        folder_id = db.add_folder(str(link), name="alias")
+        folder_id = workspace_folders.add_folder(db, str(link), name="alias")
     second = photo_ingest.add_photo(db, folder_id=folder_id, filename=filename,
                           extension=os.path.splitext(filename)[1], file_size=100, file_mtime=1.0)
     if kind == "rating":
@@ -3247,7 +3247,7 @@ def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
             else:
                 folder_alias = tmp_path / 'alias-folder'
                 os.symlink(os.path.dirname(path), folder_alias, target_is_directory=True)
-                folder_id = db.add_folder(str(folder_alias), name='Alias folder')
+                folder_id = workspace_folders.add_folder(db, str(folder_alias), name='Alias folder')
         except OSError:
             pytest.skip('symlink creation unavailable')
     second = photo_ingest.add_photo(db, folder_id=folder_id, filename=filename,
@@ -3329,7 +3329,7 @@ def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_pa
     db.set_active_workspace(db.ensure_default_workspace())
     folder = tmp_path / 'photos'
     folder.mkdir()
-    folder_id = db.add_folder(str(folder), name='Photos')
+    folder_id = workspace_folders.add_folder(db, str(folder), name='Photos')
     photos, paths = [], []
     for name in ('first', 'second'):
         path = str(folder / (name + '.xmp'))
@@ -3374,7 +3374,7 @@ def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path
     db.set_active_workspace(db.ensure_default_workspace())
     folder = tmp_path / 'photos'
     folder.mkdir()
-    folder_id = db.add_folder(str(folder), name='Photos')
+    folder_id = workspace_folders.add_folder(db, str(folder), name='Photos')
     photos = [photo_ingest.add_photo(db, folder_id=folder_id, filename=name + '.jpg',
                            extension='.jpg', file_size=100, file_mtime=1)
               for name in ('bird', 'BIRD')]

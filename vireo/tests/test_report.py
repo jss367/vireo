@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from db import Database
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def app_and_db(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos/2024", name="2024")
+    fid = workspace_folders.add_folder(db, "/photos/2024", name="2024")
 
     p1 = photo_ingest.add_photo(
         db, folder_id=fid, filename="bird1.jpg", extension=".jpg",

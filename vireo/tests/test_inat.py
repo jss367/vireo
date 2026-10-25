@@ -8,7 +8,7 @@ from testing.waits import synchronization_timeout
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_inat_submissions_table_exists(db):
 
 
 def test_record_inat_submission(db):
-    fid = db.add_folder('/photos', name='photos')
+    fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 123456, "https://www.inaturalist.org/observations/123456")
@@ -44,7 +44,7 @@ def test_get_inat_submissions_empty(db):
 
 
 def test_inat_submission_cascades_on_photo_delete(db):
-    fid = db.add_folder('/photos', name='photos')
+    fid = workspace_folders.add_folder(db, '/photos', name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
     db.inat.record_submission(pid, 111, "https://www.inaturalist.org/observations/111")
@@ -283,7 +283,7 @@ def app_and_db(tmp_path):
     os.makedirs(photo_dir)
     Image.new('RGB', (100, 100)).save(os.path.join(photo_dir, 'bird.jpg'))
 
-    fid = d.add_folder(photo_dir, name='photos')
+    fid = workspace_folders.add_folder(d, photo_dir, name='photos')
     pid = photo_ingest.add_photo(d, folder_id=fid, filename='bird.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
 
@@ -873,7 +873,7 @@ def _add_out_of_workspace_photo(db):
 
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    fid = db.add_folder(other_dir, name="other-photos")
+    fid = workspace_folders.add_folder(db, other_dir, name="other-photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid,
         filename='outside.jpg',

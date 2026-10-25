@@ -41,7 +41,7 @@ import re
 from pathlib import Path
 
 import pytest
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 VIREO_DIR = Path(__file__).resolve().parent.parent
 
@@ -423,7 +423,7 @@ def prov_db(tmp_path):
 
 def test_unstamped_tag_photo_is_recorded_as_manual(prov_db):
     """A call site that forgets provenance still produces a protected row."""
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     pid = photo_ingest.add_photo(
         prov_db, folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -443,7 +443,7 @@ def test_sidecar_import_leaves_provenance_unknown(prov_db):
     """The allowlisted neutral writers really do write NULL, not 'manual'."""
     from db import KEYWORD_SOURCE_UNKNOWN
 
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     pid = photo_ingest.add_photo(
         prov_db, folder_id=fid, filename="b.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -463,7 +463,7 @@ def test_duplicate_merge_carries_manual_provenance_to_the_winner(prov_db):
     """Moving an association between photo rows must move its authorship too."""
     from db import KEYWORD_SOURCE_UNKNOWN
 
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     winner = photo_ingest.add_photo(
         prov_db, folder_id=fid, filename="w.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -518,7 +518,7 @@ def test_keyword_merge_folds_provenance_on_overlapping_photos(prov_db):
     """
     from db import KEYWORD_SOURCE_ACCEPT, KEYWORD_SOURCE_UNKNOWN
 
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
 
     def _photo(name):
         return photo_ingest.add_photo(
@@ -570,7 +570,7 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
         KEYWORD_SOURCE_UNKNOWN,
     )
 
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     kid = prov_db.add_keyword("Wildlife", kw_type="genre")
 
     def _stamp(first, second):
@@ -596,7 +596,7 @@ def test_tag_photo_never_moves_provenance_down_the_lattice(prov_db):
 
 def test_setting_a_photo_location_records_manual_provenance(prov_db):
     """Assigning a place is a person's explicit act, not generated metadata."""
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     pid = photo_ingest.add_photo(
         prov_db, folder_id=fid, filename="loc.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -616,7 +616,7 @@ def test_manual_stamp_survives_a_later_neutral_retag(prov_db):
     """A sidecar rescan must not downgrade authorship the user established."""
     from db import KEYWORD_SOURCE_MANUAL, KEYWORD_SOURCE_UNKNOWN
 
-    fid = prov_db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(prov_db, "/photos", name="photos")
     pid = photo_ingest.add_photo(
         prov_db, folder_id=fid, filename="c.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,

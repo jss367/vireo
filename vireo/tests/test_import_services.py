@@ -9,7 +9,7 @@ from jobs import JobRunner
 from PIL import Image
 from repositories.processes import ProcessesRepository
 from scanner import ScanOptions
-from services import saved_processes
+from services import saved_processes, workspace_folders
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
@@ -76,7 +76,7 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     source.mkdir()
     selected = source / "selected.jpg"
     Image.new("RGB", (32, 32), "red").save(selected)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(selected)])
     scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
@@ -113,7 +113,7 @@ def test_restart_snapshot_keeps_left_out_folders_out(import_service, tmp_path):
     left_out = trip / "left_out.jpg"
     for path in (kept, left_out):
         Image.new("RGB", (32, 32), "red").save(path)
-    db.add_folder(str(source), name="photos")
+    workspace_folders.add_folder(db, str(source), name="photos")
     snapshot_id = db.workspaces.create_new_images_snapshot(
         [str(kept), str(left_out)],
     )
@@ -390,7 +390,7 @@ def test_snapshot_replay_without_flask_context(import_service, tmp_path):
     source.mkdir()
     photo = source / "bird.jpg"
     Image.new("RGB", (32, 32), "blue").save(photo)
-    db.add_folder(str(source), name="registered")
+    workspace_folders.add_folder(db, str(source), name="registered")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(photo)])
     body = {"source_snapshot_id": snapshot_id, "after_import": None}
 

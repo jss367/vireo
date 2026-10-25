@@ -84,7 +84,7 @@ from hypothesis.stateful import (  # noqa: E402
 )
 from PIL import ExifTags, Image  # noqa: E402
 from scanner import ScanHooks, ScanOptions  # noqa: E402
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg")
 # RAW+JPEG shooting puts IMG.cr3 beside IMG.jpg; a scan pairs them into one
@@ -615,7 +615,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
     def share_folder_with_other_workspace(self, data):
         folder = data.draw(st.sampled_from(self._photo_folders()))
         other = self.other_ws if self.ws_id == self.default_ws else self.default_ws
-        self.db.add_workspace_folder(other, folder["id"])
+        workspace_folders.add_workspace_folder(self.db, other, folder["id"])
 
     @precondition(lambda self: self._loaded_cards())
     @rule(data=st.data(), cancel_after=st.integers(1, 6))
@@ -1159,8 +1159,8 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
         mine = db._active_workspace_id
         theirs = db.create_workspace("Other")
         db.set_active_workspace(mine)
-        folder_id = db.add_folder(str(shared), name="shared")
-        db.add_workspace_folder(theirs, folder_id)
+        folder_id = workspace_folders.add_folder(db, str(shared), name="shared")
+        workspace_folders.add_workspace_folder(db, theirs, folder_id)
         photo_id = photo_ingest.add_photo(
             db, folder_id=folder_id, filename="DSC_0001.jpg", extension=".jpg",
             file_size=os.path.getsize(shared / "DSC_0001.jpg"), file_mtime=1.0,
@@ -1639,7 +1639,7 @@ def test_archive_merge_keeps_photo_in_workspace_that_shared_its_folder():
         # The card still holds the deleted photo, so it comes back in a new
         # library folder.
         import_card()
-        machine.db.add_workspace_folder(machine.other_ws, imported["id"])
+        workspace_folders.add_workspace_folder(machine.db, machine.other_ws, imported["id"])
         check()
         reimported = next(f for f in machine._photo_folders() if f["id"] != imported["id"])
         nested = os.path.join(machine.moved, "nested")

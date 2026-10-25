@@ -12,12 +12,12 @@ import textwrap
 
 from db import Database
 from repositories.source_cleanup import SourceCleanupRepository
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_folder_has_photos_sees_photos_in_any_workspace(db):
-    empty = db.add_folder("/library/empty")
-    full = db.add_folder("/library/full")
+    empty = workspace_folders.add_folder(db, "/library/empty")
+    full = workspace_folders.add_folder(db, "/library/full")
     photo_ingest.add_photo(db, full, "a.jpg", ".jpg", 10, 1.0)
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
@@ -28,8 +28,8 @@ def test_folder_has_photos_sees_photos_in_any_workspace(db):
 
 def test_local_copy_paths_unions_workspace_and_folder_copies(db):
     ws = db.active_workspace_id
-    a = db.add_folder("/library/a")
-    b = db.add_folder("/library/b")
+    a = workspace_folders.add_folder(db, "/library/a")
+    b = workspace_folders.add_folder(db, "/library/b")
     db.conn.execute(
         "INSERT INTO local_workspace_folders (workspace_id, folder_id, source_path, local_path) "
         "VALUES (?, ?, ?, ?)", (ws, a, "/library/a", "/local/a"),
@@ -50,9 +50,9 @@ def test_local_copy_paths_unions_workspace_and_folder_copies(db):
 def test_other_workspace_roots_excludes_the_given_workspace(db):
     mine = db.active_workspace_id
     other = db.create_workspace("Other")
-    root = db.add_folder("/library/root")
-    db.add_workspace_folder(other, root)
-    db.add_workspace_folder(mine, root)
+    root = workspace_folders.add_folder(db, "/library/root")
+    workspace_folders.add_workspace_folder(db, other, root)
+    workspace_folders.add_workspace_folder(db, mine, root)
 
     rows = [(r["workspace_id"], r["path"]) for r in db.source_cleanup.other_workspace_roots(mine)]
     assert rows == [(other, "/library/root")]
@@ -61,16 +61,16 @@ def test_other_workspace_roots_excludes_the_given_workspace(db):
 
 
 def test_folder_paths_lists_every_folder(db):
-    a = db.add_folder("/library/a")
-    b = db.add_folder("/library/b", link_to_workspace=False)
+    a = workspace_folders.add_folder(db, "/library/a")
+    b = workspace_folders.add_folder(db, "/library/b", link_to_workspace=False)
 
     rows = {(r["id"], r["path"]) for r in db.source_cleanup.folder_paths()}
     assert rows == {(a, "/library/a"), (b, "/library/b")}
 
 
 def test_retire_folder_drops_row_links_and_move_source_marker_without_committing(db):
-    source = db.add_folder("/library/source")
-    dest = db.add_folder("/library/dest")
+    source = workspace_folders.add_folder(db, "/library/source")
+    dest = workspace_folders.add_folder(db, "/library/dest")
     pid = photo_ingest.add_photo(db, dest, "a.jpg", ".jpg", 10, 1.0)
     db.conn.execute(
         "UPDATE photos SET last_move_source_folder_path = ? WHERE id = ?",

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import pytest
 from db import Database
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -295,8 +295,8 @@ def app_and_db(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder('/photos/2024', name='2024')
-    fid2 = db.add_folder('/photos/2024/January', name='January', parent_id=fid)
+    fid = workspace_folders.add_folder(db, '/photos/2024', name='2024')
+    fid2 = workspace_folders.add_folder(db, '/photos/2024/January', name='January', parent_id=fid)
 
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='bird1.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-01-15T10:00:00')
@@ -365,7 +365,7 @@ def client_with_photo(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(photos_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="test.jpg", extension=".jpg",
         file_size=os.path.getsize(src),

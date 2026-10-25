@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 # The success toast, never the 'Could not analyze ... Auto Tone' error.
 AUTO_TONE_APPLIED = re.compile(r'Auto Tone.*(White balance left unchanged|nothing changed)')
@@ -21,7 +21,7 @@ def denoise_photo(live_server, tmp_path):
     path = folder / 'high-iso-wildlife.png'
     Image.fromarray(pixels).save(path)
     db = live_server['db']
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(
         db, folder_id=folder_id, filename=path.name, extension='.png',
         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from classify_job.detection import DetectionHandoff
 from resource_ledger import ResourceWaitCancelled
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 BOX = {"x": 0, "y": 0, "w": 1, "h": 1}
 
@@ -50,7 +50,7 @@ def db(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "test.db"))
     ws = database.ensure_default_workspace()
     database.set_active_workspace(ws)
-    database.folder_id = database.add_folder(str(tmp_path), name="p")
+    database.folder_id = workspace_folders.add_folder(database, str(tmp_path), name="p")
     return database
 
 

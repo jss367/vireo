@@ -10,13 +10,13 @@ import pytest
 from db import Database
 from PIL import Image
 from scanner import companions
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
 def catalog(tmp_path):
     db = Database(str(tmp_path / "catalog.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     ids = {}
     for extension in (".cr3", ".jpg"):
         ids[extension] = photo_ingest.add_photo(

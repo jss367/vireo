@@ -16,7 +16,7 @@ import json
 
 import pytest
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture(autouse=True)
@@ -1779,7 +1779,7 @@ def test_location_applies_to_selection_larger_than_batch_cap(live_server, page):
     the detail-panel path did not.
     """
     db = live_server["db"]
-    folder_id = db.add_folder("/photos/laguna", name="laguna")
+    folder_id = workspace_folders.add_folder(db, "/photos/laguna", name="laguna")
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id=folder_id, filename=f"laguna{i}.jpg", extension=".jpg",

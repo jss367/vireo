@@ -7,7 +7,7 @@ import pytest
 from duplicate_scan import run_duplicate_scan
 from PIL import Image, ImageDraw
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 from e2e.module_pages import install_page_module_exposure
 
@@ -37,7 +37,7 @@ def seed_same_shot_review(db, tmp_path):
         draw.polygon(((345, 94), (375, 105), (345, 110)), fill="#39352c")
         draw.ellipse((328, 87, 336, 95), fill="#222222")
         image.save(path)
-        fid = db.add_folder(str(folder))
+        fid = workspace_folders.add_folder(db, str(folder))
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=path.name, extension=".jpg",
                                     file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                                     file_hash=f"version-{index}", timestamp=date)

@@ -6,6 +6,7 @@ import pytest
 from pipeline import run_triage
 from scoring import composite_quality_score, hard_reject_reasons, score_encounter
 from selection import mmr_select, triage_encounters
+from services import workspace_folders
 from subject_readiness import REQUIRED_QUALITY_FIELDS, SCORE_FIELDS, subject_analysis_readiness
 
 
@@ -140,7 +141,7 @@ def readiness_photo(db, tmp_path):
     from repositories.masks_features import MaskQuality, PipelineFeatures
     from services import photo_ingest
 
-    folder = db.add_folder(str(tmp_path), name="Readiness")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Readiness")
     pid = photo_ingest.add_photo(db, folder, "duck.jpg", ".jpg", 100, 1.)
     mask_path = tmp_path / "mask.png"
     mask_path.write_bytes(b"scratch-mask")

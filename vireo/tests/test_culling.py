@@ -27,7 +27,7 @@ from culling import (
     _scene_label,
     analyze_for_culling,
 )
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 # ---------------------------------------------------------------------------
 # _cluster_photos  (single-linkage embedding clustering)
@@ -540,7 +540,7 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="photos")
+    fid = workspace_folders.add_folder(db, folder_path, name="photos")
 
     # Create test images so pHash backfill doesn't fail
     from PIL import Image
@@ -719,7 +719,7 @@ def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
     vireo_dir = tmp_path
     folder_path = str(tmp_path / "raws")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="raws")
+    fid = workspace_folders.add_folder(db, folder_path, name="raws")
 
     # Simulate a RAW: register the photo with a .NEF extension, but don't
     # write a real NEF — PIL can't open it. The working copy IS available.
@@ -760,7 +760,7 @@ def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
 
     folder_path = str(tmp_path / "raws")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="raws")
+    fid = workspace_folders.add_folder(db, folder_path, name="raws")
 
     # Unreadable "RAW": junk bytes, no working copy
     fname = "broken.NEF"
@@ -801,7 +801,7 @@ def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_
     vireo_dir = tmp_path
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="photos")
+    fid = workspace_folders.add_folder(db, folder_path, name="photos")
 
     # Valid JPEG at the source path — can be opened.
     fname = "bird.jpg"
@@ -851,7 +851,7 @@ def test_phash_backfill_commits_per_photo(tmp_path):
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="photos")
+    fid = workspace_folders.add_folder(db, folder_path, name="photos")
 
     pids = []
     for i in range(3):
@@ -927,7 +927,7 @@ def test_phash_backfill_does_not_swallow_commit_errors(tmp_path):
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
-    fid = db.add_folder(folder_path, name="photos")
+    fid = workspace_folders.add_folder(db, folder_path, name="photos")
 
     fname = "bird.jpg"
     Image.new("RGB", (50, 50), color=(50, 120, 80)).save(

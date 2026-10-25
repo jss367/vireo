@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
-from services import catalog_deletion, dashboard_stats, photo_ingest
+from services import catalog_deletion, dashboard_stats, photo_ingest, workspace_folders
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -1028,7 +1028,7 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     from scanner import EMBEDDED_KEYWORDS_BACKFILL_KEY, backfill_embedded_keywords
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     tagged, already, raw = (
         photo_ingest.add_photo(db, folder_id=folder_id, filename=name, extension=ext,
                      file_size=100, file_mtime=1.0)
@@ -1068,7 +1068,7 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "photos"), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     handled, blocked = (
         photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
                      file_size=100, file_mtime=1.0)
@@ -1112,7 +1112,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
     file_meta = {"XMP": {"Subject": ["Robin", "Hawk"],
@@ -1148,7 +1148,7 @@ def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
@@ -1179,7 +1179,7 @@ def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_pat
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
@@ -1220,7 +1220,7 @@ def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_pa
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
@@ -1250,7 +1250,7 @@ def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monke
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                        extension=".jpg", file_size=100, file_mtime=1.0)
 
@@ -1340,7 +1340,7 @@ def test_incremental_index_reads_only_requested_photos(tmp_path, requested_count
 
     with Database(str(tmp_path / "test.db")) as db:
         folder = tmp_path / "archive_%"
-        folder_id = db.add_folder(str(folder), name=folder.name)
+        folder_id = workspace_folders.add_folder(db, str(folder), name=folder.name)
         requested = [folder / f"photo-{i}.jpg" for i in range(requested_count)]
         db.conn.executemany(
             "INSERT INTO photos(folder_id, filename, file_size, file_mtime, "
@@ -1993,7 +1993,7 @@ def test_companion_metadata_fills_each_missing_coordinate_and_dimension(
     from scanner.companions import _fill_primary_metadata_gaps, _read_metadata_transfer_rows
 
     with Database(str(tmp_path / "catalog.db")) as db:
-        folder_id = db.add_folder(str(tmp_path), name="photos")
+        folder_id = workspace_folders.add_folder(db, str(tmp_path), name="photos")
         raw_id = photo_ingest.add_photo(db, folder_id, "IMG.cr3", ".cr3", 2000, 1.0)
         jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG.jpg", ".jpg", 1000, 1.0)
         db.conn.execute(
@@ -3316,7 +3316,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     img_dir.mkdir()
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -3378,7 +3378,7 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
     img_dir.mkdir()
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -3415,7 +3415,7 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
     from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "photos"))
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"))
     jpeg = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
     raw = photo_ingest.add_photo(db, folder_id=fid, filename="bird.cr3", extension=".cr3",
@@ -3444,7 +3444,7 @@ def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(img_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(img_dir), name="photos")
     raw_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
         file_size=2000, file_mtime=1.0,
@@ -3479,7 +3479,7 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     img_dir.mkdir()
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -3630,7 +3630,7 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     from scanner.companions import _pair_raw_jpeg_companions
 
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
     raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
@@ -3682,7 +3682,7 @@ def test_pairing_transfers_inat_submissions(tmp_path):
     img_dir.mkdir()
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
     raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
@@ -3719,7 +3719,7 @@ def test_pairing_deduplicates_inat_submissions(tmp_path):
     img_dir.mkdir()
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
     raw_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
@@ -3859,7 +3859,7 @@ def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     # JPEG has GPS and metadata, RAW does not
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
@@ -3895,7 +3895,7 @@ def test_pair_raw_jpeg_transfers_promoted_exif_summary_columns(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
@@ -3931,7 +3931,7 @@ def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
@@ -3967,7 +3967,7 @@ def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
@@ -3994,7 +3994,7 @@ def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
@@ -4020,7 +4020,7 @@ def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
 
     jpeg_id = photo_ingest.add_photo(db, folder_id=fid, filename="IMG.jpg", extension=".jpg",
                            file_size=1000, file_mtime=1.0)
@@ -4142,7 +4142,7 @@ def test_working_copy_scope_supports_more_than_sqlite_expression_limit(
     raw_path.write_bytes(b"fake raw data")
 
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(target_dir))
+    folder_id = workspace_folders.add_folder(db, str(target_dir))
     photo_id = photo_ingest.add_photo(
         db, folder_id,
         raw_path.name,
@@ -4190,7 +4190,7 @@ def test_working_copy_extractor_rechecks_excluded_path_before_read(
     raw_path.write_bytes(b"fake raw data")
 
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(target_dir))
+    folder_id = workspace_folders.add_folder(db, str(target_dir))
     photo_id = photo_ingest.add_photo(
         db, folder_id,
         raw_path.name,
@@ -5033,12 +5033,12 @@ def test_restricted_scan_links_only_exact_target_folder(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
     active_ws = db._active_workspace_id
-    root_id = db.add_folder(str(root), name=root.name)
+    root_id = workspace_folders.add_folder(db, str(root), name=root.name)
 
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    unrelated_id = db.add_folder(
-        str(unrelated), name=unrelated.name, parent_id=root_id,
+    unrelated_id = workspace_folders.add_folder(
+        db, str(unrelated), name=unrelated.name, parent_id=root_id,
     )
     photo_ingest.add_photo(db, unrelated_id, "existing.jpg", ".jpg", 100, 1.0)
     db.set_active_workspace(active_ws)
@@ -6033,7 +6033,7 @@ def test_partial_folder_is_visible_in_folder_tree(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder("/p")
+    fid = workspace_folders.add_folder(db, "/p")
     db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
     db.conn.commit()
 
@@ -7022,7 +7022,7 @@ def test_scan_links_root_when_all_files_skipped(tmp_path):
     skip = {os.path.join(root, 'a.jpg'), os.path.join(root, 'b.jpg')}
     scan(root, db, options=ScanOptions(skip_paths=skip))
 
-    linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    linked = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     assert root in linked, (
         f"Folder {root} should be linked to the active workspace even when "
         f"all files were skipped. Linked folders: {linked}"
@@ -7055,7 +7055,7 @@ def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
     skip = {os.path.join(sub1, 'a.jpg'), os.path.join(sub2, 'b.jpg')}
     scan(root, db, options=ScanOptions(skip_paths=skip, restrict_dirs=[sub1, sub2]))
 
-    linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    linked = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     assert sub1 in linked and sub2 in linked, (
         f"Both restrict_dirs should be linked. Linked folders: {linked}"
     )
@@ -7074,14 +7074,14 @@ def test_scan_does_not_promote_discovered_descendants_to_workspace_roots(tmp_pat
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder(root, name="USA2026")
-    db.add_workspace_folder(ws_id, root_id)
+    root_id = workspace_folders.add_folder(db, root, name="USA2026")
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
     db.set_active_workspace(ws_id)
 
     scan(root, db)
 
-    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
-    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    linked_paths = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
+    root_paths = [f["path"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)]
     assert os.path.join(root, "day1") in linked_paths
     assert root_paths == [root]
 
@@ -7101,8 +7101,8 @@ def test_scan_promotes_top_level_target_to_workspace_root(tmp_path):
 
     scan(root, db)
 
-    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
-    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    linked_paths = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
+    root_paths = [f["path"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)]
     assert os.path.join(root, "day1") in linked_paths
     assert root_paths == [root]
 
@@ -7132,8 +7132,8 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
 
     scan(base, db, options=ScanOptions(restrict_dirs=[imported]))
 
-    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
-    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    root_paths = [f["path"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)]
+    linked_paths = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     # The imported leaf is the user-facing root; the archive base is
     # NOT linked to the workspace. Before PR #1107's line-1186 fix the
     # base was linked as a non-root, which fired ``add_workspace_
@@ -7168,7 +7168,7 @@ def test_restricted_scan_below_registered_root_does_not_promote_leaf(tmp_path):
     _create_test_images(root, {"trip": ["bird.jpg"]})
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
-    db.add_folder(root, name="registered")
+    workspace_folders.add_folder(db, root, name="registered")
 
     scan(
         root, db,
@@ -7179,8 +7179,8 @@ def test_restricted_scan_below_registered_root_does_not_promote_leaf(tmp_path):
         ),
     )
 
-    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
-    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    root_paths = [f["path"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)]
+    linked_paths = {f["path"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     assert root_paths == [root]
     assert leaf in linked_paths
 
@@ -7501,7 +7501,7 @@ def test_scan_purges_derived_caches_when_new_photo_reuses_a_freed_rowid(
 
     db = Database(str(tmp_path / "test.db"))
     # Claim (and free) a rowid so the real scan's insert reuses it.
-    placeholder_folder = db.add_folder(str(tmp_path / "gone"), name="gone")
+    placeholder_folder = workspace_folders.add_folder(db, str(tmp_path / "gone"), name="gone")
     doomed_id = photo_ingest.add_photo(
         db, folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -7597,7 +7597,7 @@ def test_pairing_purges_the_merged_companion_derived_caches(tmp_path):
     thumb_dir = os.path.join(vireo_dir, "thumbnails")
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -7648,7 +7648,7 @@ def test_scan_purges_variant_only_caches_when_new_photo_reuses_a_freed_rowid(
     thumb_dir = os.path.join(vireo_dir, "thumbnails")
 
     db = Database(str(tmp_path / "test.db"))
-    placeholder_folder = db.add_folder(str(tmp_path / "gone"), name="gone")
+    placeholder_folder = workspace_folders.add_folder(db, str(tmp_path / "gone"), name="gone")
     doomed_id = photo_ingest.add_photo(
         db, folder_id=placeholder_folder, filename="munia.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -7725,7 +7725,7 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
     thumb_dir = os.path.join(vireo_dir, "thumbnails")
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
     jpeg_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="IMG_003.jpg", extension=".jpg",
         file_size=1000, file_mtime=1.0,
@@ -8255,7 +8255,7 @@ def test_recycled_id_purge_marks_surviving_previews_uncacheable(tmp_path):
     preview.write_bytes(b"previous-tenant-preview")
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "photos"), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -8348,7 +8348,7 @@ def test_preview_marker_written_even_when_backdating_fails(tmp_path):
     thumb_dir.mkdir(parents=True)
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "photos"), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -8403,7 +8403,7 @@ def test_prepared_render_survivor_does_not_get_a_preview_marker(tmp_path):
     thumb_dir.mkdir(parents=True)
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "photos"), name="photos")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -8843,7 +8843,7 @@ def _sidecar_with_vireo_location(tmp_path, db, chain):
     os.makedirs(root, exist_ok=True)
     xmp_path = os.path.join(root, "bird.xmp")
 
-    folder_id = db.add_folder(root, name="photos")
+    folder_id = workspace_folders.add_folder(db, root, name="photos")
     photo_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="bird.jpg",
                             extension=".jpg", file_size=100, file_mtime=1.0)
     parent_id = None
@@ -8941,7 +8941,7 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder(str(img_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(img_dir), name="photos")
 
     companion_ids = []
     primary_ids = []
@@ -9004,7 +9004,7 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     photo_id = photo_ingest.add_photo(db, folder_id=folder_id, filename="a.jpg",
                             extension=".jpg", file_size=100, file_mtime=1.0)
     db.conn.execute(

@@ -14,7 +14,7 @@ import config as cfg
 import move as move_mod
 import pytest
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 # --------------------------------------------------------------------------
 # Pure helpers — no SSH/rsync needed.
@@ -230,7 +230,7 @@ def remote_env(tmp_path, monkeypatch):
     src.mkdir()
     (src / "a.nef").write_bytes(b"\x00" * 50)
     (src / "b.nef").write_bytes(b"\x00" * 60)
-    fid = db.add_folder(str(src), name="trip")
+    fid = workspace_folders.add_folder(db, str(src), name="trip")
     photo_ingest.add_photo(db, folder_id=fid, filename="a.nef", extension=".nef",
                  file_size=50, file_mtime=1.0)
     photo_ingest.add_photo(db, folder_id=fid, filename="b.nef", extension=".nef",
@@ -755,7 +755,7 @@ def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monk
     env = remote_env
     # Pre-register a tracked folder at the resolved catalog_path.
     catalog_path = os.path.join(env["remote"]["mount_dest_base"], "trip")
-    other_fid = env["db"].add_folder(catalog_path, name="trip")
+    other_fid = workspace_folders.add_folder(env["db"], catalog_path, name="trip")
     assert other_fid != env["fid"]
 
     called = {"rsync": False, "exists": False}

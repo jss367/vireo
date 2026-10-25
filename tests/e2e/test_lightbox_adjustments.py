@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def adjustment_photo(live_server, tmp_path):
     path = folder / 'gradient.png'
     image.save(path)
     db = live_server['db']
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     return photo_ingest.add_photo(
         db, folder_id=folder_id, filename=path.name, extension='.png',
         file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,

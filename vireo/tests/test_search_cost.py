@@ -13,6 +13,7 @@ import json
 from urllib.parse import quote
 
 import pytest
+from services import workspace_folders
 
 PHOTOS = 150
 # SQLite reports progress every this many VM steps; the count is steps / this.
@@ -49,7 +50,7 @@ def search_catalog(app_and_db, monkeypatch):
     from web import app_hooks
 
     app, db = app_and_db
-    folder = db.add_folder("/photos/Survey", name="Survey")
+    folder = workspace_folders.add_folder(db, "/photos/Survey", name="Survey")
     db.conn.executemany(
         "INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime, "
         "timestamp) VALUES (?, ?, '.jpg', 1000, 1.0, '2019-05-01T08:00:00')",

@@ -22,6 +22,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+from services import workspace_folders
 from services.local_workspace import (
     MANIFEST_VERSION,
     LocalWorkspaceCancelled,
@@ -868,7 +869,7 @@ def _materialize_ancestor_workspaces(db: Database, source_path: str, folders: Se
     When workspace A links ``/parent`` and hasn't yet materialized
     ``/parent/child``, staging ``/parent/child`` in another workspace rebases
     the child ``folders.path`` under ``local-folders/``. After that move,
-    ``_materialize_workspace_descendants(A)`` walks ``folders.path`` below
+    ``materialize_workspace_descendants(A)`` walks ``folders.path`` below
     ``/parent`` and no longer finds the child, so A never gets a
     ``workspace_folders`` link to it. That link is what
     :func:`affected_workspace_ids` and :func:`workspace_local_root_ids` both
@@ -1015,7 +1016,7 @@ def stage_folder(
 
             # Ancestor-linked workspaces need explicit workspace_folders rows
             # for every descendant we're about to rebase; otherwise the rebase
-            # hides those rows from _materialize_workspace_descendants and the
+            # hides those rows from materialize_workspace_descendants and the
             # workspace can never reach the shared local copy from its
             # ancestor root. Must run before the UPDATE below.
             _materialize_ancestor_workspaces(db, roots[0]["source_path"], folders)
@@ -1129,7 +1130,7 @@ def folder_status(db: Database, root_folder_id: int, vireo_dir: str) -> JsonDict
 
 def workspace_status(db: Database, workspace_id: int, vireo_dir: str) -> JsonDict:
     """Aggregate the active workspace's root-folder residency."""
-    roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
+    roots = [dict(row) for row in workspace_folders.get_workspace_folder_roots(db, workspace_id)]
     items: list[JsonDict] = []
     seen_sessions: set[int] = set()
     for root in roots:

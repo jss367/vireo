@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _make_jpeg(path, w=200, h=150):
@@ -209,7 +209,7 @@ def test_generate_all_uses_working_copy(tmp_path):
     Image.new("RGB", (4096, 2731), color=(0, 255, 0)).save(str(wc), "JPEG")
 
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder("/fake/photos")
+    folder_id = workspace_folders.add_folder(db, "/fake/photos")
     photo_id = photo_ingest.add_photo(db, folder_id, "test.nef", ".nef", 1000, 1.0)
     db.conn.execute(
         "UPDATE photos SET working_copy_path=? WHERE id=?",
@@ -236,7 +236,7 @@ def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     photo_ingest.add_photo(
         db, fid, "a.jpg", ".jpg",
         file_size=os.path.getsize(src),
@@ -279,7 +279,7 @@ def test_generate_all_retries_edited_raw_thumbnail_with_companion(
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(photos_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id,
         "source.NEF",
@@ -338,7 +338,7 @@ def test_generate_all_retries_when_raw_thumbnail_short_edge_is_smaller(
     vireo_dir = tmp_path / "vireo"
     vireo_dir.mkdir()
     db = Database(str(vireo_dir / "test.db"))
-    folder_id = db.add_folder(str(photos_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id,
         "source.NEF",
@@ -382,7 +382,7 @@ def test_generate_all_creates_missing(tmp_path):
     from thumbnails import generate_all
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
 
     # Create two source images
     for name in ['a.jpg', 'b.jpg']:
@@ -410,7 +410,7 @@ def test_generate_all_records_thumb_path_in_db(tmp_path):
     from thumbnails import generate_all
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     for name in ['a.jpg', 'b.jpg']:
         Image.new('RGB', (300, 200)).save(str(tmp_path / name))
         photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
@@ -439,7 +439,7 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     Image.new('RGB', (300, 200)).save(str(tmp_path / "a.jpg"))
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension='.jpg',
                  file_size=100, file_mtime=1.0)
@@ -537,7 +537,7 @@ def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
     Image.new("RGB", (792, 594), color="red").save(wc_path, "JPEG")
 
     db = Database(str(vireo_dir / "test.db"))
-    fid = db.add_folder(str(photos_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="bad.NEF",
@@ -598,7 +598,7 @@ def test_backfill_thumb_paths_sets_path_for_existing_files(tmp_path):
     from thumbnails import backfill_thumb_paths
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     for name in ['a.jpg', 'b.jpg', 'c.jpg']:
         photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                      file_size=100, file_mtime=1.0)
@@ -628,7 +628,7 @@ def test_backfill_thumb_paths_clears_path_for_missing_files(tmp_path):
     from thumbnails import backfill_thumb_paths
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension='.jpg',
                  file_size=100, file_mtime=1.0)
     # Pretend a previous run set this; the file no longer exists on disk.
@@ -652,7 +652,7 @@ def test_backfill_thumb_paths_skips_when_already_synced(tmp_path):
     from thumbnails import backfill_thumb_paths
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension='.jpg',
                  file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
@@ -674,7 +674,7 @@ def test_thumb_path_backfill_candidate_count_zero_when_synced(tmp_path):
     from thumbnails import thumb_path_backfill_candidate_count
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension='.jpg',
                  file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET thumb_path='1.jpg' WHERE id=1")
@@ -694,7 +694,7 @@ def test_thumb_path_backfill_candidate_count_counts_unsynced(tmp_path):
     from thumbnails import thumb_path_backfill_candidate_count
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name='root')
+    fid = workspace_folders.add_folder(db, str(tmp_path), name='root')
     for name in ['a.jpg', 'b.jpg']:
         photo_ingest.add_photo(db, folder_id=fid, filename=name, extension='.jpg',
                      file_size=100, file_mtime=1.0)
@@ -760,7 +760,7 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(photos_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
     pid = photo_ingest.add_photo(
         db, folder_id=fid, filename=filename,
         extension=os.path.splitext(filename)[1].lower(),

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from playwright.sync_api import expect
+from services import workspace_folders
 
 
 def test_work_locally_full_cycle(live_server, page, tmp_path):
@@ -13,7 +14,7 @@ def test_work_locally_full_cycle(live_server, page, tmp_path):
 
     ws_id = db.create_workspace("Local Cycle")
     db.set_active_workspace(ws_id)
-    folder_id = db.add_folder(str(source), name="nas-src")
+    folder_id = workspace_folders.add_folder(db, str(source), name="nas-src")
 
     activate = page.request.post(f"{live_server['url']}/api/workspaces/{ws_id}/activate")
     assert activate.ok
@@ -62,7 +63,7 @@ def test_sync_back_replaces_folder_actions_with_live_progress(
     (source / "bird.jpg").write_bytes(b"original")
     workspace_id = db.create_workspace("Inline Sync Progress")
     db.set_active_workspace(workspace_id)
-    folder_id = db.add_folder(str(source), name="inline-progress-source")
+    folder_id = workspace_folders.add_folder(db, str(source), name="inline-progress-source")
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
     ).ok
@@ -163,7 +164,7 @@ def test_bulk_sync_snapshot_marks_an_already_completed_folder(
         source = tmp_path / name
         source.mkdir()
         (source / "bird.jpg").write_bytes(b"original")
-        folder_ids.append(db.add_folder(str(source), name=name))
+        folder_ids.append(workspace_folders.add_folder(db, str(source), name=name))
 
     vireo_dir = os.path.dirname(live_server["app"].config["THUMB_CACHE_DIR"])
     local_base = str(tmp_path / "bulk-local")
@@ -246,9 +247,9 @@ def test_work_locally_explains_processing_blocker(live_server, page, tmp_path):
     (recovery_source / "fox.jpg").write_bytes(b"original-bytes")
     workspace_id = db.create_workspace("Processing")
     db.set_active_workspace(workspace_id)
-    db.add_folder(str(source), name="nas-blocked")
-    recovery_folder_id = db.add_folder(
-        str(recovery_source), name="nas-recovery"
+    workspace_folders.add_folder(db, str(source), name="nas-blocked")
+    recovery_folder_id = workspace_folders.add_folder(
+        db, str(recovery_source), name="nas-recovery"
     )
     stage_folder(db, recovery_folder_id, str(tmp_path))
     db.conn.execute(
@@ -308,7 +309,7 @@ def test_open_work_locally_dialog_disables_when_processing_starts(
     (source / "bird.jpg").write_bytes(b"original-bytes")
     workspace_id = db.create_workspace("Late Processing")
     db.set_active_workspace(workspace_id)
-    db.add_folder(str(source), name="nas-late-blocker")
+    workspace_folders.add_folder(db, str(source), name="nas-late-blocker")
     assert page.request.post(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
     ).ok
@@ -370,9 +371,9 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     (source / "bird.jpg").write_bytes(b"original")
     first = db.create_workspace("Shared First")
     second = db.create_workspace("Shared Second")
-    folder_id = db.add_folder(str(source), name="shared-source", link_to_workspace=False)
-    db.add_workspace_folder(first, folder_id)
-    db.add_workspace_folder(second, folder_id)
+    folder_id = workspace_folders.add_folder(db, str(source), name="shared-source", link_to_workspace=False)
+    workspace_folders.add_workspace_folder(db, first, folder_id)
+    workspace_folders.add_workspace_folder(db, second, folder_id)
 
     page.on("dialog", lambda dialog: dialog.accept())
     assert page.request.post(f"{live_server['url']}/api/workspaces/{first}/activate").ok

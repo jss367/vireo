@@ -4,7 +4,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _create_test_catalog(path, root_path, photos_with_keywords):
@@ -148,7 +148,7 @@ def test_execute_import_populates_db(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     # Add photo to DB directly (scanner can't read fake NEF)
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                  file_size=100, file_mtime=1.0)
 
@@ -197,7 +197,7 @@ def test_execute_import_skips_empty_normalized_keywords(tmp_path):
     ])
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                  file_size=100, file_mtime=1.0)
 
@@ -239,7 +239,7 @@ def test_execute_import_writes_normalized_keywords_to_xmp(tmp_path):
     ])
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                  file_size=100, file_mtime=1.0)
 
@@ -312,7 +312,7 @@ def test_execute_import_prefers_last_across_cased_paths(tmp_path, monkeypatch):
     _create_test_catalog(cat2, _cased_apart(root), [('DSC_0001.NEF', '', [('Blue jay', None)])])
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                        file_size=100, file_mtime=1.0)
 
@@ -391,7 +391,7 @@ def test_execute_import_keeps_case_distinct_photos_apart(tmp_path, monkeypatch):
     ])
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     upper = photo_ingest.add_photo(db, folder_id=fid, filename='Bird.NEF', extension='.nef',
                          file_size=100, file_mtime=1.0)
     lower = photo_ingest.add_photo(db, folder_id=fid, filename='bird.NEF', extension='.nef',
@@ -421,7 +421,7 @@ def test_execute_import_skips_a_path_that_folds_onto_two_photos(tmp_path, monkey
     _create_test_catalog(cat_path, root, [('BIRD.NEF', '', [('Cardinal', None)])])
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     upper = photo_ingest.add_photo(db, folder_id=fid, filename='Bird.NEF', extension='.nef',
                          file_size=100, file_mtime=1.0)
     lower = photo_ingest.add_photo(db, folder_id=fid, filename='bird.NEF', extension='.nef',
@@ -474,7 +474,7 @@ def _one_photo_catalog(tmp_path):
     cat_path = str(tmp_path / "good.lrcat")
     _create_test_catalog(cat_path, root, [('DSC_0001.NEF', '', [('Cardinal', 'Birds')])])
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(root, name='photos')
+    fid = workspace_folders.add_folder(db, root, name='photos')
     photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                  file_size=100, file_mtime=1.0)
     return cat_path, db

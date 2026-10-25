@@ -5,7 +5,7 @@ import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_ensure_schema_stamps_newest_version_on_fresh_db(tmp_path):
@@ -352,7 +352,7 @@ def test_migration_versions_are_unique_and_strictly_increasing():
 def test_version_23_import_catalog_gains_identity_state_without_changing_import_history(tmp_path):
     path = str(tmp_path / 'import-v23.db')
     with Database(path) as db:
-        fid = db.add_folder('/photos', name='Photos')
+        fid = workspace_folders.add_folder(db, '/photos', name='Photos')
         pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
         cid = db.collections.add_import('Original imported photos', [pid, pid + 10])
         original = dict(db.collections.import_provenance(cid))
@@ -475,7 +475,7 @@ def test_version_15_catalog_gains_prediction_history_instances_without_changing_
     db_path = str(tmp_path / 'vireo.db')
     schema.ensure_schema(db_path)
     with Database(db_path, initialize_schema=False) as db:
-        fid = db.add_folder('/photos', name='Photos')
+        fid = workspace_folders.add_folder(db, '/photos', name='Photos')
         pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
         did = db.detections.save(pid, [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},

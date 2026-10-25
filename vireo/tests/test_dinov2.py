@@ -15,7 +15,7 @@ import pytest
 from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 # -- Variant configuration --
 
@@ -550,7 +550,7 @@ def test_db_embedding_storage_roundtrip(tmp_path):
     from dino_embed import blob_to_embedding, embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
     pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     # Create fake embeddings
@@ -580,7 +580,7 @@ def test_db_embedding_null_by_default(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
     pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     row = db.conn.execute(
@@ -598,7 +598,7 @@ def test_db_embedding_partial_update(tmp_path):
     from dino_embed import blob_to_embedding, embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path), name="root")
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="root")
     pid = photo_ingest.add_photo(db, fid, "bird.jpg", ".jpg", 100, 1.0)
 
     global_emb = np.ones(768, dtype=np.float32)

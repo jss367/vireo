@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from app import create_app
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -22,8 +22,8 @@ def scoped_app(tmp_path):
     root = tmp_path / "photos"
     child = root / "day2"
     os.makedirs(child)
-    root_id = db.add_folder(str(root), name="photos")
-    child_id = db.add_folder(str(child), name="day2", parent_id=root_id)
+    root_id = workspace_folders.add_folder(db, str(root), name="photos")
+    child_id = workspace_folders.add_folder(db, str(child), name="day2", parent_id=root_id)
     p_root = photo_ingest.add_photo(db, root_id, "a.jpg", ".jpg", 1000, 1.0,
                           timestamp="2026-01-01T10:00:00")
     p_child = photo_ingest.add_photo(db, child_id, "b.jpg", ".jpg", 1000, 1.0,
@@ -76,10 +76,10 @@ def test_folder_scope_includes_legacy_descendants_by_path(tmp_path):
     root = tmp_path / "photos"
     legacy = root / "orphan"
     os.makedirs(legacy)
-    root_id = db.add_folder(str(root), name="photos")
+    root_id = workspace_folders.add_folder(db, str(root), name="photos")
     # Legacy descendant: path sits under the root but parent_id stays NULL.
-    legacy_id = db.add_folder(
-        str(legacy), name="orphan", parent_id=None, workspace_root=False,
+    legacy_id = workspace_folders.add_folder(
+        db, str(legacy), name="orphan", parent_id=None, workspace_root=False,
     )
     p_root = photo_ingest.add_photo(db, root_id, "a.jpg", ".jpg", 1000, 1.0)
     p_legacy = photo_ingest.add_photo(db, legacy_id, "b.jpg", ".jpg", 1000, 1.0)

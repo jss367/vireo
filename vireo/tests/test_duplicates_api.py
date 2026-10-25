@@ -1,7 +1,7 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
 import os
 
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 from wait import wait_for_job_via_client
 
 
@@ -25,7 +25,7 @@ def _seed_pair(db, file_hash, fid, name_a="x.jpg", name_b="x (2).jpg"):
 def test_scan_endpoint_starts_job(app_and_db):
     """POST /api/duplicates/scan kicks off a background job and returns job_id."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupscan1")
+    fid = workspace_folders.add_folder(db, "/tmp/dupscan1")
     _seed_pair(db, "H1", fid)
 
     client = app.test_client()
@@ -39,7 +39,7 @@ def test_scan_endpoint_starts_job(app_and_db):
 def test_scan_endpoint_job_completes_with_proposals(app_and_db):
     """The spawned job completes and stores proposals in its result."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupscan2")
+    fid = workspace_folders.add_folder(db, "/tmp/dupscan2")
     _seed_pair(db, "HSCAN", fid)
 
     client = app.test_client()
@@ -57,7 +57,7 @@ def test_scan_endpoint_job_completes_with_proposals(app_and_db):
 def test_apply_endpoint_rejects_losers(app_and_db):
     """POST /api/duplicates/apply flags the losers as rejected."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupapply1")
+    fid = workspace_folders.add_folder(db, "/tmp/dupapply1")
     p1, p2 = _seed_pair(db, "H2", fid, name_a="y.jpg", name_b="y (2).jpg")
 
     client = app.test_client()
@@ -84,8 +84,8 @@ def test_apply_endpoint_reports_offline_deferred_hashes(app_and_db, monkeypatch)
     from repositories import duplicates as duplicates_repo
 
     app, db = app_and_db
-    nas_fid = db.add_folder("/tmp/dupapply_nas")
-    local_fid = db.add_folder("/tmp/dupapply_local")
+    nas_fid = workspace_folders.add_folder(db, "/tmp/dupapply_nas")
+    local_fid = workspace_folders.add_folder(db, "/tmp/dupapply_local")
     _seed_pair(db, "HOFF", nas_fid, name_a="a.jpg", name_b="a-nas.jpg")
     # Add a second, entirely-reachable hash so we can prove the deferral
     # is per-hash: the reachable group resolves, the offline group is
@@ -119,7 +119,7 @@ def test_apply_endpoint_reports_offline_deferred_hashes(app_and_db, monkeypatch)
 def test_apply_endpoint_rejects_only_losers_not_all_but_one(app_and_db):
     """With a 3-way dup, exactly the resolver-picked losers are rejected."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupapply2")
+    fid = workspace_folders.add_folder(db, "/tmp/dupapply2")
     p1 = photo_ingest.add_photo(
         db, folder_id=fid, filename="z.jpg", extension=".jpg",
         file_size=1000, file_mtime=100.0,
@@ -155,7 +155,7 @@ def test_apply_endpoint_rejects_only_losers_not_all_but_one(app_and_db):
 def test_apply_endpoint_skips_already_resolved_hash(app_and_db):
     """If only one non-rejected row remains, skip — return 0 rejects."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupapply3")
+    fid = workspace_folders.add_folder(db, "/tmp/dupapply3")
     # Hook auto-rejects one; leave as-is so only 1 non-rejected row remains.
     photo_ingest.add_photo(
         db, folder_id=fid, filename="w.jpg", extension=".jpg",
@@ -234,7 +234,7 @@ def _seed_pair_with_real_files(db, tmp_path, file_hash):
     winner_path.write_bytes(b"x" * 100)
     loser_path.write_bytes(b"x" * 100)
 
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename="owl.jpg", extension=".jpg",
                       file_size=100, file_mtime=100.0, file_hash=file_hash)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename="owl-2.jpg", extension=".jpg",
@@ -377,7 +377,7 @@ def test_delete_loser_files_refuses_when_no_kept_anchor(app_and_db, tmp_path):
     src = folder / "lonely.jpg"
     src.write_bytes(b"y" * 100)
 
-    fid = db.add_folder(str(folder))
+    fid = workspace_folders.add_folder(db, str(folder))
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="lonely.jpg", extension=".jpg",
                        file_size=100, file_mtime=100.0, file_hash="HALONE")
     # Reject the only copy (e.g. user manually rejected it for non-duplicate reasons).
@@ -656,7 +656,7 @@ def test_disk_cleanup_summary_counts_only_anchored_rejections(app_and_db):
     Excludes purely-rejected hashes (manual rejections, no duplicate winner).
     """
     app, db = app_and_db
-    fid = db.add_folder("/tmp/clsum")
+    fid = workspace_folders.add_folder(db, "/tmp/clsum")
     # Anchored loser: 1 kept + 1 rejected sharing a hash.
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0, file_hash="HCLEAN")
@@ -694,7 +694,7 @@ def test_cleanup_matches_banner_without_saved_scan_or_disk_checks(app_and_db, mo
     import duplicate_scan
 
     app, db = app_and_db
-    fid = db.add_folder("/tmp/cleanup-catalog")
+    fid = workspace_folders.add_folder(db, "/tmp/cleanup-catalog")
     kept, rejected = _seed_pair(db, "HCATALOG", fid)
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
     unrelated = photo_ingest.add_photo(db, folder_id=fid, filename="unrelated.jpg", file_hash="HUNRELATED",
@@ -724,7 +724,7 @@ def test_cleanup_matches_banner_without_saved_scan_or_disk_checks(app_and_db, mo
 def test_cleanup_includes_all_kept_anchors_and_refreshes_catalog(app_and_db):
     """Rejected twins remain visible even with several non-rejected copies."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/cleanup-multiple-kept")
+    fid = workspace_folders.add_folder(db, "/tmp/cleanup-multiple-kept")
     a, b = _seed_pair(db, "HMULTIPLE", fid)
     c = photo_ingest.add_photo(db, folder_id=fid, filename="third.jpg", file_hash="HMULTIPLE",
                      extension=".jpg", file_size=1000, file_mtime=100.0)
@@ -748,7 +748,7 @@ def test_cleanup_includes_all_kept_anchors_and_refreshes_catalog(app_and_db):
 def test_catalog_cleanup_cannot_trash_last_surviving_copy(app_and_db, tmp_path):
     """Catalog-only loading doesn't bypass disk revalidation at deletion."""
     app, db = app_and_db
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     kept, rejected = _seed_pair(db, "HMISSINGKEEP", fid)
     copy = tmp_path / "x (2).jpg"
     copy.write_bytes(b"surviving photo")
@@ -769,7 +769,7 @@ def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
     original_ws = db.active_workspace_id
     other_ws = db.create_workspace("Archive")
     db.set_active_workspace(other_ws)
-    fid = db.add_folder("/archive/cleanup")
+    fid = workspace_folders.add_folder(db, "/archive/cleanup")
     kept, rejected = _seed_pair(db, "HARCHIVE", fid)
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
     db.conn.commit()
@@ -804,7 +804,7 @@ def test_last_scan_returns_not_found_when_no_history(app_and_db):
 def test_last_scan_returns_completed_scan_result(app_and_db):
     """After a scan completes, last-scan returns its proposals."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscan1")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscan1")
     _seed_pair(db, "HLAST", fid)
 
     client = app.test_client()
@@ -825,7 +825,7 @@ def test_scan_and_last_scan_name_each_copys_workspaces(app_and_db):
     """The scan is library-wide, so each card says which workspaces show
     that copy; a restored scan reflects membership as it is now."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/dupscanws")
+    fid = workspace_folders.add_folder(db, "/tmp/dupscanws")
     _seed_pair(db, "HWS", fid)
 
     client = app.test_client()
@@ -836,8 +836,8 @@ def test_scan_and_last_scan_name_each_copys_workspaces(app_and_db):
         assert entry["workspaces"] == ["Default"]
 
     zeta = db.create_workspace("Zeta")
-    db.add_workspace_folder(zeta, fid)
-    db.remove_workspace_folder(db._active_workspace_id, fid)
+    workspace_folders.add_workspace_folder(db, zeta, fid)
+    workspace_folders.remove_workspace_folder(db, db._active_workspace_id, fid)
 
     body = client.get("/api/duplicates/last-scan").get_json()
     (proposal,) = [p for p in body["result"]["proposals"] if p["file_hash"] == "HWS"]
@@ -848,7 +848,7 @@ def test_scan_and_last_scan_name_each_copys_workspaces(app_and_db):
 def test_last_scan_picks_most_recent_completed(app_and_db):
     """Two scans -> last-scan reflects the newer one."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscan2")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscan2")
     _seed_pair(db, "HOLD", fid)
 
     client = app.test_client()
@@ -874,7 +874,7 @@ def test_last_scan_drops_group_whose_extra_copy_id_was_reused(app_and_db, tmp_pa
     app, db = app_and_db
     for name in ("k.jpg", "k (2).jpg", "r.jpg", "r-2.jpg"):
         (tmp_path / name).write_bytes(b"x")  # buckets list folders on disk
-    fid = db.add_folder(str(tmp_path))
+    fid = workspace_folders.add_folder(db, str(tmp_path))
     _seed_pair(db, "HKEEP", fid, name_a="k.jpg", name_b="k (2).jpg")
     _keep, extra = _seed_pair(db, "HREUSE", fid, name_a="r.jpg", name_b="r-2.jpg")
 
@@ -909,7 +909,7 @@ def _scan_and_restore(client):
 def test_last_scan_reports_up_to_date_when_catalog_unchanged(app_and_db):
     """A restored scan the catalog still matches needs no rescan."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanfresh")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanfresh")
     _seed_pair(db, "HFRESH", fid)
 
     result = _scan_and_restore(app.test_client())
@@ -920,7 +920,7 @@ def test_last_scan_reports_up_to_date_when_catalog_unchanged(app_and_db):
 def test_last_scan_counts_groups_added_since_the_scan(app_and_db):
     """A duplicate imported after the scan is one a rescan would show."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanadded")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanadded")
     _seed_pair(db, "HBEFORE", fid)
     client = app.test_client()
     _scan_and_restore(client)
@@ -936,7 +936,7 @@ def test_last_scan_counts_groups_resolved_or_grown_since_the_scan(app_and_db):
     """A decision applied since, or another copy of the same file, changes
     what a rescan would show for that group."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanchanged")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanchanged")
     _seed_pair(db, "HAPPLIED", fid)
     _seed_pair(db, "HGROWN", fid, name_a="g.jpg", name_b="g (2).jpg")
     _seed_pair(db, "HSAME", fid, name_a="s.jpg", name_b="s (2).jpg")
@@ -965,7 +965,7 @@ def test_last_scan_shows_resolved_group_whose_winner_was_swapped(app_and_db):
     is re-pointed at the copy kept now, so a rescan would show nothing new.
     """
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanswap")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanswap")
     kept, rejected = _seed_pair(
         db, "HSWAP", fid, name_a="s.jpg", name_b="s (2).jpg",
     )
@@ -1005,7 +1005,7 @@ def test_last_scan_counts_unresolved_group_whose_winner_would_change(app_and_db)
     """An mtime refreshed since the scan can make the resolver keep the other
     copy; apply would follow the new pick, so the shown KEEP is out of date."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanmtime")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanmtime")
     older, newer = _seed_pair(db, "HMTIME", fid, name_a="a.jpg", name_b="b.jpg")
     client = app.test_client()
     first = _scan_and_restore(client)
@@ -1024,7 +1024,7 @@ def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
     """Removing the only extra copy hides the group as stale; a rescan would
     not show it either, so it is no reason to rescan."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscangone")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscangone")
     _keep, extra = _seed_pair(db, "HGONE", fid)
     client = app.test_client()
     _scan_and_restore(client)
@@ -1040,7 +1040,7 @@ def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
 def test_last_scan_keeps_group_with_a_current_extra_copy_left(app_and_db):
     """Deleting one of two extra copies leaves a group that still applies."""
     app, db = app_and_db
-    fid = db.add_folder("/tmp/duplastscanpartial")
+    fid = workspace_folders.add_folder(db, "/tmp/duplastscanpartial")
     keep, extra1 = _seed_pair(db, "HTRIO", fid, name_a="t.jpg", name_b="t (2).jpg")
     extra2 = photo_ingest.add_photo(
         db, folder_id=fid, filename="t (3).jpg", extension=".jpg",
@@ -1073,8 +1073,8 @@ def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db, tmp_path):
     b_dir = tmp_path / "dupbulkb"
     a_dir.mkdir()
     b_dir.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
     # Seed three groups with one file in each folder. Real on-disk files so
     # the existence guard in bulk_resolve_by_folder is satisfied.
     pairs = []
@@ -1123,9 +1123,9 @@ def test_bulk_resolve_endpoint_skips_hash_with_no_candidate_in_folder(app_and_db
     c_dir = tmp_path / "dupbulkskipc"
     for d in (a_dir, b_dir, c_dir):
         d.mkdir()
-    a_fid = db.add_folder(str(a_dir))
-    b_fid = db.add_folder(str(b_dir))
-    c_fid = db.add_folder(str(c_dir))
+    a_fid = workspace_folders.add_folder(db, str(a_dir))
+    b_fid = workspace_folders.add_folder(db, str(b_dir))
+    c_fid = workspace_folders.add_folder(db, str(c_dir))
     folder_by_id = {a_fid: a_dir, b_fid: b_dir, c_fid: c_dir}
     # Distinct filenames per group so the UNIQUE(folder_id, filename) on
     # photos doesn't collide when both groups share folder /b.

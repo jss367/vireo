@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from repositories.identity_alternatives import IdentityMergeConflict
 from scanner.companions import _pair_raw_jpeg_companions
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 CANDIDATES = ['Tropical Kingbird', "Couch's Kingbird"]
@@ -25,8 +25,8 @@ def photo(db, folder, filename):
 def folder_twins(db, tmp_path):
     target_path = tmp_path / 'target'
     target_path.mkdir()
-    target = db.add_folder(str(target_path))
-    source = db.add_folder(str(tmp_path / 'source'))
+    target = workspace_folders.add_folder(db, str(target_path))
+    source = workspace_folders.add_folder(db, str(tmp_path / 'source'))
     survivor = photo(db, target, 'bird.raf')
     losing = photo(db, source, 'bird.raf')
     return source, target, losing, survivor, str(target_path)
@@ -99,7 +99,7 @@ def test_folder_merge_conflict_rolls_back_earlier_duplicate_and_all_pending(cata
 @pytest.mark.parametrize('resolved', [False, True])
 def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_path, resolved):
     db = catalog
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     primary, companion = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     unrelated = db.add_keyword('American Robin', is_species=True)
     db.tag_photo(primary, unrelated)
@@ -120,7 +120,7 @@ def test_companion_pairing_keeps_identity_tags_and_normal_history(catalog, tmp_p
 
 def test_companion_identity_conflict_keeps_pair_and_commits_earlier_pair(catalog, tmp_path):
     db = catalog
-    folder = db.add_folder(str(tmp_path))
+    folder = workspace_folders.add_folder(db, str(tmp_path))
     raw, jpeg = photo(db, folder, 'first.raf'), photo(db, folder, 'first.jpg')
     raw2, jpeg2 = photo(db, folder, 'second.raf'), photo(db, folder, 'second.jpg')
     with db._commits_held():
@@ -146,7 +146,7 @@ def test_collapse_does_not_reintroduce_candidate_outvoted_by_newer_visible_revie
     if kind == 'folder':
         source, target, losing, survivor, path = folder_twins(db, tmp_path)
     else:
-        folder = db.add_folder(str(tmp_path))
+        folder = workspace_folders.add_folder(db, str(tmp_path))
         survivor, losing = photo(db, folder, 'bird.raf'), photo(db, folder, 'bird.jpg')
     keyword = db.add_keyword(CANDIDATES[0], is_species=True)
     db.tag_photo(losing, keyword)

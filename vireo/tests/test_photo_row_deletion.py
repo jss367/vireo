@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from repositories.photo_row_deletion import photo_row_deletion
-from services import catalog_deletion, moves_merge, photo_ingest
+from services import catalog_deletion, moves_merge, photo_ingest, workspace_folders
 from services.startup_tasks import StartupTasks
 
 VIREO_ROOT = Path(__file__).resolve().parents[1]
@@ -134,7 +134,7 @@ def test_photo_row_deletion_rewrites_every_workspace_once_on_exit(db, tmp_path, 
     import repositories.photo_row_deletion as module
 
     other_ws = db.create_workspace("Other")
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone, merged, survivor, kept = (
         _photo(db, folder, f"{n}.jpg") for n in ("gone", "merged", "survivor", "kept")
     )
@@ -165,7 +165,7 @@ def test_photo_row_deletion_rewrites_every_workspace_once_on_exit(db, tmp_path, 
 
 
 def test_photo_row_deletion_rewrites_collections_when_the_block_raises(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone = _photo(db, folder, "gone.jpg")
     kept = _photo(db, folder, "kept.jpg")
     coll = _static_collection(db, db._ws_id(), "c", [gone, kept])
@@ -179,7 +179,7 @@ def test_photo_row_deletion_rewrites_collections_when_the_block_raises(db, tmp_p
 
 
 def test_photo_row_deletion_rollback_restores_rows_and_collections(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone = _photo(db, folder, "gone.jpg")
     coll = _static_collection(db, db._ws_id(), "c", [gone])
 
@@ -200,7 +200,7 @@ def test_photo_row_deletion_rollback_restores_rows_and_collections(db, tmp_path)
 
 def test_batch_delete_prunes_collections(db, tmp_path):
     other_ws = db.create_workspace("Other")
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     gone = _photo(db, folder, "gone.jpg")
     kept = _photo(db, folder, "kept.jpg")
     coll = _static_collection(db, other_ws, "c", [gone, kept])
@@ -215,7 +215,7 @@ def test_remove_orphans_prunes_collections(db):
     from audit import remove_orphans
 
     other_ws = db.create_workspace("Other")
-    folder = db.add_folder("/gone", name="gone")
+    folder = workspace_folders.add_folder(db, "/gone", name="gone")
     orphan = _photo(db, folder, "missing.jpg")
     kept = _photo(db, folder, "kept.jpg")
     coll = _static_collection(db, other_ws, "c", [orphan, kept])
@@ -231,8 +231,8 @@ def test_relocating_a_missing_folder_onto_an_existing_one_prunes_collections(db,
     other_ws = db.create_workspace("Other")
     target_dir = tmp_path / "target"
     target_dir.mkdir()
-    target = db.add_folder(str(target_dir), workspace_root=False)
-    source = db.add_folder("/coll-src")
+    target = workspace_folders.add_folder(db, str(target_dir), workspace_root=False)
+    source = workspace_folders.add_folder(db, "/coll-src")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
     db.conn.commit()
     survivor = _photo(db, target, "dup.jpg")
@@ -252,14 +252,14 @@ def _staged_tree(db, tmp_path, *, archived_on_disk):
     date_dir.mkdir(parents=True)
     if archived_on_disk:
         (date_dir / "dup.raf").write_bytes(b"archived")
-    base_id = db.add_folder(str(arch), name="USA")
-    date_id = db.add_folder(str(date_dir), name="2026-01-01", parent_id=base_id)
+    base_id = workspace_folders.add_folder(db, str(arch), name="USA")
+    date_id = workspace_folders.add_folder(db, str(date_dir), name="2026-01-01", parent_id=base_id)
     archived = _photo(db, date_id, "dup.raf", file_size=8, file_hash="DUPHASH")
-    db.add_workspace_folder(db._ws_id(), base_id, is_root=True)
+    workspace_folders.add_workspace_folder(db, db._ws_id(), base_id, is_root=True)
     stage = tmp_path / "stage" / "USA"
-    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
-    stage_leaf = db.add_folder(
-        str(stage / "2026-01-01"), name="2026-01-01",
+    stage_root = workspace_folders.add_folder(db, str(stage), name="USA", workspace_root=False)
+    stage_leaf = workspace_folders.add_folder(
+        db, str(stage / "2026-01-01"), name="2026-01-01",
         parent_id=stage_root, workspace_root=False,
     )
     staged = _photo(
@@ -298,7 +298,7 @@ def test_companion_merge_remaps_collections(db, tmp_path):
     from scanner.companions import _pair_raw_jpeg_companions
 
     other_ws = db.create_workspace("Other")
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     jpeg = _photo(db, folder, "IMG_001.jpg", file_size=1000)
     raw = _photo(db, folder, "IMG_001.cr3", file_size=2000)
     coll = _static_collection(db, other_ws, "c", [jpeg])
@@ -318,7 +318,7 @@ def _repair(db):
 
 def test_startup_repair_removes_only_entries_for_missing_photos(db, tmp_path, caplog):
     other_ws = db.create_workspace("Other")
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     kept_a = _photo(db, folder, "a.jpg")
     kept_b = _photo(db, folder, "b.jpg")
     gone_a = _photo(db, folder, "c.jpg")
@@ -376,7 +376,7 @@ def test_startup_repair_removes_only_entries_for_missing_photos(db, tmp_path, ca
 
 
 def test_startup_repair_is_idempotent_and_writes_nothing_when_clean(db, tmp_path, caplog):
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     kept = _photo(db, folder, "a.jpg")
     gone = _photo(db, folder, "b.jpg")
     db.conn.execute("DELETE FROM photos WHERE id = ?", (gone,))
@@ -401,7 +401,7 @@ def test_startup_repair_finds_missing_ids_either_way_it_reads_photos(
 
     statements = []
     db.conn.set_trace_callback(statements.append)
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     kept = _photo(db, folder, "a.jpg")
     if top_id is not None:
         db.conn.execute("UPDATE photos SET id = ? WHERE id = ?", (top_id, kept))
@@ -423,7 +423,7 @@ def test_startup_repair_finds_missing_ids_either_way_it_reads_photos(
 
 
 def test_run_catalog_repairs_prunes_collections(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="lib")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="lib")
     kept = _photo(db, folder, "a.jpg")
     gone = _photo(db, folder, "b.jpg")
     db.conn.execute("DELETE FROM photos WHERE id = ?", (gone,))

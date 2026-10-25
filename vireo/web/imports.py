@@ -25,6 +25,7 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
+from services import workspace_folders
 from services.import_locations import MAX_SUGGESTION_PATHS, stream_location_suggestions
 from services.imports import ImportFailure, ImportService
 from services.local_folder import (
@@ -2021,7 +2022,7 @@ def create_imports_blueprint(
         db = get_db()
         active_ws = db.active_workspace_id
         status = exiftool_status()
-        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, active_ws)]
         # Filter macOS app-managed library bundles before ``os.path.isdir``:
         # stat-ing a ``.photoslibrary`` root (or a symlink into one) itself
         # trips the "access data from other apps" TCC prompt, and this
@@ -2056,7 +2057,7 @@ def create_imports_blueprint(
         # A full import without an active workspace would copy files and
         # then leave catalog rows invisible to every workspace: the
         # worker's scan calls ``set_active_workspace(None)`` and
-        # ``Database.add_folder`` skips the workspace link, and the later
+        # ``workspace_folders.add_folder`` skips the workspace link, and the later
         # ``add_collection()`` call raises because ``_ws_id()`` is
         # unavailable — after the scanner has already committed rows.
         # The mutation-reservation hook deliberately lets no-workspace

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -36,7 +36,7 @@ def _seed_publish_app(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(photos_dir), name="photos")
+    fid = workspace_folders.add_folder(db, str(photos_dir), name="photos")
 
     p1 = photo_ingest.add_photo(
         db, folder_id=fid,

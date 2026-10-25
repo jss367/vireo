@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 
 from flask import Blueprint, jsonify, request
-from services import moves_merge
+from services import moves_merge, workspace_folders
 
 
 def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
@@ -215,7 +215,7 @@ def create_moves_blueprint(get_db, json_error):
 
         request_db = get_db()
         folder = request_db.folders.get(folder_id)
-        if not folder or not request_db.workspace_has_folder_link(folder_id):
+        if not folder or not workspace_folders.workspace_has_folder_link(request_db, folder_id):
             return json_error("Folder not found", status=404)
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.

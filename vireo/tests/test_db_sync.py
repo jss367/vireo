@@ -25,7 +25,7 @@ import uuid
 import pytest
 from db import Database
 from repositories.sync import SyncRepository
-from services import pending_changes, photo_ingest
+from services import pending_changes, photo_ingest, workspace_folders
 
 
 def _visible_rows(db):
@@ -74,10 +74,10 @@ def lib(db):
     """Active workspace with two folders, a sibling workspace, and photos."""
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
-    f1 = db.add_folder("/lib/one", name="one")
-    f2 = db.add_folder("/lib/two", name="two")
-    db.add_workspace_folder(other, f1)
-    db.add_workspace_folder(other, f2)
+    f1 = workspace_folders.add_folder(db, "/lib/one", name="one")
+    f2 = workspace_folders.add_folder(db, "/lib/two", name="two")
+    workspace_folders.add_workspace_folder(db, other, f1)
+    workspace_folders.add_workspace_folder(db, other, f2)
     p = {
         "a": photo_ingest.add_photo(db, f1, "a.jpg", ".jpg", 1, 1.0),
         "a_raw": photo_ingest.add_photo(db, f1, "a.cr2", ".cr2", 1, 1.0),
@@ -388,8 +388,8 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     # On a case-insensitive filesystem "dir" is the same directory.
     with contextlib.suppress(FileExistsError):
         lower.mkdir()
-    fu = db.add_folder(str(upper), name="Dir")
-    fl = db.add_folder(str(lower), name="dir")
+    fu = workspace_folders.add_folder(db, str(upper), name="Dir")
+    fl = workspace_folders.add_folder(db, str(lower), name="dir")
     pu = photo_ingest.add_photo(db, fu, "a.jpg", ".jpg", 1, 1.0)
     pl = photo_ingest.add_photo(db, fl, "a.png", ".png", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
@@ -404,9 +404,9 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
 
 def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     ws = db._active_workspace_id
-    fu = db.add_folder(str(tmp_path / "Nope"), name="Nope")
-    fl = db.add_folder(str(tmp_path / "nope"), name="nope")
-    fx = db.add_folder(str(tmp_path / "elsewhere"), name="elsewhere")
+    fu = workspace_folders.add_folder(db, str(tmp_path / "Nope"), name="Nope")
+    fl = workspace_folders.add_folder(db, str(tmp_path / "nope"), name="nope")
+    fx = workspace_folders.add_folder(db, str(tmp_path / "elsewhere"), name="elsewhere")
     pu = photo_ingest.add_photo(db, fu, "a.jpg", ".jpg", 1, 1.0)
     pl = photo_ingest.add_photo(db, fl, "a.png", ".png", 1, 1.0)
     px = photo_ingest.add_photo(db, fx, "z.jpg", ".jpg", 1, 1.0)

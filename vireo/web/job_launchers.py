@@ -36,7 +36,7 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
-from services import detection_store, subject_masks, workspace_config
+from services import detection_store, subject_masks, workspace_config, workspace_folders
 from services.folder_moves import FolderMoveRequest
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -587,8 +587,8 @@ def create_job_launchers_blueprint(
         """
         # A scan without an active workspace would create catalog entries
         # invisible to every workspace: the worker calls
-        # ``set_active_workspace(None)`` and ``Database.add_folder`` then
-        # skips the workspace link because ``_active_workspace_id is None``.
+        # ``set_active_workspace(None)`` and ``workspace_folders.add_folder``
+        # then skips the workspace link because no workspace is active.
         # The mutation-reservation hook deliberately lets no-workspace
         # requests through so routes that answer that state can respond
         # cleanly; this route is not one of them, so refuse here.
@@ -680,7 +680,7 @@ def create_job_launchers_blueprint(
         body = request.get_json(silent=True) or {}
         incremental = bool(body.get("incremental", True))
         db = get_db()
-        roots = [r["path"] for r in db.get_workspace_folder_roots(ctx.workspace_id)]
+        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ctx.workspace_id)]
         existing = [r for r in roots if os.path.isdir(r)]
         skipped = [r for r in roots if not os.path.isdir(r)]
         if not existing:
@@ -731,7 +731,7 @@ def create_job_launchers_blueprint(
             }), 409
 
         db = get_db()
-        roots = [r["path"] for r in db.get_workspace_folder_roots(ctx.workspace_id)]
+        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ctx.workspace_id)]
         # See api_import_readiness for why excluded bundles must be filtered
         # before os.path.isdir here (macOS TCC prompt on Photos Library).
         existing = [
@@ -1246,7 +1246,7 @@ def create_job_launchers_blueprint(
 
         request_db = get_db()
         folder = request_db.folders.get(folder_id)
-        if not folder or not request_db.workspace_has_folder_link(folder_id):
+        if not folder or not workspace_folders.workspace_has_folder_link(request_db, folder_id):
             return json_error("Folder not found", status=404)
 
         guard_err = guard_move_folder(request_db, folder_id)
