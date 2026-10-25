@@ -763,8 +763,8 @@ def test_jobs_page_returns_200(app_and_db):
     # rendering the previous source's filenames under the new phase.
     assert 'step.started_at && !importInPlacePhaseActive' in html
     assert 'isRunning && !importInPlacePhaseActive' in html
-    assert 'delete leafBuffers[step.id]' in html
-    assert 'leafBufferSources[step.id] !== step.source_index' in html
+    assert 'delete state.leafBuffers[step.id]' in html
+    assert 'state.leafBufferSources[step.id] !== step.source_index' in html
     # A classify step names its model in the header; the label space it
     # compares photos against (regional lists vs Tree of Life) is published
     # as step.label_source and must render under the step.

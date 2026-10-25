@@ -70,7 +70,6 @@ SPLIT_PAGES = {
     "/pipeline/rapid-review": "pipeline-rapid-review",
     "/edit": "photo-editor",
     "/locations/review": "location-review",
-    "/jobs": "jobs",
     "/review": "review",
     "/move": "move",
     "/cull": "cull",

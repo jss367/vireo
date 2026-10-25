@@ -11,6 +11,7 @@ import json
 import logging
 import os
 
+from app_paths import media_root
 from flask import Blueprint, jsonify, request
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
@@ -204,7 +205,7 @@ def create_photo_edit_recipes_blueprint(
             mask = _create_current_local_mask_snapshot(
                 db,
                 photo_id,
-                vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
                 native_size=_recipe_source_dimensions(photo),
             )
         except ValueError as e:
@@ -222,7 +223,7 @@ def create_photo_edit_recipes_blueprint(
         import local_masks
         try:
             mask = local_masks.correct_snapshot(
-                vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
                 photo_id=photo_id, mask=body.get("mask"), mode=body.get("mode"),
                 radius=body.get("radius"), points=body.get("points"),
                 softness=body.get("softness", 0), strength=body.get("strength", 1),
@@ -255,7 +256,7 @@ def create_photo_edit_recipes_blueprint(
         if local:
             import local_masks
             snap = local_masks.snapshot_path(
-                os.path.dirname(config["THUMB_CACHE_DIR"]),
+                media_root(config["THUMB_CACHE_DIR"]),
                 photo_id, local["mask"]["ref"],
             )
             if not os.path.exists(snap):
@@ -352,7 +353,7 @@ def create_photo_edit_recipes_blueprint(
             if "local" in fields and recipe.get("local"):
                 mask = _create_current_local_mask_snapshot(
                     db, photo_id,
-                    vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                    vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
                     native_size=_recipe_source_dimensions(photo),
                 )
                 recipe["local"]["mask"].pop("corrected", None)
@@ -406,7 +407,7 @@ def create_photo_edit_recipes_blueprint(
         description = description.strip()
 
         has_local = bool(recipe.get("local")) and (fields is None or "local" in fields)
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         visible_ids = db.photo_visibility.visible_photo_ids(ids)
         visible_set = set(visible_ids)

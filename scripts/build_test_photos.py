@@ -113,17 +113,18 @@ def find_burst(files, window_seconds=2):
 
 
 def _safe_dest(dest):
-    """Validate destination is not inside ~/.vireo/ or $HOME."""
+    """Validate destination is outside Vireo storage and is not $HOME."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from vireo.app_paths import protected_roots
+
     dest = Path(dest).expanduser().resolve()
     home = Path.home().resolve()
     if dest == home:
         sys.exit(f"refusing to write to $HOME: {dest}")
-    real_vireo = (home / ".vireo").resolve()
-    try:
-        dest.relative_to(real_vireo)
-        sys.exit(f"refusing to write under ~/.vireo/: {dest}")
-    except ValueError:
-        pass
+    for root in protected_roots():
+        real_vireo = Path(root).resolve()
+        if dest == real_vireo or real_vireo in dest.parents:
+            sys.exit(f"refusing to write under Vireo storage {real_vireo}: {dest}")
     return dest
 
 

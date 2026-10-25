@@ -13,9 +13,13 @@ export function cancelDuplicateLoad() {
   /** @type {HTMLButtonElement} */ (document.getElementById('scanBtn')).disabled = false;
 }
 
-// Keep's response applies to the displayed snapshot. A scan or restore must
+// Decisions apply to the displayed snapshot. A scan or restore must
 // wait for it so it cannot install a catalog result captured before the switch.
 export function duplicateResultsReloadBlocked() {
+  if (state.sameShotReviewPending.size) {
+    showToast('Wait for the review to save before loading duplicate results.', 'info');
+    return true;
+  }
   if (!state.duplicateKeepPending.size) return false;
   showToast('Wait for the switch to finish before loading duplicate results.', 'info');
   return true;

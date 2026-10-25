@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import source_discovery
+from app_paths import media_root
 from db import Database
 from file_identity import catalog_file_paths, catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
@@ -918,7 +919,7 @@ class _ImportFullRun:
         def scan_cancel_only_check():
             return ctx.runner.cancellation_requested(job["id"])
 
-        self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        self.vireo_dir = media_root(self.config["THUMB_CACHE_DIR"])
         try:
             # copy=false: scan_target is the source and restrict_dirs is
             #   None, so scanner walks the full source tree (unchanged).
@@ -1455,7 +1456,7 @@ def create_imports_blueprint(
             # first callback. The successful sync is already over.
             progress(0, 0, "", "Checking destination")
             result = send_pending_archive(
-                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                thread_db, archive, vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
                 guard_folder=guard_move_folder, progress_cb=progress,
             )
             if sync_first:
@@ -2164,7 +2165,7 @@ def create_imports_blueprint(
         """List old pipeline staging folders that need verified recovery."""
         from staging_recovery import discover_orphaned_staging
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         return jsonify({"items": discover_orphaned_staging(vireo_dir)})
 
     @blueprint.route("/api/import/orphaned-staging/verify", methods=["POST"])
@@ -2178,7 +2179,7 @@ def create_imports_blueprint(
         if not isinstance(path, str) or not path:
             return json_error("path required")
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job):
             thread_db = ctx.thread_db()
@@ -2202,7 +2203,7 @@ def create_imports_blueprint(
         path = body.get("path")
         if not isinstance(path, str) or not path:
             return json_error("path required")
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         db = get_db()
         try:
             result = delete_verified_staging(db, vireo_dir, path)

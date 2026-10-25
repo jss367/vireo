@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 import id_conflicts
 import remote_setup
-from app_paths import default_path
+from app_paths import default_path, initialize_layout, media_root
 from db import (
     Database,
     IncompatibleDatabaseError,
@@ -1136,7 +1136,7 @@ def _migrate_legacy_preview_cache(app):
 
     import config as cfg
 
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     preview_dir = os.path.join(vireo_dir, "previews")
     if not os.path.isdir(preview_dir):
         return
@@ -1290,7 +1290,7 @@ def _migrate_edit_math_render_caches(app):
     """
     from image_edits import EDIT_MATH_VERSION
 
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     thumb_dir = app.config["THUMB_CACHE_DIR"]
     preview_dir = os.path.join(vireo_dir, "previews")
     db = Database(app.config["DB_PATH"])
@@ -1473,7 +1473,7 @@ def _enforce_preview_cache_quota_at_startup(app):
     """
     from preview_cache import evict_if_over_quota
 
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     db = Database(app.config["DB_PATH"])
     try:
         reconcile_preview_cache(db, vireo_dir)
@@ -1498,7 +1498,7 @@ def _enforce_working_copy_cache_quota_at_startup(app):
     """
     from working_copy_cache import sweep_abandoned_render_tempfiles
 
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     sweep_abandoned_render_tempfiles(vireo_dir)
     db = Database(app.config["DB_PATH"])
     try:
@@ -1519,7 +1519,7 @@ def _sweep_abandoned_transient_originals(app):
     interrupted requests can accumulate arbitrary bytes outside the quota
     with no other cleanup path.
     """
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     originals_dir = os.path.join(vireo_dir, "originals")
     if not os.path.isdir(originals_dir):
         return
@@ -1606,6 +1606,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app_hooks.register_app_hooks(
         app,
         get_db=_get_db,
+        get_runner=lambda: app._job_runner,
         reservation_exempt_endpoints=_reservation_exempt_endpoints,
     )
 
@@ -1933,7 +1934,7 @@ def _register_core_blueprints(app, w):
             json_error,
             lambda: app._job_runner,
             db_path,
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            media_root(app.config["THUMB_CACHE_DIR"]),
             invalidate_missing_originals=lambda ws_id: missing_originals.invalidate(
                 workspace_ids=[ws_id]
             ),
@@ -1945,7 +1946,7 @@ def _register_core_blueprints(app, w):
             json_error,
             lambda: app._job_runner,
             db_path,
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            media_root(app.config["THUMB_CACHE_DIR"]),
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )
@@ -2556,6 +2557,7 @@ def _open_browser_when_ready(port):
 
 
 def main():
+    initialize_layout()
     _setup_file_logging()
 
     args = _parse_main_args()

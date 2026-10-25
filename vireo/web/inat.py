@@ -16,6 +16,7 @@ import math
 import os
 import tempfile
 
+from app_paths import media_root
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from config import read_raw_config_file, settings_write_lock
 from db import Database
@@ -658,7 +659,7 @@ def create_inat_blueprint(
         quality = effective_cfg.get("working_copy_quality", 92)
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         reveal = bool(body.get("reveal", False))
 
         work = _inat_export_work(
@@ -684,7 +685,7 @@ def create_inat_blueprint(
     def _inat_edit_recipe_source(photo, recipe, fallback_path):
         from image_loader import RAW_EXTENSIONS
 
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         folders = {photo["folder_id"]: photo["folder_path"]}
         primary_is_raw = (
             os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
@@ -728,7 +729,7 @@ def create_inat_blueprint(
         return fallback_path, False
 
     def _inat_upload_photo_path(db, photo, fallback_path):
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        vireo_dir = media_root(config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo["id"])
         if not recipe:
             return fallback_path, None
@@ -835,7 +836,7 @@ def create_inat_blueprint(
         wc_abs = (
             wc_rel if wc_rel and os.path.isabs(wc_rel)
             else os.path.join(
-                os.path.dirname(config["THUMB_CACHE_DIR"]), wc_rel,
+                media_root(config["THUMB_CACHE_DIR"]), wc_rel,
             )
             if wc_rel else None
         )

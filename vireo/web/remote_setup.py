@@ -23,13 +23,20 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any
 
 from flask import Blueprint, jsonify, request
+
+if TYPE_CHECKING:
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import GetDb
 
 log = logging.getLogger(__name__)
 
 
-def create_remote_setup_blueprint(get_db, json_error, config):
+def create_remote_setup_blueprint(get_db: GetDb, json_error: JsonError, config: MutableMapping[str, Any]) -> Blueprint:
     """Build the remote-setup blueprint.
 
     Beyond the database accessor and the JSON error helper, only ``config``
@@ -40,29 +47,29 @@ def create_remote_setup_blueprint(get_db, json_error, config):
     """
     blueprint = Blueprint("remote_setup", __name__)
 
-    def _remote_setup_forbidden():
+    def _remote_setup_forbidden() -> ErrorResponse | None:
         if request.remote_addr not in ("127.0.0.1", "::1"):
             return json_error(
                 "remote setup is only available from this machine", 403)
         return None
 
-    def _remote_setup_conn_args(body):
+    def _remote_setup_conn_args(body: JsonDict) -> tuple[JsonDict, ErrorResponse | None]:
         """Validate and extract {host, user, port} shared by the wizard's
-        SSH-touching endpoints. Returns (args, None) or (None, response)."""
+        SSH-touching endpoints. Returns (args, None) or ({}, response)."""
         host = (body.get("host") or "").strip()
         user = (body.get("user") or "").strip()
         port = body.get("port", 22)
         if not host or not user:
-            return None, json_error("host and user are required")
+            return {}, json_error("host and user are required")
         try:
             port = int(port)
         except (TypeError, ValueError):
-            return None, json_error("port must be an integer")
+            return {}, json_error("port must be an integer")
         if not 1 <= port <= 65535:
-            return None, json_error("port must be between 1 and 65535")
+            return {}, json_error("port must be between 1 and 65535")
         return {"host": host, "user": user, "port": port}, None
 
-    def _remote_setup_ssh_bin():
+    def _remote_setup_ssh_bin() -> str | None:
         import config as cfg
         import move as move_mod
 
@@ -70,7 +77,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return move_mod.resolve_ssh_bin(effective_cfg.get("ssh_bin", "") or "")
 
     @blueprint.route("/api/remote-setup/mounts")
-    def api_remote_setup_mounts():
+    def api_remote_setup_mounts() -> ResponseReturnValue:
         """Mounted network shares the wizard can offer as NAS candidates."""
         import remote_setup
 
@@ -82,7 +89,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return jsonify({"mounts": remote_setup.list_network_mounts()})
 
     @blueprint.route("/api/remote-setup/ssh-check", methods=["POST"])
-    def api_remote_setup_ssh_check():
+    def api_remote_setup_ssh_check() -> ResponseReturnValue:
         """Port reachability + current key-auth status for a candidate NAS.
 
         Also ensures the Vireo keypair exists (idempotent, local-only) and
@@ -120,7 +127,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return jsonify(result)
 
     @blueprint.route("/api/remote-setup/install-key", methods=["POST"])
-    def api_remote_setup_install_key():
+    def api_remote_setup_install_key() -> ResponseReturnValue:
         """Authorize this Mac's Vireo key on the NAS using a password, once.
 
         The password is request-scoped only: written to the ssh pty and
@@ -169,7 +176,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return jsonify(out)
 
     @blueprint.route("/api/remote-setup/locate-share", methods=["POST"])
-    def api_remote_setup_locate_share():
+    def api_remote_setup_locate_share() -> ResponseReturnValue:
         """Nonce-verified NAS-side path for a mounted share. Proof, not a
         guess — the chained move deletes local originals, so a same-named
         share on the wrong volume must be impossible to configure here."""
@@ -205,7 +212,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return jsonify({"remote_path": remote_path})
 
     @blueprint.route("/api/remote-setup/list-remote-dirs", methods=["POST"])
-    def api_remote_setup_list_remote_dirs():
+    def api_remote_setup_list_remote_dirs() -> ResponseReturnValue:
         """SSH-backed directory listing for the wizard's fallback browser."""
         import remote_setup
 
@@ -229,7 +236,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
             port=conn["port"], key=priv, ssh_bin=ssh_bin)})
 
     @blueprint.route("/api/remote-setup/disk-free")
-    def api_remote_setup_disk_free():
+    def api_remote_setup_disk_free() -> ResponseReturnValue:
         """Free bytes on the volume containing ``path`` (archive-root step)."""
         forbidden = _remote_setup_forbidden()
         if forbidden:
@@ -240,7 +247,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return jsonify({"free_bytes": shutil.disk_usage(path).free})
 
     @blueprint.route("/api/remote-setup/check-archive-root", methods=["POST"])
-    def api_remote_setup_check_archive_root():
+    def api_remote_setup_check_archive_root() -> ResponseReturnValue:
         """True if ``path`` resolves (through symlinks or case-only aliases)
         into ``mount_path``. Exposes the same filesystem-aware containment
         check ``_coerce_remote_target`` runs at save time so the wizard's
@@ -270,7 +277,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
             inside = False
         return jsonify({"inside_mount": inside})
 
-    def _archive_root_state(target):
+    def _archive_root_state(target: JsonDict) -> tuple[bool | None, bool]:
         """``(present, volume_offline)`` for the target's local archive root.
 
         ``present`` is None when no root is configured or when it cannot be
@@ -305,14 +312,14 @@ def create_remote_setup_blueprint(get_db, json_error, config):
     # unreachable — rather than guessed.
     config.setdefault("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0)
 
-    def _archive_root_states(targets):
+    def _archive_root_states(targets: list[JsonDict]) -> list[tuple[bool | None, bool]]:
         """``[(present, volume_offline), ...]`` aligned with ``targets``,
         probed concurrently under ``REMOTE_TARGET_PROBE_BUDGET_SECS``."""
         from concurrent.futures import ThreadPoolExecutor, wait
 
         indexed = [(i, t) for i, t in enumerate(targets)
                    if (t.get("local_archive_root") or "").strip()]
-        states = [(None, False)] * len(targets)
+        states: list[tuple[bool | None, bool]] = [(None, False)] * len(targets)
         if not indexed:
             return states
         budget = float(config.get("REMOTE_TARGET_PROBE_BUDGET_SECS", 6.0))
@@ -341,7 +348,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         return states
 
     @blueprint.route("/api/remote-targets")
-    def api_remote_targets_list():
+    def api_remote_targets_list() -> ResponseReturnValue:
         """List configured remote (SSH) move targets for the move-form picker,
         plus whether a usable GNU rsync is available for the transfer."""
         import config as cfg
@@ -368,7 +375,7 @@ def create_remote_setup_blueprint(get_db, json_error, config):
         })
 
     @blueprint.route("/api/remote-targets/test", methods=["POST"])
-    def api_remote_target_test():
+    def api_remote_target_test() -> ResponseReturnValue:
         """Test connectivity for a remote target (saved or in-progress edit):
         SSH reachability, remote-path writability, GNU rsync availability,
         whether the local mount path is currently present, and whether the

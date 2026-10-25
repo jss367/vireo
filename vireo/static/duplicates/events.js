@@ -12,6 +12,7 @@ import { toggleResolvedSection } from './resolved.js';
 import { bulkResolveByFolderIdx } from './results.js';
 import { revealBucketFolders } from './reveal.js';
 import { renderSameShotResults } from './same-shot.js';
+import { handleSameShotReviewClick } from './same-shot-review.js';
 
 /** The photo id of the card a control sits in, or null. @param {Element} control */
 function cardPhotoId(control) {
@@ -38,6 +39,7 @@ var ACTIONS = {
 function onDuplicatesClick(event) {
   if (!(event.target instanceof Element)) return;
   var target = event.target;
+  if (handleSameShotReviewClick(target)) return;
   var action = target.closest(/** @type {'button'} */ ('[data-dup-action]'));
   if (action) {
     var handler = ACTIONS[action.dataset.dupAction || ''];

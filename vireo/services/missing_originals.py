@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 import dir_listing_cache
+from app_paths import media_root
 from db import _SQLITE_PARAM_CHUNK_SIZE as SQLITE_PARAM_CHUNK_SIZE
 from db import Database, MissingPhotosCancelled
 from photo_payload import attach_nested_edit_recipes
@@ -550,7 +551,7 @@ class MissingOriginals:
         listing_pass: dir_listing_cache.ListingPass | None = None,
     ) -> list[JsonDict]:
         thumb_dir = self._config["THUMB_CACHE_DIR"]
-        vireo_dir = os.path.dirname(thumb_dir)
+        vireo_dir = media_root(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
 

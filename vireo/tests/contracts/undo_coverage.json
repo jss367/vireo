@@ -306,6 +306,12 @@
       "POST /api/workspaces/active/local-folders/preflight/cancel"
     ]
   },
+  "review_notes": {
+    "description": "Same-shot review notes preserve all photos and have an explicit Reopen review control.",
+    "routes": [
+      "POST /api/duplicates/same-shot/review"
+    ]
+  },
   "local_history": {
     "description": "Mask snapshots are artifacts for the unsaved editor recipe; the editor gesture and saved recipe have history.",
     "routes": [

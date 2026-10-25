@@ -9,10 +9,19 @@ responses need the app's ``json_error``, so they live on
 receive as a single dependency.
 """
 
+from __future__ import annotations
+
 import math
 import re
+from typing import TYPE_CHECKING, Any
 
 from flask import g, jsonify
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from db import Database
+    from services.service_types import ErrorResponse, JsonDict, JsonError
 
 # Shared message for a location name that carries the XMP hierarchy
 # delimiter. Rejecting at assignment time (rather than at sync time) is
@@ -24,7 +33,7 @@ LOCATION_NAME_PIPE_ERROR = (
 )
 
 
-def location_name_conflict_payload(err):
+def location_name_conflict_payload(err: Exception) -> JsonDict:
     """Describe a location-keyword collision for both people and clients.
 
     ``error`` remains the stable legacy code because existing clients use
@@ -54,13 +63,13 @@ def location_name_conflict_payload(err):
     }
 
 
-def location_name_conflict_response(err):
+def location_name_conflict_response(err: Exception) -> ErrorResponse:
     payload = location_name_conflict_payload(err)
     payload["request_id"] = getattr(g, "request_id", None)
     return jsonify(payload), 409
 
 
-def coerce_place_id(candidate):
+def coerce_place_id(candidate: object) -> str:
     """Return a stripped string ``place_id`` for any JSON scalar value."""
     if candidate is None:
         return ""
@@ -69,7 +78,7 @@ def coerce_place_id(candidate):
     return str(candidate).strip()
 
 
-def extract_place_id(body):
+def extract_place_id(body: JsonDict) -> str:
     """Extract ``place_id`` from top-level or nested client place payloads."""
     candidate = body.get("place_id")
     if candidate is None and isinstance(body.get("place"), dict):
@@ -79,7 +88,7 @@ def extract_place_id(body):
     return coerce_place_id(candidate)
 
 
-def extract_keyword_id(body):
+def extract_keyword_id(body: JsonDict) -> int | None:
     """Return an integer keyword_id from a JSON body, or None."""
     candidate = body.get("keyword_id")
     if candidate is None:
@@ -95,7 +104,7 @@ def extract_keyword_id(body):
     return None
 
 
-def normalize_client_place_details(body):
+def normalize_client_place_details(body: JsonDict) -> JsonDict | None:
     """Normalize a Google Maps JS Place payload from the request body.
 
     Browser autocomplete already receives geometry and address components
@@ -114,7 +123,8 @@ def normalize_client_place_details(body):
     if body_place_id and body_place_id != place_id:
         return None
 
-    def first_present(*values):
+    # JSON values; None when all are missing, which float() rejects below.
+    def first_present(*values: Any) -> Any:
         for value in values:
             if value is not None:
                 return value
@@ -184,7 +194,7 @@ def normalize_client_place_details(body):
     }
 
 
-def walk_parent_chain(db, leaf_parent_id):
+def walk_parent_chain(db: Database, leaf_parent_id: int | None) -> list[JsonDict]:
     """Walk ``parent_id`` upward from ``leaf_parent_id`` to the root.
 
     Returns a list of ``{"id": int, "name": str}`` dicts in broadest →
@@ -196,7 +206,7 @@ def walk_parent_chain(db, leaf_parent_id):
     against pathological/malformed cycles (link_keyword_to_place
     already prevents creating cycles, but a corrupted DB could).
     """
-    parents = []
+    parents: list[JsonDict] = []
     current_parent_id = leaf_parent_id
     for _ in range(10):
         if current_parent_id is None:
@@ -211,7 +221,7 @@ def walk_parent_chain(db, leaf_parent_id):
     return parents
 
 
-def serialize_photo_location(db, photo_id):
+def serialize_photo_location(db: Database, photo_id: int) -> JsonDict | None:
     """Return a summary dict for the photo's current location keyword.
 
     The shape matches the JSON the location section UI expects::
@@ -248,11 +258,11 @@ class LocationErrors:
     response, reused so a missing photo reads the same on every route.
     """
 
-    def __init__(self, *, json_error, photo_not_found_error):
+    def __init__(self, *, json_error: JsonError, photo_not_found_error: Callable[[], ErrorResponse]) -> None:
         self._json_error = json_error
         self._photo_not_found_error = photo_not_found_error
 
-    def keyword_not_found_error(self):
+    def keyword_not_found_error(self) -> ErrorResponse:
         return self._json_error(
             "keyword_not_found",
             404,
@@ -262,7 +272,7 @@ class LocationErrors:
             ),
         )
 
-    def google_maps_not_configured_error(self):
+    def google_maps_not_configured_error(self) -> ErrorResponse:
         return self._json_error(
             "no_api_key",
             400,
@@ -272,7 +282,7 @@ class LocationErrors:
             ),
         )
 
-    def google_place_not_found_error(self):
+    def google_place_not_found_error(self) -> ErrorResponse:
         return self._json_error(
             "place_not_found",
             404,
@@ -282,7 +292,7 @@ class LocationErrors:
             ),
         )
 
-    def photo_location_edit_error(self, db, photo_id):
+    def photo_location_edit_error(self, db: Database, photo_id: int) -> ErrorResponse | None:
         """Return an error response when a photo cannot be edited in this workspace."""
         if photo_id not in db.photos.existing_ids([photo_id]):
             return self._photo_not_found_error()
@@ -292,7 +302,7 @@ class LocationErrors:
             )
         return None
 
-    def location_keyword_edit_error(self, db, keyword_id):
+    def location_keyword_edit_error(self, db: Database, keyword_id: int | None) -> ErrorResponse | None:
         """Return an error response unless ``keyword_id`` is a location keyword."""
         if keyword_id is None:
             return self._json_error("invalid keyword_id", 400)

@@ -1,15 +1,26 @@
-// Page startup.
-// Classic page script; loads after every other Jobs page definition.
+// Page startup: the module the template loads. Binds the list, filter and
+// detail-pane listeners, then runs the first fetches and the pollers.
 
-// Preserve the inline script's order: list clicks, the cleanup checkbox,
+import { jobsElement, state } from './state.js';
+import { bindDetailPaneActions } from './actions.js';
+import { applyFilters, bindJobListClicks } from './list.js';
+import { fetchHistory, fetchJobs, retryJobsPolling } from './polling.js';
+import { bindSourceCleanupConfirm } from './source-cleanup.js';
+import { bindStepRetryButtons } from './steps.js';
+
+// Preserve the old inline script's order: list clicks, the cleanup checkbox,
 // detail pane clicks, then the initial fetches and pollers.
 bindJobListClicks();
 bindSourceCleanupConfirm();
+bindStepRetryButtons();
 bindDetailPaneActions();
 jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', retryJobsPolling);
+// The type and status filters used to carry onchange="applyFilters()".
+jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFilters);
+jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
 
 // Initial load
 fetchJobs();
 fetchHistory();
-pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
+state.pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
 setInterval(function() { fetchHistory(false, true); }, 10000);

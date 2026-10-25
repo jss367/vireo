@@ -107,7 +107,10 @@ test('legacy GPS intent survives both copy retry builders without invented choic
   for (const [file, name] of [['jobs/import-retry.js', 'importRetryBody'],
     ['import/jobs.js', 'retryBodyFromFinishedJob']]) {
     const ctx = vm.createContext({jobConfig: job => job.config});
-    vm.runInContext(readFileSync('vireo/static/' + file, 'utf8'), ctx);
+    // jobs/ is an ES module page: run its declarations as a script.
+    vm.runInContext(readFileSync('vireo/static/' + file, 'utf8')
+      .replace(/^import\s[^;]*?\sfrom\s+'[^']+';\n/gm, '')
+      .replace(/(^|\*\/ )export (?=(?:async\s+)?function|const |let |var |class )/gm, '$1'), ctx);
     for (const legacy of [true, false, undefined]) {
       ctx.job = {id: 17, type: 'import', config: {sources: ['/invented'],
         destination: '/invented-output', location_from_gps: legacy}};

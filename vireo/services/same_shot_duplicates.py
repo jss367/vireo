@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from services.same_shot_reviews import attach_same_shot_reviews
 from services.service_types import JobDict, JsonDict
 
 if TYPE_CHECKING:
@@ -98,6 +99,7 @@ def _attach_photo_context(db: Database, groups: list[JsonDict]) -> None:
     for photo in photos:
         photo["workspaces"] = names.get(photo["id"], [])
         photo["edit_recipe"] = recipes.get(photo["id"])
+    attach_same_shot_reviews(db, groups)
 
 
 def scan_same_shot_candidates(

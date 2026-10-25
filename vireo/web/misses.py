@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from config import settings_write_lock
 from flask import Blueprint, jsonify, request
@@ -19,13 +21,21 @@ from photo_payload import attach_edit_recipes, attach_species_representatives
 from services import miss_flags
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 
+if TYPE_CHECKING:
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb, ResolveVisual
 
-def _filter_value(values, name):
+# ``values`` is the query string or a JSON body: raw request values.
+def _filter_value(values: Mapping[str, Any], name: str) -> Any:
     raw = values.get(name)
     return None if raw in (None, "") else raw
 
 
-def _filter_integer(values, name, minimum=None, maximum=None):
+def _filter_integer(
+    values: Mapping[str, Any], name: str, minimum: int | None = None, maximum: int | None = None,
+) -> int | None:
     raw = _filter_value(values, name)
     if raw is None:
         return None
@@ -40,7 +50,7 @@ def _filter_integer(values, name, minimum=None, maximum=None):
     return parsed
 
 
-def _filter_boolean(values, name):
+def _filter_boolean(values: Mapping[str, Any], name: str) -> bool:
     raw = _filter_value(values, name)
     if raw is None:
         return False
@@ -49,7 +59,7 @@ def _filter_boolean(values, name):
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _rules_only_collection_photo_ids(db, collection_id):
+def _rules_only_collection_photo_ids(db: Database, collection_id: int) -> set[int]:
     """Return a collection's rules-only photo ids, refusing visual collections."""
     valid = {c["id"]: c for c in db.collections.list_all()}
     if collection_id not in valid:
@@ -62,7 +72,7 @@ def _rules_only_collection_photo_ids(db, collection_id):
     return db.collections.photo_ids(collection_id)
 
 
-def _miss_legacy_photo_ids(db, values, collection_id):
+def _miss_legacy_photo_ids(db: Database, values: Mapping[str, Any], collection_id: int | None) -> set[int] | None:
     """Resolve the legacy scalar Browse parameters to a photo set (or None)."""
     folder_id = _filter_integer(values, "folder_id", minimum=1)
     rating_min = _filter_integer(values, "rating_min", minimum=1, maximum=5)
@@ -108,11 +118,11 @@ def _miss_legacy_photo_ids(db, values, collection_id):
 
 
 def create_misses_blueprint(
-    get_db,
-    json_error,
+    get_db: GetDb,
+    json_error: JsonError,
     *,
-    resolve_visual,
-):
+    resolve_visual: ResolveVisual,
+) -> Blueprint:
     """Build the misses blueprint.
 
     ``config.settings_write_lock`` serializes workspace ``config_overrides``
@@ -127,7 +137,7 @@ def create_misses_blueprint(
     """
     blueprint = Blueprint("misses", __name__)
 
-    def _miss_threshold_config_from_body(db, body):
+    def _miss_threshold_config_from_body(db: Database, body: object) -> tuple[JsonDict, JsonDict, float]:
         """Merge Misses-page threshold overrides into effective config."""
         import config as cfg
         from misses import miss_config_from_effective
@@ -186,9 +196,10 @@ def create_misses_blueprint(
         pipeline["miss_oof_ratio"] = values["miss_oof_ratio"]
         return values, pipeline, values["detector_confidence"]
 
-    def _save_miss_threshold_overrides(db, values, pipeline):
+    def _save_miss_threshold_overrides(db: Database, values: JsonDict, pipeline: JsonDict) -> None:
+        ws_id = db.require_workspace_id()
         with settings_write_lock:
-            ws = db.workspaces.get(db.active_workspace_id)
+            ws = db.workspaces.get(ws_id)
             overrides = {}
             if ws and ws["config_overrides"]:
                 try:
@@ -216,17 +227,17 @@ def create_misses_blueprint(
                 existing_pipeline[key] = pipeline[key]
             overrides["pipeline"] = existing_pipeline
             overrides["detector_confidence"] = values["detector_confidence"]
-            db.workspaces.update(db.active_workspace_id, config_overrides=overrides)
+            db.workspaces.update(ws_id, config_overrides=overrides)
 
     @blueprint.route("/api/misses/config")
-    def api_misses_config():
+    def api_misses_config() -> ResponseReturnValue:
         import config as cfg
         from misses import miss_config_from_effective
 
         db = get_db()
         return jsonify(miss_config_from_effective(db.get_effective_config(cfg.load())))
 
-    def _attach_miss_edit_recipes(db, grouped):
+    def _attach_miss_edit_recipes(db: Database, grouped: JsonDict) -> JsonDict:
         for category in ("no_subject", "clipped", "oof"):
             photos = [dict(p) for p in grouped.get(category, [])]
             attach_species_representatives(db, photos)
@@ -234,7 +245,7 @@ def create_misses_blueprint(
             grouped[category] = photos
         return grouped
 
-    def _miss_filter_photo_ids(db, values):
+    def _miss_filter_photo_ids(db: Database, values: Mapping[str, Any]) -> tuple[set[int] | None, JsonDict | None]:
         """Resolve Misses-page filters to an intersected workspace photo set.
 
         The Misses UI sends the shared filter bar's ``rules``/``visual``
@@ -256,7 +267,9 @@ def create_misses_blueprint(
             )
         return _miss_legacy_photo_ids(db, values, collection_id), None
 
-    def _miss_expression_photo_ids(db, rules_raw, visual_raw, collection_id):
+    def _miss_expression_photo_ids(
+        db: Database, rules_raw: object, visual_raw: object, collection_id: int | None,
+    ) -> tuple[set[int] | None, JsonDict | None]:
         """Resolve the shared filter bar's ``rules``/``visual`` expression."""
         collection_ids = None
         if collection_id is not None:
@@ -297,7 +310,7 @@ def create_misses_blueprint(
 
         # ``collection_id`` can still accompany the universal expression
         # for compatibility with an old composed Misses deep link.
-        if collection_id is not None:
+        if collection_ids is not None:
             photo_ids = (
                 collection_ids
                 if photo_ids is None
@@ -306,7 +319,7 @@ def create_misses_blueprint(
         return photo_ids, visual_info
 
     @blueprint.route("/api/misses", methods=["GET", "POST"])
-    def api_misses():
+    def api_misses() -> ResponseReturnValue:
         """Return photos flagged as misses.
 
         GET retains the legacy scalar query parameters for bookmarks and API
@@ -352,7 +365,7 @@ def create_misses_blueprint(
         return jsonify(grouped)
 
     @blueprint.route("/api/misses/preview", methods=["POST"])
-    def api_misses_preview():
+    def api_misses_preview() -> ResponseReturnValue:
         """Return Misses-page categories using unsaved threshold overrides."""
         from misses import preview_misses_for_workspace
 
@@ -368,7 +381,7 @@ def create_misses_blueprint(
             photo_ids, visual_info = _miss_filter_photo_ids(db, body)
         except ValueError as e:
             return json_error(str(e), 400)
-        grouped = preview_misses_for_workspace(
+        grouped: JsonDict = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence,
             since=body.get("since") or None, photo_ids=photo_ids,
         )
@@ -380,7 +393,7 @@ def create_misses_blueprint(
         return jsonify(grouped)
 
     @blueprint.route("/api/misses/recompute", methods=["POST"])
-    def api_misses_recompute():
+    def api_misses_recompute() -> ResponseReturnValue:
         """Recompute persisted miss flags with Misses-page thresholds."""
         from misses import compute_misses_for_workspace, preview_misses_for_workspace
 
@@ -405,7 +418,7 @@ def create_misses_blueprint(
             db, pipeline, detector_confidence=detector_confidence, since=since,
             photo_ids=photo_ids,
         )
-        grouped = preview_misses_for_workspace(
+        grouped: JsonDict = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
             photo_ids=photo_ids,
         )
@@ -418,7 +431,7 @@ def create_misses_blueprint(
         return jsonify(grouped)
 
     @blueprint.route("/api/misses/reject", methods=["POST"])
-    def api_misses_reject():
+    def api_misses_reject() -> ResponseReturnValue:
         """Set flag='rejected' on every photo currently flagged with the given
         miss category.
 
@@ -467,7 +480,7 @@ def create_misses_blueprint(
         return jsonify({"rejected": len(affected), "category": category})
 
     @blueprint.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])
-    def api_misses_unflag(photo_id):
+    def api_misses_unflag(photo_id: int) -> ResponseReturnValue:
         """Clear the given miss-category boolean on a single photo."""
         db = get_db()
         body = request.get_json(silent=True) or {}
