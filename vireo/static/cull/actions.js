@@ -55,9 +55,8 @@ function clearPinnedDecisions() {
   }
 }
 
-async function applyCulling() {
-  if (!cullData || cullOperationPending()) return;
-
+/** @param {CullData} data @returns {{keepers: number[], rejects: number[], unflag: number[], appliedPins: Record<string, CullAction>}} */
+function collectCullingApplyPayload(data) {
   /** @type {number[]} */
   var keepers = [];
   /** @type {number[]} */
@@ -67,7 +66,7 @@ async function applyCulling() {
   /** @type {Record<string, CullAction>} */
   var appliedPins = {};
   var seen = new Set();
-  cullData.species_groups.forEach(function(sg) {
+  data.species_groups.forEach(function(sg) {
     var groups = sg.scene_groups || sg.pose_groups || [];
     groups.forEach(function(pg) {
       pg.photos.forEach(function(p) {
@@ -85,12 +84,80 @@ async function applyCulling() {
       });
     });
   });
+  return {keepers: keepers, rejects: rejects, unflag: unflag, appliedPins: appliedPins};
+}
+
+/**
+ * Unflag carries two kinds of ids: photos whose existing flag will actually
+ * clear, and photos already at 'none' being saved as explicit Review. The
+ * backend's response reports the first set in `cleared`, and the second is
+ * the remainder. Split locally so the confirm prompt is truthful before the
+ * request runs.
+ *
+ * @param {number[]} unflag @returns {{clearing: number, reviewOnly: number}}
+ */
+function splitUnflagByCurrentState(unflag) {
+  /** @type {Record<number, string>} */
+  var currentFlag = {};
+  (pipelineResults ? pipelineResults.photos : []).forEach(function(photo) {
+    currentFlag[photo.id] = photo.flag || 'none';
+  });
+  var clearing = unflag.filter(function(pid) {
+    return currentFlag[pid] && currentFlag[pid] !== 'none';
+  }).length;
+  return {clearing: clearing, reviewOnly: unflag.length - clearing};
+}
+
+/** @param {number[]} keepers @param {number[]} rejects @param {number[]} unflag @param {Record<string, CullAction>} appliedPins */
+function updateCullStateAfterApply(keepers, rejects, unflag, appliedPins) {
+  // Apply establishes the saved baseline. Review photos were not sent to
+  // the server, so retain their existing flags instead of clearing them.
+  var keeperIds = new Set(keepers);
+  var rejectIds = new Set(rejects);
+  var clearedIds = new Set(unflag);
+  (pipelineResults ? pipelineResults.photos : []).forEach(function(photo) {
+    if (keeperIds.has(photo.id)) photo.flag = 'flagged';
+    else if (rejectIds.has(photo.id)) photo.flag = 'rejected';
+    else if (clearedIds.has(photo.id)) photo.flag = 'none';
+    if (keeperIds.has(photo.id) || rejectIds.has(photo.id) || clearedIds.has(photo.id)) {
+      photo.flag_confirmation_status = 'confirmed';
+    }
+  });
+  // Pins the write covered are in the database now. Keep/reject ones are
+  // saved flags from here on; review ones stay pinned (no flag can say
+  // "undecided on purpose") but stop counting as unsaved. Pins on photos
+  // outside this view were never sent, so they stay untouched.
+  Object.keys(appliedPins).forEach(function(pid) {
+    if (appliedPins[pid] === 'review') {
+      cullAppliedDecisions[pid] = 'review';
+    } else {
+      delete cullManualDecisions[pid];
+      delete cullAppliedDecisions[pid];
+    }
+  });
+  syncCullSourceFlags(/** @type {CullSourceResults} */ (pipelineResults));
+  cullDirty = unappliedPinCount() > 0;
+  rebuildCullDataFromPipeline();
+}
+
+async function applyCulling() {
+  if (!cullData || cullOperationPending()) return;
+
+  var payload = collectCullingApplyPayload(cullData);
+  var keepers = payload.keepers;
+  var rejects = payload.rejects;
+  var unflag = payload.unflag;
+  var appliedPins = payload.appliedPins;
+  var split = splitUnflagByCurrentState(unflag);
 
   var confirmMsg = 'Apply culling decisions?\n\n' +
     keepers.length + ' photos flagged as keepers\n' +
     rejects.length + ' photos flagged as rejected';
-  if (unflag.length) {
-    confirmMsg += '\n' + unflag.length + ' photos cleared back to no flag (moved to Review)';
+  if (split.clearing) {
+    confirmMsg += '\n' + split.clearing + ' photos cleared back to no flag (moved to Review)';
+  }
+  if (split.reviewOnly) {
+    confirmMsg += '\n' + split.reviewOnly + ' photos saved as Review';
   }
   confirmMsg += '\n\nThis sets the flag on each photo. Use Undo below to restore the previous flags.';
   if (!confirm(confirmMsg)) return;
@@ -98,42 +165,20 @@ async function applyCulling() {
   cullBusy = true;
   /** @type {HTMLButtonElement} */ (document.getElementById('applyBtn')).disabled = true;
   try {
-    await safeFetch('/api/culling/apply', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag}),
-    }, { toast: false });
-    // Apply establishes the saved baseline. Review photos were not sent to
-    // the server, so retain their existing flags instead of clearing them.
-    var keeperIds = new Set(keepers);
-    var rejectIds = new Set(rejects);
-    var clearedIds = new Set(unflag);
-    (pipelineResults ? pipelineResults.photos : []).forEach(function(photo) {
-      if (keeperIds.has(photo.id)) photo.flag = 'flagged';
-      else if (rejectIds.has(photo.id)) photo.flag = 'rejected';
-      else if (clearedIds.has(photo.id)) photo.flag = 'none';
-      if (keeperIds.has(photo.id) || rejectIds.has(photo.id) || clearedIds.has(photo.id)) {
-        photo.flag_confirmation_status = 'confirmed';
-      }
-    });
-    // Pins the write covered are in the database now. Keep/reject ones are
-    // saved flags from here on; review ones stay pinned (no flag can say
-    // "undecided on purpose") but stop counting as unsaved. Pins on photos
-    // outside this view were never sent, so they stay untouched.
-    Object.keys(appliedPins).forEach(function(pid) {
-      if (appliedPins[pid] === 'review') {
-        cullAppliedDecisions[pid] = 'review';
-      } else {
-        delete cullManualDecisions[pid];
-        delete cullAppliedDecisions[pid];
-      }
-    });
-    syncCullSourceFlags(/** @type {CullSourceResults} */ (pipelineResults));
-    cullDirty = unappliedPinCount() > 0;
-    rebuildCullDataFromPipeline();
-    /** @type {HTMLElement} */ (document.getElementById('cullStatus')).textContent = 'Applied! ' + keepers.length +
-      ' keepers, ' + rejects.length + ' rejected' +
-      (unflag.length ? ', ' + unflag.length + ' cleared' : '');
+    var resp = /** @type {{ok?: boolean, keepers?: number, rejects?: number, cleared?: number} | null | undefined} */ (
+      await safeFetch('/api/culling/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({keepers: keepers, rejects: rejects, unflag: unflag}),
+      }, { toast: false })
+    );
+    updateCullStateAfterApply(keepers, rejects, unflag, appliedPins);
+    var serverCleared = resp && typeof resp.cleared === 'number' ? resp.cleared : split.clearing;
+    var serverReview = Math.max(0, unflag.length - serverCleared);
+    var statusMsg = 'Applied! ' + keepers.length + ' keepers, ' + rejects.length + ' rejected';
+    if (serverCleared) statusMsg += ', ' + serverCleared + ' cleared';
+    if (serverReview) statusMsg += ', ' + serverReview + ' saved as Review';
+    /** @type {HTMLElement} */ (document.getElementById('cullStatus')).textContent = statusMsg;
     /** @type {HTMLElement} */ (document.getElementById('cullStatus')).style.color = 'var(--accent)';
   } catch(e) {
     /** @type {HTMLElement} */ (document.getElementById('cullStatus')).textContent = 'Error: ' + (e instanceof Error ? e.message : String(e));

@@ -64,6 +64,36 @@ test('manual Apply persists Review on a clear flag and retains confirmed UI stat
   assert.equal(ctx.cullAppliedDecisions[2], 'review');
 });
 
+test('Apply status distinguishes photos actually cleared from already-none Reviews', async () => {
+  const ctx = page();
+  vm.runInContext(fs.readFileSync(path.join(root, 'vireo/static/cull/actions.js'), 'utf8'), ctx);
+  const prompts = [];
+  const statusEl = {textContent: '', style: {}};
+  const applyBtn = {disabled: false};
+  Object.assign(ctx, {
+    cullData: {species_groups: [{scene_groups: [{photos: [
+      {photo_id: 1, action: 'review', decision_source: 'manual'},
+      {photo_id: 2, action: 'review', decision_source: 'manual'},
+    ]}]}]},
+    pipelineResults: {photos: [
+      {id: 1, flag: 'flagged'},  // Will actually clear.
+      {id: 2, flag: 'none'},     // Already clear; saved as explicit Review only.
+    ]},
+    cullOperationPending: () => false,
+    confirm: (msg) => { prompts.push(msg); return true; },
+    safeFetch: async () => ({ok: true, keepers: 0, rejects: 0, cleared: 1}),
+    document: {getElementById: (id) => id === 'applyBtn' ? applyBtn : statusEl},
+    rebuildCullDataFromPipeline() {}, updateCullApplyButton() {},
+    syncCullSourceFlags() {},
+  });
+  await ctx.applyCulling();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /1 photos cleared back to no flag/);
+  assert.match(prompts[0], /1 photos saved as Review/);
+  assert.match(statusEl.textContent, /1 cleared/);
+  assert.match(statusEl.textContent, /1 saved as Review/);
+});
+
 test('confirmed clear reloads as saved Review, unlike an unattributed raw none', () => {
   const ctx = page();
   const saved = ctx.resolveCullDecision({id: 1, flag: 'none', flag_confirmation_status: 'confirmed'});
