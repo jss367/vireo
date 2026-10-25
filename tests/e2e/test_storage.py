@@ -1,7 +1,19 @@
 import os
 from pathlib import Path
 
+import pytest
 from playwright.sync_api import expect
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Storage page's modules as ``pageModules.<file>`` and its state as
+    ``storageState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "storage", "storageState")
 
 
 def test_storage_shows_named_categories_and_escaped_file_paths(live_server, page):
@@ -48,8 +60,8 @@ def test_quota_apply_aborts_when_pending_storage_autosave_fails(
     page.evaluate(
         """async () => {
           document.getElementById('cfgPreviewCacheMaxMb').value = '123';
-          saveStorageConfig();
-          await commitWorkingCopyLimit(40960, { confirmed: false });
+          pageModules.config.saveStorageConfig();
+          await pageModules.workingCopyLimit.commitWorkingCopyLimit(40960, { confirmed: false });
         }"""
     )
 
@@ -134,24 +146,24 @@ def test_storage_sort_preserves_load_errors_and_recovers(live_server, page):
     sort = page.get_by_label("Sort by", exact=True)
     expect(grid).to_have_text("Failed to load storage info")
     expect(sort).to_be_disabled()
-    page.evaluate("renderStorageCards()")
+    page.evaluate("pageModules.overview.renderStorageCards()")
     expect(grid).to_have_text("Failed to load storage info")
 
     fail_storage = False
-    page.evaluate("loadStoragePanel()")
+    page.evaluate("pageModules.panel.loadStoragePanel()")
     expect(sort).to_be_enabled()
     expect(grid.locator(".stat-card").first).to_be_visible()
     sort.select_option("name")
 
     fail_storage = True
-    page.evaluate("loadStoragePanel()")
+    page.evaluate("pageModules.panel.loadStoragePanel()")
     expect(sort).to_be_disabled()
-    page.evaluate("renderStorageCards()")
+    page.evaluate("pageModules.overview.renderStorageCards()")
     expect(grid).to_have_text("Failed to load storage info")
     expect(grid.locator(".stat-card")).to_have_count(0)
 
     fail_storage = False
-    page.evaluate("loadStoragePanel()")
+    page.evaluate("pageModules.panel.loadStoragePanel()")
     expect(sort).to_be_enabled()
     expect(sort).to_have_value("name")
     expect(grid.locator(".stat-card").first).to_be_visible()

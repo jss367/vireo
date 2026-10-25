@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from scanner import ScanControl, ScanHooks, ScanOptions
-from services import dashboard_stats, photo_ingest
+from services import catalog_deletion, dashboard_stats, photo_ingest
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -3138,7 +3138,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
             assert not evidence["attempted"]
             evidence["attempted"] = True
             try:
-                writer.delete_photos([cat.raw_id])
+                catalog_deletion.delete_photos(writer, [cat.raw_id])
                 replacement = photo_ingest.add_photo(writer, None, "unrelated.jpg", ".jpg", 200, None)
                 assert replacement == cat.raw_id
                 evidence["replaced"] = True

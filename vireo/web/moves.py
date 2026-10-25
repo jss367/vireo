@@ -13,6 +13,7 @@ import os
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
+from services import moves_merge
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -158,7 +159,7 @@ def create_moves_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
         db = get_db()
         body = request.get_json(silent=True) or {}
         criteria = body.get("criteria", {})
-        photo_ids = db.query_move_rule_matches(criteria)
+        photo_ids = moves_merge.query_move_rule_matches(db, criteria)
         return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
 
     @blueprint.route("/api/move-folder/preflight", methods=["POST"])

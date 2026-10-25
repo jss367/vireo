@@ -2,7 +2,7 @@
 
 import pytest
 from location_review import time_review_groups
-from services import photo_ingest
+from services import moves_merge, photo_ingest
 
 
 def photo(index, timestamp, lat=None, lng=None):
@@ -436,7 +436,7 @@ def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
     db.conn.commit()
 
     if merge_kind.startswith('archive_'):
-        db.merge_staged_tree_into_archive(source_folder, str(archive))
+        moves_merge.merge_staged_tree_into_archive(db, source_folder, str(archive))
     elif merge_kind == 'relocate':
         db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (source_folder,))
         db.conn.commit()

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
-from services import duplicate_resolution
+from services import catalog_deletion, duplicate_resolution
 from sql_chunks import chunked
 
 if TYPE_CHECKING:
@@ -313,7 +313,7 @@ def create_duplicates_blueprint(
         all_files = []
         deleted_rows = 0
         for chunk in chunked(trashed_pids):
-            result = db.delete_photos(chunk)
+            result = catalog_deletion.delete_photos(db, chunk)
             all_files.extend(result.get("files", []))
             deleted_rows += result.get("deleted", 0)
         cleanup_cached_files_for_deleted_photos(all_files)

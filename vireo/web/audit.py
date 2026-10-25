@@ -269,7 +269,7 @@ def create_audit_blueprint(
         and unlink the cached thumbnails / previews / working copies that
         were derived from them.
 
-        Routed through ``db.delete_photos`` rather than the older
+        Routed through ``catalog_deletion.delete_photos`` rather than the older
         ``audit.remove_orphans`` so all the FK-cascading cleanup
         (detections, predictions, collection rules, iNat submissions)
         runs and ``cleanup_cached_files_for_deleted_photos`` unlinks

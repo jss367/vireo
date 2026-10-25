@@ -11,7 +11,7 @@ from preview_cache import (
     paired_preview_ready,
     reconcile_preview_cache,
 )
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 
 
 def seed(db, root, *, size=700_000):
@@ -84,7 +84,7 @@ def test_paired_cache_survives_reopen_and_startup_reconciles_orphans(db, tmp_pat
 
 def test_delete_removes_paired_files_and_rows_before_photo_id_reuse(db, tmp_path):
     pid, _, paired = seed(db, tmp_path)
-    files = db.delete_photos([pid])
+    files = catalog_deletion.delete_photos(db, [pid])
     cleanup_cached_files_for_deleted_photos(str(tmp_path / 'thumbs'), files["files"],
                                           vireo_dir=str(tmp_path))
     assert not paired.exists()

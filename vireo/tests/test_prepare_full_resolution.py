@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -458,7 +458,7 @@ def test_preparation_skips_concurrently_deleted_photos(
     def delete_selected():
         with_db = Database(app.config["DB_PATH"])
         try:
-            result = with_db.delete_photos([photo_id])
+            result = catalog_deletion.delete_photos(with_db, [photo_id])
             assert result["deleted"] == 1
         finally:
             with_db.close()
@@ -612,7 +612,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     def replace_photo():
         other_db = Database(app.config["DB_PATH"])
         try:
-            deleted = other_db.delete_photos([photo_id])
+            deleted = catalog_deletion.delete_photos(other_db, [photo_id])
             cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
             Image.new("RGB", (800, 600), "blue").save(replacement_path)
             replacement_bytes.append(Path(replacement_path).read_bytes())
@@ -732,7 +732,7 @@ def test_preparation_does_not_count_deleted_reused_cache(client_with_photo, monk
     def delete_reused(thread_db, *args, **kwargs):
         result = original_cache(thread_db, *args, **kwargs)
         assert result["status"] == "skipped"
-        thread_db.delete_photos([photo_id])
+        catalog_deletion.delete_photos(thread_db, [photo_id])
         return result
 
     monkeypatch.setattr(offline_cache, "cache_photo_original", delete_reused)
@@ -793,7 +793,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
     first = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
     try:
         assert old_copy_waiting.wait(synchronization_timeout(10))
-        deleted = db.delete_photos([photo_id])
+        deleted = catalog_deletion.delete_photos(db, [photo_id])
         cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
         replacement = Path(folder) / "replacement.jpg"
         Image.new("RGB", (800, 600), "blue").save(replacement)
@@ -1016,7 +1016,7 @@ def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, 
         if not replaced:
             other_db = Database(app.config["DB_PATH"])
             try:
-                deleted = other_db.delete_photos([photo_id])
+                deleted = catalog_deletion.delete_photos(other_db, [photo_id])
                 cleanup_cached_files_for_deleted_photos(
                     app.config["THUMB_CACHE_DIR"], deleted["files"],
                 )

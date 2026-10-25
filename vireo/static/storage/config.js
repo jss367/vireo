@@ -1,19 +1,15 @@
 // The cache settings: loading /api/config into the controls and the debounced
 // autosave of everything except the working-copy quota, plus the shared
 // working-copy quota state.
-// Classic page script.
 
-/** @type {ReturnType<typeof setTimeout> | null} */
-var _storageSaveTimer = null;
-var _committedWorkingCopyQuotaMb = 20480;
-var MAX_WORKING_COPY_QUOTA_MB = 1048576;
-// null = current working-copy usage has not yet been measured.
-/** @type {number | null} */
-var _workingCopySizeBytes = null;
-/** @type {number | null} */
-var _pendingWorkingCopyQuotaMb = null;
+import { state } from './state.js';
+import { loadPreviewCacheStatus } from './caches.js';
+import { loadStoragePanel } from './panel.js';
+import { safeFetch } from './shared.js';
 
-async function loadStorageConfig() {
+export const MAX_WORKING_COPY_QUOTA_MB = 1048576;
+
+export async function loadStorageConfig() {
   try {
     var cfg = /** @type {StorageConfigValues} */ (await safeFetch('/api/config', {}, { toast: false }));
     var ts = String(cfg.thumbnail_size != null ? cfg.thumbnail_size : 400);
@@ -27,15 +23,15 @@ async function loadStorageConfig() {
     /** @type {HTMLElement} */ (document.getElementById('cfgPreviewQualityVal')).textContent = pq;
     /** @type {HTMLInputElement} */ (document.getElementById('cfgPreviewCacheMaxMb')).value =
       String(cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480);
-    _committedWorkingCopyQuotaMb =
+    state.committedWorkingCopyQuotaMb =
       cfg.working_copy_cache_max_mb != null ? cfg.working_copy_cache_max_mb : 20480;
     /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb')).value =
-      String(_committedWorkingCopyQuotaMb / 1024);
+      String(state.committedWorkingCopyQuotaMb / 1024);
     updateWorkingCopyLimitState();
   } catch(e) {}
 }
 
-function readWorkingCopyQuotaMb() {
+export function readWorkingCopyQuotaMb() {
   var input = /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb'));
   var gb = Number(input.value);
   if (!Number.isFinite(gb) || gb < 0 || input.value.trim() === '') return null;
@@ -44,21 +40,21 @@ function readWorkingCopyQuotaMb() {
   return quotaMb;
 }
 
-function updateWorkingCopyLimitState() {
+export function updateWorkingCopyLimitState() {
   var quotaMb = readWorkingCopyQuotaMb();
   var input = /** @type {HTMLInputElement} */ (document.getElementById('cfgWorkingCopyCacheMaxGb'));
   var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('applyWorkingCopyLimitBtn'));
   var valid = quotaMb != null;
   input.setAttribute('aria-invalid', valid ? 'false' : 'true');
-  applyBtn.disabled = !valid || quotaMb === _committedWorkingCopyQuotaMb;
+  applyBtn.disabled = !valid || quotaMb === state.committedWorkingCopyQuotaMb;
 }
 
 // Autosaved storage controls — everything EXCEPT the working-copy quota.
 // The quota has its own explicit Apply flow (postWorkingCopyLimit); mixing
 // it into the autosave payload would let a debounced autosave that fires
 // while commitWorkingCopyLimit is in flight silently POST the old
-// _committedWorkingCopyQuotaMb and undo the quota change on the server.
-function autosaveStorageConfigPayload() {
+// state.committedWorkingCopyQuotaMb and undo the quota change on the server.
+export function autosaveStorageConfigPayload() {
   return {
     thumbnail_size: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgThumbSize')).value, 10) || 400,
     thumbnail_quality: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgThumbQuality')).value, 10) || 85,
@@ -67,7 +63,7 @@ function autosaveStorageConfigPayload() {
   };
 }
 
-async function postAutosaveStorageConfig() {
+export async function postAutosaveStorageConfig() {
   await safeFetch('/api/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -76,7 +72,7 @@ async function postAutosaveStorageConfig() {
 }
 
 /** @param {number} workingCopyQuotaMb @param {{confirmed?: boolean}=} opts */
-async function postWorkingCopyLimit(workingCopyQuotaMb, opts) {
+export async function postWorkingCopyLimit(workingCopyQuotaMb, opts) {
   opts = opts || {};
   /** @type {{working_copy_cache_max_mb: number, _confirm_working_copy_eviction?: boolean}} */
   var payload = {working_copy_cache_max_mb: workingCopyQuotaMb};
@@ -91,10 +87,10 @@ async function postWorkingCopyLimit(workingCopyQuotaMb, opts) {
   }, { toast: false });
 }
 
-function saveStorageConfig() {
-  if (_storageSaveTimer) clearTimeout(_storageSaveTimer);
-  _storageSaveTimer = setTimeout(async function() {
-    _storageSaveTimer = null;
+export function saveStorageConfig() {
+  if (state.storageSaveTimer) clearTimeout(state.storageSaveTimer);
+  state.storageSaveTimer = setTimeout(async function() {
+    state.storageSaveTimer = null;
     try {
       await postAutosaveStorageConfig();
       loadPreviewCacheStatus();
@@ -105,13 +101,13 @@ function saveStorageConfig() {
 
 // If a debounced autosave for other storage controls is queued but has not
 // yet fired, POST its payload synchronously before returning. The
-// working-copy Apply flow used to `clearTimeout(_storageSaveTimer)` on
+// working-copy Apply flow used to `clearTimeout(state.storageSaveTimer)` on
 // entry, which silently dropped any preview-cache or thumbnail edit from
 // the last 250 ms; flushing keeps those edits reaching the server.
-async function flushPendingStorageAutosave() {
-  if (_storageSaveTimer == null) return;
-  clearTimeout(_storageSaveTimer);
-  _storageSaveTimer = null;
+export async function flushPendingStorageAutosave() {
+  if (state.storageSaveTimer == null) return;
+  clearTimeout(state.storageSaveTimer);
+  state.storageSaveTimer = null;
   try {
     await postAutosaveStorageConfig();
   } catch(e) {

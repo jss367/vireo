@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import photo_ingest
+from services import catalog_deletion, moves_merge, photo_ingest
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -151,7 +151,7 @@ def test_real_deletion_cascades_identity_and_history_only_for_deleted_photos(db,
         save_alternatives(db, [losing, survivor], ['Heron', 'Egret'], 'Independent evidence', 'Bill')
         resolve_alternatives(db, [losing, survivor], 'Heron')
     if path == 'delete':
-        db.delete_photos([losing])
+        catalog_deletion.delete_photos(db, [losing])
     else:
         db.audit.remove_orphan_rows([losing])
         db.commit()
@@ -196,7 +196,7 @@ def test_staged_identity_intents_cannot_be_acknowledged_by_old_path_writer(db, t
     assert before
     db.conn.execute('UPDATE pending_changes SET sync_started=1 WHERE photo_id=?', (losing,))
     db.commit()
-    counts = db.merge_staged_tree_into_archive(tree['stage_root'], tree['arch'])
+    counts = moves_merge.merge_staged_tree_into_archive(db, tree['stage_root'], tree['arch'])
     clear_pending_by_token(db, [row['change_token'] for row in before])
     for row in before:
         replacement = db.conn.execute('SELECT * FROM pending_changes WHERE id=?', (row['id'],)).fetchone()

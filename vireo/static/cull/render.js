@@ -22,6 +22,17 @@ function cullDecisionStatsHtml() {
   return html;
 }
 
+// Photos showing more than one species are listed under each, so the
+// species' photo counts can add up to more than the Photos total.
+function cullMultiSpeciesStatHtml() {
+  var multi = /** @type {CullData} */ (cullData).multi_species_photos || 0;
+  if (!multi) return '';
+  return '<div class="summary-stat" title="These photos show more than one species and are listed under each. ' +
+    'The Photos, Favorites, Undecided and Reject totals count each photo once.">' +
+    '<div class="num" style="color:var(--text-secondary);">' + multi + '</div>' +
+    '<div class="label">Under 2+ species</div></div>';
+}
+
 function cullDecisionActionsHtml() {
   var buttons = [];
   var pinnedTotal = manualDecisionCount();
@@ -65,6 +76,7 @@ function renderCulling() {
     '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Undecided</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
+    cullMultiSpeciesStatHtml() +
     cullDecisionStatsHtml() +
     cullDecisionActionsHtml() +
     '<button class="summary-link" id="cullReviewRejected" onclick="reviewCullRejected()"' +

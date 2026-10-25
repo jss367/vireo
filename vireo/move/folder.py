@@ -82,7 +82,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             ``reject_tracked_ancestor``, ancestor) is no longer an error.
             Instead, after the verified file copy, the staged folder/photo rows
             are folded into the existing archive rows via
-            ``db.merge_staged_tree_into_archive`` (new folders repointed,
+            ``moves_merge.merge_staged_tree_into_archive`` (new folders repointed,
             identical-filename photos dropped) rather than a path cascade. Only
             the local-processing archive commit opts in; manual and remote
             moves keep the default refusal. The result then carries ``merge``
