@@ -1,6 +1,8 @@
 /* Browse: photo loading: the loaded window, paging, reset-and-reload. ES module (see
    browse/README.md). */
-import { browseLimits, setBrowseTotals, state } from './state.js';
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
+import { browseLimits, state } from './state.js';
 import { browseWindowSequence, claimBrowseWindow, observeBrowseWindow } from './window-requests.js';
 import { VireoFilter, safeFetch, searchLaneHeaders } from './shared.js';
 import {
@@ -39,9 +41,9 @@ import { updateFilterSummary, updateScrollPosition } from './view-controls.js';
    after each await before changing the grid or releasing its loading flag. */
 async function refreshBrowseWindowInPlace() {
   var windowIsCurrent = claimBrowseWindow();
-  state.selectAllRequestSeq++;
-  state.loading = true;
-  var firstPage = state.earliestPage;
+  selection.invalidate();
+  var finishLoad = pagination.beginLoad();
+  var firstPage = pagination.earliestPage;
   /** @type {BrowsePhoto[]} */ var nextPhotos = [];
   /** @type {BrowsePage | undefined} */ var data;
   var page = firstPage;
@@ -63,24 +65,24 @@ async function refreshBrowseWindowInPlace() {
     // Keep selected photos too, including selected members of a stack. The
     // rest of the historical tail can return through ordinary lazy loading.
     state.photos.forEach(function(photo, index) {
-      if (photo.id === state.selectedPhotoId || state.selectedPhotos.has(photo.id)
+      if (photo.id === selection.focusedPhotoId || selection.batchIds.has(photo.id)
           || (photo.browse_stack && photo.browse_stack.photo_ids.some(function(id) {
-            return id === state.selectedPhotoId || state.selectedPhotos.has(id);
+            return id === selection.focusedPhotoId || selection.batchIds.has(id);
           }))) lastIndex = Math.max(lastIndex, index);
     });
     // One extra page provides room for rows to fill the gaps after removals.
-    return Math.max(firstPage, Math.min(state.currentPage - 1,
-      firstPage + Math.floor(lastIndex / state.perPage) + 1));
+    return Math.max(firstPage, Math.min(pagination.currentPage - 1,
+      firstPage + Math.floor(lastIndex / pagination.perPage) + 1));
   }
 
   async function stageNeededPages() {
     // Re-evaluate the live viewport after every await. A user can scroll
     // farther while either pages or expanded stack members are being fetched.
     while (windowIsCurrent() && page <= neededEndPage()
-        && (!data || (page - 1) * state.perPage < data.total)) {
-      var chunk = Math.max(1, Math.min(Math.floor(500 / state.perPage), neededEndPage() - page + 1));
+        && (!data || (page - 1) * pagination.perPage < data.total)) {
+      var chunk = Math.max(1, Math.min(Math.floor(500 / pagination.perPage), neededEndPage() - page + 1));
       while ((page - 1) % chunk !== 0) chunk--;
-      var request = buildBrowsePageRequest((page - 1) / chunk + 1, state.perPage * chunk);
+      var request = buildBrowsePageRequest((page - 1) / chunk + 1, pagination.perPage * chunk);
       data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
       if (!windowIsCurrent()) return false;
       if (data.total === 0) {
@@ -92,13 +94,13 @@ async function refreshBrowseWindowInPlace() {
       // A batch removal may have eliminated the entire focused window.
       // Fetch the new last page instead of leaving a nonempty library blank.
       if (page === firstPage && page > 1 && !data.photos.length && data.total > 0) {
-        firstPage = Math.max(1, Math.ceil(data.total / state.perPage));
+        firstPage = Math.max(1, Math.ceil(data.total / pagination.perPage));
         page = firstPage;
         continue;
       }
       nextPhotos = nextPhotos.concat(data.photos);
       page += chunk;
-      if ((page - 1) * state.perPage >= data.total || !data.photos.length) break;
+      if ((page - 1) * pagination.perPage >= data.total || !data.photos.length) break;
     }
     return windowIsCurrent();
   }
@@ -139,7 +141,7 @@ async function refreshBrowseWindowInPlace() {
             stagedIds.add(id);
           });
         });
-        if (matchingIds === null && data && data.total > 0 && Array.from(state.selectedPhotos).some(function(id) {
+        if (matchingIds === null && data && data.total > 0 && Array.from(selection.batchIds).some(function(id) {
           return !stagedIds.has(id);
         })) {
           var idsRequest = buildBrowseIdsRequest();
@@ -193,10 +195,9 @@ async function refreshBrowseWindowInPlace() {
     // The lightbox shares this array; retain its identity across the refresh.
     state.photos.length = 0;
     nextPhotos.forEach(function(photo) { state.photos.push(photo); });
-    state.earliestPage = firstPage;
-    state.currentPage = page; if (!data) return null;
-    setBrowseTotals(data);
-    state.allLoaded = loadedWindowOffset() + state.photos.length >= state.totalPhotos;
+    if (!data) return null;
+    pagination.setTotals(data);
+    pagination.place(firstPage, page, state.photos.length);
     syncBrowseAvailableLightboxPhotos();
 
     var availableIds = matchingIds || new Set();
@@ -207,21 +208,21 @@ async function refreshBrowseWindowInPlace() {
         availableIds.add(id);
       });
     });
-    state.selectedPhotos.forEach(function(id) {
-      if (!availableIds.has(id)) state.selectedPhotos.delete(id);
+    selection.batchIds.forEach(function(id) {
+      if (!availableIds.has(id)) selection.removeFromBatch(id);
     });
-    if (state.selectedPhotoId != null && !availableIds.has(state.selectedPhotoId)) closeDetail();
-    const selectedCover = loadedBrowseStackCoverForPhoto(state.selectedPhotoId);
-    state.selectedIndex = state.photos.findIndex(function(photo) {
-      return photo.id === state.selectedPhotoId || (selectedCover && photo.id === selectedCover.id);
-    });
-    if (state.selectedPhotoId == null && state.selectedPhotos.size === 0) hideDetailPanel();
+    if (selection.focusedPhotoId != null && !availableIds.has(selection.focusedPhotoId)) closeDetail();
+    const selectedCover = loadedBrowseStackCoverForPhoto(selection.focusedPhotoId);
+    selection.reanchor(state.photos.findIndex(function(photo) {
+      return photo.id === selection.focusedPhotoId || (selectedCover && photo.id === selectedCover.id);
+    }));
+    if (selection.focusedPhotoId == null && selection.batchIds.size === 0) hideDetailPanel();
 
     renderGrid({ preserveThumbnails: true });
     updateGridTail();
     updatePreviousPhotosButton();
     updateOfflineCollectionState(data);
-    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
+    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
     if (VireoFilter && VireoFilter.setVisualInfo) VireoFilter.setVisualInfo(data.visual || null);
     updateFilterSummary();
     updateBatchBar();
@@ -247,7 +248,7 @@ async function refreshBrowseWindowInPlace() {
   } finally {
     if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor || '';
     if (windowIsCurrent()) {
-      state.loading = false;
+      finishLoad();
       if (succeeded) {
         rearmInfiniteScrollObserver();
         requestAnimationFrame(ensureViewportHydrated);
@@ -305,7 +306,7 @@ function browseFocusCandidateChunks(/** @type {BrowseAnchor | null} */ anchor, /
    cursors — so the next load starts a fresh contiguous window. Selection,
    collection scope and anchors are the caller's business. */
 function clearBrowseLoadedWindow() {
-  state.browseDatasetReady = false;
+  pagination.reset();
   state.expandedBrowseStacks.clear();
   state.browseStackMembers = {};
   state.browseStackErrors = {};
@@ -313,9 +314,6 @@ function clearBrowseLoadedWindow() {
   state.browseStackExpansionRequests = {};
   state.browseStackCoverRecheck.clear();
   state.photos = [];
-  state.currentPage = 1;
-  state.allLoaded = false;
-  state.earliestPage = 1;
   updatePreviousPhotosButton();
 }
 
@@ -361,7 +359,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // Membership edits keep the current window on screen until its replacement
   // is complete. A reset followed by anchor restoration still paints page 1
   // while the remaining pages load, even if the final position is correct.
-  if (options && options.preserveScroll && state.photos.length && state.browseDatasetReady) {
+  if (options && options.preserveScroll && state.photos.length && pagination.ready) {
     return refreshBrowseWindowInPlace();
   }
   var preserveAnchor = !!(options && options.preserveAnchor);
@@ -440,15 +438,13 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     : null;
   clearBrowseLoadedWindow();
   var resetWindowIsCurrent = claimBrowseWindow();
-  state.selectAllRequestSeq++;
-  state.loading = false;
+  selection.invalidate();
+  pagination.cancelLoad();
   // Dataset is about to change; any prior selection (multi-select Set or
   // single-focus id) points at photos that may not exist in the new view.
   // Leaving them set would let updateBatchBar() keep showing "N selected"
   // and arm batch actions (delete/export/develop) against stale ids.
-  state.selectedPhotos.clear();
-  state.selectedPhotoId = null;
-  state.selectedIndex = -1;
+  selection.clear();
   settleSidebarScopeForReload(preserveCollection);
   var preservedCollectionId = preserveCollection ? state.activeCollectionId : null;
   if (anchor) hideDetailPanel();
@@ -535,7 +531,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     // sequential requests to find that out.
     var anchorScanBudget = focusAnchor
       ? 0
-      : Math.max(anchor.index || 0, 0) + state.perPage;
+      : Math.max(anchor.index || 0, 0) + pagination.perPage;
     var card = await loadUntilPhotoRendered(
       anchor.photoId,
       anchorScanShouldContinue,
@@ -616,13 +612,10 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     }
 
     if (restoredStackIds) {
-      state.selectedPhotos = new Set(restoredStackIds);
-      state.selectedPhotoId = null;
-      state.selectedIndex = anchorIndex;
+      selection.selectBatch(restoredStackIds, anchorIndex);
       abandonDetailFocusForBatch();
     } else {
-      state.selectedPhotoId = anchor.photoId;
-      state.selectedIndex = anchorIndex;
+      selection.focus(anchor.photoId, anchorIndex);
     }
     refreshCardSelectionVisuals();
     updateBatchBar();
@@ -666,15 +659,11 @@ export function getBrowseRules() {
    the target's page, so everything that reasons about how much of the dataset
    is on screen (tail runway, allLoaded gate, position readout) has to add it
    back. */
-export function loadedWindowOffset() {
-  return Math.max(0, (state.earliestPage - 1) * state.perPage);
-}
-
 export function updatePreviousPhotosButton() {
   var banner = /** @type {HTMLElement} */ (document.getElementById('loadPreviousPhotosBanner'));
   if (!banner) return;
-  var offset = loadedWindowOffset();
-  if (state.earliestPage <= 1 || offset <= 0) {
+  var offset = pagination.offset;
+  if (pagination.earliestPage <= 1 || offset <= 0) {
     banner.style.display = 'none';
     return;
   }
@@ -697,13 +686,13 @@ export function updatePreviousPhotosButton() {
 }
 
 export async function loadPreviousPhotos() {
-  if (state.loading || state.earliestPage <= 1) return false;
+  if (pagination.loading || pagination.earliestPage <= 1) return false;
   // Do not prepend an offset page read from a newer database snapshot to the
   // focused page. Ingestion/deletion between those requests can overlap or
   // skip the boundary. Restarting at page 1 hands control back to the normal
   // contiguous lazy loader while keeping this user-requested transition
   // bounded to one configured-size page.
-  state.earliestPage = 1;
+  pagination.reset();
   updatePreviousPhotosButton();
   return resetAndLoad();
 }
@@ -791,12 +780,12 @@ function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} *
    first previously-loaded card remains at the same screen position while the
    new cards are inserted above it. */
 export async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ options = {}) {
-  if (state.loading || state.earliestPage <= 1) return false;
-  state.loading = true;
+  if (pagination.loading || pagination.earliestPage <= 1) return false;
+  var finishLoad = pagination.beginLoad();
   var windowIsCurrent = observeBrowseWindow();
   var loadSucceeded = false;
-  var requestedPage = state.earliestPage - 1;
-  var request = buildBrowsePageRequest(requestedPage, state.perPage);
+  var requestedPage = pagination.earliestPage - 1;
+  var request = buildBrowsePageRequest(requestedPage, pagination.perPage);
 
   try {
     /** @type {BrowsePage} */ var data = await safeFetch(request.url, request.options, {
@@ -804,8 +793,8 @@ export async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ opt
     });
     if (!windowIsCurrent()) return null;
 
-    setBrowseTotals(data);
-    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
+    pagination.setTotals(data);
+    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
     if (VireoFilter && VireoFilter.setVisualInfo) {
       VireoFilter.setVisualInfo(data.visual || null);
     }
@@ -836,10 +825,9 @@ export async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ opt
     // the newly prepended page without closing and reopening the viewer.
     Array.prototype.unshift.apply(state.photos, preceding);
     syncBrowseAvailableLightboxPhotos();
-    state.earliestPage = requestedPage;
+    pagination.prepend(requestedPage, state.photos.length);
     prependGridPhotos(preceding);
     updatePreviousPhotosButton();
-    state.allLoaded = loadedWindowOffset() + state.photos.length >= state.totalPhotos;
     updateGridTail();
     updateFilterSummary();
     refreshBrowseLightboxCounter();
@@ -869,7 +857,7 @@ export async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ opt
     if (!windowIsCurrent()) return null;
   } finally {
     if (windowIsCurrent()) {
-      state.loading = false;
+      finishLoad();
       if (loadSucceeded && state.anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         requestAnimationFrame(ensureViewportHydrated);
@@ -880,9 +868,9 @@ export async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ opt
 }
 
 export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) {
-  if (state.loading) return null;
-  if (state.allLoaded) return true;
-  state.loading = true;
+  if (pagination.loading) return null;
+  if (pagination.allLoaded) return true;
+  var finishLoad = pagination.beginLoad();
   // Extends the window its caller (resetAndLoad / bootstrap / deep link /
   // the intersection observer) already owns — observe, never claim.
   var windowIsCurrent = observeBrowseWindow();
@@ -919,13 +907,13 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
   if (focusPhotoId == null && tailEl && tailEl.firstElementChild) {
     var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
     if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
-      var pagesLoaded = state.currentPage - 1;
-      if (state.perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
-      else if (state.perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
+      var pagesLoaded = pagination.currentPage - 1;
+      if (pagination.perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
+      else if (pagination.perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
     }
   }
-  var reqPage = (state.currentPage - 1) / chunk + 1;
-  var reqPerPage = state.perPage * chunk;
+  var reqPage = (pagination.currentPage - 1) / chunk + 1;
+  var reqPerPage = pagination.perPage * chunk;
 
   var request = buildBrowsePageRequest(
     reqPage, reqPerPage,
@@ -937,12 +925,12 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
   try {
     /** @type {BrowsePage} */ var data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
     if (!windowIsCurrent()) return null;  // grid was reset mid-flight; drop stale response
-    setBrowseTotals(data);
+    pagination.setTotals(data);
     // Availability totals are photo counts, so they are read from the same
     // response that feeds ``totalUnderlyingPhotos`` — never from the
     // stack-collapsed ``data.total``.
     updateOfflineCollectionState(data);
-    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
+    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
     if (VireoFilter && VireoFilter.setVisualInfo) {
       VireoFilter.setVisualInfo(data.visual || null);
     }
@@ -960,8 +948,6 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
         && typeof data.focus_index === 'number' && Number.isInteger(data.focus_index) && data.focus_index >= 0
         && typeof data.focus_page === 'number' && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
       focusedPage = data.focus_page;
-      state.earliestPage = focusedPage;
-      state.currentPage = focusedPage;
       // Which candidate the server placed the page by. Usually the one we
       // asked about first; a stack whose leading frames this result set
       // dropped answers with a frame it kept.
@@ -971,24 +957,20 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
     }
     var firstNewIdx = state.photos.length;
 
-    if (data.photos.length === 0) {
-      state.allLoaded = true;
-    } else {
+    if (data.photos.length > 0) {
       // Keep the array identity stable. The shared lightbox navigates the
       // same object and can therefore continue into this newly loaded page.
       Array.prototype.push.apply(state.photos, data.photos);
       syncBrowseAvailableLightboxPhotos();
-      state.currentPage += chunk;
       // A deep-link window starts partway in, so it is exhausted when it
       // reaches the end of the dataset — not when it holds ``totalPhotos``
       // rows, which it never would.
-      if (loadedWindowOffset() + state.photos.length >= state.totalPhotos) state.allLoaded = true;
     }
+    pagination.append(state.photos.length, chunk, focusedPage, data.photos.length === 0);
     if (focusedPage !== null) updatePreviousPhotosButton();
 
     if (firstNewIdx === 0) renderGrid();
     else appendGridPhotos(data.photos, firstNewIdx);
-    state.browseDatasetReady = true;
     updateGridTail();
     updateFilterSummary();
     refreshBrowseLightboxCounter();
@@ -1013,7 +995,7 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
     }
   } finally {
     if (windowIsCurrent()) {
-      state.loading = false;
+      finishLoad();
       if (showLoading && loadingState) loadingState.style.display = 'none';
       // Re-check the scan depth live (not a load-start snapshot): a stale
       // scan can drain during our fetch, and its own hydration rAF then

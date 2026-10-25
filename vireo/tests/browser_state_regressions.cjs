@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
+const {installBrowseOwners} = require('../../tests/frontend/browse-owner-fixture.cjs');
 function fn(file, name) {
   const src = [].concat(file).map(f => fs.readFileSync(f, 'utf8')).join('\n');
   const found = src.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
@@ -24,8 +25,7 @@ assert(review.length > 0, 'Pipeline Review scripts must be loaded by the templat
 async function main() {
   let complete;
   const ctx = vm.createContext({
-    selectedPhotos: new Set(), selectedPhotoId: null, selectedIndex: -1,
-    anchorRestoreEpoch: 0, selectAllRequestSeq: 0,
+    anchorRestoreEpoch: 0,
     window: {}, buildBrowseIdsRequest: () => ({}),
     safeFetch: () => new Promise(resolve => { complete = resolve; }),
     showToast() {}, renderGrid() {}, updateBatchBar() {},
@@ -37,21 +37,22 @@ async function main() {
   // Browse's functions are ES module code that reads page state as
   // `state.<field>`; the context stands in for that object.
   ctx.state = ctx;
+  installBrowseOwners(ctx);
   vm.runInContext(fs.readFileSync('vireo/static/browse/window-requests.js', 'utf8').replace(/^export /gm, ''), ctx);
-  for (const name of ['selectAllMatchingPhotos', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
+  for (const name of ['selectAllMatchingPhotos', 'rangeSelectionIds', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
     vm.runInContext(fn(browse, name), ctx);
   }
   const pending = ctx.selectAllMatchingPhotos();
   ctx.selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false}, 2, 1);
-  assert.equal(ctx.selectedPhotoId, 2);
+  assert.equal(ctx.selection.focusedPhotoId, 2);
   complete({photo_ids: [1, 2, 3, 4]});
   await pending;
   assert.deepEqual(Array.from(ctx.getActiveSelection()), [2]);
   ctx.window._vireoNativeMenuPhotoIdsOverride = [99];
   assert.deepEqual(Array.from(ctx.getActiveSelection()), [99]);
   assert.deepEqual(Array.from(ctx.getBrowseSelection()), [2]);
-  ctx.selectedPhotos.add(2);
-  ctx.selectedPhotos.add(3);
+  ctx.selection.addToBatch(2);
+  ctx.selection.addToBatch(3);
   assert.deepEqual(Array.from(ctx.getBrowseSelection()), [2, 3]);
   assert.deepEqual(Array.from(ctx.getActiveSelection()), [99]);
   
@@ -545,7 +546,6 @@ async function testDeepLinkFailureReleasesLoading() {
     const context = vm.createContext({
       document: {getElementById: () => ({checked: true})},
       folderHealthRefreshSeq: 1,
-      loading: false,
       _cfgPromise: failure === 'config' ? Promise.reject(new Error('offline')) : Promise.resolve({}),
       applyBrowseConfig() {},
       safeFetch: async () => {
@@ -554,11 +554,12 @@ async function testDeepLinkFailureReleasesLoading() {
       },
     });
     context.state = context;
+    installBrowseOwners(context);
     vm.runInContext(source, context);
     await context._runPhotoDeepLink(1);
     // An early failure releases the grid; a newer health refresh retains
     // ownership so cleanup cannot allow competing page requests.
-    assert.equal(context.loading, failure === 'superseded', failure);
+    assert.equal(context.pagination.loading, failure === 'superseded', failure);
   }
 }
 

@@ -60,7 +60,7 @@ def test_browse_keeps_clicked_photo_visible_when_window_resizes(live_server, pag
     cards = page.locator(".grid-card")
     cards.first.wait_for(state="visible")
     cards.last.click()
-    assert page.evaluate("browseState.selectedPhotoId") is not None
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is not None
     assert page.evaluate(CARD_VISIBILITY)["fullyVisible"] is True
 
     wide_columns = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
@@ -87,8 +87,8 @@ def test_browse_resize_keeps_the_most_recently_clicked_card_visible(live_server,
     cards.first.wait_for(state="visible")
     cards.first.click()
     cards.last.click(modifiers=["ControlOrMeta"])
-    last_id = page.evaluate("browseState.lastClickedPhotoId")
-    assert page.evaluate("browseState.selectedPhotoId") != last_id
+    last_id = page.evaluate("pageModules.selectionState.selection.lastClickedPhotoId")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") != last_id
 
     wide = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
     page.set_viewport_size({"width": 780, "height": 900})
@@ -151,13 +151,13 @@ def test_browse_resize_falls_back_when_the_last_clicked_card_is_not_rendered(liv
     cards = page.locator(".grid-card")
     cards.first.wait_for(state="visible")
     cards.last.click()
-    visible_id = page.evaluate("browseState.selectedPhotoId")
+    visible_id = page.evaluate("pageModules.selectionState.selection.focusedPhotoId")
 
     # Stand in for the collapsed stack member: selected, last clicked, no card.
     page.evaluate(
         """() => {
-          browseState.lastClickedPhotoId = 999999;
-          browseState.selectedPhotos.add(999999);
+          pageModules.selectionState.selection.rememberClick(999999);
+          pageModules.selectionState.selection.addToBatch(999999);
           pageModules.scroll.noteFocusedCardVisibility();
         }"""
     )
@@ -209,10 +209,10 @@ def test_browse_resize_keeps_a_right_clicked_photo_visible(live_server, page):
     assert on_screen_id is not None
     page.locator(f'.grid-card[data-id="{on_screen_id}"]').click(button="right")
     page.keyboard.press("Escape")
-    assert page.evaluate("browseState.selectedPhotoId") == on_screen_id
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == on_screen_id
     # The coercion has to register as a click on a visible card, or the resize
     # is judged against where the *previous* selection was scrolled to.
-    assert page.evaluate("browseState.lastClickedPhotoId") == on_screen_id
+    assert page.evaluate("pageModules.selectionState.selection.lastClickedPhotoId") == on_screen_id
     assert page.evaluate("pageModules.scroll.focusedCardWasOnScreen") is True
 
     narrow = page.evaluate("() => pageModules.scroll.gridContainer.clientWidth")
@@ -265,8 +265,8 @@ def test_browse_resize_keeps_a_collapsed_stack_cover_visible(live_server, page):
     page.locator(f'.grid-card[data-id="{cover_id}"] .browse-stack-badge').click()
 
     # Both the focus and the last click are now on unrendered members.
-    assert page.evaluate("browseState.selectedPhotoId") in hidden
-    assert page.evaluate("browseState.lastClickedPhotoId") in hidden
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") in hidden
+    assert page.evaluate("pageModules.selectionState.selection.lastClickedPhotoId") in hidden
     assert page.evaluate("() => !!pageModules.scroll.renderedCardForFocus(pageModules.scroll.focusedBrowsePhotoId())") is True
 
     page.evaluate("() => pageModules.scroll.noteFocusedCardVisibility()")

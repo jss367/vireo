@@ -22742,6 +22742,14 @@ def _run_detail_prediction_panel(html, mode, payload):
     return _run_node(source, [mode, _json.dumps(payload)])
 
 
+def _browse_owner_js(module):
+    """Load the real owner used by extracted Browse functions, without exports."""
+    source = (Path(__file__).parent.parent / "static/browse" / f"{module}.js").read_text(
+        encoding="utf-8",
+    )
+    return re.sub(r"^export ", "", source, flags=re.MULTILINE)
+
+
 _STACK_SELECTION_STUB = """
 // Minimal stand-ins for the Browse globals the selection code reads. Every
 // side effect is captured rather than performed, so the assertions are about
@@ -22757,10 +22765,6 @@ var __document = {
 var document = __document;
 var window = {};
 var anchorRestoreEpoch = 0;
-var lastClickedPhotoId = null;
-var selectedPhotos = new Set();
-var selectedPhotoId = null;
-var selectedIndex = -1;
 var photos = [];
 var browseStackMembers = {};
 var detailPhotoId = null;
@@ -22790,17 +22794,15 @@ function seedGrid() {
     {id: 30, browse_stack: null},
   ];
   browseStackMembers = {};
-  selectedPhotos = new Set();
-  selectedPhotoId = null;
-  selectedIndex = -1;
+  selection.clear();
   __detail.visible = false;
   __detail.photoId = null;
 }
 function selectionSnapshot() {
   return {
-    selected: Array.from(selectedPhotos),
-    focused: selectedPhotoId,
-    index: selectedIndex,
+    selected: Array.from(selection.batchIds),
+    focused: selection.focusedPhotoId,
+    index: selection.anchorIndex,
     detail: __detail.photoId,
   };
 }
@@ -22813,6 +22815,7 @@ var SHIFT_CLICK = {shiftKey: true, metaKey: false, ctrlKey: false};
 def _browse_selection_js(html, body):
     """Browse's real selection functions over a stubbed grid."""
     return "\n".join([
+        _browse_owner_js("selection-state"),
         _STACK_SELECTION_STUB,
         _browse_js_function_body(html, "function browseStackMemberIdsFor("),
         _browse_js_function_body(html, "function browseStackMemberIds("),
@@ -22822,6 +22825,7 @@ def _browse_selection_js(html, body):
         _browse_js_function_body(html, "function browseSelectionIncludes("),
         _browse_js_function_body(html, "function browseCardSelectionClass("),
         _browse_js_function_body(html, "function browseSelectionStackNote("),
+        _browse_js_function_body(html, "function rangeSelectionIds("),
         _browse_js_function_body(html, "function selectPhoto("),
         body,
     ])
@@ -22884,7 +22888,7 @@ var twoStacks = selectionSnapshot();
 selectPhoto(CMD_CLICK, 20, 1);
 var afterUntoggle = selectionSnapshot();
 seedGrid();
-selectedPhotos = new Set([11]);
+selection.replaceBatch([11]);
 selectPhoto(CMD_CLICK, 10, 0);
 var partialFilledIn = selectionSnapshot();
 seedGrid();
@@ -22949,6 +22953,21 @@ process.stdout.write(JSON.stringify(selectionSnapshot()));
     assert sorted(result["selected"]) == [10, 11]
 
 
+def test_shift_click_from_a_tray_member_includes_the_next_stack(app_and_db):
+    """A hidden focus and the next collapsed card share the owner's range."""
+    app, _ = app_and_db
+    html = _page_with_scripts(app.test_client(), "/browse")
+    result = _run_node(_browse_selection_js(html, """
+seedGrid();
+selectPhoto(CLICK, 11, 0, {stackAware: false});
+selectPhoto(SHIFT_CLICK, 20, 1);
+process.stdout.write(JSON.stringify(selectionSnapshot()));
+"""), [])
+    assert result["selected"] == [10, 11, 12, 20, 21]
+    assert result["focused"] == 11
+    assert result["index"] == 0
+
+
 def test_stack_card_paints_a_partial_mark_for_a_partial_selection(app_and_db):
     """The full ring on a stack card means the whole stack.
 
@@ -22965,17 +22984,17 @@ var none = browseCardSelectionClass(photos[0]);
 selectPhoto(CLICK, 10, 0);
 var whole = browseCardSelectionClass(photos[0]);
 seedGrid();
-selectedPhotoId = 10;
+selection.focus(10);
 var coverFocusOnly = browseCardSelectionClass(photos[0]);
 seedGrid();
-selectedPhotos = new Set([12]);
+selection.replaceBatch([12]);
 var oneMember = browseCardSelectionClass(photos[0]);
 var single = browseCardSelectionClass(photos[2]);
 seedGrid();
 // Cmd-clicked out of the tray, then collapsed: the focus sits on the cover
 // while the set holds only the other frames.
-selectedPhotos = new Set([11, 12]);
-selectedPhotoId = 10;
+selection.replaceBatch([11, 12]);
+selection.focus(10);
 var focusOutsideSet = browseCardSelectionClass(photos[0]);
 process.stdout.write(JSON.stringify({
   none: none, whole: whole, coverFocusOnly: coverFocusOnly,
@@ -23004,7 +23023,7 @@ def test_stack_dblclick_snapshot_distinguishes_a_preselected_stack(app_and_db):
     clicks then reaffirm a selection rather than creating one — and the close
     handler would silently swap that user-assembled batch for the finished-on
     photo if the dblclick were still marked as gesture-generated. Capturing
-    ``selectedPhotos`` before the first click of a sequence is what lets the
+    ``selection.batchIds`` before the first click of a sequence is what lets the
     handler tell those cases apart: ``event.detail`` numbers the sequence, so
     only ``detail === 1`` records, and ``detail === 2`` preserves that snapshot
     through the second click. Codex P2 on PR #1672.
@@ -23018,30 +23037,33 @@ var SECOND = Object.assign({detail: 2}, CLICK);
 // Fresh gesture: pre-state is empty, so the dblclick's two clicks made the
 // stack selection and its provenance should be recorded.
 selectPhoto(FIRST, 10, 0);
-var afterFirst = new Set(browseSelectionBeforeStackDblClickStart);
+var afterFirst = selection.takeClickSnapshot();
+// The owner transfers snapshots, so run a fresh sequence to inspect both clicks.
+seedGrid();
+selectPhoto(FIRST, 10, 0);
 selectPhoto(SECOND, 10, 0);
 var freshGesture = {
-  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+  pre: Array.from(selection.takeClickSnapshot()).sort(),
   afterFirst: Array.from(afterFirst).sort(),
 };
 seedGrid();
 // Deliberate batch preselects the stack; a subsequent dblclick has to see
 // that the pre-first-click state was already the stack, so the two clicks
 // only reaffirmed it. Codex P2 on PR #1672.
-selectedPhotos = new Set([10, 11, 12]);
+selection.replaceBatch([10, 11, 12]);
 selectPhoto(FIRST, 10, 0);
 selectPhoto(SECOND, 10, 0);
 var preselected = {
-  pre: Array.from(browseSelectionBeforeStackDblClickStart).sort(),
+  pre: Array.from(selection.takeClickSnapshot()).sort(),
 };
 seedGrid();
 // A single click captures its own pre-state; the next first-of-a-sequence
 // overwrites it with whatever the earlier click left behind.
 selectPhoto(FIRST, 10, 0);
-var afterSingle = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+var afterSingle = Array.from(selection.takeClickSnapshot()).sort();
 var LATER_FIRST = Object.assign({detail: 1}, CLICK);
 selectPhoto(LATER_FIRST, 30, 2);
-var afterLater = Array.from(browseSelectionBeforeStackDblClickStart).sort();
+var afterLater = Array.from(selection.takeClickSnapshot()).sort();
 process.stdout.write(JSON.stringify({
   freshGesture: freshGesture,
   preselected: preselected,
@@ -23130,7 +23152,7 @@ selectPhoto(CLICK, 10, 0);
 process.stdout.write(JSON.stringify({
   before: beforeStackClick,
   after: {
-    selected: Array.from(selectedPhotos),
+    selected: Array.from(selection.batchIds),
     detailOwner: detailPhotoId,
     clearCalls: __clearCalls,
   },
@@ -23362,26 +23384,29 @@ def test_empty_lightbox_close_drops_a_stacks_dangling_members(app_and_db):
     # instead of the extractor's boundary rule: the fix under test is the
     # named function, not its wiring.
     source = "\n".join([
+        _browse_owner_js("selection-state"),
+        _browse_owner_js("pagination"),
         """
-var selectedPhotos = new Set();
-var selectedPhotoId = null;
 var browseLightboxStackGesture = null;
 var browseLightboxStackGestureSpent = null;
 var photos = [];
-var allLoaded = true;
-var earliestPage = 1;
 var browseStackMembers = {};
 var refreshes = 0, bars = 0;
 function refreshCardSelectionVisuals() { refreshes += 1; }
 function updateBatchBar() { bars += 1; }
+function seedWindow(first = 1, exhausted = true) {
+  var count = (first - 1) * pagination.perPage + photos.length;
+  pagination.setTotals({total: count + (exhausted ? 0 : 50)});
+  pagination.place(first, first + 1, photos.length);
+}
 global.document = { addEventListener: function() {}, querySelector: function() { return null; } };
 """,
         body,
         """
 function snapshot() {
   return {
-    selected: Array.from(selectedPhotos).sort(function(a, b){ return a - b; }),
-    focus: selectedPhotoId,
+    selected: Array.from(selection.batchIds).sort(function(a, b){ return a - b; }),
+    focus: selection.focusedPhotoId,
     armed: browseLightboxStackGesture,
     spent: browseLightboxStackGestureSpent,
     refreshes: refreshes,
@@ -23397,37 +23422,38 @@ var results = {};
 //     already gone from `photos`; the hidden members (11, 12) live under
 //     its orphaned browseStackMembers entry with no cover to represent
 //     them on the grid.
-selectedPhotos = new Set([11, 12]);
-selectedPhotoId = 10;
+selection.replaceBatch([11, 12]);
+selection.focus(10);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = {ids: [10, 11, 12], epoch: 3};
 photos = [];
 browseStackMembers = {"10": [{id: 11}, {id: 12}]};
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.spentDeleteFlow = snapshot();
 
 // (b) The gesture may still be armed if the delete-button close did not
 //     set it aside (no `#deleteModal.open`). Same cleanup applies.
-selectedPhotos = new Set([11, 12]);
-selectedPhotoId = null;
+selection.replaceBatch([11, 12]);
+selection.focus(null);
 browseLightboxStackGesture = {ids: [10, 11, 12], epoch: 7};
 browseLightboxStackGestureSpent = null;
 photos = [];
 browseStackMembers = {"10": [{id: 11}, {id: 12}]};
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.armedFallback = snapshot();
 
 // (c) No gesture in either slot, no lingering selection — nothing to
 //     touch and no visible refresh should fire.
-selectedPhotos = new Set();
-selectedPhotoId = null;
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [];
 browseStackMembers = {};
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.nothingPending = snapshot();
 
@@ -23438,27 +23464,28 @@ results.nothingPending = snapshot();
 //     `closeLightbox(null)` fires with neither gesture slot populated. The
 //     empty-close path still has to drop the hidden members (11, 12) so
 //     batch shortcuts do not act on photos with no card on screen.
-selectedPhotos = new Set([11, 12]);
-selectedPhotoId = null;
+selection.replaceBatch([11, 12]);
+selection.focus(null);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 20}, {id: 21}];
 browseStackMembers = {"10": [{id: 11}, {id: 12}]};
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.noGestureOrphaned = snapshot();
 
 // (e) The same empty-close on a selection that is still fully reachable
 //     from the grid must leave it alone — an unrelated stack cover was
 //     deleted; the surviving batch of another stack is not orphaned.
-selectedPhotos = new Set([20, 21]);
-selectedPhotoId = 20;
+selection.replaceBatch([20, 21]);
+selection.focus(20);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 20}, {id: 21}];
 browseStackMembers = {};
-allLoaded = true;
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.noGestureReachable = snapshot();
 
@@ -23468,14 +23495,14 @@ results.noGestureReachable = snapshot();
 //     selection whose photos are all perfectly valid. The bounded drop in
 //     the lightbox:photodeleted handler covers the real orphans here.
 //     Codex P2 on PR #1672.
-selectedPhotos = new Set([11, 12, 900, 901]);
-selectedPhotoId = null;
+selection.replaceBatch([11, 12, 900, 901]);
+selection.focus(null);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 20}, {id: 21}];
 browseStackMembers = {};
-allLoaded = false;
 refreshes = 0; bars = 0;
+seedWindow(1, false);
 browseReconcileEmptyLightboxClose();
 results.partialWindow = snapshot();
 
@@ -23483,18 +23510,16 @@ results.partialWindow = snapshot();
 //     deep-linked load. The earlier pages have never been fetched, so their
 //     selected ids are no more unreachable than (f)'s.
 //     Codex P2 on PR #1672.
-selectedPhotos = new Set([11, 12, 900, 901]);
-selectedPhotoId = null;
+selection.replaceBatch([11, 12, 900, 901]);
+selection.focus(null);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 20}, {id: 21}];
 browseStackMembers = {};
-allLoaded = true;
-earliestPage = 4;
 refreshes = 0; bars = 0;
+seedWindow(4);
 browseReconcileEmptyLightboxClose();
 results.windowStartsLate = snapshot();
-earliestPage = 1;
 
 // (h) Two collapsed stacks are selected. The user expands one and opens its
 //     tray lightbox, deletes every member — `_lightboxPhotoList` empties and
@@ -23506,15 +23531,14 @@ earliestPage = 1;
 //     happens to hold — otherwise the surviving stack silently shrinks to
 //     its cover and later batch actions touch one frame of four.
 //     Codex P2 on PR #1672.
-selectedPhotos = new Set([30, 31, 32]);
-selectedPhotoId = 30;
+selection.replaceBatch([30, 31, 32]);
+selection.focus(30);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
 browseStackMembers = {};
-allLoaded = true;
-earliestPage = 1;
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.uncachedStackReachable = snapshot();
 
@@ -23523,15 +23547,14 @@ results.uncachedStackReachable = snapshot();
 //     must also honor `browse_stack.photo_ids`, or an unrelated empty close
 //     would null the focus even though the stack card still represents it.
 //     Codex P2 on PR #1672.
-selectedPhotos = new Set();
-selectedPhotoId = 32;
+selection.clearBatch();
+selection.focus(32);
 browseLightboxStackGesture = null;
 browseLightboxStackGestureSpent = null;
 photos = [{id: 30, browse_stack: {photo_ids: [30, 31, 32], count: 3}}];
 browseStackMembers = {};
-allLoaded = true;
-earliestPage = 1;
 refreshes = 0; bars = 0;
+seedWindow();
 browseReconcileEmptyLightboxClose();
 results.uncachedFocusReachable = snapshot();
 

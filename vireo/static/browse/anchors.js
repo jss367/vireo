@@ -1,5 +1,7 @@
 /* Browse: keeping the selected photo / viewport anchored across reloads. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { closeDetail } from './detail.js';
 import { getBrowsePhotoElement, getGridCard, loadedBrowseStackCoverForPhoto } from './grid.js';
@@ -18,7 +20,7 @@ import { updateScrollPosition } from './view-controls.js';
    the card the user is looking at. Resolve it back to that card so it can
    anchor a reload like any other selected card. */
 function browseSelectedStackCoverId() {
-  if (state.selectedPhotos.size < 2) return null;
+  if (selection.batchIds.size < 2) return null;
   var isTheSelection = function(/** @type {BrowsePhoto | undefined} */ photo) {
     if (!photo || !photo.browse_stack) return false;
     // A focused photo alongside the set usually means a batch the user built
@@ -27,17 +29,17 @@ function browseSelectedStackCoverId() {
     // (``batchHasHiddenMembers`` in toggleBrowseStack) because a collapsed
     // tray cannot hold a focus on a hidden frame. Accept a focus that *is*
     // this cover, reject any other (Codex P2 on PR #1695).
-    if (state.selectedPhotoId != null && photo.id !== state.selectedPhotoId) return false;
+    if (selection.focusedPhotoId != null && photo.id !== selection.focusedPhotoId) return false;
     var ids = browseStackMemberIdsFor(photo);
-    return !!ids && ids.length === state.selectedPhotos.size
-      && ids.every(function(id) { return state.selectedPhotos.has(id); });
+    return !!ids && ids.length === selection.batchIds.size
+      && ids.every(function(id) { return selection.batchIds.has(id); });
   };
   // Both ways of selecting a whole stack — clicking the collapsed card and
   // the tray's "Select all" — leave ``selectedIndex`` on the cover's grid
   // slot, so this hits on the first try in practice. The scan is the
   // fallback for a selection that outlived its index.
-  var focused = state.photos[state.selectedIndex];
-  if (state.selectedIndex >= 0 && focused && isTheSelection(focused)) {
+  var focused = state.photos[selection.anchorIndex];
+  if (selection.anchorIndex >= 0 && focused && isTheSelection(focused)) {
     return focused.id;
   }
   var cover = state.photos.find(isTheSelection);
@@ -47,10 +49,10 @@ function browseSelectedStackCoverId() {
 /** @returns {BrowseAnchor | null} */
 export function captureSelectedPhotoAnchor() {
   var stackCoverId = browseSelectedStackCoverId();
-  if (stackCoverId == null && (state.selectedPhotoId == null || state.selectedPhotos.size > 0)) {
+  if (stackCoverId == null && (selection.focusedPhotoId == null || selection.batchIds.size > 0)) {
     return null;
   }
-  var anchorId = stackCoverId == null ? state.selectedPhotoId : stackCoverId; if (anchorId == null) return null;
+  var anchorId = stackCoverId == null ? selection.focusedPhotoId : stackCoverId; if (anchorId == null) return null;
   var card = getBrowsePhotoElement(anchorId);
   if (!card) return null;
   var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
@@ -87,7 +89,7 @@ export function captureSelectedPhotoAnchor() {
     stackSelection: stackCoverId != null,
     // The frames the user actually picked. The restore intersects these with
     // the reloaded group rather than adopting its membership wholesale.
-    stackIds: stackCoverId == null ? null : Array.from(state.selectedPhotos),
+    stackIds: stackCoverId == null ? null : Array.from(selection.batchIds),
   };
 }
 
@@ -162,8 +164,8 @@ export async function restoreBrowseViewportAnchor(/** @type {BrowseAnchor | null
   // ``allLoaded`` the way ``loadUntilPhotoRendered`` does would walk a
   // 60k-photo library end to end whenever the anchored photo is the one the
   // edit removed from the filtered set.
-  var budget = Math.max(anchor.index, 0) + state.perPage;
-  while (!state.allLoaded && state.photos.length <= budget && !getGridCard(anchor.photoId)) {
+  var budget = Math.max(anchor.index, 0) + pagination.perPage;
+  while (!pagination.allLoaded && state.photos.length <= budget && !getGridCard(anchor.photoId)) {
     if (shouldContinue && !shouldContinue()) return;
     var beforeLen = state.photos.length;
     if (await loadPhotos() !== true) return;
@@ -187,7 +189,7 @@ export async function restoreBrowseViewportAnchor(/** @type {BrowseAnchor | null
 }
 
 export function anchorRestoreIsPending(/** @type {BrowseAnchor | null} */ anchor, /** @type {number | null | undefined} */ restoreEpoch = undefined) {
-  return !!anchor && state.anchorRestoreEpoch === restoreEpoch && state.selectedPhotoId == null && state.selectedPhotos.size === 0;
+  return !!anchor && state.anchorRestoreEpoch === restoreEpoch && selection.focusedPhotoId == null && selection.batchIds.size === 0;
 }
 
 export function anchorSelectionIsCurrent(/** @type {BrowseAnchor | null} */ anchor, /** @type {number | null | undefined} */ restoreEpoch = undefined) {
@@ -197,9 +199,9 @@ export function anchorSelectionIsCurrent(/** @type {BrowseAnchor | null} */ anch
   // photo — the shape clicking the collapsed card produces, not the
   // single-focus shape the line below describes.
   if (anchor.stackSelection) {
-    return state.selectedPhotoId == null && state.selectedPhotos.size > 0;
+    return selection.focusedPhotoId == null && selection.batchIds.size > 0;
   }
-  return state.selectedPhotoId === anchor.photoId && state.selectedPhotos.size === 0;
+  return selection.focusedPhotoId === anchor.photoId && selection.batchIds.size === 0;
 }
 
 export async function loadUntilPhotoRendered(/** @type {number} */ photoId, /** @type {(() => boolean) | undefined} */ shouldContinue = undefined, /** @type {{resolveStackMember?: boolean, budget?: number} | undefined} */ options = undefined) {
@@ -212,14 +214,14 @@ export async function loadUntilPhotoRendered(/** @type {number} */ photoId, /** 
   var budget = options && options.budget != null ? options.budget : null;
   var card = getGridCard(photoId);
   var stackCover = resolveStackMember ? loadedBrowseStackCoverForPhoto(photoId) : null;
-  while (!card && !stackCover && !state.allLoaded) {
+  while (!card && !stackCover && !pagination.allLoaded) {
     if (budget != null && state.photos.length > budget) break;
     if (shouldContinue && !shouldContinue()) return null;
-    var beforePage = state.currentPage;
+    var beforePage = pagination.currentPage;
     var beforeLen = state.photos.length;
     await loadPhotos();
     if (shouldContinue && !shouldContinue()) return null;
-    if (state.currentPage === beforePage && state.photos.length === beforeLen) break;
+    if (pagination.currentPage === beforePage && state.photos.length === beforeLen) break;
     card = getGridCard(photoId);
     if (resolveStackMember) stackCover = loadedBrowseStackCoverForPhoto(photoId);
   }
@@ -233,8 +235,6 @@ export async function loadUntilPhotoRendered(/** @type {number} */ photoId, /** 
 
 export function clearActiveSelectionAndDetail() {
   state.anchorRestoreEpoch++;
-  state.selectedPhotos.clear();
-  state.selectedPhotoId = null;
-  state.selectedIndex = -1;
+  selection.clear();
   closeDetail();
 }

@@ -1,5 +1,6 @@
 /* Browse: multi-selection panel (edits paste, compare, keyword and wildlife state). ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   VireoBatchEdits, VireoBrowseCompare, editNav, escapeHtml, safeFetch, showToast,
@@ -49,8 +50,8 @@ export function updateSelectionPanel(/** @type {number[]} */ ids) {
     var predList = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
     if (predList) predList.innerHTML = '';
     renderSelectionWildlifeState([]);
-    if (wasVisible && state.selectedPhotoId) {
-      loadDetail(state.selectedPhotoId);
+    if (wasVisible && selection.focusedPhotoId) {
+      loadDetail(selection.focusedPhotoId);
     } else if (wasVisible) {
       var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
       var summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));

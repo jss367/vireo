@@ -1,5 +1,6 @@
 /* Browse: right-click menus for grid cards, folders and collections. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
@@ -59,7 +60,7 @@ function _refreshInspectorAfterSinglePhotoEdit(/** @type {number} */ photoId, /*
     renderBatchInspector(getActiveSelection(), { preserveLocation: true });
     return;
   }
-  if (state.selectedPhotoId === photoId) singleFallback();
+  if (selection.focusedPhotoId === photoId) singleFallback();
 }
 
 export async function setRatingFor(/** @type {number} */ photoId, /** @type {number} */ rating) {
@@ -399,8 +400,8 @@ document.addEventListener('contextmenu', function(e) {
   // Finder-style coercion: right-click on an item outside the selection
   // replaces the selection with that one item. Fold selectedPhotoId in first
   // so a single-focus click doesn't get silently dropped.
-  if (state.selectedPhotos.size === 0 && state.selectedPhotoId !== null) {
-    state.selectedPhotos.add(state.selectedPhotoId);
+  if (selection.batchIds.size === 0 && selection.focusedPhotoId !== null) {
+    selection.addToBatch(selection.focusedPhotoId);
   }
   // The "item" a collapsed stack card offers is the stack, so coercion
   // replaces the selection with every frame behind it unless they are all in
@@ -410,7 +411,7 @@ document.addEventListener('contextmenu', function(e) {
     ? [pid]
     : browseSelectionIdsForClick(pid);
   var wholeStackSelected = stackIds.every(function(stackId) {
-    return state.selectedPhotos.has(stackId);
+    return selection.batchIds.has(stackId);
   });
   var ids;
   if (stackIds.length > 1 && !wholeStackSelected) {
@@ -420,14 +421,12 @@ document.addEventListener('contextmenu', function(e) {
     // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
     // Codex P2 on PR #1672.
     state.anchorRestoreEpoch++;
-    state.selectedPhotos = new Set(stackIds);
-    state.selectedPhotoId = null;
-    state.selectedIndex = state.photos.findIndex(function(p) { return p.id === pid; });
+    selection.selectBatch(stackIds, state.photos.findIndex(function(p) { return p.id === pid; }));
     abandonDetailFocusForBatch();
     ids = stackIds;
   } else {
-    var beforeCoercion = selectionIdsKey(Array.from(state.selectedPhotos));
-    ids = coerceSelectionOnContext(state.selectedPhotos, pid);
+    var beforeCoercion = selectionIdsKey(Array.from(selection.batchIds));
+    ids = coerceSelectionOnContext(new Set(selection.batchIds), pid);
     // Coercion replacing the selection is a selection change like any other,
     // so the generation moves with it — otherwise a restore still waiting on
     // stack hydration (undo/redo) considers itself current and merges the
@@ -435,17 +434,16 @@ document.addEventListener('contextmenu', function(e) {
     // changed: right-clicking inside the selection keeps it, and retiring a
     // pending restore for that would lose a selection nobody replaced.
     // Codex P2 on PR #1672.
-    if (selectionIdsKey(ids) !== beforeCoercion) state.anchorRestoreEpoch++;
+    if (selectionIdsKey(ids) !== beforeCoercion) { state.anchorRestoreEpoch++; selection.replaceBatch(ids); }
   }
   // If coercion replaced the set, align selectedPhotoId (so the detail panel
   // reflects the right-clicked photo) and selectedIndex (the Shift-range
   // anchor — a subsequent Shift-click must range-select from this card).
-  if (ids.length === 1 && ids[0] === pid && state.selectedPhotoId !== pid) {
-    state.selectedPhotoId = pid;
-    state.selectedIndex = state.photos.findIndex(function(p) { return p.id === pid; });
-    if (state.selectedIndex < 0) {
+  if (ids.length === 1 && ids[0] === pid && selection.focusedPhotoId !== pid) {
+    selection.focus(pid, state.photos.findIndex(function(p) { return p.id === pid; }));
+    if (selection.anchorIndex < 0) {
       var coverId = browseStackCoverIdForPhoto(pid);
-      state.selectedIndex = state.photos.findIndex(function(p) { return p.id === coverId; });
+      selection.reanchor(state.photos.findIndex(function(p) { return p.id === coverId; }));
     }
     loadDetail(pid);
   }
@@ -453,7 +451,7 @@ document.addEventListener('contextmenu', function(e) {
   // is on screen by construction. Without this, a resize after right-clicking
   // a card would still be judged against wherever the *previous* selection was
   // scrolled to, and would refuse to keep this one visible.
-  state.lastClickedPhotoId = pid;
+  selection.rememberClick(pid);
   refreshCardSelectionVisuals();
   noteFocusedCardVisibility();
   updateBatchBar();

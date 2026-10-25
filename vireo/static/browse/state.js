@@ -1,11 +1,6 @@
-/* Browse: page state, the constants the page's modules share, and the small
-   helpers that keep that state consistent. ES module (see browse/README.md).
-
-   An ES module cannot assign another module's variable, so every value more
-   than one module writes, and the rest of the page's mutable state, is a
-   field of `state` (`state.selectedPhotoId = id`). This module imports
-   nothing, so it is evaluated first and `state` exists before any other
-   page module runs. */
+/* Browse page data, scope and rendering caches. Selection and pagination
+   have independent owners in selection-state.js and pagination.js. This
+   module imports nothing so shared page data is available during composition. */
 
 /* ---------- State ---------- */
 export const state = {
@@ -16,32 +11,11 @@ export const state = {
   googleMapsPreferEnglish: true,
   /** @type {BrowsePhoto[]} */
   photos: [],
-  totalPhotos: 0,
-  totalUnderlyingPhotos: 0,
-  totalBrowseStacks: 0,
-  currentPage: 1,
-  perPage: 50,
-  loading: false,
-  allLoaded: false,
-  earliestPage: 1,
-  // True only after an authoritative response has initialized the grid, even
-  // when that response contains zero photos. Health events can arrive while
-  // bootstrap or a deep link is still pending; an "unaffected scope" is only
-  // safe to preserve once there is an initialized dataset to preserve.
-  browseDatasetReady: false,
-  /** @type {number | null} */
-  selectedPhotoId: null,
   // The photo the single-photo detail panel shows; null while it is hidden or
   // showing the batch inspector. In-flight detail requests compare against it
   // as their owner check.
   /** @type {number | null} */
   detailPhotoId: null,
-  selectedIndex: -1,
-  // The card the user clicked most recently. Usually selectedPhotoId, but a
-  // cmd-click can fold the focused photo into selectedPhotos and null the focus
-  // id, and that card is still the one the user is looking at.
-  /** @type {number | null} */
-  lastClickedPhotoId: null,
   anchorRestoreEpoch: 0,
   anchorScanDepth: 0,
   // Focused reloads (sort changes) capture the selection, then clear it and
@@ -62,8 +36,6 @@ export const state = {
   // left, so the anchor must not survive into the new one.
   pendingFocusAnchorScopeGen: -1,
   focusReloadInFlight: 0,
-  /** @type {Set<number>} */
-  selectedPhotos: new Set(), // multi-select
   /** @type {Set<number>} */
   expandedBrowseStacks: new Set(),
   /** @type {Record<string, BrowsePhoto[]>} */
@@ -141,7 +113,6 @@ export const state = {
   // stale value for the edited id survive.
   /** @type {Record<string, number>} */
   colorLabelEditGen: Object.create(null),
-  selectAllRequestSeq: 0, // bumped to ignore stale async select-all responses
   // rating/flag/color/date/keyword filter state now lives in VireoFilter
   // (the universal filter bar); Browse keeps only page-scope state.
   /** @type {number | null} */
@@ -273,18 +244,6 @@ export const state = {
   // without scrolling to the requested photo (and VireoFilter was left
   // uninitialized) (Codex review r3686778061).
   _activeFolderHealthRefresh: Promise.resolve(),
-  // The selection as it stood before the first click of the most recent click
-  // sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
-  // handler so it can tell "these clicks made the selection" from "these clicks
-  // reaffirmed a selection the user already had": a deliberate tray Select all
-  // + collapse leaves the stack members in ``selectedPhotos``, and a plain
-  // click on the collapsed cover then sets the same set again, so the
-  // resulting ``selectedPhotos`` is byte-for-byte identical either way. Without
-  // this snapshot the dblclick handler would mark that pre-existing batch as
-  // gesture-generated and the close handler would then replace it with the
-  // finished-on photo. Codex P2 on PR #1672.
-  /** @type {Set<number> | null} */
-  browseSelectionBeforeStackDblClickStart: null,
 };
 
 /* ---------- Constants and state helpers ---------- */
@@ -311,13 +270,6 @@ export function _removeBrowseStackExpansionRequest(/** @type {string} */ cacheKe
   if (!list.length) delete state.browseStackExpansionRequests[cacheKey];
 }
 
-export function setBrowseTotals(/** @type {BrowseTotals | null} */ data) {
-  state.totalPhotos = Number(data && data.total) || 0;
-  state.totalBrowseStacks = Number(data && data.stack_count) || 0;
-  state.totalUnderlyingPhotos = data && data.underlying_total != null
-    ? Number(data.underlying_total) || 0
-    : state.totalPhotos;
-}
 // Panel request ownership lives in panelRequests.
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a

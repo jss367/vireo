@@ -1,5 +1,6 @@
 /* Browse: /api/config fetch, keyboard shortcut defaults, config application. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
 import { state } from './state.js';
 import { VireoViewPreferences, safeFetch, setKeyboardShortcuts } from './shared.js';
 
@@ -24,7 +25,7 @@ export var _cfgPromise = (async function() {
 
 export function applyBrowseConfig(/** @type {BrowseConfig | null | undefined} */ cfg = undefined) {
   if (!cfg) return;
-  if (cfg.photos_per_page) state.perPage = cfg.photos_per_page;
+  if (cfg.photos_per_page) pagination.configure(cfg.photos_per_page);
   if (cfg.browse_thumb_default && VireoViewPreferences.read('vireo.browse.thumbSize') === null) {
     var slider = /** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider'));
     if (slider) {

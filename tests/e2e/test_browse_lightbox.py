@@ -119,7 +119,7 @@ def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
 
     cards = page.locator(".grid-card")
     cards.nth(1).wait_for(state="visible")
-    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && pageModules.pagination.pagination.total > browseState.photos.length")
     boundary_id = int(cards.nth(1).get_attribute("data-id"))
 
     cards.nth(1).dblclick()
@@ -241,7 +241,7 @@ def test_browse_lightbox_single_photo_window_waits_for_previous_page(
         ),
     )
     page.goto(f"{live_server['url']}/browse?photo_id={target_id}")
-    page.wait_for_function("browseState.photos.length === 1 && browseState.earliestPage === 2")
+    page.wait_for_function("browseState.photos.length === 1 && pageModules.pagination.pagination.earliestPage === 2")
     page.evaluate(
         """() => {
           const originalSafeFetch = window.safeFetch;
@@ -261,7 +261,7 @@ def test_browse_lightbox_single_photo_window_waits_for_previous_page(
     page.wait_for_function(
         "photoId => vireoLightboxSession.displayedPhotoId() === photoId", arg=target_id
     )
-    page.wait_for_function("browseState.loading === true && !!window.__releasePreviousPage")
+    page.wait_for_function("pageModules.pagination.pagination.loading === true && !!window.__releasePreviousPage")
     page.evaluate("lightboxNav(-1)")
     page.evaluate("window.__releasePreviousPage()")
 
@@ -299,9 +299,9 @@ def test_browse_lightbox_delete_preserves_live_pagination_list(live_server, page
         ),
     )
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && pageModules.pagination.pagination.total > browseState.photos.length")
     deleted_id, remaining_id = page.evaluate("[browseState.photos[0].id, browseState.photos[1].id]")
-    page.evaluate("browseState.allLoaded = true")
+    page.evaluate("pageModules.pagination.pagination.append(browseState.photos.length, 0, null, true)")
 
     page.locator(f'.grid-card[data-id="{deleted_id}"]').dblclick()
     page.wait_for_function(
@@ -323,7 +323,7 @@ def test_browse_lightbox_delete_preserves_live_pagination_list(live_server, page
 
     page.evaluate(
         """() => {
-          browseState.allLoaded = false;
+          pageModules.pagination.pagination.place(pageModules.pagination.pagination.earliestPage, pageModules.pagination.pagination.currentPage, browseState.photos.length);
           document.dispatchEvent(new CustomEvent('lightbox:photochanged', {
             detail: {photoId: vireoLightboxSession.requestedPhotoId()}
           }));
@@ -360,7 +360,7 @@ def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
         ),
     )
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && pageModules.pagination.pagination.total > browseState.photos.length")
     boundary_id = page.evaluate("browseState.photos[1].id")
     page.evaluate(
         """() => {
@@ -381,7 +381,7 @@ def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
     page.wait_for_function(
         "photoId => vireoLightboxSession.displayedPhotoId() === photoId", arg=boundary_id
     )
-    page.wait_for_function("browseState.loading === true && !!window.__releaseNextPage")
+    page.wait_for_function("pageModules.pagination.pagination.loading === true && !!window.__releaseNextPage")
     page.evaluate("lightboxNav(1)")
     original_session = page.evaluate("pageModules.lightbox.browseLightboxSession")
 
@@ -399,7 +399,7 @@ def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
     assert page.evaluate("pageModules.lightbox.browseLightboxSession") == original_session + 1
 
     page.evaluate("window.__releaseNextPage()")
-    page.wait_for_function("browseState.loading === false && browseState.photos.length > 2", timeout=5000)
+    page.wait_for_function("pageModules.pagination.pagination.loading === false && browseState.photos.length > 2", timeout=5000)
     page.wait_for_timeout(100)
     assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == boundary_id
 
@@ -438,9 +438,9 @@ def test_browse_lightbox_close_selects_current_photo(live_server, page):
     expect(page.locator("#lightboxOverlay")).not_to_have_class(
         "lightbox-overlay active"
     )
-    assert page.evaluate("browseState.selectedPhotoId") == second_id
-    assert page.evaluate("browseState.selectedIndex") == 1
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == second_id
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == 1
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
     expect(cards.nth(1)).to_have_class(re.compile(r"\bselected\b"))
     expect(cards.first).not_to_have_class(re.compile(r"\bselected\b"))
 
@@ -497,9 +497,9 @@ def test_browse_lightbox_close_during_navigation_returns_to_visible_photo(
     expect(page.locator("#lightboxOverlay")).not_to_have_class(
         "lightbox-overlay active"
     )
-    assert page.evaluate("browseState.selectedPhotoId") == ids["first"]
-    assert page.evaluate("browseState.selectedIndex") == 0
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == ids["first"]
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == 0
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
     expect(cards.first).to_have_class(re.compile(r"\bselected\b"))
     expect(cards.nth(1)).not_to_have_class(re.compile(r"\bselected\b"))
 
@@ -552,7 +552,7 @@ def test_browse_lightbox_delete_only_photo_does_not_reselect_it(
                     photosStillHasDeleted:
                         typeof browseState.photos !== 'undefined' &&
                         browseState.photos.some(p => p.id === event.detail.photoId),
-                    selectedPhotoIdAtClose: browseState.selectedPhotoId,
+                    selectedPhotoIdAtClose: pageModules.selectionState.selection.focusedPhotoId,
                 });
             }, { once: true });
             window.lightboxDelete();
@@ -570,7 +570,7 @@ def test_browse_lightbox_delete_only_photo_does_not_reselect_it(
     # When lightbox:closed fires, `photos` must already have the deleted
     # entry filtered out; otherwise the reconciliation re-selects it.
     assert observed["photosStillHasDeleted"] is False
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     assert page.evaluate("browseState.photos.length") == initial_count - 1
 
 
@@ -600,7 +600,7 @@ def test_browse_lightbox_close_skips_reload_when_photo_unchanged(
     # Focus the first photo via a normal click, which runs `loadDetail` once.
     first_card.click()
     page.wait_for_function(
-        "photoId => browseState.selectedPhotoId === photoId", arg=first_id
+        "photoId => pageModules.selectionState.selection.focusedPhotoId === photoId", arg=first_id
     )
 
     # loadDetail re-renders the detail panel; mark its rendered rating so a
@@ -613,7 +613,7 @@ def test_browse_lightbox_close_skips_reload_when_photo_unchanged(
             // Committed identity is set synchronously inside openLightbox once
             // the image commits; capture whatever is committed at close time.
             closeLightbox();
-            return { selectedPhotoId: browseState.selectedPhotoId, selectedIndex: browseState.selectedIndex };
+            return { selectedPhotoId: pageModules.selectionState.selection.focusedPhotoId, selectedIndex: pageModules.selectionState.selection.anchorIndex };
         }""",
         [first_id, first_card.get_attribute("data-filename")],
     )
@@ -1665,11 +1665,11 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
 
     target_card = page.locator(f'.grid-card[data-id="{target_id}"]')
     expect(target_card).to_be_visible(timeout=5000)
-    assert page.evaluate("browseState.loading") is False
+    assert page.evaluate("pageModules.pagination.pagination.loading") is False
     assert target_queries == []
 
     initial_ids = page.evaluate("browseState.photos.map(function(p) { return p.id; })")
-    paging = page.evaluate("({earliestPage: browseState.earliestPage, perPage: browseState.perPage})")
+    paging = page.evaluate("({earliestPage: pageModules.pagination.pagination.earliestPage, perPage: pageModules.pagination.pagination.perPage})")
     initial_page = paging["earliestPage"]
     assert initial_page > 1
     position_summary = page.evaluate(
@@ -1691,10 +1691,10 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
         f"{offset:,} earlier photos"
     )
     expect(page.locator("#loadPreviousPhotosText")).to_contain_text(f"#{offset + 1:,}")
-    assert page.evaluate("pageModules.loading.loadedWindowOffset()") == offset
+    assert page.evaluate("pageModules.pagination.pagination.offset") == offset
     skeletons = page.evaluate("document.querySelectorAll('#gridTail .skel-card').length")
     assert skeletons <= max(
-        0, page.evaluate("browseState.totalPhotos") - offset - len(initial_ids)
+        0, page.evaluate("pageModules.pagination.pagination.total") - offset - len(initial_ids)
     )
 
     # Reaching the upper boundary extends the focused window backward without
@@ -1732,7 +1732,7 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
           container.dispatchEvent(new Event('scroll'));
         }"""
     )
-    page.wait_for_function("browseState.loading === true && !!window.__releasePreviousPage")
+    page.wait_for_function("pageModules.pagination.pagination.loading === true && !!window.__releasePreviousPage")
     page.evaluate(
         """() => {
           const container = document.getElementById('gridContainer');
@@ -1745,7 +1745,7 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
     )
     page.evaluate("window.__releasePreviousPage()")
     page.wait_for_function(
-        "expected => browseState.earliestPage === expected && browseState.loading === false",
+        "expected => pageModules.pagination.pagination.earliestPage === expected && pageModules.pagination.pagination.loading === false",
         arg=initial_page - 1,
         timeout=5000,
     )
@@ -1759,7 +1759,7 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
     assert abs(new_first_top - response_time_top) < 2
 
     page.locator("#loadPreviousPhotosButton").click()
-    page.wait_for_function("browseState.earliestPage === 1 && browseState.browseDatasetReady", timeout=5000)
+    page.wait_for_function("pageModules.pagination.pagination.earliestPage === 1 && pageModules.pagination.pagination.ready", timeout=5000)
     restarted_ids = page.evaluate("browseState.photos.map(function(p) { return p.id; })")
     assert restarted_ids
     assert restarted_ids != initial_ids
@@ -1775,7 +1775,7 @@ def test_browse_photo_id_deep_link_invalidates_older_workspace_load(live_server,
     target_id = live_server["data"]["photos"][4]
 
     page.goto(f"{live_server['url']}/browse")
-    page.wait_for_function("browseState.browseDatasetReady", timeout=5000)
+    page.wait_for_function("pageModules.pagination.pagination.ready", timeout=5000)
 
     result = page.evaluate(
         """async ({targetId, folderId}) => {
@@ -1818,6 +1818,7 @@ def test_browse_photo_id_deep_link_invalidates_older_workspace_load(live_server,
 
             return {
               activeFolderId: browseState.activeFolderId,
+              loading: pageModules.pagination.pagination.loading,
               ids: browseState.photos.map(function(photo) { return photo.id; }),
             };
           } finally {
@@ -1830,6 +1831,7 @@ def test_browse_photo_id_deep_link_invalidates_older_workspace_load(live_server,
     assert result["activeFolderId"] == folder_b
     assert target_id in result["ids"]
     assert -999 not in result["ids"]
+    assert result["loading"] is False
 
 
 # Gate two requests inside the page so the deep-link race is deterministic:
@@ -1934,7 +1936,7 @@ def test_browse_photo_id_deep_link_discards_loads_started_before_folder_switch(
     expect(page.locator(f'.grid-card[data-id="{target_id}"]')).to_be_visible(
         timeout=5000
     )
-    page.wait_for_function("browseState.browseDatasetReady === true")
+    page.wait_for_function("pageModules.pagination.pagination.ready === true")
 
     # Now deliver the abandoned workspace load.
     page.evaluate("window.__vireoGate.queryRelease()")
@@ -1959,15 +1961,15 @@ def test_browse_photo_id_deep_link_discards_loads_started_before_folder_switch(
 
     # Transparency invariant: the banner's count must describe the window that
     # is actually on screen, not the abandoned one.
-    offset = page.evaluate("pageModules.loading.loadedWindowOffset()")
-    assert offset == page.evaluate("(browseState.earliestPage - 1) * browseState.perPage")
+    offset = page.evaluate("pageModules.pagination.pagination.offset")
+    assert offset == page.evaluate("(pageModules.pagination.pagination.earliestPage - 1) * pageModules.pagination.pagination.perPage")
     assert offset > 0
     expect(page.locator("#loadPreviousPhotosBanner")).to_be_visible()
     expect(page.locator("#loadPreviousPhotosText")).to_contain_text(
         f"{offset:,} earlier photos"
     )
     expect(page.locator("#loadPreviousPhotosText")).to_contain_text(f"#{offset + 1:,}")
-    assert page.evaluate("browseState.totalPhotos") == len(folder_b_ids)
+    assert page.evaluate("pageModules.pagination.pagination.total") == len(folder_b_ids)
 
 
 def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
@@ -4858,29 +4860,29 @@ def test_browse_image_hotkeys_preserve_selection_and_shortcut_remaps(live_server
 
     selected = page.evaluate(
         """() => {
-            browseState.selectedPhotos.clear();
-            browseState.selectedPhotoId = null;
-            browseState.selectedIndex = -1;
-            browseState.selectedPhotos.add(browseState.photos[0].id);
-            browseState.selectedPhotos.add(browseState.photos[1].id);
+            pageModules.selectionState.selection.clearBatch();
+            pageModules.selectionState.selection.focus(null);
+            pageModules.selectionState.selection.reanchor(-1);
+            pageModules.selectionState.selection.addToBatch(browseState.photos[0].id);
+            pageModules.selectionState.selection.addToBatch(browseState.photos[1].id);
             pageModules.grid.renderGrid();
             pageModules.batchBar.updateBatchBar();
-            return Array.from(browseState.selectedPhotos).sort((a, b) => a - b);
+            return Array.from(pageModules.selectionState.selection.batchIds).sort((a, b) => a - b);
         }"""
     )
 
     page.keyboard.press("e")
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
-    assert page.evaluate("Array.from(browseState.selectedPhotos).sort((a, b) => a - b)") == selected
+    assert page.evaluate("Array.from(pageModules.selectionState.selection.batchIds).sort((a, b) => a - b)") == selected
     page.keyboard.press("g")
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay")
-    assert page.evaluate("Array.from(browseState.selectedPhotos).sort((a, b) => a - b)") == selected
+    assert page.evaluate("Array.from(pageModules.selectionState.selection.batchIds).sort((a, b) => a - b)") == selected
 
     page.evaluate(
         """() => {
-            browseState.selectedPhotos.clear();
-            browseState.selectedPhotoId = browseState.photos[0].id;
-            browseState.selectedIndex = 0;
+            pageModules.selectionState.selection.clearBatch();
+            pageModules.selectionState.selection.focus(browseState.photos[0].id);
+            pageModules.selectionState.selection.reanchor(0);
             browseState.photos[0].flag = null;
             pageModules.config._shortcuts.flag = 'e';
             pageModules.grid.renderGrid();

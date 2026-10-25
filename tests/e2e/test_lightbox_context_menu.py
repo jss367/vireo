@@ -89,8 +89,8 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     current_id = page.evaluate("vireoLightboxSession.requestedPhotoId()")
     page.evaluate(
         """() => {
-            browseState.selectedPhotos.clear();
-            browseState.selectedPhotoId = vireoLightboxSession.requestedPhotoId();
+            pageModules.selectionState.selection.clearBatch();
+            pageModules.selectionState.selection.focus(vireoLightboxSession.requestedPhotoId());
             window.__exportRequest = null;
             window.__resolveExport = null;
             window.__rejectPreflight = true;

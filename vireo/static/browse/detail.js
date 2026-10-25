@@ -1,6 +1,7 @@
-import {renderSpeciesProvenance} from './species-provenance.js';
 /* Browse: single-photo detail panel, metadata, summary panel, undo/redo. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
+import {renderSpeciesProvenance} from './species-provenance.js';
 import { searchLaneSeq, state } from './state.js';
 import {
   VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
@@ -47,7 +48,7 @@ export async function loadDetail(/** @type {number} */ id) {
   // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
   // stays A, so both the sync class removal below and the post-await
   // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
-  if (state.selectedPhotos.size > 1) return;
+  if (selection.batchIds.size > 1) return;
   panelRequests.detailPredictions.invalidate();
   /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.add('hidden');
   var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
@@ -75,7 +76,7 @@ export async function loadDetail(/** @type {number} */ id) {
     // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
     // promote the selection to multi. The batch inspector is already rendered;
     // don't clobber it with this stale single-photo response.
-    if (state.selectedPhotoId === id && state.selectedPhotos.size <= 1) {
+    if (selection.focusedPhotoId === id && selection.batchIds.size <= 1) {
       renderDetail(photo);
       if (detail) detail.classList.add('visible');
       // Fetched separately from /api/photos so the panel renders the same
@@ -415,8 +416,8 @@ export function abandonDetailFocusForBatch() {
 export function closeDetail() {
   state.anchorRestoreEpoch++;
   hideDetailPanel();
-  state.selectedPhotoId = null;
-  state.selectedIndex = -1;
+  selection.focus(null);
+  selection.reanchor(-1);
   // Drop any lingering EXIF suggestion attached to the closed detail photo.
   // Without this, the element keeps its data-photo-id and Accept button; a
   // later Ctrl+A (or any batch that still contains that photo) would satisfy

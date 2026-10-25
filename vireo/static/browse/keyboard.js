@@ -1,5 +1,7 @@
 /* Browse: keyboard shortcuts and grid arrow-key navigation. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   closeLightbox, closePanoramaModal, exitLightboxFullscreen, matchesShortcut,
@@ -121,8 +123,8 @@ document.addEventListener('keydown', function(e) {
   // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
   // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
   // the bar advertises "1 selected" after cmd-click reduces the set to one.
-  var useBatch = state.selectedPhotos.size >= 1;
-  var hasActive = useBatch || state.selectedPhotoId;
+  var useBatch = selection.batchIds.size >= 1;
+  var hasActive = useBatch || selection.focusedPhotoId;
 
   if (matchesShortcut(e, _shortcuts.compare || 'c')) {
     var compareIds = getActiveSelection();
@@ -138,7 +140,7 @@ document.addEventListener('keydown', function(e) {
     for (var r = 0; r <= 5; r++) {
       if (matchesShortcut(e, _shortcuts['rate_' + r])) {
         if (useBatch) batchSetRating(r);
-        else if (state.selectedPhotoId != null) setRating(state.selectedPhotoId, r);
+        else if (selection.focusedPhotoId != null) setRating(selection.focusedPhotoId, r);
         return;
       }
     }
@@ -199,14 +201,14 @@ export function getBrowseGridColumnCount() {
 }
 
 export async function moveBrowseSelection(/** @type {number} */ delta, /** @type {KeyboardEvent | undefined} */ e = undefined) {
-  var nextIndex = state.selectedIndex < 0 && delta > 0 ? 0 : state.selectedIndex + delta;
+  var nextIndex = selection.anchorIndex < 0 && delta > 0 ? 0 : selection.anchorIndex + delta;
   while (true) {
     while (nextIndex >= 0 && nextIndex < state.photos.length && state.photos[nextIndex] &&
            !browsePhotoIsAvailable(/** @type {BrowsePhoto} */ (state.photos[nextIndex]))) {
       nextIndex += delta > 0 ? 1 : -1;
     }
     if (nextIndex >= 0 && nextIndex < state.photos.length && state.photos[nextIndex]) break;
-    if (delta <= 0 || nextIndex < 0 || state.allLoaded) return;
+    if (delta <= 0 || nextIndex < 0 || pagination.allLoaded) return;
 
     // Skipping trailing offline cards can move us beyond the loaded window.
     // Fetch the next page and resume the skip until an available row appears
@@ -222,7 +224,7 @@ export async function moveBrowseSelection(/** @type {number} */ delta, /** @type
   };
   var photo = state.photos[nextIndex]; if (!photo) return;
   selectPhoto(selectionEvent, photo.id, nextIndex);
-  scrollToCard(state.selectedIndex);
+  scrollToCard(selection.anchorIndex);
 }
 
 export function scrollToCard(/** @type {number} */ idx) {

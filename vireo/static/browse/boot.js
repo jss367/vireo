@@ -4,7 +4,9 @@
    the page (bootstrap, folder-health subscription, infinite scroll, photo deep
    link). Every module it imports has been evaluated by the time its body
    runs. ES module (see browse/README.md). */
-import { setBrowseTotals, state } from './state.js';
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
+import { state } from './state.js';
 import { claimBrowseWindow } from './window-requests.js';
 import {
   VireoBrowseCompare, VireoFilter, VireoViewPreferences, _reconcileMissingFoldersInitSnapshot,
@@ -35,7 +37,7 @@ import { getGridCard, renderGrid } from './grid.js';
 import { moveBrowseSelection } from './keyboard.js';
 import { openBrowseShortcutPhoto, removeDeletedLightboxPhoto } from './lightbox.js';
 import {
-  loadedWindowOffset, onBrowseFilterChange, resetAndLoad,
+  onBrowseFilterChange, resetAndLoad,
   updatePreviousPhotosButton,
 } from './loading.js';
 import { afterHistoryChange } from './prediction-panels.js';
@@ -67,7 +69,7 @@ import { updateFilterSummary, updateThumbSize } from './view-controls.js';
 // scripts parsed.
 registerPageHooks({
   getActiveSelection: getActiveSelection,
-  getSelectedPhotoId: function() { return state.selectedPhotoId; },
+  getSelectedPhotoId: function() { return selection.focusedPhotoId; },
   getPhotos: function() { return state.photos; },
   getDetailPhotoId: function() { return state.detailPhotoId; },
   openBrowseShortcutPhoto: openBrowseShortcutPhoto,
@@ -130,7 +132,7 @@ async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
-  state.loading = true;
+  var finishLoad = pagination.beginLoad();
   var bootstrapSucceeded = false;
   // Declared out here so the finally-region guard below can read it even
   // if /api/browse/init throws before the assignment inside the try.
@@ -192,7 +194,7 @@ async function bootstrapBrowse() {
     // The combined init endpoint still needs the collection id for first paint
     // in either case.
     if (state.activeCollectionId) initParams.set('collection_id', String(state.activeCollectionId));
-    initParams.set('per_page', String(state.perPage));
+    initParams.set('per_page', String(pagination.perPage));
     var missingSnapshotVersionAtInitStart =
       typeof missingFoldersSnapshotVersion() !== 'undefined'
         ? missingFoldersSnapshotVersion()
@@ -241,14 +243,11 @@ async function bootstrapBrowse() {
       if (bootstrapWindowIsCurrent()) {
         // Populate everything from a single response
         state.photos = data.photos || [];
-        setBrowseTotals(data);
-        state.currentPage = 2; // next page to load
-        state.earliestPage = 1; // bootstrap always starts at the top of the dataset
-        if (state.photos.length >= state.totalPhotos) state.allLoaded = true;
+        pagination.setTotals(data);
+        pagination.place(1, 2, state.photos.length);
 
         renderGrid();
         updatePreviousPhotosButton();
-        state.browseDatasetReady = true;
         updateFilterSummary();
         hydrateColorLabelsForRenderedPage(bootstrapWindowIsCurrent);
       }
@@ -305,7 +304,7 @@ async function bootstrapBrowse() {
       // ever running through resetAndLoad, so the grid didn't match the
       // visible chips until the user edited them (Codex review r3624766665).
       var scopeChanged = state.browseScopeGen !== bootstrapScopeGen;
-      VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
+      VireoFilter.setResultTotal(pagination.underlyingTotal);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
       // dashboard-scoped (?dashboard_scope=1&collection_id=..., composable).
@@ -419,7 +418,7 @@ async function bootstrapBrowse() {
   // sort change claimed the window mid-init: its loadPhotos owns ``loading``
   // and releases it in its own finally.
   if (!healthChangedDuringInit && bootstrapWindowIsCurrent()) {
-    state.loading = false;
+    finishLoad();
     if (bootstrapSucceeded) {
       rearmInfiniteScrollObserver();
       // Make sure a tall viewport still gets its second page even when the
@@ -461,7 +460,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   var wasSuperseded = false;
 
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
-  state.loading = true;
+  var finishLoad = pagination.beginLoad();
   var deepLinkLoaded = false;
   var isDeepLinkDatasetCurrent = /** @type {(() => boolean) | null} */ (null);
   try {
@@ -474,7 +473,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       // (its loadPhotos would then race the intersection observer). The
       // isDeepLinkHealthCurrent check above already returns early in that
       // case, so reaching here means it's safe to release.
-      state.loading = false;
+      finishLoad();
       return wasSuperseded;
     }
 
@@ -489,22 +488,17 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     // is no longer on screen). Claiming discards every load started before
     // this point (Codex review r3792769108).
     var deepLinkWindowIsCurrent = claimBrowseWindow();
-
+    finishLoad = pagination.beginLoad();
     // Navigate to the photo's folder
     state.activeFolderId = photo.folder_id;
     state.activeKeyword = null;
     state.activeCollectionId = null;
-    state.browseDatasetReady = false;
+    pagination.reset();
     state.photos = [];
-    state.currentPage = 1;
-    state.allLoaded = false;
-    state.earliestPage = 1;
     updatePreviousPhotosButton();
     // Same hazard as filterByCollection: leaving selectedPhotos populated
     // across a dataset switch leaves the batch bar armed against stale ids.
-    state.selectedPhotos.clear();
-    state.selectedPhotoId = null;
-    state.selectedIndex = -1;
+    selection.clear();
     closeDetail();
     /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
 
@@ -530,7 +524,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
         : null;
     var initParams = new URLSearchParams();
     initParams.set('folder_id', photo.folder_id);
-    initParams.set('per_page', String(state.perPage));
+    initParams.set('per_page', String(pagination.perPage));
     initParams.set('sort', deepLinkSort);
     initParams.set('focus_photo_id', String(photoId));
     var initData = await safeFetch('/api/browse/init?' + initParams.toString(), {}, { toast: false });
@@ -569,15 +563,12 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       renderCollectionList(initData.collections || []);
       loadCollectionCounts();
       state.photos = initData.photos || [];
-      setBrowseTotals(initData);
+      pagination.setTotals(initData);
       var focusPage = parseInt(initData.focus_page, 10);
       var hasFocusPage = Number.isInteger(focusPage) && focusPage >= 1;
-      state.earliestPage = hasFocusPage ? focusPage : 1;
-      state.currentPage = hasFocusPage ? focusPage + 1 : 2;
-      if (loadedWindowOffset() + state.photos.length >= state.totalPhotos) state.allLoaded = true;
+      pagination.place(hasFocusPage ? focusPage : 1, hasFocusPage ? focusPage + 1 : 2, state.photos.length);
       renderGrid();
       updatePreviousPhotosButton();
-      state.browseDatasetReady = true;
       /** @type {HTMLElement} */ (document.getElementById('loadingState')).style.display = 'none';
       deepLinkLoaded = true;
       hydrateColorLabelsForRenderedPage(function() {
@@ -595,7 +586,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     if (!el) {
       // loadPhotos() honors the setup guard, so release it before the explicit
       // compatibility/reconciliation scan or it would return immediately.
-      state.loading = false;
+      finishLoad();
       el = await loadUntilPhotoRendered(photoId, function() {
         return isDeepLinkHealthCurrent() && datasetIsCurrent();
       });
@@ -637,7 +628,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
           };
         },
       }).then(function() {
-        VireoFilter.setResultTotal(state.totalUnderlyingPhotos);
+        VireoFilter.setResultTotal(pagination.underlyingTotal);
         if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
       }).catch(function() {});
     }
@@ -649,7 +640,7 @@ export async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // (Codex review r3686696351).
   if (isDeepLinkHealthCurrent() &&
       (!isDeepLinkDatasetCurrent || isDeepLinkDatasetCurrent())) {
-    state.loading = false;
+    finishLoad();
     if (deepLinkLoaded) {
       rearmInfiniteScrollObserver();
       requestAnimationFrame(ensureViewportHydrated);

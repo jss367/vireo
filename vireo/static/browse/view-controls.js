@@ -1,10 +1,12 @@
 /* Browse: toolbar view controls (filters, sort, stacks, thumb size) and result position. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { VireoFilter } from './shared.js';
 import { loadCalendarData } from './calendar.js';
 import { renderGrid, updateGridTail } from './grid.js';
-import { loadedWindowOffset, resetAndLoad } from './loading.js';
+import { resetAndLoad } from './loading.js';
 import { browseStacksEnabled } from './stacks.js';
 
 export function hasActiveBrowseFilter() {
@@ -39,7 +41,7 @@ export function onSortChanged() {
   reloadBrowseResults({
     preserveAnchor: true,
     focusAnchor: true,
-    preserveViewport: state.selectedPhotos.size > 0,
+    preserveViewport: selection.batchIds.size > 0,
   });
 }
 
@@ -78,20 +80,20 @@ export function reloadBrowseResults(/** @type {BrowseReloadOptions | undefined} 
 
 export function updateScrollPosition() {
   var el = /** @type {HTMLElement} */ (document.getElementById('filterSummary'));
-  var positionOffset = loadedWindowOffset();
-  var stackedTotals = state.totalPhotos.toLocaleString() + ' items · '
-    + state.totalBrowseStacks.toLocaleString() + (state.totalBrowseStacks === 1 ? ' stack · ' : ' stacks · ')
-    + state.totalUnderlyingPhotos.toLocaleString() + ' photos';
+  var positionOffset = pagination.offset;
+  var stackedTotals = pagination.total.toLocaleString() + ' items · '
+    + pagination.stackCount.toLocaleString() + (pagination.stackCount === 1 ? ' stack · ' : ' stacks · ')
+    + pagination.underlyingTotal.toLocaleString() + ' photos';
   var resultLabel = function(/** @type {number | string} */ position) {
     if (browseStacksEnabled()) {
       return position + ' of ' + stackedTotals;
     }
-    return position + ' of ' + state.totalPhotos.toLocaleString();
+    return position + ' of ' + pagination.total.toLocaleString();
   };
   if (state.photos.length === 0) {
     el.textContent = browseStacksEnabled()
       ? stackedTotals
-      : state.totalPhotos.toLocaleString() + ' photos';
+      : pagination.total.toLocaleString() + ' photos';
     return;
   }
   // Find which cards are visible in the viewport
@@ -99,7 +101,7 @@ export function updateScrollPosition() {
   if (cards.length === 0) {
     el.textContent = browseStacksEnabled()
       ? stackedTotals
-      : state.totalPhotos.toLocaleString() + ' photos';
+      : pagination.total.toLocaleString() + ' photos';
     return;
   }
   var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
@@ -114,7 +116,7 @@ export function updateScrollPosition() {
     var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
     var skeletonCount = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#gridTail .skel-card')).length;
     var representedPhotos = Math.min(
-      state.totalPhotos - positionOffset,
+      pagination.total - positionOffset,
       state.photos.length + skeletonCount
     );
     var approx = positionOffset + Math.max(

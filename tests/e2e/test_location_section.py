@@ -577,7 +577,7 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     expect(page.locator("#locationExifSuggestion button.accept-btn")).to_be_visible()
     page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
     page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => browseState.selectedPhotos.size === 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size === 3")
 
     page.locator("#locationExifSuggestion button.accept-btn").click()
     page.wait_for_function(
@@ -639,20 +639,20 @@ def test_exif_suggestion_clears_when_anchor_leaves_selection(
 
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
 
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 1 && !pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
 
     page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && !browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && !pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
 
@@ -719,7 +719,7 @@ def test_exif_suggestion_cleared_by_filled_location_render(
     ) == ""
 
     page.locator(f".grid-card[data-id='{photo_a}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => browseState.selectedPhotos.size === 2")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size === 2")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -792,17 +792,17 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_anchor_dropped(
     # While the response is held, drive the anchor-dropped batch sequence.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 1 && !pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
     page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && !browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && !pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
 
@@ -942,7 +942,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_location_saved(
     # preserveExifSuggestion; if the fix didn't hold, the preserved
     # (stale) suggestion for A would become visible here.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => browseState.selectedPhotos.size === 2")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size === 2")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1019,13 +1019,13 @@ def test_exif_suggestion_cleared_by_close_detail(
     # closeDetail() path (Escape would also call clearSelection and empty
     # selectedPhotos, masking the bug).
     page.locator(".detail-close").click()
-    page.wait_for_function("() => browseState.selectedPhotoId == null")
+    page.wait_for_function("() => pageModules.selectionState.selection.focusedPhotoId == null")
 
     # Select All — includes the closed anchor, so the batch inspector opens
     # with A in ids. Without the fix, keepSugg would be true and A's Accept
     # line would flash back into the batch panel.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1096,7 +1096,7 @@ def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
     # is preserved by design.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
@@ -1108,8 +1108,8 @@ def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
     # into the next batch that includes A.
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id) && "
-        "browseState.selectedPhotoId == null",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 1 && !pageModules.selectionState.selection.batchIds.has(id) && "
+        "pageModules.selectionState.selection.focusedPhotoId == null",
         arg=anchor,
     )
 
@@ -1117,7 +1117,7 @@ def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
     # with A back in ids. Without the fix, keepSugg would be true and A's
     # Accept line would flash back into the batch panel.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1183,7 +1183,7 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # Grow to batch {A, B} — A is still the focused anchor.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
@@ -1193,7 +1193,7 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # closeDetail and the selectPhoto deselect scrub, so it needs its own.
     page.evaluate("() => pageModules.selection.clearSelection()")
     page.wait_for_function(
-        "() => browseState.selectedPhotos.size === 0 && browseState.selectedPhotoId == null"
+        "() => pageModules.selectionState.selection.batchIds.size === 0 && pageModules.selectionState.selection.focusedPhotoId == null"
     )
 
     # Immediately after Clear, the suggestion must already be scrubbed —
@@ -1210,7 +1210,7 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # keepSugg would be true (owner A is in the new ids) and A's Accept line
     # would flash back into the batch panel.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1289,13 +1289,13 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_close_detail(
     # Close the detail panel via the × button — the real closeDetail()
     # path. Escape would also clear selectedPhotos, hiding the bug.
     page.locator(".detail-close").click()
-    page.wait_for_function("() => browseState.selectedPhotoId == null")
+    page.wait_for_function("() => pageModules.selectionState.selection.focusedPhotoId == null")
     # The scrub null-ed the ambient owner pointer synchronously.
     assert page.evaluate("() => browseState.detailPhotoId") is None
 
     # Select All — the departed anchor is back in the selection.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     # Now release the held reverse-geocode response. Without the fix, the
     # completion path would repaint A's Accept line into the batch panel
@@ -1385,7 +1385,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_clear(
     # Grow to batch {A, B} — A is still the focused anchor.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
 
@@ -1394,13 +1394,13 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_clear(
     # bypasses closeDetail entirely, so it needs its own scrubs.
     page.evaluate("() => pageModules.selection.clearSelection()")
     page.wait_for_function(
-        "() => browseState.selectedPhotos.size === 0 && browseState.selectedPhotoId == null"
+        "() => pageModules.selectionState.selection.batchIds.size === 0 && pageModules.selectionState.selection.focusedPhotoId == null"
     )
     assert page.evaluate("() => browseState.detailPhotoId") is None
 
     # Select All — A is back in the batch.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     # Release the held reverse-geocode response.
     held_routes[0].fulfill(
@@ -1492,7 +1492,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_location_s
     # pass when the held response resolves.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
+        "(id) => pageModules.selectionState.selection.batchIds.size === 2 && pageModules.selectionState.selection.batchIds.has(id)",
         arg=anchor,
     )
 
@@ -1510,7 +1510,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_location_s
     # Wait for the batch save to complete: A and B both persisted, and the
     # batch inspector has re-rendered (so #locationFilled is hidden again).
     page.wait_for_function(
-        "() => browseState.selectedPhotos.size === 2"
+        "() => pageModules.selectionState.selection.batchIds.size === 2"
         " && document.getElementById('locationFilled').hidden === true"
     )
     for _ in range(50):
@@ -1668,7 +1668,7 @@ def test_exif_suggestion_cleared_by_loaddetail_before_select_all(
     # the Select All ids) and A's Accept line would flash back into the
     # batch inspector.
     page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1748,7 +1748,7 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     _wait_for_detail_loaded(page)
     page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
     page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => browseState.selectedPhotos.size === 3")
+    page.wait_for_function("() => pageModules.selectionState.selection.batchIds.size === 3")
 
     inp = page.locator("#locationInput")
     inp.fill("the meadow")
@@ -1795,8 +1795,8 @@ def test_location_applies_to_selection_larger_than_batch_cap(live_server, page):
     # lazy-loads far fewer than that, and multi-select is covered elsewhere.
     # What's under test is what the save path does with a big selection.
     page.evaluate(
-        "(ids) => { browseState.selectedPhotos.clear(); ids.forEach(function(id) "
-        "{ browseState.selectedPhotos.add(id); }); }",
+        "(ids) => { pageModules.selectionState.selection.clearBatch(); ids.forEach(function(id) "
+        "{ pageModules.selectionState.selection.addToBatch(id); }); }",
         photo_ids,
     )
     page.evaluate("() => pageModules.location._submitLocationText('Mount Laguna')")

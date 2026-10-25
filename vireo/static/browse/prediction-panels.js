@@ -1,5 +1,6 @@
 /* Browse: prediction panels for the detail and selection views. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { PREDICTION_COLLAPSE_AT, state } from './state.js';
 import { escapeAttr, escapeHtml, openLightbox, safeFetch, showToast } from './shared.js';
 import { _refreshBrowseKeywordState } from './batch-actions.js';
@@ -597,7 +598,7 @@ function refreshBrowseSidebarPanels() {
 export async function afterHistoryChange() {
   // History can change membership and ordering, including photos outside the
   // loaded page. Re-run the current query for both toolbar and keyboard actions.
-  var previousSelection = new Set(state.selectedPhotos);
+  var previousSelection = new Set(selection.batchIds);
   var cachedMemberIds = new Set();
   Object.values(state.browseStackMembers).forEach(function(members) {
     members.forEach(function(photo) { cachedMemberIds.add(photo.id); });
@@ -643,7 +644,7 @@ export async function afterHistoryChange() {
     // Restore only selections that still belong to the refreshed query.
     previousSelection.forEach(function(id) {
       var photo = findBrowsePhoto(id);
-      if (photo && browsePhotoIsAvailable(photo)) state.selectedPhotos.add(id);
+      if (photo && browsePhotoIsAvailable(photo)) selection.addToBatch(id);
     });
   }
   refreshCardSelectionVisuals();

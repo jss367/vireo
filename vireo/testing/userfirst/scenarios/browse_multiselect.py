@@ -47,7 +47,7 @@ def run(session):
     )
     session.screenshot("after-multiselect")
 
-    sel_size = session.eval("(async () => (await import('/static/browse/state.js')).state.selectedPhotos.size)()")
+    sel_size = session.eval("(async () => (await import('/static/browse/selection-state.js')).selection.batchIds.size)()")
     session.assert_that(
         sel_size == 3,
         f"selectedPhotos should contain all three clicked photos; got size={sel_size}",

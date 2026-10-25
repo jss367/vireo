@@ -37,6 +37,8 @@
     "../vireo/static/browse/selection-panel-state.js",
     "../vireo/static/browse/selection-panel.js",
     "../vireo/static/browse/selection.js",
+    "../vireo/static/browse/selection-state.js",
+    "../vireo/static/browse/pagination.js",
     "../vireo/static/browse/shared.js",
     "../vireo/static/browse/sidebar-collections.js",
     "../vireo/static/browse/sidebar-folders.js",

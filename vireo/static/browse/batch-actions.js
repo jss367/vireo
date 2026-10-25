@@ -1,5 +1,7 @@
 /* Browse: batch edits over the selection (rating, flag, keywords, delete, collections, capture time, iNaturalist). ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoDialog, closeCommandPalette, closeHelpModal, closeLightbox, closeReportModal,
@@ -323,7 +325,7 @@ export async function batchSetFlag(/** @type {NonNullable<BrowsePhoto['flag']>} 
   await reconcileBrowseStackCovers(ids);
   refreshGridCards(ids);
   refreshExpandedBrowseStackMembers(ids);
-  if (state.selectedPhotoId != null && ids.indexOf(state.selectedPhotoId) !== -1) {
+  if (selection.focusedPhotoId != null && ids.indexOf(selection.focusedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
   _refreshBatchInspectorIfActive();
@@ -484,9 +486,7 @@ export async function batchDelete() {
     // so the logical item count cannot be updated arithmetically. Reload the
     // current scope from the authoritative projection.
     if (browseStacksEnabled()) {
-      state.selectedPhotos.clear();
-      state.selectedPhotoId = null;
-      state.selectedIndex = -1;
+      selection.clear();
       updateBatchBar();
       resetAndLoad({preserveCollection: true});
       loadSummary();
@@ -494,13 +494,12 @@ export async function batchDelete() {
       return;
     }
     state.photos = state.photos.filter(function(p) { return !deletedSet.has(p.id); });
-    state.totalPhotos = Math.max(0, state.totalPhotos - (data.deleted || 0));
-    state.totalUnderlyingPhotos = Math.max(0, state.totalUnderlyingPhotos - (data.deleted || 0));
-    state.selectedPhotos = new Set(Array.from(state.selectedPhotos).filter(function(id) {
+    pagination.removePhotos(data.deleted || 0);
+    selection.replaceBatch(Array.from(selection.batchIds).filter(function(id) {
       return !deletedSet.has(id);
     }));
-    if (state.selectedPhotoId != null && deletedSet.has(state.selectedPhotoId)) {
-      state.selectedPhotoId = null;
+    if (selection.focusedPhotoId != null && deletedSet.has(selection.focusedPhotoId)) {
+      selection.focus(null);
     }
     // Re-sync the batch bar (count, compare/best/burst buttons, selection
     // inspector) against the shrunk selection. Just hiding the bar when the

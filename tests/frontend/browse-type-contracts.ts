@@ -8,8 +8,23 @@ import {
 } from '../../vireo/static/browse/prediction-panels.js';
 import { selectionPanel } from '../../vireo/static/browse/selection-panel-state.js';
 import { claimBrowseWindow, observeBrowseWindow } from '../../vireo/static/browse/window-requests.js';
+import {selection} from '../../vireo/static/browse/selection-state.js';
+import {pagination} from '../../vireo/static/browse/pagination.js';
 
 export function verifyBrowseContracts() {
+  selection.selectSingle(1, 0);
+  selection.selectBatch([1, 2], 0);
+  // @ts-expect-error Membership is a read-only view.
+  selection.batchIds.add(3);
+  // @ts-expect-error Focus changes go through selection transitions.
+  selection.focusedPhotoId = 3;
+  // @ts-expect-error Selection ids are numeric.
+  selection.replaceBatch(['1']);
+  // @ts-expect-error Pagination counters cannot be assigned.
+  pagination.currentPage = 3;
+  // @ts-expect-error Page sizes must be numeric.
+  pagination.configure('50');
+
   const windowIsCurrent: () => boolean = claimBrowseWindow();
   windowIsCurrent();
   observeBrowseWindow()();

@@ -1,5 +1,6 @@
 /* Browse: collections sidebar, counts, offline members, membership refresh. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { VireoFilter, escapeHtml, safeFetch, showToast } from './shared.js';
 import { collectionAcceptsManualPhotos } from './batch-actions.js';
@@ -367,7 +368,7 @@ export function refreshActiveCollectionAfterMembershipChange(/** @type {string[]
     // A batch spanning several cards has no single-photo anchor. Keep its
     // grid window and surviving selection so accepting a species can be
     // followed by another edit on those same photos.
-    reloadBrowseResults(state.selectedPhotos.size > 0
+    reloadBrowseResults(selection.batchIds.size > 0
       ? { preserveScroll: true }
       : { preserveAnchor: true, focusAnchor: true });
     return;

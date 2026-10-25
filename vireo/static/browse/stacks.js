@@ -1,5 +1,6 @@
 /* Browse: burst stacks: membership, badges, trays, cover reconciliation. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import {
   _pushBrowseStackExpansionRequest, _removeBrowseStackExpansionRequest, state,
 } from './state.js';
@@ -102,9 +103,9 @@ export function browseStackMemberRange(/** @type {number | null} */ anchorId, /*
 // painted the whole stack as selected while a rating would have skipped the
 // frame on top. Codex P2 on PR #1672.
 export function browseSelectionIncludes(/** @type {number} */ id) {
-  return state.selectedPhotos.size > 0
-    ? state.selectedPhotos.has(id)
-    : id === state.selectedPhotoId;
+  return selection.batchIds.size > 0
+    ? selection.batchIds.has(id)
+    : id === selection.focusedPhotoId;
 }
 
 // Which of this card's photos are in the active selection. A stack card
@@ -481,17 +482,17 @@ export async function reconcileBrowseStackCovers(/** @type {number[]} */ photoId
     if (state.expandedBrowseStacks.delete(oldCoverId)) {
       state.expandedBrowseStacks.add(newCover.id);
     }
-    if (state.selectedPhotoId != null && members.some(function(member) {
-      return member.id === state.selectedPhotoId;
+    if (selection.focusedPhotoId != null && members.some(function(member) {
+      return member.id === selection.focusedPhotoId;
     })) {
-      state.selectedIndex = oldIndex;
+      selection.reanchor(oldIndex);
       // The demoted cover is gone from the top-level photos array. Grid
       // selection and preview navigation both look it up there and would
       // otherwise land on an unselected card with an index of -1 in the
       // navigation list. Hand focus to the newly promoted cover, which now
       // occupies that grid slot.
-      if (state.selectedPhotoId === oldCoverId && state.selectedPhotos.size === 0) {
-        state.selectedPhotoId = newCover.id;
+      if (selection.focusedPhotoId === oldCoverId && selection.batchIds.size === 0) {
+        selection.focus(newCover.id);
         focusedReplacementId = newCover.id;
         refreshFocusedDetail = /** @type {HTMLElement} */ (document.getElementById('detailContent')).classList.contains('visible');
       }
@@ -582,17 +583,17 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
   var badge = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + coverId + '"] .browse-stack-badge'));
   if (state.expandedBrowseStacks.has(coverId)) {
     var members = state.browseStackMembers[String(coverId)] || [];
-    var selectedHiddenMember = state.selectedPhotoId !== coverId && members.some(function(member) {
-      return member.id === state.selectedPhotoId;
+    var selectedHiddenMember = selection.focusedPhotoId !== coverId && members.some(function(member) {
+      return member.id === selection.focusedPhotoId;
     });
     // A stack-wide Select all clears selectedPhotoId but leaves every member
     // ID in selectedPhotos. Once the tray collapses, hidden members are gone
     // from the navigation list, so a preview shortcut would fall through to
     // the first hidden member and yield a 0/N lightbox. Detect that case so
     // we can re-pin focus to the visible cover after removing the tray.
-    var batchHasHiddenMembers = state.selectedPhotoId == null && state.selectedPhotos.size > 0
+    var batchHasHiddenMembers = selection.focusedPhotoId == null && selection.batchIds.size > 0
       && members.some(function(member) {
-        return member.id !== coverId && state.selectedPhotos.has(member.id);
+        return member.id !== coverId && selection.batchIds.has(member.id);
       });
     state.expandedBrowseStacks.delete(coverId);
     var tray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
@@ -604,11 +605,11 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
     // member cache for a cheap re-expand and for batch state reconciliation.
     if (selectedHiddenMember) {
       var coverIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
-      if (state.selectedPhotos.size > 0) {
+      if (selection.batchIds.size > 0) {
         // Keep the exact multi-selection intact. The focused hidden member is
         // still an active batch target, and getBrowseShortcutPhoto maps that
         // focus to the collapsed cover solely for preview/navigation.
-        state.selectedIndex = coverIndex;
+        selection.reanchor(coverIndex);
         refreshCardSelectionVisuals();
       } else {
         // stackAware: false — collapsing a tray is a view action. It hands
@@ -622,8 +623,8 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
       // Preserve the batch (Select all) selection but pin single-photo focus
       // to the visible cover so preview shortcuts, keyboard navigation, and
       // the grid caret all resolve inside the top-level cover list.
-      state.selectedPhotoId = coverId;
-      state.selectedIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
+      selection.focus(coverId);
+      selection.reanchor(state.photos.findIndex(function(photo) { return photo.id === coverId; }));
       refreshCardSelectionVisuals();
     }
     return;
@@ -780,13 +781,10 @@ export function selectBrowseStackAll(/** @type {MouseEvent | null} */ event, /**
   var coverCandidate = state.photos.find(function(photo) { return photo.id === coverId; });
   if (!coverCandidate || !coverCandidate.browse_stack) return; const cover = coverCandidate;
   state.anchorRestoreEpoch++;
-  state.selectedPhotoId = null;
-  state.selectedIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
   // Same list, in the same cover-first order, that clicking the collapsed
   // card produces — the tray button and the card must not disagree.
-  state.selectedPhotos = new Set(
-    browseStackMemberIds(coverId) || cover.browse_stack?.photo_ids || []
-  );
+  selection.selectBatch(browseStackMemberIds(coverId) || cover.browse_stack?.photo_ids || [],
+    state.photos.findIndex(function(photo) { return photo.id === coverId; }));
   abandonDetailFocusForBatch();
   refreshCardSelectionVisuals();
   updateBatchBar();
