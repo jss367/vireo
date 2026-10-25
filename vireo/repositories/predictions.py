@@ -140,6 +140,51 @@ class PredictionRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
+    def legacy_detection_folders(self) -> list[dict[str, Any]]:
+        """Visible folders with evidence of pre-raw-storage detector output.
+
+        Legacy detector runs/rows count even if classification never produced
+        predictions. Sentinel predictions cover older catalogs without run
+        metadata. Confidence and review filters must not hide affected photos.
+        A consistent identified MegaDetector run proves raw boxes were stored,
+        including empty scenes. Old classifier rows can survive that run's
+        content-addressed detection upsert and must not keep the nudge alive.
+        """
+        return [dict(row) for row in self.conn.execute("""
+            SELECT f.id, f.path, COUNT(*) AS photo_count
+            FROM photos p
+            JOIN folders f ON f.id = p.folder_id
+            JOIN photo_workspace_visibility v ON v.photo_id = p.id
+            WHERE v.workspace_id = ? AND NOT EXISTS (
+                SELECT 1 FROM detector_runs dr
+                WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
+                  AND dr.runtime_fingerprint != 'legacy'
+                  AND (dr.box_count = 0 OR EXISTS (
+                      SELECT 1 FROM detections raw_d
+                      WHERE raw_d.photo_id = dr.photo_id
+                        AND raw_d.detector_model = dr.detector_model
+                        AND raw_d.runtime_fingerprint = dr.runtime_fingerprint
+                  ))
+            ) AND (
+                EXISTS (
+                    SELECT 1 FROM detector_runs dr
+                    WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
+                      AND dr.runtime_fingerprint = 'legacy'
+                ) OR EXISTS (
+                    SELECT 1 FROM detections d
+                    WHERE d.photo_id = p.id AND (
+                        (d.detector_model = 'megadetector-v6' AND d.runtime_fingerprint = 'legacy')
+                        OR EXISTS (
+                            SELECT 1 FROM predictions pr
+                            WHERE pr.detection_id = d.id AND pr.labels_fingerprint = 'legacy'
+                        )
+                    )
+                )
+            )
+            GROUP BY f.id, f.path
+            ORDER BY f.path, f.id
+        """, (self.workspace_id,)).fetchall()]
+
     @staticmethod
     def _normalized_species(species):
         """``species`` in keyword-storage form, as every prediction stores it."""

@@ -7,6 +7,7 @@
     "../vireo/static/pipeline/completion.js",
     "../vireo/static/pipeline/extract-config.js",
     "../vireo/static/pipeline/labels-modal.js",
+    "../vireo/static/pipeline/legacy-detections.js",
     "../vireo/static/pipeline/models.js",
     "../vireo/static/pipeline/page-init.js",
     "../vireo/static/pipeline/plan.js",

@@ -40,6 +40,9 @@ RAW_READS = {
     'repositories/keyword_provenance.py:_live_neighbour_species': 1,
     'repositories/predictions.py:PredictionRepository.get_rows': 1,
     'repositories/predictions.py:PredictionRepository.accept_subject_species': 1,
+    # Upgrade discovery reads the immutable migration sentinel, not species
+    # decisions: accepting/rejecting a prediction does not regenerate raw boxes.
+    'repositories/predictions.py:PredictionRepository.legacy_detection_folders': 1,
     # Classified-photo and unscored-output counts are independent of decisions.
     'repositories/stats.py:StatsRepository._dashboard_classification_counts': 2,
     'repositories/collections.py:CollectionRepository._suggest_field_sql': 1,
