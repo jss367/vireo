@@ -25,6 +25,8 @@ import re
 import sqlite3
 import tempfile
 import time
+from collections.abc import Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from app_paths import media_root
 from artifact_flight import (
@@ -99,6 +101,23 @@ from working_copy_cache import (
     working_copy_quota_bytes,
 )
 
+if TYPE_CHECKING:
+    import threading
+    from collections.abc import Sequence
+    from contextlib import AbstractContextManager
+    from sqlite3 import Row
+
+    import numpy as np
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from float_image import FloatImage
+    from PIL import Image
+    from preview_materializer import PreviewMaterialization
+    from services.preview_workers import PreviewGuard, PreviewResult
+    from services.scan_work import ConfigLoader
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import AppConfig, ClearPreviewCacheInvalid, GetDb, GetRunner
+
 log = logging.getLogger(__name__)
 
 
@@ -113,22 +132,38 @@ _UNSET = object()
 _CROP_FOLDER_MISSING = object()
 
 
+class _OriginalView(Protocol):
+    """The registered ``serve_original_photo`` view, re-entered by flights."""
+
+    def __call__(
+        self, photo_id: int, *, _artifact_flight_guarded: bool = False, _prepare_source: Row | None = None,
+    ) -> ResponseReturnValue: ...
+
+
+class _RenderEditPreview(Protocol):
+    """``PreviewWorkers.render``: ``(status, body, source_kind)``."""
+
+    def __call__(
+        self, payload: JsonDict, session: str, sequence: int, *, guard: PreviewGuard | None = None,
+    ) -> PreviewResult: ...
+
+
 class _ArtifactResponseError(RuntimeError):
     """Carry a producer's non-success Flask response to equal-key waiters."""
 
-    def __init__(self, response):
+    def __init__(self, response: Response) -> None:
         super().__init__(f"artifact producer returned HTTP {response.status_code}")
         self.status_code = response.status_code
         self.data = response.get_data()
         self.mimetype = response.mimetype
 
-    def to_response(self):
+    def to_response(self) -> Response:
         return Response(
             self.data, status=self.status_code, mimetype=self.mimetype,
         )
 
 
-def _shed_prefetch_response():
+def _shed_prefetch_response() -> Response:
     """Return a non-cacheable empty response for declined speculative work."""
     response = Response(status=204)
     response.headers["Cache-Control"] = "no-store"
@@ -142,13 +177,13 @@ _PAIRED_PREVIEW_DIRNAME = "paired"
 _PAIRED_PREVIEW_TTL_SEC = 15 * 60
 
 
-def _paired_preview_dir(preview_dir):
+def _paired_preview_dir(preview_dir: str) -> str:
     return os.path.join(preview_dir, _PAIRED_PREVIEW_DIRNAME)
 
 
 def _paired_render_state_hash(
-    photo, size, pair_source, pair_source_path, recipe,
-):
+    photo: Row, size: int, pair_source: str, pair_source_path: str, recipe: JsonDict | None,
+) -> str:
     """Signature hash for a paired-source render's shadow cache filename.
 
     Includes the paired source file's mtime/size, the recipe (whose effect
@@ -189,26 +224,26 @@ def _paired_render_state_hash(
 
 
 def _paired_preview_path(
-    preview_dir, photo_id, size, pair_source, state_hash,
-):
+    preview_dir: str, photo_id: int, size: int, pair_source: str, state_hash: str,
+) -> str:
     return os.path.join(
         _paired_preview_dir(preview_dir),
         f"{photo_id}_{size}_{pair_source}_{state_hash}.jpg",
     )
 
 
-def _paired_original_dir(vireo_dir):
+def _paired_original_dir(vireo_dir: str) -> str:
     return os.path.join(vireo_dir, "originals", _PAIRED_PREVIEW_DIRNAME)
 
 
-def _paired_original_path(vireo_dir, photo_id, pair_source, state_hash):
+def _paired_original_path(vireo_dir: str, photo_id: int, pair_source: str, state_hash: str) -> str:
     return os.path.join(
         _paired_original_dir(vireo_dir),
         f"{photo_id}_{pair_source}_{state_hash}.jpg",
     )
 
 
-def _fresh_paired_artifact(path):
+def _fresh_paired_artifact(path: str) -> bool:
     """Return whether a non-empty paired artifact is still inside its TTL."""
     try:
         return (
@@ -219,7 +254,7 @@ def _fresh_paired_artifact(path):
         return False
 
 
-def _sweep_stale_paired_previews(paired_dir):
+def _sweep_stale_paired_previews(paired_dir: str) -> None:
     """Best-effort removal of paired-preview cache files older than the TTL.
 
     Paired renders are only kept around long enough for a browser warmup
@@ -243,10 +278,10 @@ def _sweep_stale_paired_previews(paired_dir):
             continue
 
 
-def _is_preview_cache_invalid(db, photo_id, size):
+def _is_preview_cache_invalid(db: Database, photo_id: int, size: int) -> bool:
     return db.caches.preview_invalidated(photo_id, size)
 
-def _full_resolution_render_signature(photo, recipe, file_state=None):
+def _full_resolution_render_signature(photo: Row, recipe: JsonDict | None, file_state: JsonDict | None = None) -> JsonDict:
     """Describe every catalogued input to a cached inspection render.
 
     The source size/mtime pair is refreshed by scans, the canonical recipe
@@ -270,8 +305,8 @@ def _full_resolution_render_signature(photo, recipe, file_state=None):
     }
 
 def _full_resolution_render_path(
-    vireo_dir, photo, recipe, file_state=None,
-):
+    vireo_dir: str, photo: Row, recipe: JsonDict | None, file_state: JsonDict | None = None,
+) -> str:
     signature = json.dumps(
         _full_resolution_render_signature(
             photo, recipe, file_state,
@@ -284,7 +319,7 @@ def _full_resolution_render_path(
         vireo_dir, "originals", f"{photo['id']}_{cache_key}.jpg",
     )
 
-def _peg_render_mtime_to_source(cache_path, photo):
+def _peg_render_mtime_to_source(cache_path: str, photo: Row) -> None:
     """Align a freshly written render's mtime to the photo's source.
 
     ``_prepared_full_resolution_render`` rejects renders whose mtime
@@ -311,7 +346,7 @@ def _peg_render_mtime_to_source(cache_path, photo):
     with contextlib.suppress(OSError, TypeError, ValueError):
         os.utime(cache_path, (float(source_mtime), float(source_mtime)))
 
-def _serve_trusted_working_copy(path):
+def _serve_trusted_working_copy(path: str) -> Response:
     """Serve a working-copy cache hit and stamp it as recently used.
 
     Callers hold ``working_copy_publication_guard`` — the same lock the
@@ -324,7 +359,7 @@ def _serve_trusted_working_copy(path):
     return send_file(path, mimetype="image/jpeg")
 
 
-def _send_opened_file(handle, path, mimetype):
+def _send_opened_file(handle: BinaryIO, path: str, mimetype: str) -> Response:
     """``send_file`` an already-open ``handle`` with the validators of ``path``.
 
     A response sent from a file object carries no ETag or Last-Modified:
@@ -354,8 +389,8 @@ def _send_opened_file(handle, path, mimetype):
     )
 
 def _prepared_full_resolution_render(
-    vireo_dir, photo, recipe, file_state=None,
-):
+    vireo_dir: str, photo: Row, recipe: JsonDict | None, file_state: JsonDict | None = None,
+) -> str | None:
     cache_path = _full_resolution_render_path(
         vireo_dir, photo, recipe, file_state,
     )
@@ -385,7 +420,9 @@ def _prepared_full_resolution_render(
     return cache_path
 
 
-def _run_original_artifact_flight(artifact_key, producer, consumer):
+def _run_original_artifact_flight(
+    artifact_key: str, producer: Callable[[], Response], consumer: Callable[[], Response],
+) -> Response:
     """Run one ``/original`` artifact flight, shedding declined prefetches."""
     speculative = request.args.get("prefetch") == "1"
     speculative_slot = False
@@ -403,7 +440,8 @@ def _run_original_artifact_flight(artifact_key, producer, consumer):
         )
         if result.skipped:
             return _shed_prefetch_response()
-        return result.value
+        # A flight that ran (or joined one) carries its response.
+        return cast(Response, result.value)
     except _ArtifactResponseError as exc:
         return exc.to_response()
     except ArtifactProducerFailed as exc:
@@ -415,12 +453,14 @@ def _run_original_artifact_flight(artifact_key, producer, consumer):
             preview_prefetch_slots.release()
 
 
-def _source_changed_response():
+def _source_changed_response() -> _ArtifactResponseError:
     return _ArtifactResponseError(make_response(("Photo source changed", 404)))
 
 
 @contextlib.contextmanager
-def _preparation_publication(db, photo_id, prepare_source, captured_recipe=_UNSET):
+def _preparation_publication(
+    db: Database, photo_id: int, prepare_source: Row | None, captured_recipe: object = _UNSET,
+) -> Iterator[None]:
     """Hold a catalog-writer transaction while a preparation render publishes.
 
     Refuses late preparation writes after deletion/reimport, so a recycled
@@ -441,7 +481,7 @@ def _preparation_publication(db, photo_id, prepare_source, captured_recipe=_UNSE
 
     check_recipe = captured_recipe is not _UNSET
 
-    def check_source():
+    def check_source() -> None:
         if not photo_source_matches(prepare_source, db.photos.get(photo_id)):
             raise _source_changed_response()
         if check_recipe and db.get_photo_edit_recipe(photo_id) != captured_recipe:
@@ -476,18 +516,18 @@ class _OriginalPhotoRequest:
 
     def __init__(
         self,
-        db,
-        photo_id,
-        photo,
-        folder_path,
-        vireo_dir,
-        recipe,
-        primary_is_raw,
+        db: Database,
+        photo_id: int,
+        photo: Row,
+        folder_path: str,
+        vireo_dir: str,
+        recipe: JsonDict | None,
+        primary_is_raw: bool,
         *,
-        artifact_flight_guarded,
-        prepare_source,
-        view,
-    ):
+        artifact_flight_guarded: bool,
+        prepare_source: Row | None,
+        view: _OriginalView,
+    ) -> None:
         self.db = db
         self.photo_id = photo_id
         self.photo = photo
@@ -501,18 +541,21 @@ class _OriginalPhotoRequest:
         self.original = OriginalPhoto(
             db, photo_id, photo, folder_path, vireo_dir, recipe, primary_is_raw,
         )
-        self.file_state = None
-        self.trusted_wc_path = None
-        self.source = None
-        self.extraction = None
+        self.file_state: JsonDict | None = None
+        # Set by serve_original_photo before the unedited and edited paths.
+        self.trusted_wc_path: str | None = None
+        # Late-bound: _resolve_unedited_source and serve_unedited set these
+        # before any reader runs.
+        self.source = cast("UneditedSource", None)
+        self.extraction = cast("OriginalExtraction", None)
 
-    def _preparation_publication(self):
+    def _preparation_publication(self) -> AbstractContextManager[None]:
         return _preparation_publication(
             self.db, self.photo_id, self.prepare_source,
             captured_recipe=self.recipe,
         )
 
-    def _reenter(self, *, guarded):
+    def _reenter(self, *, guarded: bool) -> Response:
         response = make_response(
             self._view(
                 self.photo_id, _artifact_flight_guarded=guarded, _prepare_source=self.prepare_source,
@@ -522,20 +565,22 @@ class _OriginalPhotoRequest:
             raise _ArtifactResponseError(response)
         return response
 
-    def _serve_trusted_working_copy_if_present(self):
+    def _serve_trusted_working_copy_if_present(self) -> Response | None:
+        # Callers check trusted_wc_path first.
+        trusted_wc_path = cast(str, self.trusted_wc_path)
         with working_copy_publication_guard():
-            if os.path.isfile(self.trusted_wc_path):
-                return _serve_trusted_working_copy(self.trusted_wc_path)
+            if os.path.isfile(trusted_wc_path):
+                return _serve_trusted_working_copy(trusted_wc_path)
         return None
 
-    def serve_paired_raw(self, pair_source, pair_source_path):
+    def serve_paired_raw(self, pair_source: str, pair_source_path: str) -> Response:
         """Serve an explicit ``?source=raw`` view of a paired photo."""
         return _PairedRawOriginal(self, pair_source, pair_source_path).serve()
 
-    def collect_file_state(self):
+    def collect_file_state(self) -> None:
         self.file_state = self.original.collect_file_state()
 
-    def coordinate_canonical_flight(self):
+    def coordinate_canonical_flight(self) -> Response:
         """Share one cache-miss render between equal-key requests.
 
         Every remaining cache-miss path resolves to one real destination,
@@ -561,12 +606,12 @@ class _OriginalPhotoRequest:
             lambda: self._reenter(guarded=False),
         )
 
-    def trusted_full_res_working_copy_path(self):
+    def trusted_full_res_working_copy_path(self) -> str | None:
         return self.original.trusted_full_res_working_copy_path()
 
     # -- Edited renders --------------------------------------------------
 
-    def serve_edited(self):
+    def serve_edited(self) -> tuple[str, int] | Response:
         """Render the edit recipe at full resolution and serve the cache."""
         from image_loader import RAW_EXTENSIONS
 
@@ -595,7 +640,7 @@ class _OriginalPhotoRequest:
             return "Could not load image", 500
         return self._publish_edited_render(img)
 
-    def _publish_edited_render(self, img):
+    def _publish_edited_render(self, img: Image.Image | FloatImage) -> Response:
         import config as cfg
         import local_masks
         from flask import send_file
@@ -635,7 +680,7 @@ class _OriginalPhotoRequest:
 
     # -- Unedited originals ----------------------------------------------
 
-    def serve_unedited(self):
+    def serve_unedited(self) -> Response | tuple[str, int]:
         """Serve the unedited original, extracting a rendition on a miss."""
         from flask import send_file
 
@@ -664,7 +709,7 @@ class _OriginalPhotoRequest:
 
         return self._serve_decoded_original()
 
-    def _resolve_unedited_source(self):
+    def _resolve_unedited_source(self) -> Response | tuple[str, int] | None:
         from flask import send_file
 
         self.source = source = UneditedSource.resolve(self.original)
@@ -672,7 +717,8 @@ class _OriginalPhotoRequest:
         if self.primary_is_raw:
             with reader_guard("full-resolution"):
                 if source.display_cache_is_current():
-                    return send_file(source.display_cache_path, mimetype="image/jpeg")
+                    # A current display cache has a path.
+                    return send_file(cast(str, source.display_cache_path), mimetype="image/jpeg")
 
         if (
             self.primary_is_raw
@@ -695,7 +741,7 @@ class _OriginalPhotoRequest:
 
         return self._route_around_raw_failure()
 
-    def _route_around_raw_failure(self):
+    def _route_around_raw_failure(self) -> Response | tuple[str, int] | None:
         if self.source.route_around_raw_failure():
             if self.primary_is_raw and self.trusted_wc_path:
                 # Same eviction race as the non-RAW cache-hit branch:
@@ -711,7 +757,7 @@ class _OriginalPhotoRequest:
             return "Could not load image", 500
         return None
 
-    def _serve_decoded_original(self):
+    def _serve_decoded_original(self) -> Response | tuple[str, int]:
         """Fallback: serve via load_image."""
         img = self.source.decode()
         if img is None:
@@ -732,12 +778,13 @@ class _OriginalPhotoRequest:
             return "Could not load image", 500
         return self._cache_decoded_original(img)
 
-    def _cache_decoded_original(self, img):
+    def _cache_decoded_original(self, img: Image.Image | FloatImage) -> Response:
         from flask import send_file
 
         photo_id = self.photo_id
         if self.primary_is_raw:
-            cache_path = self.source.display_cache_path
+            # UneditedSource.resolve sets it for a RAW primary.
+            cache_path = cast(str, self.source.display_cache_path)
             cache_dir = os.path.dirname(cache_path)
             tmp_prefix = f".{photo_id}.display."
         else:
@@ -786,7 +833,7 @@ class _PairedRawOriginal:
     recipe and flight state, and re-enters the view through the request.
     """
 
-    def __init__(self, original_request, pair_source, pair_source_path):
+    def __init__(self, original_request: _OriginalPhotoRequest, pair_source: str, pair_source_path: str) -> None:
         self.photo = original_request.photo
         self.photo_id = original_request.photo_id
         self.vireo_dir = original_request.vireo_dir
@@ -796,7 +843,7 @@ class _PairedRawOriginal:
         self.pair_source = pair_source
         self.pair_source_path = pair_source_path
 
-    def serve(self):
+    def serve(self) -> Response:
         """Serve an explicit ``?source=raw`` view of a paired photo.
 
         Paired RAW originals coordinate through a source-aware shadow
@@ -820,13 +867,13 @@ class _PairedRawOriginal:
             if _fresh_paired_artifact(paired_original_cache):
                 return send_file(paired_original_cache, mimetype="image/jpeg")
 
-        def _render_paired_original():
+        def _render_paired_original() -> Response:
             return self._render_paired_original(paired_original_cache)
 
         if self.artifact_flight_guarded:
             return _render_paired_original()
 
-        def _paired_consumer():
+        def _paired_consumer() -> Response:
             # Producer already published the shadow-cache file, so a
             # re-entering waiter hits the cache-hit check above and
             # serves it via send_file — no second decode.
@@ -838,7 +885,7 @@ class _PairedRawOriginal:
             _paired_consumer,
         )
 
-    def _render_paired_original(self, paired_original_cache):
+    def _render_paired_original(self, paired_original_cache: str) -> Response:
         import io
 
         import config as cfg
@@ -909,7 +956,7 @@ class _ExtractedOriginal:
     state of its own: the tempfile path and size flow through the calls.
     """
 
-    def __init__(self, original_request, extraction):
+    def __init__(self, original_request: _OriginalPhotoRequest, extraction: OriginalExtraction) -> None:
         self.db = original_request.db
         self.photo = original_request.photo
         self.photo_id = original_request.photo_id
@@ -920,16 +967,18 @@ class _ExtractedOriginal:
         self.source = original_request.source
         self.extraction = extraction
 
-    def serve(self, tmp_path):
+    def serve(self, tmp_path: str) -> Response | tuple[str, int]:
         # Update DB so future requests are fast; also backfill
         # dimensions if missing so the full-res shortcut works next time
         from PIL import Image as _PILImage
+        # The still-private rendition, or None once it is published.
+        private_tmp: str | None = tmp_path
         if self.primary_is_raw:
             # RAW display cache goes through ``wc_abs`` immediately so
             # subsequent checks (undersized retry, trusted-wc override)
             # can peek at the just-written file directly.
             self.extraction.publish(tmp_path)
-            tmp_path = None
+            private_tmp = None
             peek_path = self.extraction.wc_abs
         else:
             # Non-RAW: keep the rendition private until cacheability
@@ -938,7 +987,7 @@ class _ExtractedOriginal:
             peek_path = tmp_path
         with _PILImage.open(peek_path) as upgraded:
             uw, uh = upgraded.size
-        tmp_path, uw, uh = self.extraction.replace_undersized_extraction(tmp_path, uw, uh)
+        private_tmp, uw, uh = self.extraction.replace_undersized_extraction(private_tmp, uw, uh)
         if self.primary_is_raw and self.trusted_wc_path:
             expected_w, expected_h = _scaled_recipe_source_dimensions(self.photo)
             display_is_near_full = (
@@ -973,9 +1022,9 @@ class _ExtractedOriginal:
                             self.db, self.photo, self.extraction.source_for_extraction,
                         )
                         return _serve_trusted_working_copy(self.trusted_wc_path)
-        return self._serve_generated_original(tmp_path, uw, uh)
+        return self._serve_generated_original(private_tmp, uw, uh)
 
-    def serve_companion_extraction(self):
+    def serve_companion_extraction(self) -> Response | tuple[str, int] | None:
         """Extract the companion after extraction failed on a RAW source.
 
         extract_working_copy failed on a RAW source: try the full-res
@@ -1009,7 +1058,7 @@ class _ExtractedOriginal:
                 return self._serve_generated_original(companion_tmp, uw, uh)
         return None
 
-    def _serve_generated_original(self, tmp_path, uw, uh):
+    def _serve_generated_original(self, tmp_path: str | None, uw: int, uh: int) -> Response | tuple[str, int]:
         # Lock order matches the existing publication path: working-copy
         # guard first, then SQLite, including nested extraction commits.
         try:
@@ -1021,24 +1070,24 @@ class _ExtractedOriginal:
                     os.unlink(tmp_path)
             raise
 
-    def _serve_generated_original_current(self, tmp_path, uw, uh):
+    def _serve_generated_original_current(self, tmp_path: str | None, uw: int, uh: int) -> Response | tuple[str, int]:
         """Publish to the cache, or stream the private tmp transiently.
 
-        ``tmp_path`` is the private rendition from
-        ``extract_to_private_tmp``. The RAW branch has always already
-        published (its callers publish immediately so their
-        ``PIL.Image.open`` size peek reads a known path); it passes
-        ``tmp_path=None`` and this call just serves ``wc_abs``.
-        Otherwise, the cacheable branch publishes and serves from
-        ``wc_abs`` (pinning against concurrent eviction with an open
-        fd); the non-cacheable branch keeps the file at a per-request
-        transient path and streams from there — ``wc_abs`` is never
-        touched, so concurrent waiters cannot collide there.
+        ``tmp_path`` is the private rendition from ``extract_to_private_tmp``.
+        The RAW branch has always already published (its callers publish
+        immediately so their ``PIL.Image.open`` size peek reads a known path);
+        it passes ``tmp_path=None`` and this call just serves ``wc_abs``.
+        Otherwise, the cacheable branch publishes and serves from ``wc_abs``
+        (pinning against concurrent eviction with an open fd); the
+        non-cacheable branch keeps the file at a per-request transient path
+        and streams from there — ``wc_abs`` is never touched, so concurrent
+        waiters cannot collide there.
         """
         from flask import send_file
 
         if self.primary_is_raw:
             return send_file(self.extraction.wc_abs, mimetype="image/jpeg")
+        tmp_path = cast(str, tmp_path)  # Only the RAW branch above is passed None.
 
         # Decide cacheability under the publication/eviction guard using
         # a freshly reloaded quota. If a settings save raised
@@ -1122,7 +1171,7 @@ class _ExtractedOriginal:
 
         return self._stream_transient_rendition(tmp_path)
 
-    def _stream_transient_rendition(self, tmp_path):
+    def _stream_transient_rendition(self, tmp_path: str) -> tuple[str, int] | Response:
         """Stream a non-cacheable rendition from a transient path.
 
         Non-cacheable rendition: relocate ``tmp_path`` into
@@ -1164,7 +1213,7 @@ class _ExtractedOriginal:
                 os.unlink(transient_path)
             return "Could not load image", 500
 
-        def _stream_rendition():
+        def _stream_rendition() -> Iterator[bytes]:
             try:
                 while chunk := rendition_fh.read(1024 * 1024):
                     yield chunk
@@ -1177,7 +1226,7 @@ class _ExtractedOriginal:
         return Response(_stream_rendition(), mimetype="image/jpeg")
 
 
-def _send_cached_thumbnail(directory, fname):
+def _send_cached_thumbnail(directory: str, fname: str) -> Response:
     resp = make_response(send_from_directory(directory, fname))
     resp.cache_control.public = True
     resp.cache_control.max_age = 24 * 60 * 60  # 1 day
@@ -1195,15 +1244,15 @@ class _ThumbnailRequest:
 
     def __init__(
         self,
-        db,
-        photo_id,
-        photo,
-        folder_row,
-        filename,
-        thumb_dir,
-        pair_source,
-        pair_source_path,
-    ):
+        db: Database,
+        photo_id: int,
+        photo: Row,
+        folder_row: Row,
+        filename: str,
+        thumb_dir: str,
+        pair_source: str | None,
+        pair_source_path: str | None,
+    ) -> None:
         self.db = db
         self.photo_id = photo_id
         self.photo = photo
@@ -1212,26 +1261,32 @@ class _ThumbnailRequest:
         self.thumb_dir = thumb_dir
         self.pair_source = pair_source
         self.pair_source_path = pair_source_path
-        self.cache_recipe = None
-        self.cache_filename = None
-        self.thumb_path = None
+        self.cache_recipe: JsonDict | None = None
+        # Late-bound: select_cache_target sets the cache target, and
+        # prepare_self_heal / resolve_render_source the self-heal inputs,
+        # before anything reads them.
+        self.cache_filename = cast(str, None)
+        self.thumb_path = cast(str, None)
         # Set when a locked stale thumbnail forces regeneration to the
         # ``<id>_regen.jpg`` sidecar; the real ``<id>.jpg`` stays stale.
         self.served_from_regen_sidecar = False
-        self.selected_source_mtime = None
-        self.live_source = None
-        self.vireo_dir = None
-        self.folders = None
-        self.render_recipe = None
-        self.thumb_size = None
-        self.source = None
+        self.selected_source_mtime: float | None = None
+        self.live_source = cast(str, None)
+        self.vireo_dir = cast(str, None)
+        self.folders = cast("dict[int, str]", None)
+        self.render_recipe: JsonDict | None = None
+        self.thumb_size = cast(int, None)
+        self.source = cast(str, None)
         self.using_working_copy = False
-        self._cfg = None
-        self._generate_thumbnail = None
-        self._retry_after_working_copy_eviction = None
-        self._retry_with_working_copy = None
+        # The lazily imported config module and thumbnail generators.
+        self._cfg = cast("ConfigLoader", None)
+        self._generate_thumbnail = cast("Callable[..., str | None]", None)
+        self._retry_after_working_copy_eviction = cast(
+            "Callable[..., tuple[str | None, str]]", None,
+        )
+        self._retry_with_working_copy = cast("Callable[..., str | None]", None)
 
-    def select_cache_target(self):
+    def select_cache_target(self) -> None:
         self.cache_recipe = (
             None if self.pair_source == "jpeg"
             else self.db.get_photo_edit_recipe(self.photo_id)
@@ -1249,7 +1304,7 @@ class _ThumbnailRequest:
         except OSError:
             self.selected_source_mtime = self.photo["file_mtime"]
 
-    def _is_fresh(self, cached_mtime):
+    def _is_fresh(self, cached_mtime: float) -> bool:
         # Treat as fresh if ``file_mtime`` is unknown (legacy rows
         # pre-mtime tracking — we have no signal to invalidate
         # against, so prefer the fast path over false-positive
@@ -1259,7 +1314,7 @@ class _ThumbnailRequest:
             or cached_mtime >= self.selected_source_mtime
         ) and _camera_cache_matches(self.thumb_path, self.photo, self.cache_recipe)
 
-    def serve_fresh_cache(self):
+    def serve_fresh_cache(self) -> Response | tuple[str, int] | None:
         """Serve the cached thumbnail when it is current, or clear it.
 
         Returns ``None`` when the caller should regenerate into
@@ -1294,7 +1349,7 @@ class _ThumbnailRequest:
             return self._serve_regen_sidecar()
         return None
 
-    def _serve_regen_sidecar(self):
+    def _serve_regen_sidecar(self) -> Response | tuple[str, int] | None:
         """Move the cache target to the ``_regen`` sidecar.
 
         We can't unlink the stale file (Windows lock, permissions,
@@ -1355,7 +1410,7 @@ class _ThumbnailRequest:
                 return "", 404
         return None
 
-    def prepare_self_heal(self):
+    def prepare_self_heal(self) -> None:
         self.live_source = os.path.join(
             self.folder_row["path"], self.photo["filename"],
         )
@@ -1389,7 +1444,7 @@ class _ThumbnailRequest:
             if self.folder_row else {}
         )
 
-    def resolve_render_source(self):
+    def resolve_render_source(self) -> None:
         recipe = self.db.get_photo_edit_recipe(self.photo_id)
         # Edit recipes and local masks are stored in the primary RAW's
         # coordinate space. A developed companion may already be cropped,
@@ -1412,7 +1467,7 @@ class _ThumbnailRequest:
                 self.vireo_dir, self.folders,
             )
 
-    def would_retry_failed_raw_decode(self):
+    def would_retry_failed_raw_decode(self) -> bool:
         return (
             not self.using_working_copy
             and self.pair_source != "jpeg"
@@ -1425,7 +1480,7 @@ class _ThumbnailRequest:
             )
         )
 
-    def generate(self):
+    def generate(self) -> str | None:
         """Generate the thumbnail, then walk the decode fallbacks."""
         # Derive the decode mode from the primary photo's extension
         # rather than source so a future change to render-source
@@ -1512,7 +1567,7 @@ class _ThumbnailRequest:
                 self.source = result
         return result
 
-    def _generate_from_companion(self, result):
+    def _generate_from_companion(self, result: str | None) -> str | None:
         """Fall back to the companion JPEG after a failed RAW decode.
 
         libraw couldn't demosaic the RAW (unsupported variant, corrupt file,
@@ -1556,7 +1611,7 @@ class _ThumbnailRequest:
             self.source = companion_abs
         return result
 
-    def peg_mtime_to_source(self, result):
+    def peg_mtime_to_source(self, result: str) -> None:
         """Peg the regenerated thumbnail's mtime to the source file_mtime.
 
         This keeps the staleness invariant — ``cached_mtime >= file_mtime``
@@ -1584,7 +1639,7 @@ class _ThumbnailRequest:
                 self.photo_id, exc_info=True,
             )
 
-    def persist_thumb_path(self):
+    def persist_thumb_path(self) -> None:
         """Persist on-disk presence for the coverage dashboard.
 
         The dashboard's coverage query (`thumb_path IS NOT NULL`) then
@@ -1622,17 +1677,17 @@ class _EditPreviewRequest:
 
     def __init__(
         self,
-        db,
-        photo_id,
-        photo,
-        folder_row,
-        vireo_dir,
-        recipe,
-        display_recipe,
-        size,
-        apply_crop,
-        analysis=False,
-    ):
+        db: Database,
+        photo_id: int,
+        photo: Row,
+        folder_row: Row,
+        vireo_dir: str,
+        recipe: JsonDict,
+        display_recipe: JsonDict,
+        size: int,
+        apply_crop: bool,
+        analysis: bool = False,
+    ) -> None:
         self.db = db
         self.photo_id = photo_id
         self.photo = photo
@@ -1646,14 +1701,16 @@ class _EditPreviewRequest:
         self.original_abs = os.path.join(
             folder_row["path"], photo["filename"],
         )
-        self.canonical = None
+        # Late-bound: _select_and_load_source sets the selected source and
+        # its decode bound before anything reads them.
+        self.canonical = cast(str, None)
         self.using_working_copy = False
-        self.selected_ext = None
-        self.load_max_size = None
-        self.native_dims = None
+        self.selected_ext = cast(str, None)
+        self.load_max_size: int | None = None
+        self.native_dims = cast("tuple[int, int]", None)
         self.source_failure_current = False
 
-    def load(self):
+    def load(self) -> Image.Image | FloatImage | None:
         """Decode the edit source with every recovery path; ``None`` on failure.
 
         Retries the original when an evicted working copy vanished, swaps an
@@ -1687,7 +1744,7 @@ class _EditPreviewRequest:
             _record_working_copy_failure(self.db, photo, self.canonical)
         return img
 
-    def load_source(self):
+    def load_source(self) -> Image.Image | FloatImage | None:
         """Select the edit source and decode it; ``None`` when it failed.
 
         If the original volume is offline, the working copy is the only
@@ -1702,7 +1759,7 @@ class _EditPreviewRequest:
         with source_guard:
             return self._select_and_load_source()
 
-    def _source_recipe(self):
+    def _source_recipe(self) -> JsonDict:
         """The recipe ``_recipe_render_source`` selects the source with.
 
         Resolve the source with the actual recipe (not None) so
@@ -1742,7 +1799,7 @@ class _EditPreviewRequest:
                 source_recipe = {"version": SCHEMA_VERSION}
         return source_recipe
 
-    def _select_and_load_source(self):
+    def _select_and_load_source(self) -> Image.Image | FloatImage | None:
         from image_loader import (
             RAW_DECODE_LINEAR,
             RAW_EXTENSIONS,
@@ -1812,7 +1869,7 @@ class _EditPreviewRequest:
             )
         return img
 
-    def _source_load_max_size(self):
+    def _source_load_max_size(self) -> int | None:
         """The long edge to decode the selected source at.
 
         A cropped output needs more source pixels than its requested long
@@ -1861,7 +1918,7 @@ class _EditPreviewRequest:
                 load_max_size = None
         return load_max_size
 
-    def retry_original_source(self):
+    def retry_original_source(self) -> Image.Image | FloatImage | None:
         """Decode the original after the working copy vanished; may be None.
 
         Quota enforcement can unlink the selected working copy after
@@ -1915,7 +1972,7 @@ class _EditPreviewRequest:
                 self.using_working_copy = False
         return img
 
-    def replace_undersized_raw_decode(self, img):
+    def replace_undersized_raw_decode(self, img: Image.Image | FloatImage) -> Image.Image | FloatImage | None:
         """Swap an undersized RAW decode for the companion JPEG if larger.
 
         _load_raw falls back to an embedded camera JPEG when libraw can't
@@ -1944,7 +2001,7 @@ class _EditPreviewRequest:
                     companion_img = load_image(
                         companion_abs, max_size=self.load_max_size,
                     )
-                    if _companion_image_can_replace_raw_result(
+                    if companion_img is not None and _companion_image_can_replace_raw_result(
                         companion_img, img, expected_w, expected_h,
                     ):
                         log.info(
@@ -1962,7 +2019,7 @@ class _EditPreviewRequest:
                         companion_img.close()
         return img
 
-    def load_companion_after_raw_failure(self):
+    def load_companion_after_raw_failure(self) -> Image.Image | None:
         """Decode the companion JPEG after the RAW failed; may be None.
 
         Same companion fallback as serve_preview's cache-miss path: an
@@ -1989,7 +2046,7 @@ class _EditPreviewRequest:
                     self.canonical = companion_abs
         return img
 
-    def render(self, img):
+    def render(self, img: Image.Image | FloatImage) -> Image.Image | FloatImage:
         """Apply the display recipe to the decoded source."""
         from image_edits import apply_recipe_to_loaded_image, detail_render_scale
         from render_source import rendered_recipe_long_edge
@@ -2024,7 +2081,7 @@ class _EditPreviewRequest:
         )
 
 
-def _load_active_mask(db, photo_id):
+def _load_active_mask(db: Database, photo_id: int) -> Image.Image | None:
     """The photo's active SAM mask as a PIL 'L' image, or None."""
     import io
 
@@ -2045,7 +2102,7 @@ def _load_active_mask(db, photo_id):
     return None
 
 
-def render_edit_preview_job(payload, output_path):
+def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, str, str]:
     """Child-process entry: all decode/render work, without constructing Flask."""
     import config as cfg
     import cv2
@@ -2085,7 +2142,7 @@ def render_edit_preview_job(payload, output_path):
 
 
 @contextlib.contextmanager
-def _edit_preview_source_guard(photo, folder, cancelled):
+def _edit_preview_source_guard(photo: Row, folder: Row, cancelled: threading.Event) -> Iterator[None]:
     # The eviction guard is process-local. Keep ownership in the parent when
     # the working copy is the only source; the child must not race its eviction.
     working_copy = photo['working_copy_path']
@@ -2097,7 +2154,10 @@ def _edit_preview_source_guard(photo, folder, cancelled):
     yield
 
 
-def _edit_mask_preview_geometry(photo, normalized, native_dims, size, apply_crop, snapshot):
+def _edit_mask_preview_geometry(
+    photo: Row, normalized: JsonDict, native_dims: tuple[int, int], size: int, apply_crop: bool,
+    snapshot: Image.Image,
+) -> tuple[tuple[int, int], float | None]:
     """Source dimensions and feather scale for ``/photos/<id>/edit-mask-preview``.
 
     Returns ``(source_dims, preview_detail_scale)``: the size the local
@@ -2141,7 +2201,7 @@ def _edit_mask_preview_geometry(photo, normalized, native_dims, size, apply_crop
     return source_dims, preview_detail_scale
 
 
-def _tinted_mask_png(weight):
+def _tinted_mask_png(weight: np.ndarray) -> bytes:
     """Encode a local weight map as the editor's tinted RGBA PNG overlay."""
     import io
 
@@ -2160,7 +2220,9 @@ def _tinted_mask_png(weight):
     return buf.getvalue()
 
 
-def _requested_pair_source(get_db, config, photo, folder_path):
+def _requested_pair_source(
+    get_db: GetDb, config: AppConfig, photo: Row, folder_path: str,
+) -> tuple[str | None, str | None]:
     """Resolve an explicit RAW/JPEG display choice for a paired photo.
 
     Paired files remain one catalog record, but browser image requests can
@@ -2182,7 +2244,7 @@ def _requested_pair_source(get_db, config, photo, folder_path):
     if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
         return None, None
 
-    def _offline_path(column):
+    def _offline_path(column: str) -> str | None:
         try:
             row = get_db().caches.offline_original_get(photo["id"])
         except sqlite3.Error:
@@ -2211,7 +2273,7 @@ def _requested_pair_source(get_db, config, photo, folder_path):
     return "jpeg", _offline_path("companion_path")
 
 
-def _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename):
+def _serve_photo_thumbnail(get_db: GetDb, config: AppConfig, db: Database, photo_id: int, photo: Row, filename: str) -> tuple[str, int] | Response:
     """Serve or self-heal the thumbnail of a photo the caller may show."""
     thumb_dir = config["THUMB_CACHE_DIR"]
     folder_row = db.folders.get(photo["folder_id"])
@@ -2270,7 +2332,7 @@ def _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename):
     return _send_cached_thumbnail(thumb_dir, thumb.cache_filename)
 
 
-def _mask_file_is_db_backed(get_db, filename, mask_path):
+def _mask_file_is_db_backed(get_db: GetDb, filename: str, mask_path: str) -> bool:
     """Whether a mask file on disk is actually this photo's.
 
     ``masks/<id>.png`` and ``masks/<id>.<variant>.png`` are keyed by
@@ -2294,11 +2356,11 @@ def _mask_file_is_db_backed(get_db, filename, mask_path):
     for mask in db.masks_features.list_masks_for_photo(pid):
         if mask["path"] and os.path.realpath(mask["path"]) == real:
             return True
-    mask_path = db.masks_features.photo_mask_path(pid)
-    return bool(mask_path and os.path.realpath(mask_path) == real)
+    active_mask_path = db.masks_features.photo_mask_path(pid)
+    return bool(active_mask_path and os.path.realpath(active_mask_path) == real)
 
 
-def _read_mask_bytes(mask_path):
+def _read_mask_bytes(mask_path: str) -> bytes | None:
     """Read an immutable mask generation, or lose a cleanup race.
 
     POSIX keeps an already-open unlinked file readable, while Windows
@@ -2313,7 +2375,7 @@ def _read_mask_bytes(mask_path):
         return None
 
 
-def _load_crop_source(config, db, photo):
+def _load_crop_source(config: AppConfig, db: Database, photo: Row) -> object | Image.Image | None:
     """Decode the crop source: the working copy first, then the original.
 
     Returns ``_CROP_FOLDER_MISSING`` when there is no working copy and
@@ -2374,7 +2436,7 @@ def _load_crop_source(config, db, photo):
     return img
 
 
-def _crop_to_detection(img, dets, requested_detection):
+def _crop_to_detection(img: Image.Image, dets: list[Row], requested_detection: int | None) -> Image.Image:
     """Crop to the primary (or requested) subject box with its padding."""
     import config as cfg
 
@@ -2403,7 +2465,7 @@ def _crop_to_detection(img, dets, requested_detection):
     return img
 
 
-def _focus_mask_bytes(db_path, db, photo_id):
+def _focus_mask_bytes(db_path: str, db: Database, photo_id: int) -> bytes | None:
     """Only read the recorded mask inside this catalog's mask directory."""
     mask_path = db.masks_features.photo_mask_path(photo_id)
     if not mask_path:
@@ -2414,7 +2476,9 @@ def _focus_mask_bytes(db_path, db, photo_id):
     return _read_mask_bytes(abs_mask) if inside else None
 
 
-def _comparison_media_subject(db, photo, args, effective):
+def _comparison_media_subject(
+    db: Database, photo: JsonDict | Row, args: Mapping[str, str], effective: JsonDict,
+) -> tuple[JsonDict, JsonDict]:
     """Validate selected-subject media without falling back to primary evidence."""
     from focus_crop import valid_subject_box
     from subject_ranking import SubjectComparison, cached_analysis, resolve_subject
@@ -2435,7 +2499,10 @@ def _comparison_media_subject(db, photo, args, effective):
     return detection, analysis
 
 
-def _validated_focus_source(config, db, photo, args, effective, source_choice, boxes=(), basis="auto"):
+def _validated_focus_source(
+    config: AppConfig, db: Database, photo: JsonDict, args: Mapping[str, str], effective: JsonDict,
+    source_choice: str, boxes: Sequence[Row | JsonDict] = (), basis: str = "auto",
+) -> tuple[Image.Image | None, str | None]:
     """Decoding may outlive a source replacement; revalidate pinned evidence."""
     img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
     if img is not None and args.get("detection_id") is not None:
@@ -2456,7 +2523,7 @@ def _validated_focus_source(config, db, photo, args, effective, source_choice, b
     return img, source
 
 
-def _focus_geometry_error(img, photo, used, args):
+def _focus_geometry_error(img: Image.Image, photo: JsonDict | Row, used: str, args: Mapping[str, str]) -> str | None:
     from focus_crop import validate_raster_geometry
     if used in {"eye", "subject"} or args.get("mask") == "1":
         try:
@@ -2467,7 +2534,9 @@ def _focus_geometry_error(img, photo, used, args):
     return None
 
 
-def _focus_source_image(config, photo, folder, source_choice):
+def _focus_source_image(
+    config: AppConfig, photo: JsonDict, folder: JsonDict | Row | None, source_choice: str,
+) -> tuple[Image.Image | None, str | None]:
     """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
 
     ``working`` requires the working copy, with no original fallback.
@@ -2502,9 +2571,9 @@ def _focus_source_image(config, photo, folder, source_choice):
 
 
 def _paired_cache_path_for_request(
-    preview_dir, photo, photo_id, size, pair_source, pair_source_path,
-    render_recipe, bypass_cache,
-):
+    preview_dir: str, photo: Row, photo_id: int, size: int, pair_source: str | None, pair_source_path: str | None,
+    render_recipe: JsonDict | None, bypass_cache: bool,
+) -> str | None:
     """The source-keyed shadow cache path, or ``None`` for ordinary previews."""
     # Paired renders coordinate through a distinct source-aware artifact
     # so a browser warmup (prefetch=1) and the visible request that
@@ -2517,26 +2586,26 @@ def _paired_cache_path_for_request(
     # returning bytes rendered from the previous state indefinitely —
     # regular preview-cache invalidation does not remove these source-keyed
     # files. Old states remain accounted for until LRU eviction.
-    return (
-        _paired_preview_path(
-            preview_dir,
-            photo_id,
-            size,
-            pair_source,
-            _paired_render_state_hash(
-                photo, size, pair_source, pair_source_path, render_recipe,
-            ),
-        )
-        if bypass_cache
-        else None
+    if not bypass_cache:
+        return None
+    # Only an explicit pair view bypasses the cache, and it names both.
+    pair_source, pair_source_path = cast(str, pair_source), cast(str, pair_source_path)
+    return _paired_preview_path(
+        preview_dir,
+        photo_id,
+        size,
+        pair_source,
+        _paired_render_state_hash(
+            photo, size, pair_source, pair_source_path, render_recipe,
+        ),
     )
 
 
 def _serve_cached_preview(
-    db, photo_id, size, cache_path, paired_cache_path, vireo_dir, *,
-    bypass_cache, stale_after_failed_invalidation,
-    skip_untracked_preview_adoption,
-):
+    db: Database, photo_id: int, size: int, cache_path: str, paired_cache_path: str | None, vireo_dir: str, *,
+    bypass_cache: bool, stale_after_failed_invalidation: bool,
+    skip_untracked_preview_adoption: bool,
+) -> Response | None:
     """Serve a tracked, adoptable or paired cache hit; ``None`` on a miss."""
     from flask import send_file
 
@@ -2592,10 +2661,10 @@ def _serve_cached_preview(
 
 
 def _materialize_requested_preview(
-    db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
-    render_recipe, bypass_cache, pair_source, pair_source_path,
-    _prepare_source,
-):
+    db: Database, photo: Row, photo_id: int, size: int, folder_row: Row, vireo_dir: str, cache_path: str,
+    render_recipe: JsonDict | None, bypass_cache: bool, pair_source: str | None, pair_source_path: str | None,
+    _prepare_source: Row | None,
+) -> PreviewMaterialization | None:
     """Render the preview; ``None`` when the source could not be decoded."""
     import config as cfg
 
@@ -2634,16 +2703,16 @@ class _PreviewServer:
     """
 
     def __init__(
-        self, get_db, config, *, invalid_preview_cache_paths,
-        clear_preview_cache_invalid,
-    ):
+        self, get_db: GetDb, config: AppConfig, *, invalid_preview_cache_paths: set[str],
+        clear_preview_cache_invalid: ClearPreviewCacheInvalid,
+    ) -> None:
         self._get_db = get_db
         self._config = config
         self._invalid_preview_cache_paths = invalid_preview_cache_paths
         self._clear_preview_cache_invalid = clear_preview_cache_invalid
 
 
-    def allowed_preview_sizes(self):
+    def allowed_preview_sizes(self) -> set[int]:
         """Allowlist for /photos/<id>/preview?size=N.
 
         Includes the fixed tier plus the user-configured preview_max_size
@@ -2652,13 +2721,13 @@ class _PreviewServer:
         """
         import config as cfg
         effective = self._get_db().get_effective_config(cfg.load())
-        fixed = set(PREVIEW_TIER_SIZES)
+        fixed: set[int] = set(PREVIEW_TIER_SIZES)
         pm = effective.get("preview_max_size") or 1920
         if pm == 0:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
 
-    def _serve_source_frame(self, photo_id, size):
+    def _serve_source_frame(self, photo_id: int, size: int) -> ResponseReturnValue:
         """Serve the cached upright, unedited frame used for manual placement."""
         import config as cfg
         from services.source_frame_preview import SourceFrameUnavailable, source_frame_bytes
@@ -2684,8 +2753,8 @@ class _PreviewServer:
         return response.make_conditional(request)
 
     def _reconcile_preview_cache_file(
-        self, db, photo, photo_id, size, cache_path, recipe, render_recipe, bypass_cache,
-    ):
+        self, db: Database, photo: Row, photo_id: int, size: int, cache_path: str, recipe: JsonDict | None, render_recipe: JsonDict | None, bypass_cache: bool,
+    ) -> tuple[bool, bool]:
         """Drop corrupt, invalidated and stale untracked preview files.
 
         Returns ``(stale_after_failed_invalidation,
@@ -2751,12 +2820,13 @@ class _PreviewServer:
         return stale_after_failed_invalidation, skip_untracked_preview_adoption
 
     def _coordinate_preview_flight(
-        self, photo_id, size, cache_path, paired_cache_path, bypass_cache,
-        _prepare_source,
-    ):
+        self, photo_id: int, size: int, cache_path: str, paired_cache_path: str | None, bypass_cache: bool,
+        _prepare_source: Row | None,
+    ) -> Response | tuple[str, int]:
         """Run the cache-miss render under the equal-key artifact flight."""
+        # A cache-bypassing pair view always has its shadow-cache path.
         artifact_key = os.path.abspath(
-            paired_cache_path if bypass_cache else cache_path,
+            cast(str, paired_cache_path) if bypass_cache else cache_path,
         )
         speculative = request.args.get("prefetch") == "1"
         speculative_slot = False
@@ -2765,7 +2835,7 @@ class _PreviewServer:
             if not speculative_slot:
                 return _shed_prefetch_response()
 
-        def coordinated_request(*, guarded):
+        def coordinated_request(*, guarded: bool) -> Response:
             response = make_response(
                 self._serve_preview(
                     photo_id, size, _artifact_flight_guarded=guarded,
@@ -2785,7 +2855,8 @@ class _PreviewServer:
             )
             if result.skipped:
                 return _shed_prefetch_response()
-            return result.value
+            # A flight that ran (or joined one) carries its response.
+            return cast(Response, result.value)
         except _ArtifactResponseError as exc:
             return exc.to_response()
         except ArtifactProducerFailed as exc:
@@ -2799,9 +2870,9 @@ class _PreviewServer:
                 preview_prefetch_slots.release()
 
     def _record_rendered_preview(
-        self, db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
-        bypass_cache, rendered,
-    ):
+        self, db: Database, photo_id: int, photo: Row, size: int, cache_path: str, paired_cache_path: str | None, vireo_dir: str,
+        bypass_cache: bool, rendered: PreviewMaterialization,
+    ) -> None:
         """Bookkeeping after a render: clear invalidation, evict, publish paired bytes."""
         if not bypass_cache and rendered.published:
             self._invalid_preview_cache_paths.discard(cache_path)
@@ -2833,8 +2904,8 @@ class _PreviewServer:
                 )
 
     def _serve_preview(
-        self, photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
-    ):
+        self, photo_id: int, size: int, *, _artifact_flight_guarded: bool = False, _prepare_source: Row | None = None,
+    ) -> tuple[str, int] | Response:
         """Serve a preview at the given size, using the preview_cache LRU.
 
         This is the single code path behind both /photos/<id>/preview and
@@ -2933,17 +3004,17 @@ class _PreviewServer:
 
 
 def create_media_blueprint(
-    get_db,
-    json_error,
-    db_path,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    db_path: str,
+    config: AppConfig,
     *,
-    get_runner,
-    invalid_preview_cache_paths,
-    clear_preview_cache_invalid,
-    render_edit_preview,
-    cancel_edit_preview,
-):
+    get_runner: GetRunner,
+    invalid_preview_cache_paths: set[str],
+    clear_preview_cache_invalid: ClearPreviewCacheInvalid,
+    render_edit_preview: _RenderEditPreview,
+    cancel_edit_preview: Callable[[str, int], None],
+) -> Blueprint:
     """Build the image- and mask-serving blueprint.
 
     ``config`` is the Flask app's config mapping; ``THUMB_CACHE_DIR`` (and
@@ -2967,7 +3038,7 @@ def create_media_blueprint(
     )
 
     @blueprint.route("/thumbnails/<filename>")
-    def serve_thumbnail(filename):
+    def serve_thumbnail(filename: str) -> ResponseReturnValue:
         """Serve a 400px JPEG thumbnail for a photo, regenerating on miss.
 
         Self-heal: if the thumbnail file is missing on disk but the photo
@@ -3030,7 +3101,7 @@ def create_media_blueprint(
         return _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename)
 
     @blueprint.route("/thumbnails/duplicate/<filename>")
-    def serve_duplicate_thumbnail(filename):
+    def serve_duplicate_thumbnail(filename: str) -> ResponseReturnValue:
         """``serve_thumbnail`` for a member of a duplicate group, in any workspace.
 
         The duplicate scan is library-wide, so the Duplicates page shows
@@ -3056,7 +3127,7 @@ def create_media_blueprint(
         return _serve_photo_thumbnail(get_db, config, db, photo_id, photo, filename)
 
     @blueprint.route("/masks/<filename>")
-    def serve_mask(filename):
+    def serve_mask(filename: str) -> ResponseReturnValue:
         """Serve mask PNG files.
 
         Legacy callers (e.g. ``openInspect`` in pipeline_review.html) still
@@ -3117,7 +3188,7 @@ def create_media_blueprint(
     _MASK_VARIANT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
     @blueprint.route("/api/masks/<int:pid>/<variant>.png")
-    def api_serve_mask(pid, variant):
+    def api_serve_mask(pid: int, variant: str) -> ResponseReturnValue:
         """Serve the mask file recorded on the ``photo_masks`` row.
 
         Reads the stored ``photo_masks.path`` instead of reconstructing
@@ -3168,7 +3239,7 @@ def create_media_blueprint(
         return "", 404
 
     @blueprint.route("/api/photos/<int:pid>/masks")
-    def api_photo_masks(pid):
+    def api_photo_masks(pid: int) -> ResponseReturnValue:
         """List a photo's available SAM mask variants and the active one.
 
         Powers the lightbox variant-toggle dropdown: the UI fetches this
@@ -3194,7 +3265,7 @@ def create_media_blueprint(
         })
 
     @blueprint.route("/photos/<int:photo_id>/crop")
-    def serve_crop_preview(photo_id):
+    def serve_crop_preview(photo_id: int) -> ResponseReturnValue:
         """Serve the cropped region that would be sent to BioCLIP."""
         import config as cfg
         from PIL import Image
@@ -3221,11 +3292,13 @@ def create_media_blueprint(
             if not dets:
                 return json_error("Subject not found", 404)
 
-        img = _load_crop_source(config, db, photo)
-        if img is _CROP_FOLDER_MISSING:
+        loaded = _load_crop_source(config, db, photo)
+        if loaded is _CROP_FOLDER_MISSING:
             return "Not found", 404
-        if img is None:
+        if loaded is None:
             return "Could not load image", 500
+        # The sentinel and None were answered above.
+        img = cast("Image.Image", loaded)
 
         if requested_detection is not None:
             geometry_error = _focus_geometry_error(img, photo, "subject", request.args)
@@ -3238,7 +3311,7 @@ def create_media_blueprint(
             if exposure_ev is not None:
                 from image_edits import apply_recipe
                 img = apply_recipe(img, {"adjustments": {"exposure": exposure_ev}})
-        img.thumbnail((800, 800), Image.LANCZOS)
+        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
         import io
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -3256,7 +3329,7 @@ def create_media_blueprint(
         return response
 
     @blueprint.route("/photos/<int:photo_id>/focus-crop")
-    def serve_focus_crop(photo_id):
+    def serve_focus_crop(photo_id: int) -> ResponseReturnValue:
         """Native upright-source window; eyes require detection/generation binding."""
         import io
 
@@ -3355,7 +3428,7 @@ def create_media_blueprint(
         return response
 
     @blueprint.route("/photos/<int:photo_id>/full")
-    def serve_full_photo(photo_id):
+    def serve_full_photo(photo_id: int) -> ResponseReturnValue:
         """Serve a display-sized preview (alias for /preview at preview_max_size).
 
         Reads workspace-effective config so a per-workspace preview_max_size
@@ -3385,7 +3458,7 @@ def create_media_blueprint(
         return previews._serve_preview(photo_id, int(pm or 1920))
 
     @blueprint.route("/photos/<int:photo_id>/preview")
-    def serve_photo_preview(photo_id, *, _prepare_source=None):
+    def serve_photo_preview(photo_id: int, *, _prepare_source: Row | None = None) -> ResponseReturnValue:
         """Serve a JPEG preview at a chosen max-size.
 
         Cache is LRU-tracked in the preview_cache table; on-disk files that
@@ -3409,7 +3482,7 @@ def create_media_blueprint(
         return previews._serve_preview(photo_id, size, _prepare_source=_prepare_source)
 
     @blueprint.route("/photos/<int:photo_id>/edit-mask-preview")
-    def serve_edit_mask_preview(photo_id):
+    def serve_edit_mask_preview(photo_id: int) -> ResponseReturnValue:
         """Serve a recipe's transformed, feathered local-weight map as a
         tinted RGBA PNG aligned with the editor preview.
 
@@ -3500,7 +3573,7 @@ def create_media_blueprint(
         return Response(_tinted_mask_png(weight), mimetype="image/png")
 
     @blueprint.route('/api/edit-preview/cancel', methods=['POST'])
-    def api_cancel_edit_preview():
+    def api_cancel_edit_preview() -> ResponseReturnValue:
         from services.preview_workers import parse_request
 
         body = request.get_json(silent=True) or {}
@@ -3514,7 +3587,7 @@ def create_media_blueprint(
         return '', 204
 
     @blueprint.route("/photos/<int:photo_id>/edit-preview")
-    def serve_photo_edit_preview(photo_id):
+    def serve_photo_edit_preview(photo_id: int) -> ResponseReturnValue:
         """Serve a preview for an in-progress or committed edit recipe.
 
         Crop editing intentionally uses the whole transformed source. Once a
@@ -3614,7 +3687,7 @@ def create_media_blueprint(
         return Response(buf.getvalue(), mimetype="image/jpeg")
 
     @blueprint.route("/api/photos/<int:photo_id>/auto-tone")
-    def api_auto_tone(photo_id):
+    def api_auto_tone(photo_id: int) -> ResponseReturnValue:
         """Fit Auto Tone to the photo as framed by ``recipe``, in ``style``.
 
         Returns the fitted exposure, highlights, shadows, contrast, whites,
@@ -3692,7 +3765,7 @@ def create_media_blueprint(
         return jsonify(result)
 
     @blueprint.route("/photos/<int:photo_id>/original")
-    def serve_original_photo(photo_id, *, _artifact_flight_guarded=False, _prepare_source=None):
+    def serve_original_photo(photo_id: int, *, _artifact_flight_guarded: bool = False, _prepare_source: Row | None = None) -> ResponseReturnValue:
         """Serve full-resolution image for 1:1 zoom."""
         from flask import send_file
 
@@ -3741,7 +3814,8 @@ def create_media_blueprint(
             # recipe or local mask in that coordinate space.
             if pair_source == "jpeg":
                 return send_file(pair_source_path)
-            return original.serve_paired_raw(pair_source, pair_source_path)
+            # A resolved pair path always names its source.
+            return original.serve_paired_raw(cast(str, pair_source), pair_source_path)
 
         original.collect_file_state()
         with reader_guard("full-resolution"):
