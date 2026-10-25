@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app_paths import migration_journal, native_roots
+from file_replace import replace_file
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -144,7 +145,7 @@ def _write_journal(path: Path, record: JsonDict) -> None:
             json.dump(record, stream, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         _sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
@@ -186,8 +187,20 @@ def _target(name: str, data: Path, cache: Path) -> Path:
     return (cache if name in CACHES else data) / name
 
 
+def _normalized_link_target(target: str) -> str:
+    # Windows readlink returns the substitution path, including its extended
+    # prefix. Compare lexical targets without following links: recovery must
+    # also recognize dangling links and still reject a link to another path.
+    if os.name == "nt":
+        if target[:8].upper() == "\\\\?\\UNC\\":
+            target = "\\\\" + target[8:]
+        elif target.startswith("\\\\?\\"):
+            target = target[4:]
+    return os.path.normcase(target)
+
+
 def _is_link(path: Path, target: Path) -> bool:
-    return path.is_symlink() and os.readlink(path) == str(target)
+    return path.is_symlink() and _normalized_link_target(os.readlink(path)) == _normalized_link_target(str(target))
 
 
 def _verify_entry(row: JsonDict, source: Path, target: Path) -> bool:

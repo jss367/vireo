@@ -75,6 +75,7 @@ def test_hf_cache_inventory_route(seeded):
     assert inv["unused_size"] == 5000
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_bulk_existing_model_cache_removal_keeps_installed_weights(seeded, tmp_path):
     app, blobs = seeded
     response = app.test_client().post("/api/storage/hf-cache/remove", json={"installed": True})
@@ -82,6 +83,18 @@ def test_bulk_existing_model_cache_removal_keeps_installed_weights(seeded, tmp_p
     assert response.get_json()["freed"] == 300
     assert not blobs["live"].exists()
     assert blobs["orphan"].exists()
+    assert (tmp_path / "vireo-models/dinov2-vit-b14/model.onnx").read_bytes() == b"installed"
+
+
+def test_bulk_existing_model_cache_removal_refuses_unsupported_platform(seeded, tmp_path, monkeypatch):
+    from services import hf_cache_tree
+
+    app, blobs = seeded
+    monkeypatch.setattr(hf_cache_tree, "supported", lambda: False)
+    response = app.test_client().post("/api/storage/hf-cache/remove", json={"installed": True})
+    assert response.status_code == 409
+    assert "no-follow directory descriptors" in response.get_json()["error"]
+    assert all(blob.exists() for blob in blobs.values())
     assert (tmp_path / "vireo-models/dinov2-vit-b14/model.onnx").read_bytes() == b"installed"
 
 

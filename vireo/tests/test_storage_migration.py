@@ -1,9 +1,12 @@
 """Offline relocation preserves bytes, stored paths, locks, and crash recovery."""
 
 import json
+import ntpath
 import os
 import sqlite3
-from pathlib import Path
+from contextlib import closing
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 from services import storage_migration as migration
@@ -22,7 +25,7 @@ def legacy(tmp_path, monkeypatch):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    with sqlite3.connect(source / "vireo.db") as db:
+    with closing(sqlite3.connect(source / "vireo.db")) as db, db:
         db.execute("CREATE TABLE saved (path TEXT)")
         db.execute("INSERT INTO saved VALUES (?)", (str(source / "working/photo.raw"),))
     (source / "config.json").write_text(json.dumps({"custom": str(source / "working")}))
@@ -63,7 +66,7 @@ def test_migration_preserves_bytes_inodes_saved_paths_and_default_media_root(leg
     assert app_paths.default_path("data") == str(data)
     assert app_paths.media_root(app_paths.default_path("thumbnails")) == str(data)
     assert app_paths.default_path("models") == str(cache / "models")
-    with sqlite3.connect(data / "vireo.db") as db:
+    with closing(sqlite3.connect(data / "vireo.db")) as db:
         saved = db.execute("SELECT path FROM saved").fetchone()[0]
         assert saved == str(source / "working/photo.raw")
         assert Path(saved).read_bytes() == b"unique original"
@@ -125,7 +128,7 @@ def test_destination_collision_does_not_move_or_overwrite_data(legacy, destinati
 
 def test_relative_symlink_refused_without_touching_target(legacy):
     source, _data, _cache, journal = legacy
-    (source / "relative").symlink_to("working/photo.raw")
+    (source / "relative").symlink_to(Path("working") / "photo.raw")
     with pytest.raises(migration.MigrationError, match="Relative symlink"):
         migration.migrate()
     assert (source / "relative").read_bytes() == b"unique original"
@@ -275,3 +278,82 @@ def test_missing_or_replaced_root_stops_recovery(legacy, monkeypatch):
     with pytest.raises(migration.MigrationError, match="root changed"):
         migration.migrate(rollback=True)
     assert journal.exists() and (source / "working/photo.raw").exists()
+
+
+@pytest.mark.parametrize(("reported", "expected", "matches"), [
+    (r"\\?\C:\Users\Vireo\runtime.lock", r"C:\Users\Vireo\runtime.lock", True),
+    (r"\\?\C:\Users\Vireo\runtime.lock", "c:/users/vireo/runtime.lock", True),
+    (r"\\?\UNC\server\share\models", r"\\server\share\models", True),
+    (r"\\?\C:\Users\Vireo\models", r"C:\Users\Vireo\thumbnails", False),
+    (r"\\?\UNC\server\share\models", r"\\other\share\models", False),
+])
+def test_windows_substitution_link_targets_are_compared_lexically(monkeypatch, reported, expected, matches):
+    # Use Windows path rules on every host, including case folding and UNC
+    # substitution paths. No existing target is required to recognize a link.
+    monkeypatch.setattr(migration, "os", SimpleNamespace(name="nt", path=ntpath, readlink=lambda _p: reported))
+    link = SimpleNamespace(is_symlink=lambda: True)
+    assert migration._is_link(link, PureWindowsPath(expected)) is matches
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_recovery_accepts_extended_readlink_targets(legacy, monkeypatch, rollback):
+    source, _data, _cache, journal = legacy
+
+    class SubstitutionPaths:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        def readlink(self, path):
+            target = os.readlink(path)
+            return target if target.startswith("\\\\?\\") else "\\\\?\\" + target
+
+    monkeypatch.setattr(migration, "os", SubstitutionPaths())
+    real_link = migration._link
+
+    def interrupted(path, target, directory):
+        if path.parent == source:
+            raise OSError("simulated interruption")
+        real_link(path, target, directory)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(migration, "_link", interrupted)
+        with pytest.raises(OSError, match="simulated interruption"):
+            migration.migrate()
+    migration.migrate(rollback=rollback)
+    assert not journal.exists()
+    assert (source / "working/photo.raw").read_bytes() == b"unique original"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink spelling")
+def test_posix_link_cannot_impersonate_windows_substitution_target(legacy):
+    source, _data, _cache, _journal = legacy
+    target = source / "working/photo.raw"
+    link = source / "wrong-link"
+    link.symlink_to("\\\\?\\" + str(target))
+    assert not migration._is_link(link, target)
+
+
+def test_journal_publication_retries_transient_windows_locks(tmp_path, monkeypatch):
+    import file_replace
+
+    journal = tmp_path / "journal.json"
+    journal.write_text('{"previous": true}')
+    real_replace = os.replace
+    calls = []
+
+    def transient_lock(src, dst):
+        calls.append((src, dst))
+        if len(calls) < 3:
+            assert json.loads(journal.read_text()) == {"previous": True}
+            raise PermissionError("simulated Windows sharing violation")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(file_replace, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(file_replace.os, "replace", transient_lock)
+    monkeypatch.setattr(file_replace.time, "sleep", lambda _delay: None)
+    migration._write_journal(journal, {"current": True})
+    assert len(calls) == 3
+    assert json.loads(journal.read_text()) == {"current": True}
+    assert list(tmp_path.iterdir()) == [journal]

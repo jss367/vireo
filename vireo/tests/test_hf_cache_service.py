@@ -76,6 +76,7 @@ def _entries(inv):
     return {e["key"]: e for e in inv["entries"]}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_bulk_existing_model_cache_cleanup_preserves_installs_and_unused_entries(hub, tmp_path):
     from services import hf_cache
 
@@ -91,6 +92,7 @@ def test_bulk_existing_model_cache_cleanup_preserves_installs_and_unused_entries
     assert (install / "model.onnx").read_bytes() == b"installed"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_existing_model_cleanup_rechecks_install_presence(hub, tmp_path):
     from services import hf_cache
 
@@ -103,6 +105,7 @@ def test_existing_model_cleanup_rechecks_install_presence(hub, tmp_path):
     assert blob.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_existing_model_cleanup_preserves_weights_linked_into_cache(hub, tmp_path):
     from services import hf_cache
 
