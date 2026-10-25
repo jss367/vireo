@@ -77,6 +77,7 @@ from keyword_identity import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from repositories.identity_alternatives import retarget_candidate_names
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 log = logging.getLogger(__name__)
 
@@ -1980,15 +1981,14 @@ def _taxonomy_for_species_replacement():
 def _fetch_entry_prediction(conn, ws, prediction_id):
     """The prediction row the caller named, with its review group and photo."""
     return conn.execute(
-        """SELECT pr.*,
+        f"""SELECT pr.*,
                   pr.classifier_model AS model,
                   pr_rev.group_id AS group_id,
                   pr_rev.individual AS individual,
                   d.photo_id
            FROM predictions pr
            JOIN detections d ON d.id = pr.detection_id
-           LEFT JOIN prediction_review pr_rev
-             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+           {prediction_review_join('pr')}
            WHERE pr.id = ?""",
         (ws, prediction_id),
     ).fetchone()
@@ -2076,10 +2076,9 @@ def _acceptance_targets(
     # workspace) that survives the caller's scope.
     if pred["group_id"]:
         group_preds = conn.execute(
-            """SELECT pr.id, d.photo_id, pr_rev.status AS status
+            f"""SELECT pr.id, d.photo_id, pr_rev.status AS status
                FROM predictions pr
-               JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr', required=True)}
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos ph ON ph.id = d.photo_id
                JOIN photo_workspace_visibility wf
@@ -2233,14 +2232,13 @@ def _reject_detection_alternatives(conn, ws, this_pred_id):
     if row is None:
         return
     sibs = conn.execute(
-        """SELECT pr.id FROM predictions pr
-           LEFT JOIN prediction_review pr_rev
-             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+        f"""SELECT pr.id FROM predictions pr
+           {prediction_review_join('pr')}
            WHERE pr.detection_id = ?
              AND pr.classifier_model = ?
              AND pr.labels_fingerprint = ?
              AND pr.id != ?
-             AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
+             AND {prediction_review_status()} IN ('pending', 'alternative')""",
         (ws, row["detection_id"], row["classifier_model"],
          row["labels_fingerprint"], this_pred_id),
     ).fetchall()
@@ -2377,15 +2375,13 @@ def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, get_effective_c
     # the still-live neighbour and queue its removal).
     return [
         row["species"] for row in conn.execute(
-            """SELECT DISTINCT pr.species AS species
+            f"""SELECT DISTINCT pr.species AS species
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
+               {prediction_review_join('pr')}
                WHERE d.photo_id = ?
                  AND pr.detection_id IS NOT ?
-                 AND COALESCE(pr_rev.status, 'pending')
+                 AND {prediction_review_status()}
                      NOT IN ('rejected', 'alternative')
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (

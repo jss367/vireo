@@ -35,6 +35,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator
 from typing import Any
 
 from keyword_normalization import keyword_match_key
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 
 
 class PhotoSpeciesRepository:
@@ -95,9 +96,9 @@ class PhotoSpeciesRepository:
                            d.box_w, d.box_h, d.detector_confidence, d.detector_model, d.category,
                            p.id AS prediction_id, p.species, p.confidence,
                            p.classifier_model, p.labels_fingerprint,
-                           COALESCE(r.status, 'pending') AS status
+                           {prediction_review_status('r')} AS status
                     FROM detections d LEFT JOIN predictions p ON p.detection_id=d.id
-                    LEFT JOIN prediction_review r ON r.prediction_id=p.id AND r.workspace_id=?
+                    {prediction_review_join('p', review_alias='r')}
                     WHERE d.photo_id IN ({marks})
                     ORDER BY d.photo_id, d.id, p.confidence DESC, p.id""",
                 [ws, *chunk],
