@@ -48,9 +48,9 @@ def _prepare(page, live_server, action, photo_link=False):
         page.goto(f"{live_server['url']}/browse?photo_id={ids[0]}")
     else:
         _open_browse(page, live_server)
-    page.wait_for_function("VireoFilter.isReady() && !browseState.loading && browseState.browseDatasetReady")
+    page.wait_for_function("VireoFilter.isReady() && !pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
     page.select_option("#sortSelect", "name")
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
     page.evaluate("pageModules.viewControls.updateThumbSize(300)")
     if action == "quick_missing":
         page.click('.vf-shortcuts [data-field="has_location_keyword"]')
@@ -69,7 +69,7 @@ def _prepare(page, live_server, action, photo_link=False):
         page.evaluate("pageModules.calendar.selectCalendarDay('2024-05-02', 60)")
     else:
         page.evaluate("VireoFilter.addRule('rating', '>=', 5)")
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos >= 60 && browseState.totalPhotos < 70")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total >= 60 && pageModules.pagination.pagination.total < 70")
     return ids
 
 
@@ -95,7 +95,7 @@ def _turn_off(page, action):
     elif action == "sidebar_keyword":
         # The keyword list lives in the summary panel, which a selection's
         # detail panel hides. Exercise its handler directly in that case.
-        if page.evaluate("browseState.selectedPhotoId != null"):
+        if page.evaluate("pageModules.selectionState.selection.focusedPhotoId != null"):
             page.evaluate("pageModules.sidebarKeywords.filterByKeyword('Portfolio')")
         else:
             page.locator('#keywordTree .tree-item[data-keyword="Portfolio"]').click()
@@ -176,7 +176,7 @@ def _check_turning_off(page, live_server, action, selected, photo_link=False):
     # Photo links scope Browse to the target's folder (the other two seed
     # photos live elsewhere); removing a filter must preserve that scope.
     page.wait_for_function(
-        "total => !browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === total && browseState.anchorScanDepth === 0",
+        "total => !pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === total && browseState.anchorScanDepth === 0",
         arg=183 if photo_link else 185,
     )
     page.wait_for_function("""anchor => {
@@ -186,8 +186,8 @@ def _check_turning_off(page, live_server, action, selected, photo_link=False):
       return rect.bottom > box.top && rect.top < box.bottom &&
         Math.abs(rect.top - box.top - anchor.topOffset) < 4;
     }""", arg=anchor)
-    assert page.evaluate("browseState.selectedPhotoId") == (anchor["photoId"] if selected else None)
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == (anchor["photoId"] if selected else None)
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
     # The target moves several pages into the expanded library. Resolve it
     # directly, including for Clear filters, rather than loading from page 1.
     assert queries[0].get("focus_photo_id") == anchor["photoId"]
@@ -203,7 +203,7 @@ def test_second_removal_during_reload_keeps_original_photo(live_server, page, se
     _stall_first_focused_query(page)
     ids = _prepare(page, live_server, "quick_flag")
     page.evaluate("VireoFilter.addRule('rating', '>=', 5)")
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
     card = page.locator(f'#grid .grid-card[data-id="{ids[145]}"]')
     card.scroll_into_view_if_needed()
     if selected:
@@ -214,9 +214,9 @@ def test_second_removal_during_reload_keeps_original_photo(live_server, page, se
     _turn_off(page, "quick_flag")
     page.wait_for_function("window.__focusStalled")
     _turn_off(page, "clear")
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.focusReloadInFlight === 0")
-    assert page.evaluate("browseState.totalPhotos") == 185
-    assert page.evaluate("browseState.selectedPhotoId") == (anchor["photoId"] if selected else None)
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && browseState.focusReloadInFlight === 0")
+    assert page.evaluate("pageModules.pagination.pagination.total") == 185
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == (anchor["photoId"] if selected else None)
     assert page.evaluate("""id => {
       const card = pageModules.grid.getGridCard(id).getBoundingClientRect();
       const box = pageModules.scroll.gridContainer.getBoundingClientRect();
@@ -228,9 +228,9 @@ def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page)
     ids = _prepare(page, live_server, "quick_flag")
     live_server["db"].photo_review.set_flags(ids[:120], "rejected")
     page.click('.vf-shortcuts [data-value="rejected"]')
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === 180")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === 180")
     # Select a Picked photo that will disappear when only Rejected remains.
-    page.evaluate("async () => { while (!browseState.allLoaded) await pageModules.loading.loadPhotos(); }")
+    page.evaluate("async () => { while (!pageModules.pagination.pagination.allLoaded) await pageModules.loading.loadPhotos(); }")
     page.locator(f'#grid .grid-card[data-id="{ids[145]}"]').click()
     with page.expect_response(lambda response:
         response.url.endswith('/api/photos/query') and
@@ -238,9 +238,9 @@ def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page)
     ) as focused:
         _turn_off(page, "quick_flag")
     assert focused.value.json()["focus_index"] is None
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.focusReloadInFlight === 0")
-    assert page.evaluate("browseState.selectedPhotoId") is None
-    assert page.evaluate("browseState.totalPhotos") == 120
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && browseState.focusReloadInFlight === 0")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
+    assert page.evaluate("pageModules.pagination.pagination.total") == 120
     assert page.evaluate("browseState.photos.length") < 120, "must not scan all results for an excluded photo"
 
 
@@ -264,8 +264,8 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
     page.evaluate("rule => VireoFilter.loadExpression([rule])", {
         "field": field, "op": op, "value": values,
     })
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
-    page.evaluate("async () => { while (!browseState.allLoaded) await pageModules.loading.loadPhotos(); }")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
+    page.evaluate("async () => { while (!pageModules.pagination.pagination.allLoaded) await pageModules.loading.loadPhotos(); }")
     card = page.locator(f'#grid .grid-card[data-id="{ids[145]}"]')
     card.scroll_into_view_if_needed()
     if selected:
@@ -291,10 +291,10 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
     # Removing an excluded value widens the view; removing an included
     # value narrows it. The anchor remains eligible in both cases.
     page.wait_for_function(
-        "total => !browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === total && browseState.anchorScanDepth === 0",
+        "total => !pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === total && browseState.anchorScanDepth === 0",
         arg=60 if op == "in" else 185,
     )
-    assert page.evaluate("browseState.selectedPhotoId") == (anchor["photoId"] if selected else None)
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == (anchor["photoId"] if selected else None)
     page.wait_for_function("""anchor => {
       const card = pageModules.grid.getGridCard(anchor.photoId);
       if (!card) return false;
@@ -315,8 +315,8 @@ def test_folder_handoff_does_not_inherit_keyword_selection(live_server, page):
         page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]').click()
     assert 'focus_photo_id' not in query.value.post_data_json
     assert query.value.post_data_json['folder_id'] == folder_id
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady")
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     assert page.evaluate("pageModules.scroll.gridContainer.scrollTop") == 0
     assert page.evaluate("VireoFilter.hasFilters()") is False
 
@@ -329,9 +329,9 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
                         (live_server["data"]["folders"][0],))
     collection_id = next(c['id'] for c in db.collections.list_all() if c['name'] == 'All Photos')
     page.goto(f"{live_server['url']}/browse?collection_id={collection_id}&dashboard_scope=1&rating_min=5")
-    page.wait_for_function("VireoFilter.isReady() && !browseState.loading && browseState.browseDatasetReady")
+    page.wait_for_function("VireoFilter.isReady() && !pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready")
     page.click('#offlineCollectionToggle')
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === 60")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === 60")
     page.evaluate("pageModules.viewControls.updateThumbSize(300)")
     page.locator(f'#grid .grid-card.offline[data-id="{ids[145]}"]').scroll_into_view_if_needed()
     anchor = page.evaluate("pageModules.anchors.captureBrowseViewportAnchor()")
@@ -341,7 +341,7 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
     assert query.value.post_data_json['include_offline'] is True
     assert query.value.post_data_json['collection_id'] == collection_id
     assert query.value.post_data_json['focus_photo_id'] == anchor['photoId']
-    page.wait_for_function("!browseState.loading && browseState.browseDatasetReady && browseState.anchorScanDepth === 0 && browseState.totalPhotos === 185")
+    page.wait_for_function("!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && browseState.anchorScanDepth === 0 && pageModules.pagination.pagination.total === 185")
     page.wait_for_function("""anchor => {
       const card = pageModules.grid.getGridCard(anchor.photoId);
       if (!card || !card.classList.contains('offline')) return false;
@@ -349,7 +349,7 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
       return rect.bottom > box.top && rect.top < box.bottom &&
         Math.abs(rect.top - box.top - anchor.topOffset) < 4;
     }""", arg=anchor, timeout=3000)
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     assert page.evaluate("pageModules.selection.getActiveSelection()") == []
 
 
@@ -367,7 +367,7 @@ def test_replacing_or_adding_extension_values_starts_fresh(live_server, page, op
         'field': 'extension', 'op': op,
         'value': '.jpg' if op == 'is' else ['.jpg', '.png'],
     })
-    page.wait_for_function('!browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === 185')
+    page.wait_for_function('!pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === 185')
     page.locator(f'#grid .grid-card[data-id="{ids[25]}"]').click()
     page.click('.vf-filters-btn')
     with _expect_reset_query(page) as query:
@@ -376,8 +376,8 @@ def test_replacing_or_adding_extension_values_starts_fresh(live_server, page, op
         ).check()
     assert 'focus_photo_id' not in query.value.post_data_json
     page.wait_for_function(
-        'total => !browseState.loading && browseState.browseDatasetReady && browseState.totalPhotos === total',
+        'total => !pageModules.pagination.pagination.loading && pageModules.pagination.pagination.ready && pageModules.pagination.pagination.total === total',
         arg=1 if op == 'is' else 186,
     )
-    assert page.evaluate('browseState.selectedPhotoId') is None
+    assert page.evaluate('pageModules.selectionState.selection.focusedPhotoId') is None
     assert page.evaluate('pageModules.scroll.gridContainer.scrollTop') == 0

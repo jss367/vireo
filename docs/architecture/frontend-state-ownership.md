@@ -45,9 +45,31 @@ It has no dependencies on the page's rendering or loading modules. Dataset
 replacements claim an opaque owner; paging, selection and stack callbacks
 observe it and check their predicate after asynchronous work. The mutable
 owner remains private. The numeric sequence is exposed only for server search
-cancellation. Grid data, pagination and the loading flag still live in
-`browse/state.js`; this extraction removes request ownership from that shared
-object and lets consumers observe it without importing the loading workflow.
+cancellation. Grid data remains in `browse/state.js`. Selection and pagination have separate
+owners, described below; request predicates can be observed without importing
+the loading workflow.
+
+## Browse selection and pagination
+
+`static/browse/selection-state.js` owns batch membership, focus, range anchor,
+last-click identity, pre-double-click snapshots and pending Select all requests.
+Its frozen API performs grouped single, batch, toggle and range transitions.
+Membership is exposed as a live read-only view; action ids are copied. Every
+membership or focus mutation invalidates pending selection reads. Moving the
+anchor after a prepend preserves membership ownership. DOM work, stack range
+resolution and EXIF-suggestion cleanup stay in `selection.js` and its callers.
+
+`static/browse/pagination.js` owns the first/next page, page size, result totals,
+readiness and loading state. Window updates publish their related counters
+together. Each load receives a completion handle that cannot release a newer
+load; dataset replacement explicitly cancels the prior handle. Resetting page
+metadata preserves an in-flight deep-link setup guard. Photo rows and their
+lightbox-shared array remain in `state.js`.
+
+`tests/frontend/browse-state-owners.test.mjs` exercises actual ES modules for
+snapshot isolation, focus/batch transitions, stack toggles, asynchronous selection
+ownership, page offsets and stale load completion. Existing browser journeys
+exercise real clicks, keyboard navigation, deep links, sorting and health races.
 
 ## Lightbox navigation and loading
 

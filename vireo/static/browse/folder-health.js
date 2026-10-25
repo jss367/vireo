@@ -1,5 +1,6 @@
 /* Browse: refreshing Browse when folder health (missing/restored) changes. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
 import { state } from './state.js';
 import { localFolders, markMissingFoldersReconciliationPending } from './shared.js';
 import { loadCalendarData } from './calendar.js';
@@ -149,7 +150,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // A transition in an unrelated folder cannot change a leaf-folder result
   // set. Keep its selection, detail panel, and scroll position intact while
   // still refreshing workspace-wide sidebar and summary counts.
-  if (!activeScopeWasAffected && state.browseDatasetReady) {
+  if (!activeScopeWasAffected && pagination.ready) {
     loadCollectionCounts();
     loadSummary();
     if (state.timelineMode) loadCalendarData();

@@ -1,6 +1,7 @@
 // Selected definitions only: invented DOM, inert transport, no app or browser imports.
 const fs=require('fs'),vm=require('vm'),path=require('path'),assert=require('node:assert/strict');
 const {test}=require('node:test');
+const {installBrowseOwners}=require('./browse-owner-fixture.cjs');
 const root=path.resolve(__dirname,'../..');
 const {parse}=require('acorn');
 function source(file){
@@ -97,6 +98,7 @@ function page(){
   });
   c.window=c;
   c.state=c;
+  installBrowseOwners(c);
   functions(c,'sidebar-collections.js',['collectionCountMarkup','renderCollectionList','filterByCollection','refreshActiveCollectionAfterMembershipChange','highlightedCollectionId','syncSidebarHighlights']);
   functions(c,'sidebar-folders.js',['filterByFolder','renderFolderTree']);
   functions(c,'sidebar-keywords.js',['filterByKeyword','renderKeywordTree']);
@@ -256,10 +258,7 @@ test('photo deep-link executes with invented init data and repaints all trees',a
   let reads=0,scrolled=false;
   Object.assign(c,{
     folderHealthRefreshSeq:0,_cfgPromise:Promise.resolve({
-    }),applyBrowseConfig:no,claimBrowseWindow:()=>()=>true,updatePreviousPhotosButton:no,selectedPhotos:new Set(),closeDetail:no,perPage:50,loadCollectionCounts:no,setBrowseTotals:data=>{
-      c.totalPhotos=data.total;
-      c.totalUnderlyingPhotos=data.total;
-    },loadedWindowOffset:()=>0,renderGrid:no,hydrateColorLabelsForRenderedPage:no,getGridCard:()=>({
+    }),applyBrowseConfig:no,claimBrowseWindow:()=>()=>true,updatePreviousPhotosButton:no,closeDetail:no,loadCollectionCounts:no,renderGrid:no,hydrateColorLabelsForRenderedPage:no,getGridCard:()=>({
       style:{
       },scrollIntoView:()=>{
         scrolled=true;
@@ -285,7 +284,7 @@ test('photo deep-link executes with invented init data and repaints all trees',a
   assert.deepEqual(p.active(),[['folderTree',{
     folderId:'2'
   }]]);
-  assert.equal(c.loading,false);
+  assert.equal(c.pagination.loading,false);
 });
 test('deep-link-installed callback drops opened collection after chip edits and keyword selection',async()=>{
   for(const edit of ['chip','keyword']){
@@ -295,10 +294,7 @@ test('deep-link-installed callback drops opened collection after chip edits and 
     let installed;
     Object.assign(c,{
       folderHealthRefreshSeq:0,_cfgPromise:Promise.resolve({
-      }),applyBrowseConfig:no,claimBrowseWindow:()=>()=>true,updatePreviousPhotosButton:no,selectedPhotos:new Set(),closeDetail:no,perPage:50,loadCollectionCounts:no,setBrowseTotals:data=>{
-        c.totalPhotos=data.total;
-        c.totalUnderlyingPhotos=data.total;
-      },loadedWindowOffset:()=>0,renderGrid:no,hydrateColorLabelsForRenderedPage:no,getGridCard:()=>({
+      }),applyBrowseConfig:no,claimBrowseWindow:()=>()=>true,updatePreviousPhotosButton:no,closeDetail:no,loadCollectionCounts:no,renderGrid:no,hydrateColorLabelsForRenderedPage:no,getGridCard:()=>({
         style:{
         },scrollIntoView:no
       }),preferredScrollBehavior:()=> 'auto',setTimeout:fn=>fn(),rearmInfiniteScrollObserver:no,requestAnimationFrame:no,ensureViewportHydrated:no,safeFetch:async url=>url.startsWith('/api/photos/')?{

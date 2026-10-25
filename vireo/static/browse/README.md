@@ -16,7 +16,7 @@ is involved.
 
 | File | Responsibility |
 | --- | --- |
-| `state.js` | Page state: the `state` object (grid window, selection, scope, sidebar and panel load generations, stacks, colour labels, ...), `browseLimits`, `PREDICTION_COLLAPSE_AT`, and the helpers that keep state consistent (`setBrowseTotals`, `searchLaneSeq`, ...) |
+| `state.js` | Photo data, scope, sidebar and panel load generations, stack caches, colour labels, `browseLimits`, `PREDICTION_COLLAPSE_AT`, and cache helpers |
 | `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar, sync-panel and classic-helper global the page uses, and `registerPageHooks()` |
 | `markup.js` | The `data-browse-on` handler table and `bindBrowseMarkup()` (see Markup below) |
 | `boot.js` | The entry module: composing the filter bar's row, binding the markup and the compare overlay, registering the page hooks, bootstrap, the folder-health subscription, infinite scroll, and the photo deep link |
@@ -28,7 +28,9 @@ is involved.
 | `stacks.js` | Burst stacks: membership, badges, trays, cover reconciliation |
 | `anchors.js` | Keeping the selected photo or viewport in place across reloads |
 | `scroll.js` | Infinite scroll (`observer`, `infiniteScroll`) and keeping the focused card visible |
-| `selection.js` | Selection: click, range, select all, clear, `getActiveSelection` |
+| `selection.js` | Click, range, select all and clear workflows, `getActiveSelection`, and selection UI effects |
+| `selection-state.js` | Private focus, batch membership, range anchor, click snapshots and pending selection ownership |
+| `pagination.js` | Private page range, page size, totals, readiness and loading ownership |
 | `keyboard.js` | Shortcuts and arrow-key navigation |
 | `lightbox.js` | Opening the shared lightbox from the grid and reconciling its events |
 | `species-provenance.js` | Per-species evidence display and editing, including supporting-frame links |
@@ -54,15 +56,26 @@ is involved.
 
 ## State
 
-Page state lives in one exported object, `state` in `state.js`. An ES module
-cannot reassign another module's variable, so files write fields
-(`state.selectedPhotoId = id`) instead of rebinding variables; a value only
-its own module writes stays a module variable, exported read-only where
-others read it. `state.js` imports nothing, so it is evaluated before any
-other page module. Values browser tests tune are fields of small exported
-objects (`browseLimits.maxFocusCandidates`, `batchBarTiming.activateQuietMs`,
-`infiniteScroll.observerIsNative`, `locationPick.lastPickedAt`) rather than
-constants.
+`selection-state.js` exports `selection`, a frozen API over private focus,
+batch membership, the range anchor and pre-double-click snapshots. Use
+`selectSingle`, `selectBatch`, `toggle`, `extendRange` and `clear` for selection
+transitions. `batchIds` is a live iterable view with `size`, `has` and `forEach`;
+it exposes no backing Set or mutators. `ids()` returns a copied action snapshot.
+`beginSelectAll()` returns a predicate invalidated by subsequent selection
+changes, including changes made outside the click handler.
+
+`pagination.js` exports `pagination`, which owns page size, first/next page,
+totals, dataset readiness and the loading mutex. Its properties are read-only.
+`place`, `append` and `prepend` publish a coherent window; `setTotals` preserves
+item and underlying-photo counts separately. `beginLoad()` returns an idempotent
+completion that can release only its own load. `cancelLoad()` retires a replaced
+load. `reset()` resets page metadata while preserving a setup load, as required
+by photo deep links.
+
+Photo rows, scope and render caches remain in `state.js`. The photo array's
+identity still matters to the shared lightbox and is preserved when extending
+or refreshing a loaded window. Test tuning knobs remain separate small exported
+objects such as `browseLimits`, `batchBarTiming` and `infiniteScroll`.
 
 Grid-request ownership lives in `window-requests.js`, which imports no page
 modules. Dataset replacements call `claimBrowseWindow()`; selection, stack and
@@ -127,8 +140,9 @@ them are safe because no module calls an import while it is being evaluated.
 Browser tests reach the page's modules through `tests/e2e/module_pages.py`:
 the `page` fixture publishes every Browse module as `pageModules.<file>`
 (camelCased: `pageModules.selectionPanel`) and the state object as
-`browseState` after each navigation to Browse. Node tests run a module's
-functions in a VM with the context standing in for `state`.
+`browseState` after each navigation to Browse. Browser tests read the owners through `pageModules.selectionState.selection`
+and `pageModules.pagination.pagination`. Node UI fixtures load the complete
+owner implementations into their isolated VM contexts.
 
 ## Panel requests
 

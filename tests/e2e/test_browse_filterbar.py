@@ -293,8 +293,8 @@ def test_collection_count_and_optional_grid_keep_offline_members(live_server, pa
 
     # Select all remains an operational action over accessible photos only.
     page.evaluate("pageModules.selection.selectAllMatchingPhotos()")
-    page.wait_for_function("browseState.selectedPhotos.size === 3")
-    assert set(page.evaluate("Array.from(browseState.selectedPhotos)")) == (
+    page.wait_for_function("pageModules.selectionState.selection.batchIds.size === 3")
+    assert set(page.evaluate("Array.from(pageModules.selectionState.selection.batchIds)")) == (
         set(live_server["data"]["photos"]) - offline_ids
     )
 
@@ -760,12 +760,12 @@ def test_clearing_filters_keeps_selected_photo_in_place(
     else:
         page.click(".vf-clear")
     page.wait_for_function(
-        "(id) => browseState.photos.length === 5 && browseState.selectedPhotoId === id",
+        "(id) => browseState.photos.length === 5 && pageModules.selectionState.selection.focusedPhotoId === id",
         arg=selected_id,
     )
     page.wait_for_timeout(100)  # allow the anchor-restoration animation frame
 
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
     expect(selected).to_have_class("grid-card selected")
     top_after = page.evaluate(
         """(id) => {
@@ -807,7 +807,7 @@ def test_clear_without_filters_does_not_reload(live_server, page, clear_action):
     assert page.evaluate("pageModules.windowRequests.browseWindowSequence()") == epoch_before
     assert not page.evaluate("VireoFilter.hasFilters()")
     assert page.locator(".vf-search input").input_value() == ""
-    assert page.evaluate("browseState.selectedPhotoId") == selected_id
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == selected_id
     expect(selected).to_have_class("grid-card selected")
 
 
@@ -884,7 +884,7 @@ def test_select_all_matches_filtered_grid(live_server, page):
     search.press("Escape")  # blur: select-all is a grid shortcut, not an input one
     page.keyboard.press("ControlOrMeta+a")
     page.wait_for_function(
-        "browseState.selectedPhotos && browseState.selectedPhotos.size === 3", timeout=8000,
+        "pageModules.selectionState.selection.batchIds && pageModules.selectionState.selection.batchIds.size === 3", timeout=8000,
     )
 
 
@@ -1101,7 +1101,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
     }[scope]
     expected_ids = live_server["data"]["photos"][:3 if scope == "folder" else 2]
     page.goto(f"{live_server['url']}/browse?{query}")
-    page.wait_for_function("VireoFilter.isReady() && !browseState.loading")
+    page.wait_for_function("VireoFilter.isReady() && !pageModules.pagination.pagination.loading")
     row = page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk")
     expect(row.locator(".summary-species-count")).to_have_text(str(len(expected_ids)))
     if activation == "click":
@@ -1129,7 +1129,7 @@ def test_top_species_narrows_match_any_collection(live_server, page):
         ]
     }))
     page.goto(f"{live_server['url']}/browse?collection_id={cid}")
-    page.wait_for_function("VireoFilter.isReady() && !browseState.loading")
+    page.wait_for_function("VireoFilter.isReady() && !pageModules.pagination.pagination.loading")
     expect(page.locator("#grid .grid-card")).to_have_count(5)
     page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk").click()
     expect(page.locator("#grid .grid-card")).to_have_count(3)

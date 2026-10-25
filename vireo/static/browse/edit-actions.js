@@ -1,5 +1,6 @@
 /* Browse: detail-panel edits (rating, flag, color, wildlife, keywords) and the batch inspector. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { _noteColorLabelEdits, state } from './state.js';
 import { checkPendingSync, safeFetch } from './shared.js';
 import {
@@ -50,7 +51,7 @@ export async function setRating(/** @type {number} */ photoId, /** @type {number
     // The user may have moved on during the POST. loadDetail(A) while B is
     // open would hide B's panel and null detailPhotoId, then refuse to render
     // A, leaving the panel blank.
-    if (state.selectedPhotoId === photoId) loadDetail(photoId);
+    if (selection.focusedPhotoId === photoId) loadDetail(photoId);
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -67,8 +68,8 @@ export async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ fl
     await batchSetFlag(target);
     return;
   }
-  if (!state.selectedPhotoId) return;
-  var photoId = state.selectedPhotoId;
+  if (!selection.focusedPhotoId) return;
+  var photoId = selection.focusedPhotoId;
   try {
     await safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST',
@@ -81,7 +82,7 @@ export async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ fl
     await reconcileBrowseStackCovers([photoId]);
     refreshGridCards([photoId]);
     refreshExpandedBrowseStackMembers([photoId]);
-    if (state.selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    if (selection.focusedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
   } catch(e) {}
 }
@@ -107,22 +108,22 @@ export async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** 
   if (p) p.wildlife_excluded = excluded ? 1 : 0;
   renderGrid();
   refreshExpandedBrowseStackMembers([photoId]);
-  if (state.selectedPhotoId === photoId) loadDetail(photoId);
+  if (selection.focusedPhotoId === photoId) loadDetail(photoId);
   showUndoToast();
 }
 
 export async function toggleDetailWildlifeExcluded() {
-  if (!state.selectedPhotoId) return;
+  if (!selection.focusedPhotoId) return;
   // Read the current value via findBrowsePhoto so a stack member that lives
   // only in browseStackMembers (not the top-level photos array) still yields
   // its true wildlife_excluded state. photos.find() would return undefined for
   // hidden members and always send excluded=true — clicking "Include Wildlife
   // Classification" on an already-excluded member would silently re-exclude
   // it instead of including it.
-  var p = findBrowsePhoto(state.selectedPhotoId);
+  var p = findBrowsePhoto(selection.focusedPhotoId);
   var current = p ? !!p.wildlife_excluded : false;
   try {
-    await setWildlifeExcludedFor(state.selectedPhotoId, !current);
+    await setWildlifeExcludedFor(selection.focusedPhotoId, !current);
   } catch(e) {}
 }
 
@@ -150,7 +151,7 @@ export function _recoverColorLabelsAfterFailedWrite(/** @type {number[]} */ ids)
     // fetchColorLabels already re-rendered a batch inspector; only the
     // single-photo panel is left to catch up.
     var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
-    if (state.selectedPhotoId != null && ids.indexOf(state.selectedPhotoId) !== -1
+    if (selection.focusedPhotoId != null && ids.indexOf(selection.focusedPhotoId) !== -1
         && !(detail && detail.classList.contains('batch-mode'))) {
       updateDetailColors();
     }
@@ -209,8 +210,8 @@ export async function setColorLabel(/** @type {string | null} */ color) {
     await batchSetColorLabel(target);
     return;
   }
-  if (!state.selectedPhotoId) return;
-  var photoId = state.selectedPhotoId;
+  if (!selection.focusedPhotoId) return;
+  var photoId = selection.focusedPhotoId;
   _noteColorLabelEdits([photoId]);
   var current = state.colorLabels[photoId] || null;
   var newColor = (current === color) ? null : color;
@@ -228,7 +229,7 @@ export async function setColorLabel(/** @type {string | null} */ color) {
     delete state.colorLabels[photoId];
   }
   state.colorLabelsFetched.add(photoId);
-  if (state.selectedPhotoId === photoId) updateDetailColors();
+  if (selection.focusedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
   refreshExpandedBrowseStackMembers([photoId]);
   scheduleCollectionCountsRefresh();
@@ -241,7 +242,7 @@ function updateDetailColorsValue(/** @type {string | null} */ current) {
 }
 
 export function updateDetailColors() {
-  updateDetailColorsValue((state.selectedPhotoId == null ? null : state.colorLabels[state.selectedPhotoId]) || null);
+  updateDetailColorsValue((selection.focusedPhotoId == null ? null : state.colorLabels[selection.focusedPhotoId]) || null);
 }
 
 // --- Multi-select (batch) inspector ---------------------------------------
@@ -379,7 +380,7 @@ export async function addKeyword(/** @type {BrowseKeywordOption | null} */ keywo
   var ids = getActiveSelection();
   var useBatch = ids.length > 1;
   var batchSelectionKey = selectionIdsKey(ids);
-  if (!state.selectedPhotoId && !useBatch) return;
+  if (!selection.focusedPhotoId && !useBatch) return;
   var input = /** @type {HTMLInputElement} */ (document.getElementById('addKeywordInput'));
   var name = input.value.trim();
   if (!name) return;
@@ -396,7 +397,7 @@ export async function addKeyword(/** @type {BrowseKeywordOption | null} */ keywo
   try {
     var endpoint = useBatch
       ? '/api/batch/keyword'
-      : '/api/photos/' + state.selectedPhotoId + '/keywords';
+      : '/api/photos/' + selection.focusedPhotoId + '/keywords';
     await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -405,7 +406,7 @@ export async function addKeyword(/** @type {BrowseKeywordOption | null} */ keywo
     // skipDetail when the single-photo branch below runs a full loadDetail,
     // which re-fetches this photo's predictions anyway.
     await _refreshBrowseKeywordState(ids, {
-      skipDetail: !useBatch && !!state.selectedPhotoId,
+      skipDetail: !useBatch && !!selection.focusedPhotoId,
     });
     input.value = '';
     acState.selectedKeyword = null;
@@ -419,8 +420,8 @@ export async function addKeyword(/** @type {BrowseKeywordOption | null} */ keywo
       // Selection is unchanged after a batch keyword save; keep any in-progress
       // location input the user may have typed.
       renderBatchInspector(currentSel, { preserveLocation: true });
-    } else if (state.selectedPhotoId) {
-      loadDetail(state.selectedPhotoId);
+    } else if (selection.focusedPhotoId) {
+      loadDetail(selection.focusedPhotoId);
     }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
       panelRequests.keywords.invalidate();
@@ -445,7 +446,7 @@ export async function removeKeyword(/** @type {number} */ photoId, /** @type {nu
       _keywordNameFromCache(keywordId) || null,
     );
     // Same guard as setRating: don't blank the panel of a photo opened since.
-    if (state.selectedPhotoId === photoId) loadDetail(photoId);
+    if (selection.focusedPhotoId === photoId) loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
     refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
@@ -479,9 +480,9 @@ export async function setKeywordType(/** @type {number} */ kwId, /** @type {stri
     // State repaints them, except where loadDetail below already will.
     await _refreshBrowseKeywordState(
       loadedBrowsePhotoIds(),
-      { skipDetail: !!state.selectedPhotoId },
+      { skipDetail: !!selection.focusedPhotoId },
     );
-    if (state.selectedPhotoId) loadDetail(state.selectedPhotoId);
+    if (selection.focusedPhotoId) loadDetail(selection.focusedPhotoId);
     loadKeywords();
   } catch(e) {}
 }

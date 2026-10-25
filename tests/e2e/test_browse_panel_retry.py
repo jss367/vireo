@@ -109,7 +109,7 @@ def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page
     page.route(pattern, intercept)
     page.goto(f"{live_server['url']}/browse")
     page.locator("#grid .grid-card").first.click()
-    selected = page.evaluate("browseState.selectedPhotoId")
+    selected = page.evaluate("pageModules.selectionState.selection.focusedPhotoId")
     panel = page.locator("#detailPredictions")
     retry = panel.get_by_role("button", name="Retry loading photo predictions", exact=True)
     expect(retry).to_be_visible()
@@ -119,7 +119,7 @@ def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page
     expect(panel).not_to_contain_text("Loading predictions")
     expect(panel).not_to_contain_text("Could not load")
     assert requests[0] == requests[1]
-    assert page.evaluate("browseState.selectedPhotoId") == selected
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == selected
 
 
 @pytest.mark.parametrize("kind,panel_id,endpoint,label", PANELS)

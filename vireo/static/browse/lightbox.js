@@ -1,5 +1,7 @@
 /* Browse: opening the shared lightbox from the grid and reconciling its events. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   lightboxNav, lightboxPhotoList, lightboxSession, matchesShortcut, openLightbox,
@@ -45,8 +47,7 @@ import {
   // this stack. Codex P2 on PR #1672.
   var gestureIds = /** @type {HTMLElement | null} */ (e.target.closest('.browse-stack-badge'))
     ? null : browseStackMemberIds(id);
-  const preState = state.browseSelectionBeforeStackDblClickStart;
-  state.browseSelectionBeforeStackDblClickStart = null;
+  const preState = selection.takeClickSnapshot();
   var preStateWasThisStack = !!(
     preState && gestureIds
     && preState.size === gestureIds.length
@@ -56,8 +57,8 @@ import {
   browseLightboxStackGesture = (
     !preStateWasThisStack
     && gestureIds
-    && gestureIds.length === state.selectedPhotos.size
-    && gestureIds.every(function(memberId) { return state.selectedPhotos.has(memberId); })
+    && gestureIds.length === selection.batchIds.size
+    && gestureIds.every(function(memberId) { return selection.batchIds.has(memberId); })
   ) ? { ids: gestureIds.slice(), epoch: state.anchorRestoreEpoch } : null;
   // Top-level grid cards navigate the grid, matching pre-stacks behaviour;
   // an expanded stack's members live in ``.browse-stack-member`` cards and
@@ -77,8 +78,8 @@ export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @t
     removedFromLightboxList = state.photos === lightboxPhotos;
     state.photos.splice(index, 1);
   }
-  state.selectedPhotos.delete(photoId);
-  if (state.selectedPhotoId === photoId) state.selectedPhotoId = null;
+  selection.removeFromBatch(photoId);
+  if (selection.focusedPhotoId === photoId) selection.focus(null);
   renderGrid();
   refreshBrowseSidebarCounts();
   return removedFromLightboxList;
@@ -112,26 +113,26 @@ export function availableBrowsePhotos() {
 }
 
 export function getBrowseShortcutPhoto() {
-  if (state.selectedPhotoId != null) {
-    var selected = findBrowsePhoto(state.selectedPhotoId);
+  if (selection.focusedPhotoId != null) {
+    var selected = findBrowsePhoto(selection.focusedPhotoId);
     if (selected) {
-      var selectedNavigation = browsePhotoNavigationList(state.selectedPhotoId);
+      var selectedNavigation = browsePhotoNavigationList(selection.focusedPhotoId);
       if (browseNavigationListIsTopLevel(selectedNavigation) && !state.photos.some(function(photo) {
-        return photo.id === state.selectedPhotoId;
+        return photo.id === selection.focusedPhotoId;
       })) {
-        var selectedCoverId = browseStackCoverIdForPhoto(state.selectedPhotoId);
+        var selectedCoverId = browseStackCoverIdForPhoto(selection.focusedPhotoId);
         var selectedCover = state.photos.find(function(photo) { return photo.id === selectedCoverId; });
         if (selectedCover) selected = selectedCover;
       }
       return {
         photo: selected,
-        index: state.selectedIndex,
+        index: selection.anchorIndex,
         navigationPhotos: selectedNavigation,
       };
     }
   }
-  if (state.selectedPhotos.size > 0) {
-    var selectedIds = Array.from(state.selectedPhotos);
+  if (selection.batchIds.size > 0) {
+    var selectedIds = Array.from(selection.batchIds);
     for (var selectedOffset = 0; selectedOffset < selectedIds.length; selectedOffset++) {
       var selectedId = selectedIds[selectedOffset]; if (selectedId == null) continue; var selectedMember = findBrowsePhoto(selectedId);
       if (selectedMember) { const memberId = selectedMember.id;
@@ -145,15 +146,15 @@ export function getBrowseShortcutPhoto() {
         }
         return {
           photo: selectedMember,
-          index: state.selectedIndex,
+          index: selection.anchorIndex,
           navigationPhotos: memberNavigation,
         };
       }
     }
   }
   var idx = -1;
-  if (idx < 0 && state.selectedIndex >= 0 && state.photos[state.selectedIndex]) {
-    idx = state.selectedIndex;
+  if (idx < 0 && selection.anchorIndex >= 0 && state.photos[selection.anchorIndex]) {
+    idx = selection.anchorIndex;
   }
   if (idx < 0 && state.photos.length > 0) {
     idx = state.photos.findIndex(function(photo) {
@@ -262,9 +263,9 @@ function continueBrowseLightboxAcrossBoundary(/** @type {number} */ delta, /** @
     return;
   }
 
-  var canLoad = delta > 0 ? !state.allLoaded : state.earliestPage > 1;
+  var canLoad = delta > 0 ? !pagination.allLoaded : pagination.earliestPage > 1;
   if (!canLoad) return;
-  if (state.loading) {
+  if (pagination.loading) {
     if (browseLightboxBoundaryRetry != null) clearTimeout(browseLightboxBoundaryRetry);
     browseLightboxBoundaryRetry = setTimeout(function() {
       continueBrowseLightboxAcrossBoundary(delta, /** @type {number} */ currentId, /** @type {number} */ session);
@@ -291,15 +292,15 @@ document.addEventListener('lightbox:photochanged', function(event) {
     var shownStack = browseStackMemberIds(shownId);
     if (shownStack) browseLightboxRepresentedByPhoto[String(shownId)] = shownStack;
   }
-  if (!browseLightboxOwnsLoadedWindow() || state.loading) return;
+  if (!browseLightboxOwnsLoadedWindow() || pagination.loading) return;
   var photoId = event && event.detail && event.detail.photoId;
   var lightboxPhotos = lightboxPhotoList();
   var index = lightboxPhotos.findIndex(function(photo) {
     return photo.id === photoId;
   });
   if (index < 0) return;
-  if (!state.allLoaded && index >= lightboxPhotos.length - 3) loadPhotos({ silent: true });
-  if (state.earliestPage > 1 && index <= 2) prependPreviousPhotos({ silent: true });
+  if (!pagination.allLoaded && index >= lightboxPhotos.length - 3) loadPhotos({ silent: true });
+  if (pagination.earliestPage > 1 && index <= 2) prependPreviousPhotos({ silent: true });
 });
 
 document.addEventListener('lightbox:navigationboundary', function(event) {
@@ -360,11 +361,11 @@ document.addEventListener('lightbox:photodeleted', function(event) {
     });
     var dropped = false;
     orphaned.forEach(function(id) {
-      if (state.selectedPhotos.delete(id)) dropped = true;
+      if (selection.removeFromBatch(id)) dropped = true;
     });
-    if (state.selectedPhotoId != null && orphaned.indexOf(state.selectedPhotoId) !== -1) {
-      state.selectedPhotoId = null;
-      state.selectedIndex = -1;
+    if (selection.focusedPhotoId != null && orphaned.indexOf(selection.focusedPhotoId) !== -1) {
+      selection.focus(null);
+      selection.reanchor(-1);
       dropped = true;
     }
     if (dropped) {
@@ -474,10 +475,10 @@ function browseReconcileEmptyLightboxClose() {
   var touched = false;
   if (pending) {
     pending.ids.forEach(function(id) {
-      if (state.selectedPhotos.delete(id)) touched = true;
+      if (selection.removeFromBatch(id)) touched = true;
     });
-    if (state.selectedPhotoId != null && pending.ids.indexOf(state.selectedPhotoId) !== -1) {
-      state.selectedPhotoId = null;
+    if (selection.focusedPhotoId != null && pending.ids.indexOf(selection.focusedPhotoId) !== -1) {
+      selection.focus(null);
       touched = true;
     }
   }
@@ -501,7 +502,7 @@ function browseReconcileEmptyLightboxClose() {
   // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
   // covers the partial-window case, because it knows which ids the deleted
   // cover actually stood for. Codex P2 on PR #1672.
-  if (state.selectedPhotos.size > 0 && state.allLoaded && state.earliestPage === 1) {
+  if (selection.batchIds.size > 0 && pagination.allLoaded && pagination.earliestPage === 1) {
     var reachable = new Set();
     state.photos.forEach(function(photo) {
       reachable.add(photo.id);
@@ -518,26 +519,26 @@ function browseReconcileEmptyLightboxClose() {
       var members = state.browseStackMembers[String(photo.id)] || [];
       members.forEach(function(member) { reachable.add(member.id); });
     });
-    Array.from(state.selectedPhotos).forEach(function(id) {
+    Array.from(selection.batchIds).forEach(function(id) {
       if (!reachable.has(id)) {
-        state.selectedPhotos.delete(id);
+        selection.removeFromBatch(id);
         touched = true;
       }
     });
   }
-  if (state.selectedPhotoId != null && state.allLoaded && state.earliestPage === 1) {
+  if (selection.focusedPhotoId != null && pagination.allLoaded && pagination.earliestPage === 1) {
     var focusStillReachable = state.photos.some(function(photo) {
-      if (photo.id === state.selectedPhotoId) return true;
+      if (photo.id === selection.focusedPhotoId) return true;
       // Same reasoning as the reachable sweep: a hidden member of an
       // uncached collapsed stack is still represented by its cover card.
       // Codex P2 on PR #1672.
       var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
-      if (stackIds.indexOf(state.selectedPhotoId == null ? -1 : state.selectedPhotoId) !== -1) return true;
+      if (stackIds.indexOf(selection.focusedPhotoId == null ? -1 : selection.focusedPhotoId) !== -1) return true;
       var members = state.browseStackMembers[String(photo.id)] || [];
-      return members.some(function(member) { return member.id === state.selectedPhotoId; });
+      return members.some(function(member) { return member.id === selection.focusedPhotoId; });
     });
     if (!focusStillReachable) {
-      state.selectedPhotoId = null;
+      selection.focus(null);
       touched = true;
     }
   }
@@ -571,7 +572,7 @@ document.addEventListener('lightbox:closed', function(event) {
   // the next photo, so what the viewed photos stood for is still needed. Any
   // other close is the end of the session. Codex P2 on PR #1672.
   if (!deleteDialogOpen) browseLightboxRepresentedByPhoto = {};
-  if (state.selectedPhotos.size > 0) {
+  if (selection.batchIds.size > 0) {
     // Viewing shortcuts can open the lightbox without collapsing an existing
     // batch. Preserve that batch instead of replacing it with the viewed
     // photo — unless this lightbox was opened by a double-click on a stack
@@ -589,7 +590,7 @@ document.addEventListener('lightbox:closed', function(event) {
     // Codex P2 on PR #1672.
     const gestureIds = stackGesture && stackGesture.epoch === state.anchorRestoreEpoch
       ? new Set(stackGesture.ids) : null;
-    if (!gestureIds || !Array.from(state.selectedPhotos).every(function(id) {
+    if (!gestureIds || !Array.from(selection.batchIds).every(function(id) {
       return gestureIds.has(id);
     })) return;
     // Finished inside that stack: the viewing gesture ended where it began,
@@ -597,13 +598,13 @@ document.addEventListener('lightbox:closed', function(event) {
     // gesture is spent either way — reopening the same stack with a viewing
     // shortcut afterwards is a viewing shortcut over a batch, and batches are
     // preserved. Codex P2 on PR #1672.
-    if (state.selectedPhotos.has(photoId)) {
+    if (selection.batchIds.has(photoId)) {
       var stackCoverId = browseStackCoverIdForPhoto(photoId);
       var stackIdx = state.photos.findIndex(function(photo) {
         return photo.id === photoId || photo.id === stackCoverId;
       });
       if (stackIdx >= 0) {
-        state.selectedIndex = stackIdx;
+        selection.reanchor(stackIdx);
         scrollToCard(stackIdx);
       }
       return;
@@ -618,8 +619,8 @@ document.addEventListener('lightbox:closed', function(event) {
   if (idx < 0 || !findBrowsePhoto(photoId)) return;
   // Past the guard above, so the gesture's selection is replaced by the photo
   // the user actually finished on.
-  if (state.selectedPhotos.size > 0) {
-    state.selectedPhotos.clear();
+  if (selection.batchIds.size > 0) {
+    selection.clearBatch();
     browseLightboxStackGesture = null;
   }
   // Skip `selectPhoto` when the focused photo is already the one being
@@ -627,8 +628,8 @@ document.addEventListener('lightbox:closed', function(event) {
   // detail panel and would silently discard an unsubmitted `#locationInput`
   // draft (its blur handler only hides suggestions, it does not save). Only
   // reload details when lightbox navigation actually changed the photo.
-  if (state.selectedPhotoId === photoId) {
-    if (state.selectedIndex !== idx) state.selectedIndex = idx;
+  if (selection.focusedPhotoId === photoId) {
+    if (selection.anchorIndex !== idx) selection.reanchor(idx);
     scrollToCard(idx);
     return;
   }

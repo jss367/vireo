@@ -216,9 +216,9 @@ def test_development_settings_paste_blocks_overlapping_requests(
     pending_state = page.evaluate(
         """async photoId => {
           await window.vireoEditNav.setCopiedRecipe({adjustments: {exposure: 1.0}});
-          browseState.selectedPhotos.clear();
-          browseState.selectedPhotos.add(photoId);
-          browseState.selectedPhotoId = photoId;
+          pageModules.selectionState.selection.clearBatch();
+          pageModules.selectionState.selection.addToBatch(photoId);
+          pageModules.selectionState.selection.focus(photoId);
           const originalSafeFetch = window.safeFetch;
           window.__originalPasteSafeFetch = originalSafeFetch;
           window.__pasteRequestCount = 0;
@@ -374,7 +374,7 @@ def test_browse_selection_opens_burst_review(live_server, page):
 
     cards.nth(0).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
-    assert page.evaluate("browseState.selectedPhotos.size") == 2
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 2
 
     expect(page.locator("#burstReviewBtn")).to_be_visible()
     page.locator("#burstReviewBtn").click()
@@ -633,8 +633,8 @@ def test_right_click_outside_selection_replaces_selection(live_server, page):
 
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
     # Selection should now be exactly card 2.
-    assert page.evaluate("browseState.selectedPhotos.size") == 1
-    assert page.evaluate(f"browseState.selectedPhotos.has({c2_id})") is True
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 1
+    assert page.evaluate(f"pageModules.selectionState.selection.batchIds.has({c2_id})") is True
 
 
 def test_right_click_inside_selection_preserves_multi(live_server, page):
@@ -652,15 +652,15 @@ def test_right_click_inside_selection_preserves_multi(live_server, page):
     # Build a 2-item selection via cmd-clicks so selectedPhotos holds both.
     cards.nth(0).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
-    assert page.evaluate("browseState.selectedPhotos.size") == 2
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 2
 
     # Right-click one of the already-selected cards; the set must survive.
     cards.nth(0).click(button="right")
 
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
-    assert page.evaluate("browseState.selectedPhotos.size") == 2
-    assert page.evaluate(f"browseState.selectedPhotos.has({c0_id})") is True
-    assert page.evaluate(f"browseState.selectedPhotos.has({c1_id})") is True
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 2
+    assert page.evaluate(f"pageModules.selectionState.selection.batchIds.has({c0_id})") is True
+    assert page.evaluate(f"pageModules.selectionState.selection.batchIds.has({c1_id})") is True
 
 
 def test_right_click_outside_selection_updates_detail(live_server, page):
@@ -712,12 +712,12 @@ def test_right_click_updates_shift_range_anchor(live_server, page):
 
     # Left-click card 0 so selectedIndex = 0.
     cards.nth(0).click()
-    assert page.evaluate("browseState.selectedIndex") == 0
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == 0
 
     # Right-click card 2 — coercion must update the anchor to index 2.
     cards.nth(2).click(button="right")
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
-    assert page.evaluate("browseState.selectedIndex") == 2
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == 2
 
     # Dismiss the menu via Escape so the outside-click swallower doesn't
     # fire — an outside mousedown would eat the subsequent Shift-click.
@@ -734,7 +734,7 @@ def test_right_click_updates_shift_range_anchor(live_server, page):
     c1_id = int(cards.nth(1).get_attribute("data-id"))
     c2_id = int(cards.nth(2).get_attribute("data-id"))
     c3_id = int(cards.nth(3).get_attribute("data-id"))
-    selected_array = page.evaluate("Array.from(browseState.selectedPhotos)")
+    selected_array = page.evaluate("Array.from(pageModules.selectionState.selection.batchIds)")
     assert c2_id in selected_array, f"card 2 (id={c2_id}) missing from selection {selected_array}"
     assert c3_id in selected_array, f"card 3 (id={c3_id}) missing from selection {selected_array}"
     # Cards 0 and 1 must NOT be included — the anchor moved with the right-click.

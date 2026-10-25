@@ -1,11 +1,12 @@
 /* Browse: grid DOM: rendering, appending/prepending pages, card refreshes. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { VireoColorLabels } from './shared.js';
 import {
   applyCardColorLabel, renderCardInfo, renderPhotoCard, renderSpeciesBadges,
 } from './cards.js';
-import { loadedWindowOffset } from './loading.js';
 import { findBrowsePhoto } from './selection-panel.js';
 import {
   loadedBrowsePhotoIds, refreshExpandedBrowseStackMembers, restoreExpandedBrowseStacks,
@@ -54,7 +55,7 @@ export function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
   });
   grid.insertAdjacentHTML('afterbegin', html);
   bindBrowseMarkup(grid);
-  if (state.selectedIndex >= 0) state.selectedIndex += newPhotos.length;
+  if (selection.anchorIndex >= 0) selection.reanchor(selection.anchorIndex + newPhotos.length);
   updateGridTail();
   refreshColorLabelControlsIn(grid);
 }
@@ -73,7 +74,7 @@ export function updateGridTail() {
   var tail = document.getElementById('gridTail');
   // Photos before the loaded window are reached with "Browse from beginning",
   // not by scrolling down — they must not inflate the downward runway.
-  var remaining = state.allLoaded ? 0 : state.totalPhotos - loadedWindowOffset() - state.photos.length;
+  var remaining = pagination.allLoaded ? 0 : pagination.total - pagination.offset - state.photos.length;
   var cards = /** @type {HTMLCollectionOf<HTMLElement>} */ (grid.getElementsByClassName('grid-card'));
   var lastCard = cards.length ? cards[cards.length - 1] : null;
   if (remaining <= 0 || !lastCard) {
@@ -254,7 +255,7 @@ export function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options
   if (state.photos.length === 0) {
     grid.innerHTML = '';
     // Show welcome if DB is completely empty, otherwise show filter-empty message
-    if (state.totalPhotos === 0 && !hasActiveBrowseFilter()) {
+    if (pagination.total === 0 && !hasActiveBrowseFilter()) {
       welcome.style.display = 'block';
       empty.style.display = 'none';
     } else {

@@ -122,7 +122,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk3.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        "photoId => browseState.selectedPhotoId === photoId",
+        "photoId => pageModules.selectionState.selection.focusedPhotoId === photoId",
         arg=burst_ids[2],
     )
     expect(page.locator("#detailFilename")).to_have_text("hawk3.jpg")
@@ -140,11 +140,11 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     )
     other_hidden_member.click(button="right")
     page.wait_for_function(
-        "photoId => browseState.selectedPhotoId === photoId",
+        "photoId => pageModules.selectionState.selection.focusedPhotoId === photoId",
         arg=burst_ids[0],
     )
     assert page.evaluate(
-        "coverId => browseState.selectedIndex === browseState.photos.findIndex(function(photo) { return photo.id === coverId; })",
+        "coverId => pageModules.selectionState.selection.anchorIndex === browseState.photos.findIndex(function(photo) { return photo.id === coverId; })",
         burst_ids[1],
     )
     page.evaluate("() => closeContextMenu()")
@@ -180,8 +180,8 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
         """() => {
           var preview = pageModules.lightbox.getBrowseShortcutPhoto();
           return {
-            selectedPhotoId: browseState.selectedPhotoId,
-            selectedIds: Array.from(browseState.selectedPhotos),
+            selectedPhotoId: pageModules.selectionState.selection.focusedPhotoId,
+            selectedIds: Array.from(pageModules.selectionState.selection.batchIds),
             previewId: preview && preview.photo.id,
             topLevelNavigation: !!preview && preview.navigationPhotos === browseState.photos,
           };
@@ -200,7 +200,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     tray.get_by_role("button", name="Collapse stack").click()
     expect(tray).to_be_hidden()
     page.wait_for_function(
-        "coverId => browseState.selectedPhotoId === coverId",
+        "coverId => pageModules.selectionState.selection.focusedPhotoId === coverId",
         arg=burst_ids[1],
     )
     expect(page.locator("#detailFilename")).to_have_text("hawk2.jpg")
@@ -223,7 +223,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     assert page.evaluate(
         """coverId => {
           var preview = pageModules.lightbox.getBrowseShortcutPhoto();
-          return browseState.selectedPhotos.size === 3 && browseState.selectedPhotoId === coverId
+          return pageModules.selectionState.selection.batchIds.size === 3 && pageModules.selectionState.selection.focusedPhotoId === coverId
             && preview.photo.id === coverId && preview.navigationPhotos === browseState.photos;
         }""",
         burst_ids[1],
@@ -336,8 +336,8 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # member cache is needed: the cover carries its member ids.
     page.locator(f'.grid-card[data-id="{burst_ids[0]}"]').click()
     page.wait_for_function(
-        """ids => browseState.selectedPhotoId === null && browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.focusedPhotoId === null && pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator("#selectionCount")).to_have_text(
@@ -352,8 +352,8 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # Promoting a new cover moves no photo in or out of the stack, so the
     # selection the click made survives it intact.
     page.wait_for_function(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_have_class(
@@ -370,9 +370,9 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(page.locator(f'.grid-card[data-id="{burst_ids[0]}"]')).to_be_visible()
     page.evaluate(
         """ids => {
-          browseState.selectedPhotoId = ids[0];
-          browseState.selectedIndex = browseState.photos.findIndex(function(photo) { return photo.id === ids[0]; });
-          browseState.selectedPhotos = new Set([ids[0], ids[1]]);
+          pageModules.selectionState.selection.focus(ids[0]);
+          pageModules.selectionState.selection.reanchor(browseState.photos.findIndex(function(photo) { return photo.id === ids[0]; }));
+          pageModules.selectionState.selection.replaceBatch(new Set([ids[0], ids[1]]));
         }""",
         [burst_ids[0], live_server["data"]["photos"][3]],
     )
@@ -384,7 +384,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
         """ids => {
           var active = pageModules.selection.getActiveSelection();
           var preview = pageModules.lightbox.getBrowseShortcutPhoto();
-          return browseState.selectedPhotoId === ids[0]
+          return pageModules.selectionState.selection.focusedPhotoId === ids[0]
             && active.length === 2 && active.includes(ids[0]) && active.includes(ids[1])
             && preview.photo.id !== ids[0] && preview.navigationPhotos === browseState.photos;
         }""",
@@ -504,13 +504,13 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     )
 
     page.click(".vf-clear")
-    page.wait_for_function("id => browseState.selectedPhotoId === id", arg=selected_id)
+    page.wait_for_function("id => pageModules.selectionState.selection.focusedPhotoId === id", arg=selected_id)
     member = page.locator(f'.browse-stack-member[data-id="{selected_id}"]')
     member.wait_for(state="visible")
     page.wait_for_timeout(100)
 
     expect(member).to_have_class("browse-stack-member selected")
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
     assert page.evaluate(
         "id => browseState.expandedBrowseStacks.has(pageModules.stacks.browseStackCoverIdForPhoto(id))",
         selected_id,
@@ -840,8 +840,8 @@ def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         burst_ids,
     )
 
@@ -886,8 +886,8 @@ def test_badge_double_click_does_not_claim_a_deliberate_batch(live_server, page)
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         burst_ids,
     )
 
@@ -968,8 +968,8 @@ def test_undo_keeps_a_whole_stack_selected(live_server, page):
     )
     page.evaluate("() => doUndo()")
     page.wait_for_function(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
@@ -1055,7 +1055,7 @@ def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
     # no stack note, since one card is still an actionable selection.
     assert page.evaluate("() => window.__pickedDuringHydration") is True
     assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
-    assert page.evaluate("() => browseState.selectedPhotoId") == other_id
+    assert page.evaluate("() => pageModules.selectionState.selection.focusedPhotoId") == other_id
     expect(page.locator("#batchCount")).to_have_text("1 selected")
 
 
@@ -1233,13 +1233,13 @@ def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page)
     expect(tray.locator(".browse-stack-member")).to_have_count(3)
     tray.get_by_role("button", name="Collapse stack").click()
     page.wait_for_function(
-        "coverId => browseState.selectedPhotoId === coverId && browseState.selectedPhotos.size === 3",
+        "coverId => pageModules.selectionState.selection.focusedPhotoId === coverId && pageModules.selectionState.selection.batchIds.size === 3",
         arg=burst_ids[1],
     )
 
     cover.click(modifiers=["Meta"])
     page.wait_for_function(
-        "() => pageModules.selection.getActiveSelection().length === 0 && browseState.selectedPhotoId === null"
+        "() => pageModules.selection.getActiveSelection().length === 0 && pageModules.selectionState.selection.focusedPhotoId === null"
     )
     expect(page.locator("#batchBar")).to_be_hidden()
     expect(cover).to_have_class("grid-card has-browse-stack")
@@ -1282,7 +1282,7 @@ def test_deleting_a_stacks_cover_in_the_lightbox_drops_its_dangling_members(
     page.keyboard.press("Escape")
 
     page.wait_for_function(
-        "photoId => browseState.selectedPhotoId === photoId && browseState.selectedPhotos.size === 0",
+        "photoId => pageModules.selectionState.selection.focusedPhotoId === photoId && pageModules.selectionState.selection.batchIds.size === 0",
         arg=other_id,
     )
     assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
@@ -1321,8 +1321,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         arg=burst_ids,
     )
 
@@ -1337,7 +1337,7 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        "photoId => browseState.selectedPhotoId === photoId && browseState.selectedPhotos.size === 0",
+        "photoId => pageModules.selectionState.selection.focusedPhotoId === photoId && pageModules.selectionState.selection.batchIds.size === 0",
         arg=other_id,
     )
     expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
@@ -1349,8 +1349,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         arg=burst_ids,
     )
     page.keyboard.press("e")
@@ -1360,8 +1360,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         burst_ids,
     )
 
@@ -1382,8 +1382,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => browseState.selectedPhotos.size === ids.length
-          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
+        """ids => pageModules.selectionState.selection.batchIds.size === ids.length
+          && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })""",
         burst_ids,
     )
 
@@ -1424,8 +1424,8 @@ def test_double_clicking_a_preselected_stack_preserves_the_batch(
     tray.get_by_role("button", name="Collapse stack").click()
     expect(tray).to_be_hidden()
     page.wait_for_function(
-        "ids => browseState.selectedPhotos.size === ids.length"
-        " && ids.every(function(id) { return browseState.selectedPhotos.has(id); })",
+        "ids => pageModules.selectionState.selection.batchIds.size === ids.length"
+        " && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })",
         arg=burst_ids,
     )
 
@@ -1439,8 +1439,8 @@ def test_double_clicking_a_preselected_stack_preserves_the_batch(
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        "ids => browseState.selectedPhotos.size === ids.length"
-        " && ids.every(function(id) { return browseState.selectedPhotos.has(id); })",
+        "ids => pageModules.selectionState.selection.batchIds.size === ids.length"
+        " && ids.every(function(id) { return pageModules.selectionState.selection.batchIds.has(id); })",
         burst_ids,
     )
 
@@ -2619,7 +2619,7 @@ def test_select_all_matching_puts_stack_cover_first_outside_collections(
           await pageModules.selection.selectAllMatchingPhotos();
           return {
             collectionScoped: !!(browseState.activeCollectionId && !browseState.dashboardCollectionScope),
-            selected: Array.from(browseState.selectedPhotos),
+            selected: Array.from(pageModules.selectionState.selection.batchIds),
             firstCardId: parseInt(
               document.querySelector('#grid > .grid-card').dataset.id, 10
             ),

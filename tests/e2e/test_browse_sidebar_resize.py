@@ -53,15 +53,15 @@ def test_browse_sidebar_resizer_keys_do_not_move_grid_selection(live_server, pag
     page.goto(live_server["url"] + "/browse")
 
     page.locator(".grid-card").first.wait_for(state="visible")
-    assert page.evaluate("browseState.selectedIndex") == -1
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == -1
 
     resizer = page.locator("#browseSidebarResizer")
     resizer.focus()
     resizer.press("ArrowRight")
     resizer.press("ArrowLeft")
 
-    assert page.evaluate("browseState.selectedIndex") == -1
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == -1
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     assert not page.evaluate(
         "document.getElementById('detailContent').classList.contains('visible')"
     )
@@ -136,8 +136,8 @@ def test_detail_sidebar_resizer_supports_keyboard_without_moving_selection(
 
     assert abs(detail_panel.bounding_box()["width"] - (initial_width + 10)) <= 1
     expect(resizer).to_have_attribute("aria-valuenow", str(round(initial_width + 10)))
-    assert page.evaluate("browseState.selectedIndex") == -1
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == -1
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
 
 
 def test_detail_sidebar_max_width_reserves_room_for_grid(live_server, page):

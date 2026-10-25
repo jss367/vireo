@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
+const {installBrowseOwners} = require('../../tests/frontend/browse-owner-fixture.cjs');
 
 // The browse files are ES modules. Run each one's body as a script, as
 // tests/frontend/module-source.mjs does: drop its imports (the context supplies
@@ -73,6 +74,7 @@ function setup() {
   });
   ctx.window = ctx;
   ctx.state = ctx;
+  installBrowseOwners(ctx);
   vm.runInContext(fs.readFileSync('vireo/static/vireo-panel-loader.js', 'utf8'), ctx);
   ctx.VireoPanelLoader = ctx.window.VireoPanelLoader;
   for (const file of ['panel-requests.js', 'selection-panel-state.js', 'selection-panel.js', 'prediction-panels.js', 'panel-loaders.js']) {

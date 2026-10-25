@@ -1,5 +1,6 @@
 /* Browse: best-of-batch picker. ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { safeFetch, showToast } from './shared.js';
 import {
@@ -13,7 +14,7 @@ import { scheduleCollectionCountsRefresh } from './sidebar-collections.js';
 import { reconcileBrowseStackCovers, refreshExpandedBrowseStackMembers } from './stacks.js';
 
 function bestBatchSeedId() {
-  if (state.selectedPhotoId != null) return state.selectedPhotoId;
+  if (selection.focusedPhotoId != null) return selection.focusedPhotoId;
   var ids = getActiveSelection();
   return ids.length ? ids[0] : null;
 }

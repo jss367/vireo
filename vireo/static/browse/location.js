@@ -1,5 +1,6 @@
 /* Browse: detail-panel location editing (Google Places, keywords, EXIF suggestion). ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { VireoFilter, escapeHtml, googleMaps, safeFetch, setGoogleMapsCallback } from './shared.js';
 import { confirmBatchKeyword } from './batch-actions.js';
@@ -247,7 +248,7 @@ async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @typ
   var activeSel = getActiveSelection();
   if (activeSel.length > 1) {
     renderBatchInspector(activeSel);
-  } else if (detailPhotoId && state.selectedPhotoId === detailPhotoId) {
+  } else if (detailPhotoId && selection.focusedPhotoId === detailPhotoId) {
     loadDetail(detailPhotoId);
   } else {
     loadSummary();

@@ -13,7 +13,7 @@ Two ways in:
 - ``install_page_module_exposure(page, directory, state_name)`` does it for
   every module of the page on every navigation to it, and names the page's
   ``state`` object ``window.<state_name>``. The ``page`` fixture installs it
-  for Browse, so Browse tests read ``browseState.selectedPhotoId`` and call
+  for Browse, so Browse tests read ``pageModules.selectionState.selection.focusedPhotoId`` and call
   ``pageModules.grid.renderGrid()`` (the module's file name without
   ``.js``, camelCased: ``pageModules.selectionPanel`` for
   ``selection-panel.js``).

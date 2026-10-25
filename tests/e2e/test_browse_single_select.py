@@ -73,8 +73,8 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
 
     state = page.evaluate(
         """() => {
-          browseState.totalPhotos = 50000;
-          browseState.allLoaded = false;
+          pageModules.pagination.pagination.setTotals({total: 50000});
+          pageModules.pagination.pagination.place(pageModules.pagination.pagination.earliestPage, pageModules.pagination.pagination.currentPage, browseState.photos.length);
           pageModules.grid.updateGridTail();
           var container = document.getElementById('gridContainer');
           container.scrollTop = container.scrollHeight;
@@ -101,12 +101,12 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
             if (url === '/api/photos/query') {
               calls++;
               var perPage = JSON.parse(options.body).per_page;
-              if (calls >= 10) return Promise.resolve({photos: [], total: browseState.totalPhotos});
+              if (calls >= 10) return Promise.resolve({photos: [], total: pageModules.pagination.pagination.total});
               var batch = [];
               for (var i = 0; i < perPage; i++) {
                 batch.push({id: nextId++, filename: 'photo-' + nextId + '.jpg'});
               }
-              return Promise.resolve({photos: batch, total: browseState.totalPhotos});
+              return Promise.resolve({photos: batch, total: pageModules.pagination.pagination.total});
             }
             return originalSafeFetch(url, options, fetchOptions);
           };
@@ -125,10 +125,10 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
               var boundaryIsPastViewport = firstSkeleton &&
                 firstSkeleton.getBoundingClientRect().top -
                   container.getBoundingClientRect().bottom > 3200;
-              if (calls > 0 && !browseState.loading && (boundaryIsPastViewport || browseState.allLoaded)) break;
+              if (calls > 0 && !pageModules.pagination.pagination.loading && (boundaryIsPastViewport || pageModules.pagination.pagination.allLoaded)) break;
               await new Promise(function(resolve) { setTimeout(resolve, 20); });
             }
-            return {calls: calls, loaded: browseState.photos.length, allLoaded: browseState.allLoaded};
+            return {calls: calls, loaded: browseState.photos.length, allLoaded: pageModules.pagination.pagination.allLoaded};
           } finally {
             safeFetch = originalSafeFetch;
           }
@@ -492,9 +492,9 @@ def test_non_card_selection_flow_shows_bar_active_immediately(
     page.evaluate(
         """
         photoIds => {
-          browseState.selectedPhotos.clear();
-          photoIds.forEach(id => browseState.selectedPhotos.add(id));
-          browseState.selectedPhotoId = null;
+          pageModules.selectionState.selection.clearBatch();
+          photoIds.forEach(id => pageModules.selectionState.selection.addToBatch(id));
+          pageModules.selectionState.selection.focus(null);
           pageModules.grid.renderGrid();
           pageModules.batchBar.updateBatchBar();
         }
@@ -1500,7 +1500,7 @@ def test_clear_button_clears_single_focus(live_server, page):
 
     expect(bar).to_be_hidden()
     # selectedPhotoId must be cleared too so batch actions no longer target it.
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
 
 
 def test_clear_button_closes_detail_panel(live_server, page):
@@ -1584,9 +1584,9 @@ def test_multiselect_keyword_picker_shows_and_applies_suggestion(live_server, pa
     page.evaluate(
         """
         photoIds => {
-          browseState.selectedPhotos.clear();
-          photoIds.forEach(id => browseState.selectedPhotos.add(id));
-          browseState.selectedPhotoId = null;
+          pageModules.selectionState.selection.clearBatch();
+          photoIds.forEach(id => pageModules.selectionState.selection.addToBatch(id));
+          pageModules.selectionState.selection.focus(null);
           pageModules.grid.renderGrid();
           pageModules.batchBar.updateBatchBar();
         }
@@ -1875,8 +1875,8 @@ def test_singleton_multiselect_detail_keyword_add_stays_single_photo(live_server
     cards.nth(1).click(modifiers=["Meta"])
     cards.nth(1).click(modifiers=["Meta"])
 
-    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
-    assert page.evaluate("browseState.selectedPhotoId") == a_id
+    assert page.evaluate("Array.from(pageModules.selectionState.selection.batchIds)") == [a_id]
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") == a_id
     expect(page.locator("#addKeywordInput")).to_be_visible()
 
     keyword_name = "Singleton Detail Keyword"
@@ -1931,7 +1931,7 @@ def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     # so the visible highlight and getActiveSelection() agree.
     active = page.evaluate("pageModules.selection.getActiveSelection()")
     assert active == [b_id], f"expected [{b_id}], got {active}"
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
 
     # The stale detail panel must be hidden so its (now no-op) handlers
     # can't be invoked against a null selectedPhotoId.
@@ -1977,8 +1977,8 @@ def test_close_detail_preserves_multiselect_highlight(live_server, page):
     # Bar must still reflect the surviving multi-select entry.
     expect(page.locator("#batchBar")).to_be_visible()
     expect(page.locator("#batchCount")).to_have_text("1 selected")
-    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("Array.from(pageModules.selectionState.selection.batchIds)") == [a_id]
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
 
     # Card A must still paint as selected so the user can see what will be acted on.
     assert page.evaluate(
@@ -2006,13 +2006,13 @@ def test_resetAndLoad_clears_multiselect_set(live_server, page):
 
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
-    assert page.evaluate("browseState.selectedPhotos.size") == 1
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 1
 
     # Simulate any dataset-changing action (sort change, filter, folder click).
     page.evaluate("pageModules.loading.resetAndLoad()")
 
-    assert page.evaluate("browseState.selectedPhotos.size") == 0
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 0
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     expect(bar).to_be_hidden()
 
 
@@ -2035,8 +2035,8 @@ def test_singleton_set_keyboard_shortcut_applies(live_server, page):
     cards.nth(0).click(modifiers=["Meta"])
 
     # Cmd-click one item from fresh state leaves set={A} with no single-focus.
-    assert page.evaluate("Array.from(browseState.selectedPhotos)") == [a_id]
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert page.evaluate("Array.from(pageModules.selectionState.selection.batchIds)") == [a_id]
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     expect(page.locator("#batchBar")).to_be_visible()
 
     # "3" maps to _shortcuts.rate_3 by default.
@@ -2063,15 +2063,15 @@ def test_arrow_navigation_loads_next_page_at_loaded_boundary(live_server, page):
 
     cards = page.locator(".grid-card")
     cards.nth(1).wait_for(state="visible")
-    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && pageModules.pagination.pagination.total > browseState.photos.length")
 
     cards.nth(1).click()
-    assert page.evaluate("browseState.selectedIndex") == 1
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == 1
 
     page.keyboard.press("ArrowRight")
 
-    page.wait_for_function("browseState.photos.length > 2 && browseState.selectedIndex === 2", timeout=3000)
-    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[2].id")
+    page.wait_for_function("browseState.photos.length > 2 && pageModules.selectionState.selection.anchorIndex === 2", timeout=3000)
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId === browseState.photos[2].id")
 
 
 def test_arrow_navigation_loads_past_trailing_offline_photo(live_server, page):
@@ -2098,12 +2098,12 @@ def test_arrow_navigation_loads_past_trailing_offline_photo(live_server, page):
               {id: 201, folder_status: 'ok', filename: 'a.jpg'},
               {id: 202, folder_status: 'missing', filename: 'b.jpg'}
             ];
-            browseState.selectedIndex = 0;
-            browseState.selectedPhotoId = 201;
-            browseState.allLoaded = false;
-            browseState.loading = false;
+            pageModules.selectionState.selection.reanchor(0);
+            pageModules.selectionState.selection.focus(201);
+            pageModules.pagination.pagination.place(pageModules.pagination.pagination.earliestPage, pageModules.pagination.pagination.currentPage, browseState.photos.length);
+            pageModules.pagination.pagination.cancelLoad();
             await pageModules.keyboard.moveBrowseSelection(1, {});
-            return {loads, selected: {id: browseState.selectedPhotoId, index: browseState.selectedIndex}};
+            return {loads, selected: {id: pageModules.selectionState.selection.focusedPhotoId, index: pageModules.selectionState.selection.anchorIndex}};
           } finally {
             window.safeFetch = originalSafeFetch;
           }
@@ -2126,12 +2126,12 @@ def test_vertical_arrow_navigation_moves_by_rendered_grid_columns(live_server, p
     page.wait_for_function("cols => browseState.photos.length > cols", arg=columns)
 
     page.keyboard.press("ArrowDown")
-    page.wait_for_function("cols => browseState.selectedIndex === cols", arg=columns)
-    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[browseState.selectedIndex].id")
+    page.wait_for_function("cols => pageModules.selectionState.selection.anchorIndex === cols", arg=columns)
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId === browseState.photos[pageModules.selectionState.selection.anchorIndex].id")
 
     page.keyboard.press("ArrowUp")
-    page.wait_for_function("browseState.selectedIndex === 0")
-    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[0].id")
+    page.wait_for_function("pageModules.selectionState.selection.anchorIndex === 0")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId === browseState.photos[0].id")
 
 
 def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
@@ -2140,11 +2140,11 @@ def test_arrow_down_without_selection_starts_at_first_photo(live_server, page):
     page.goto(f"{url}/browse")
 
     page.locator(".grid-card").first.wait_for(state="visible")
-    assert page.evaluate("browseState.selectedIndex") == -1
+    assert page.evaluate("pageModules.selectionState.selection.anchorIndex") == -1
 
     page.keyboard.press("ArrowDown")
-    page.wait_for_function("browseState.selectedIndex === 0")
-    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[0].id")
+    page.wait_for_function("pageModules.selectionState.selection.anchorIndex === 0")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId === browseState.photos[0].id")
 
 
 def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
@@ -2163,14 +2163,14 @@ def test_shift_arrow_navigation_preserves_range_selection_at_loaded_boundary(
 
     cards = page.locator(".grid-card")
     cards.nth(1).wait_for(state="visible")
-    page.wait_for_function("browseState.photos.length === 2 && browseState.totalPhotos > browseState.photos.length")
+    page.wait_for_function("browseState.photos.length === 2 && pageModules.pagination.pagination.total > browseState.photos.length")
 
     cards.nth(1).click()
     page.keyboard.press("Shift+ArrowRight")
 
-    page.wait_for_function("browseState.photos.length > 2 && browseState.selectedPhotos.has(browseState.photos[2].id)")
-    assert page.evaluate("browseState.selectedPhotos.has(browseState.photos[1].id)")
-    assert page.evaluate("browseState.selectedPhotoId === browseState.photos[1].id")
+    page.wait_for_function("browseState.photos.length > 2 && pageModules.selectionState.selection.batchIds.has(browseState.photos[2].id)")
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.has(browseState.photos[1].id)")
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId === browseState.photos[1].id")
 
 
 def test_multiselect_offers_partial_keyword_fill(live_server, page):
@@ -2183,7 +2183,7 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     assert cards.count() >= 5
 
     page.evaluate("""
-      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      browseState.photos.forEach(function(p) { pageModules.selectionState.selection.addToBatch(p.id); });
       pageModules.grid.renderGrid();
       pageModules.batchBar.updateBatchBar();
     """)
@@ -2252,7 +2252,7 @@ def test_selection_panel_delegation_survives_refresh_and_keyboard_activation(liv
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      browseState.photos.forEach(p => browseState.selectedPhotos.add(p.id));
+      browseState.photos.forEach(p => pageModules.selectionState.selection.addToBatch(p.id));
       pageModules.grid.renderGrid();
       pageModules.batchBar.updateBatchBar();
       pageModules.selectionPanelEvents.bindSelectionPanelActions();
@@ -2290,7 +2290,7 @@ def test_multiselect_shows_and_removes_keyword_shared_by_all_photos(live_server,
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      browseState.photos.forEach(function(p) { pageModules.selectionState.selection.addToBatch(p.id); });
       pageModules.grid.renderGrid();
       pageModules.batchBar.updateBatchBar();
     """)
@@ -2333,7 +2333,7 @@ def test_multiselect_groups_metadata_and_bulk_updates_wildlife_workflow(
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      browseState.photos.forEach(function(p) { browseState.selectedPhotos.add(p.id); });
+      browseState.photos.forEach(function(p) { pageModules.selectionState.selection.addToBatch(p.id); });
       pageModules.grid.renderGrid();
       pageModules.batchBar.updateBatchBar();
     """)
@@ -2376,10 +2376,10 @@ def test_wildlife_batch_completion_refreshes_current_selection(live_server, page
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate("""
-      browseState.selectedPhotoId = null;
-      browseState.selectedPhotos.clear();
+      pageModules.selectionState.selection.focus(null);
+      pageModules.selectionState.selection.clearBatch();
       browseState.photos.slice(0, 2).forEach(function(photo) {
-        browseState.selectedPhotos.add(photo.id);
+        pageModules.selectionState.selection.addToBatch(photo.id);
       });
       pageModules.batchBar.updateBatchBar();
     """)
@@ -2408,9 +2408,9 @@ def test_wildlife_batch_completion_refreshes_current_selection(live_server, page
     page.wait_for_function("typeof window.__releaseWildlifeBatch === 'function'")
 
     page.evaluate("""
-      browseState.selectedPhotos.clear();
+      pageModules.selectionState.selection.clearBatch();
       browseState.photos.slice(2, 5).forEach(function(photo) {
-        browseState.selectedPhotos.add(photo.id);
+        pageModules.selectionState.selection.addToBatch(photo.id);
       });
       pageModules.batchBar.updateBatchBar();
     """)
@@ -2433,17 +2433,17 @@ def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):
     first_filename = page.evaluate("browseState.photos[0].filename")
 
     page.evaluate("""
-      browseState.selectedPhotoId = browseState.photos[0].id;
-      browseState.selectedIndex = 0;
-      browseState.selectedPhotos.clear();
-      browseState.selectedPhotos.add(browseState.photos[0].id);
-      browseState.selectedPhotos.add(browseState.photos[1].id);
+      pageModules.selectionState.selection.focus(browseState.photos[0].id);
+      pageModules.selectionState.selection.reanchor(0);
+      pageModules.selectionState.selection.clearBatch();
+      pageModules.selectionState.selection.addToBatch(browseState.photos[0].id);
+      pageModules.selectionState.selection.addToBatch(browseState.photos[1].id);
       pageModules.batchBar.updateBatchBar();
     """)
     expect(page.locator("#selectionPanel")).to_be_visible()
 
     page.evaluate("""
-      browseState.selectedPhotos.delete(browseState.photos[1].id);
+      pageModules.selectionState.selection.removeFromBatch(browseState.photos[1].id);
       pageModules.batchBar.updateBatchBar();
     """)
 
@@ -2569,7 +2569,7 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
 
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
-    assert page.evaluate("browseState.selectedPhotos.size") == 1
+    assert page.evaluate("pageModules.selectionState.selection.batchIds.size") == 1
 
     # Switch to a collection; stale selection must drop before loadPhotos.
     # Collections now open INTO the filter bar as an editable expression
@@ -2586,8 +2586,8 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
         timeout=4000,
     )
 
-    page.wait_for_function("browseState.selectedPhotos.size === 0", timeout=4000)
-    assert page.evaluate("browseState.selectedPhotoId") is None
+    page.wait_for_function("pageModules.selectionState.selection.batchIds.size === 0", timeout=4000)
+    assert page.evaluate("pageModules.selectionState.selection.focusedPhotoId") is None
     expect(bar).to_be_hidden()
 
 

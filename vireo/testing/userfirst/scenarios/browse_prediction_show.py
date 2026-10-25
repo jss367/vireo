@@ -99,7 +99,7 @@ def run(session):
 
     # The whole point of not narrowing the selection: the Accept buttons for
     # all five photos are still there when the user closes the lightbox.
-    still_selected = session.eval("(async () => (await import('/static/browse/state.js')).state.selectedPhotos.size)()")
+    still_selected = session.eval("(async () => (await import('/static/browse/selection-state.js')).selection.batchIds.size)()")
     session.assert_that(
         still_selected == len(ids),
         f"looking must not change the selection; got size={still_selected}",

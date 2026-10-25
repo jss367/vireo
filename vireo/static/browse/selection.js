@@ -1,5 +1,6 @@
 /* Browse: photo selection (click, range, select all, clear). ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { VireoFilter, nativeMenuPhotoIdsOverride, safeFetch, showToast } from './shared.js';
 import { updateBatchBar } from './batch-bar.js';
@@ -15,94 +16,35 @@ import {
 } from './stacks.js';
 
 /* ---------- Photo Selection & Detail ---------- */
-export function selectPhoto(/** @type {Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey"> & Partial<Pick<MouseEvent, "detail">>} */ e, /** @type {number} */ id, /** @type {number} */ idx, /** @type {{stackAware?: boolean}} */ opts = {}) {
-  // Snapshot the pre-click selection so the grid dblclick handler can tell
-  // "these clicks made the selection" from "these clicks reaffirmed an
-  // existing one" — the two produce identical ``selectedPhotos`` when the
-  // click lands on the stack that was already selected. Only the first click
-  // of a click sequence records: the browser numbers sequential clicks in
-  // ``event.detail`` (1 for the first, 2 for the second of a dblclick), so
-  // detail > 1 preserves the pre-first-click snapshot through the second.
-  // Codex P2 on PR #1672.
-  if (!(e && (e.detail || 0) > 1)) {
-    state.browseSelectionBeforeStackDblClickStart = new Set(state.selectedPhotos);
+// A stack member can anchor its cover's grid slot while living outside the
+// top-level photo array. The owner folds the focused anchor and clicked target
+// into this range so visible highlights and action targets stay identical.
+function rangeSelectionIds(/** @type {number} */ id, /** @type {number} */ idx) {
+  var members = browseStackMemberRange(selection.focusedPhotoId, id);
+  if (members) return members;
+  var start = Math.min(selection.anchorIndex, idx);
+  var end = Math.max(selection.anchorIndex, idx);
+  /** @type {number[]} */ var ids = [];
+  for (var i = start; i <= end; i++) {
+    var photo = state.photos[i];
+    if (photo && (!photo.folder_status || photo.folder_status === 'ok' || photo.folder_status === 'partial')) {
+      browseSelectionIdsForClick(photo.id).forEach(function(memberId) { ids.push(memberId); });
+    }
   }
+  return ids;
+}
+
+export function selectPhoto(/** @type {Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey"> & Partial<Pick<MouseEvent, "detail">>} */ e, /** @type {number} */ id, /** @type {number} */ idx, /** @type {{stackAware?: boolean}} */ opts = {}) {
+  // Preserve the pre-first-click batch through the second click of a
+  // double-click, which otherwise looks identical to reaffirming a batch.
+  if (!(e && (e.detail || 0) > 1)) selection.captureClick();
   state.anchorRestoreEpoch++;
-  state.lastClickedPhotoId = id;
-  // A collapsed stack card is its whole stack (see browseStackMemberIds), so
-  // every branch below acts on this list rather than on `id` alone.
+  selection.rememberClick(id);
   var clickIds = browseSelectionIdsForClick(id, opts);
-  if (e.shiftKey && state.selectedIndex >= 0) {
-    // Shift-click: range select
-    var memberRange = browseStackMemberRange(state.selectedPhotoId, id);
-    if (memberRange) {
-      memberRange.forEach(function(memberId) { state.selectedPhotos.add(memberId); });
-    } else {
-      var start = Math.min(state.selectedIndex, idx);
-      var end = Math.max(state.selectedIndex, idx);
-      for (var i = start; i <= end; i++) {
-        var photo = state.photos[i]; if (photo && (!photo.folder_status ||
-            photo.folder_status === 'ok' || photo.folder_status === 'partial')) {
-          // Each card in the range contributes what clicking it would: a
-          // stack card contributes its frames, not just its cover.
-          browseSelectionIdsForClick(photo.id).forEach(function(rangeId) {
-            state.selectedPhotos.add(rangeId);
-          });
-        }
-      }
-    }
-    // The anchor of a range is always part of that range. Usually it is
-    // photos[selectedIndex] and the loop already covered it, but a focused
-    // expanded-stack member is not in the top-level photos array at all:
-    // selectBrowseStackMember() anchors selectedIndex on the member's *cover*
-    // grid slot. Without this the loop adds the cover and the intervening
-    // cards while the member keeps painting "selected" off selectedPhotoId,
-    // yet getActiveSelection() prefers the now-nonempty set and drops it —
-    // Export/Delete would silently act on the cover the user never focused.
-    // Fold the anchor in so the highlighted set and the acted-on set cannot
-    // disagree. Codex P2 on PR #1561.
-    if (state.selectedPhotoId != null) state.selectedPhotos.add(state.selectedPhotoId);
-    // Same reasoning for the shift-click *target*: usually id === photos[idx].id
-    // and the loop already added it, but selectBrowseStackMember() passes the
-    // hidden member's id with the cover's grid slot as idx — so the loop can
-    // only reach the cover. Fold the target in so a Shift-click on a hidden
-    // stack member always ends up in the resulting range. Codex P2 on
-    // PR #1561.
-    clickIds.forEach(function(clickId) { state.selectedPhotos.add(clickId); });
+  if (e.shiftKey && selection.anchorIndex >= 0) {
+    selection.extendRange(rangeSelectionIds(id, idx), clickIds);
   } else if (e.metaKey || e.ctrlKey) {
-    // Cmd/Ctrl-click: toggle in selection. Fold the focused photo into the
-    // set so batch operations include it (otherwise the highlighted
-    // selectedPhotoId is silently excluded from keyboard shortcuts).
-    if (state.selectedPhotos.size === 0 && state.selectedPhotoId !== null) {
-      state.selectedPhotos.add(state.selectedPhotoId);
-    }
-    // A stack toggles as a unit, and it only leaves the selection when every
-    // one of its frames is in it: Cmd-clicking a stack whose tray contributed
-    // three frames adds the rest rather than removing those three.
-    var alreadySelected = clickIds.every(function(clickId) {
-      return state.selectedPhotos.has(clickId);
-    });
-    clickIds.forEach(function(clickId) {
-      if (alreadySelected) state.selectedPhotos.delete(clickId);
-      else state.selectedPhotos.add(clickId);
-    });
-    // If the toggle dropped the focused photo out of a non-empty set, its
-    // highlight/detail focus is now stale: the card still paints "selected"
-    // via the selectedPhotoId branch of the highlight rule, yet
-    // getActiveSelection() returns the set — so destructive actions
-    // (delete/export/develop) would target the set while the user is staring
-    // at a different, visibly-focused card. Reconcile by dropping the focus.
-    //
-    // The same applies when this toggle empties the set entirely and the
-    // focused photo is one of the ids it just removed: collapsing an expanded
-    // stack pins the focus to its cover, so Cmd-clicking that stack off left
-    // getActiveSelection() falling back to the cover — a stack the user
-    // deselected as a unit coming back as a one-photo partial selection.
-    // Codex P2 on PR #1672.
-    if (state.selectedPhotoId !== null && !state.selectedPhotos.has(state.selectedPhotoId)
-        && (state.selectedPhotos.size > 0 || clickIds.indexOf(state.selectedPhotoId) !== -1)) {
-      state.selectedPhotoId = null;
-      state.selectedIndex = -1;
+    if (selection.toggle(clickIds)) {
       var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
       if (detail && detail.classList.contains('visible')) {
         detail.classList.remove('visible');
@@ -110,44 +52,19 @@ export function selectPhoto(/** @type {Pick<MouseEvent, "shiftKey" | "metaKey" |
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
-      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
-      // still tagged with its data-photo-id (hidden along with the detail
-      // panel). This path bypasses closeDetail entirely, so without an
-      // explicit scrub a later Select All (or any batch that still contains
-      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
-      // selection check and resurrect the anchor's Accept line for the
-      // whole batch — clicking it would apply the dropped anchor's GPS
-      // place to every selected photo. Codex P2 on PR #1097.
+      // Retire both the rendered suggestion and its asynchronous owner when
+      // focus leaves. An old reverse-geocode must never repaint into a batch.
       clearExifSuggestion();
-      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
-      // post-await guard reads. If A's reverse-geocode is still in flight
-      // when we drop A here, the completion runs later; leaving
-      // detailPhotoId pointing at A means a subsequent Select All that
-      // contains A would let the async paint path resurrect A's Accept line
-      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
       state.detailPhotoId = null;
     }
   } else if (clickIds.length > 1) {
-    // Normal click on a stack card: select the stack, the same state the
-    // tray's "Select all" produces. There is no single photo to focus — the
-    // card stands for all of them — so the panel opens as the batch
-    // inspector rather than showing one frame's detail as if it were the
-    // thing being acted on.
-    state.selectedPhotos = new Set(clickIds);
-    state.selectedPhotoId = null;
-    state.selectedIndex = idx;
+    selection.selectBatch(clickIds, idx);
     abandonDetailFocusForBatch();
   } else {
-    // Normal click: single select
-    state.selectedPhotos.clear();
-    state.selectedPhotoId = id;
-    state.selectedIndex = idx;
+    selection.selectSingle(id, idx);
     loadDetail(id);
   }
-
-  // Update highlights
   refreshCardSelectionVisuals();
-
   noteFocusedCardVisibility();
   updateBatchBar();
 }
@@ -167,9 +84,7 @@ export function getActiveSelection() {
 // Read-only panels belong to the visible grid selection. A native-menu action
 // may temporarily target a different lightbox photo without changing that view.
 export function getBrowseSelection() {
-  if (state.selectedPhotos.size > 0) return Array.from(state.selectedPhotos);
-  if (state.selectedPhotoId != null) return [state.selectedPhotoId];
-  return [];
+  return selection.ids();
 }
 
 // Use the same membership query for Select all and selection reconciliation.
@@ -217,9 +132,7 @@ export function buildBrowseIdsRequest() {
 
 export async function selectAllMatchingPhotos() {
   state.anchorRestoreEpoch++;
-  state.selectedPhotoId = null;
-  state.selectedIndex = -1;
-  var requestSeq = ++state.selectAllRequestSeq;
+  var requestIsCurrent = selection.beginSelectAll();
   var selectionEpoch = state.anchorRestoreEpoch;
   var windowIsCurrent = observeBrowseWindow();
   var request = buildBrowseIdsRequest();
@@ -227,14 +140,13 @@ export async function selectAllMatchingPhotos() {
   showToast('Selecting all matching photos...', 'info');
   try {
     /** @type {BrowseIdsResponse} */ var data = await safeFetch(request.url, request.options, { toast: false });
-    if (requestSeq !== state.selectAllRequestSeq || selectionEpoch !== state.anchorRestoreEpoch || !windowIsCurrent()) return;
-    state.selectedPhotos.clear();
-    (data.photo_ids || data.ids || []).forEach(function(id) { state.selectedPhotos.add(id); });
+    if (!requestIsCurrent() || selectionEpoch !== state.anchorRestoreEpoch || !windowIsCurrent()) return;
+    selection.replaceBatch(data.photo_ids || data.ids || []);
     renderGrid();
     updateBatchBar();
     showToast(
-      'Selected ' + state.selectedPhotos.size.toLocaleString() + ' photo' +
-        (state.selectedPhotos.size === 1 ? '' : 's'),
+      'Selected ' + selection.batchIds.size.toLocaleString() + ' photo' +
+        (selection.batchIds.size === 1 ? '' : 's'),
       'success'
     );
   } catch(e) {
@@ -292,9 +204,7 @@ export function clearSelection() {
   state.anchorRestoreEpoch++;
   // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
   // reappears immediately with the single-focus photo still armed for actions.
-  state.selectedPhotos.clear();
-  state.selectedPhotoId = null;
-  state.selectedIndex = -1;
+  selection.clear();
   // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
   // too. Without this, the suggestion element keeps its data-photo-id and
   // Accept button after clearing, so a later Select All that still contains

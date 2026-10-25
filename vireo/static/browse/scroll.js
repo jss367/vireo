@@ -1,5 +1,7 @@
 /* Browse: infinite scroll and keeping the focused card visible. ES module (see
    browse/README.md). */
+import { pagination } from './pagination.js';
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import { getBrowsePhotoElement, updateGridTail } from './grid.js';
 import { setBrowseDetailPanelWidth, setBrowseSidebarWidth } from './layout.js';
@@ -40,7 +42,7 @@ export function rearmInfiniteScrollObserver() {
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
   if (infiniteScroll.observerDisconnected) return;
-  if (state.allLoaded || typeof observer === 'undefined') return;
+  if (pagination.allLoaded || typeof observer === 'undefined') return;
   var sentinel = /** @type {HTMLElement} */ (document.getElementById('scrollSentinel'));
   if (!sentinel) return;
   observer.unobserve(sentinel);
@@ -52,7 +54,7 @@ export function rearmInfiniteScrollObserver() {
    successful page load until the viewport is covered by real cards. */
 export function ensureViewportHydrated() {
   if (infiniteScroll.observerDisconnected || !infiniteScroll.observerIsNative) return;
-  if (state.loading || state.allLoaded || state.anchorScanDepth > 0) return;
+  if (pagination.loading || pagination.allLoaded || state.anchorScanDepth > 0) return;
   if (state.photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
@@ -67,7 +69,7 @@ export function ensureViewportHydrated() {
    instead of the sticky explanation banner, whose sticky geometry remains in
    the viewport even when the actual loading boundary is far above it. */
 function ensurePreviousViewportHydrated() {
-  if (state.loading || state.earliestPage <= 1 || state.anchorScanDepth > 0) return;
+  if (pagination.loading || pagination.earliestPage <= 1 || state.anchorScanDepth > 0) return;
   if (state.photos.length === 0) return;
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var contRect = gridContainer.getBoundingClientRect();
@@ -100,12 +102,12 @@ export function focusedBrowsePhotoId() {
   // card on screen, though: collapsing a stack after a stack-wide Select all
   // leaves the last-clicked member selected but unrendered, with
   // selectedPhotoId deliberately pinned to the visible cover.
-  if (state.lastClickedPhotoId != null &&
-      (state.lastClickedPhotoId === state.selectedPhotoId || state.selectedPhotos.has(state.lastClickedPhotoId)) &&
-      renderedCardForFocus(state.lastClickedPhotoId)) {
-    return state.lastClickedPhotoId;
+  if (selection.lastClickedPhotoId != null &&
+      (selection.lastClickedPhotoId === selection.focusedPhotoId || selection.batchIds.has(selection.lastClickedPhotoId)) &&
+      renderedCardForFocus(selection.lastClickedPhotoId)) {
+    return selection.lastClickedPhotoId;
   }
-  return state.selectedPhotoId;
+  return selection.focusedPhotoId;
 }
 
 // The card standing in for a focused photo. A focused photo that is not itself

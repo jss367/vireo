@@ -1,5 +1,6 @@
 /* Browse: grid card markup (fields, badges, color labels, detection boxes). ES module (see
    browse/README.md). */
+import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   VireoColorLabels, VireoTime, _vireoPairSource, escapeAttr, escapeHtml, vireoPhotoHasOrientationEdit,
@@ -183,7 +184,7 @@ export function hydrateColorLabelsForRenderedPage(/** @type {() => boolean} */ i
     // fetchColorLabels already re-rendered a batch inspector; only the
     // single-photo panel is left to catch up.
     var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
-    if (state.selectedPhotoId != null
+    if (selection.focusedPhotoId != null
         && !(detail && detail.classList.contains('batch-mode'))) {
       updateDetailColors();
     }
