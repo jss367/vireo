@@ -19,10 +19,22 @@ function _closeInatExportStream() {
   _inatExportStream = null;
 }
 
+/** The name iNaturalist receives for one species option. @param {InatSpeciesOption} option */
+function _inatOptionTaxon(option) {
+  return option.scientific_name || option.species || '';
+}
+
 function _inatQueueItem(/** @type {number} */ photoId, /** @type {InatPreparedPhoto} */ data) {
+  var options = (data.species_options || []).filter(function(option) { return !!_inatOptionTaxon(option); });
+  // The single-valued fields stay the default; a photo with only a
+  // confirmed keyword (no prediction) starts from that keyword instead of
+  // an empty taxon.
+  var first = options[0];
+  var taxon = data.scientific_name || data.species || (first ? _inatOptionTaxon(first) : '');
   return {
     photo_id: photoId,
-    taxon_name: data.scientific_name || data.species || '',
+    taxon_name: taxon,
+    species_options: options,
     observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
     latitude: data.latitude != null ? data.latitude : '',
     longitude: data.longitude != null ? data.longitude : '',
@@ -34,6 +46,99 @@ function _inatQueueItem(/** @type {number} */ photoId, /** @type {InatPreparedPh
     existing_url: data.existing_observation_url,
     upload_url: data.upload_url,
   };
+}
+
+/** @param {InatSpeciesOption} option */
+function _inatOptionLabel(option) {
+  var name = option.species || option.scientific_name || '';
+  if (option.scientific_name && option.scientific_name !== name) name += ' (' + option.scientific_name + ')';
+  var source = option.source === 'confirmed' ? 'confirmed'
+    : Math.round(100 * (option.confidence || 0)) + '% prediction';
+  return name + ' · ' + source;
+}
+
+/**
+ * The species picker for a photo carrying more than one species. An
+ * observation records one taxon, so the dialog says how many the photo has
+ * and lets you choose; the default stays the prefilled taxon.
+ *
+ * @param {InatQueueItem} item @param {number} idx
+ */
+function _inatSpeciesChoiceHtml(item, idx) {
+  var options = item.species_options || [];
+  if (options.length < 2) return '';
+  var current = options.findIndex(function(option) { return _inatOptionTaxon(option) === item.taxon_name; });
+  if (current < 0) current = options.findIndex(function(option) { return option.primary; });
+  var names = options.map(function(option) { return option.species || option.scientific_name; }).join(', ');
+  return '<div class="inat-species-choice">' +
+    '<p id="inatSpeciesNote' + idx + '">This photo has ' + options.length + ' species: ' + escapeHtml(names) +
+      '. An iNaturalist observation records one taxon, so choose which one to send.</p>' +
+    '<select id="inatSpecies' + idx + '" data-inat-species="' + idx + '" aria-label="Species to send to iNaturalist">' +
+    options.map(function(option, oi) {
+      return '<option value="' + oi + '"' + (oi === current ? ' selected' : '') + '>' + escapeHtml(_inatOptionLabel(option)) + '</option>';
+    }).join('') +
+    '</select></div>';
+}
+
+/**
+ * Bind each species picker in ``root``: choosing a species updates the
+ * queued taxon and calls ``onChange`` with the card index and taxon.
+ *
+ * @param {HTMLElement} root @param {(idx: number, taxon: string) => void} onChange
+ */
+function _inatBindSpeciesChoices(root, onChange) {
+  root.querySelectorAll('select[data-inat-species]').forEach(function(node) {
+    var select = /** @type {HTMLSelectElement} */ (node);
+    var idx = Number(select.getAttribute('data-inat-species'));
+    select.addEventListener('change', function() {
+      var item = inatQueue[idx];
+      var option = item && (item.species_options || [])[Number(select.value)];
+      if (!item || !option) return;
+      item.taxon_name = _inatOptionTaxon(option);
+      onChange(idx, item.taxon_name);
+    });
+  });
+}
+
+/** Quick mode: the taxon line follows the picked species. @param {number} idx @param {string} taxon */
+function _inatQuickSpeciesChanged(idx, taxon) {
+  var text = document.getElementById('inatTaxonText' + idx);
+  if (text) text.textContent = taxon;
+}
+
+/** Direct mode: the editable taxon field takes the picked species. @param {number} idx @param {string} taxon */
+function _inatDirectSpeciesChanged(idx, taxon) {
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('inatTaxon' + idx));
+  if (input) input.value = taxon;
+}
+
+/** The quick dialog's "Include with this photo" choices. @param {InatQueueItem} item @param {number} idx */
+function _inatQuickOptions(item, idx) {
+  var hasTaxon = !!item.taxon_name;
+  var hasDate = !!item.observed_on;
+  var hasLocation = item.latitude !== '' && item.longitude !== '';
+  var taxonText = hasTaxon ? item.taxon_name : 'No detected taxon';
+  var dateText = hasDate ? item.observed_on : 'No observation date';
+  var locationText = hasLocation
+    ? String(item.latitude) + ', ' + String(item.longitude)
+    : 'No location';
+  return '<fieldset style="border:0;padding:0;margin:12px 0 0;display:flex;flex-direction:column;gap:8px;">' +
+    '<legend style="font-size:13px;color:var(--text-primary);margin-bottom:7px;">Include with this photo</legend>' +
+    _inatSpeciesChoiceHtml(item, idx) +
+    '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+      '<input id="inatIncludeTaxon' + idx + '" type="checkbox"' + (hasTaxon ? ' checked' : ' disabled') + '> Taxon: <span id="inatTaxonText' + idx + '">' + escapeHtml(taxonText) + '</span>' +
+    '</label>' +
+    '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+      '<input id="inatIncludeDate' + idx + '" type="checkbox"' + (hasDate ? ' checked' : ' disabled') + '> Date: ' + escapeHtml(dateText) +
+    '</label>' +
+    '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+      '<input id="inatIncludeLocation' + idx + '" type="checkbox"' + (hasLocation ? ' checked' : ' disabled') + '> Location: ' + escapeHtml(locationText) +
+    '</label>' +
+    '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+      '<input id="inatIncludeDescription' + idx + '" type="checkbox"> Description' +
+    '</label>' +
+    '<textarea id="inatQuickDescription' + idx + '" aria-label="Description" placeholder="Description (optional)" style="width:100%;min-height:48px;box-sizing:border-box;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:3px;padding:6px 8px;font-size:12px;resize:vertical;"></textarea>' +
+  '</fieldset>';
 }
 
 async function _inatOpenUrl(/** @type {string} */ url) {
@@ -185,33 +290,6 @@ export async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /
     return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
   }
 
-  function _inatQuickOptions(/** @type {InatQueueItem} */ item, /** @type {number} */ idx) {
-    var hasTaxon = !!item.taxon_name;
-    var hasDate = !!item.observed_on;
-    var hasLocation = item.latitude !== '' && item.longitude !== '';
-    var taxonText = hasTaxon ? item.taxon_name : 'No detected taxon';
-    var dateText = hasDate ? item.observed_on : 'No observation date';
-    var locationText = hasLocation
-      ? String(item.latitude) + ', ' + String(item.longitude)
-      : 'No location';
-    return '<fieldset style="border:0;padding:0;margin:12px 0 0;display:flex;flex-direction:column;gap:8px;">' +
-      '<legend style="font-size:13px;color:var(--text-primary);margin-bottom:7px;">Include with this photo</legend>' +
-      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
-        '<input id="inatIncludeTaxon' + idx + '" type="checkbox"' + (hasTaxon ? ' checked' : ' disabled') + '> Taxon: ' + escapeHtml(taxonText) +
-      '</label>' +
-      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
-        '<input id="inatIncludeDate' + idx + '" type="checkbox"' + (hasDate ? ' checked' : ' disabled') + '> Date: ' + escapeHtml(dateText) +
-      '</label>' +
-      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
-        '<input id="inatIncludeLocation' + idx + '" type="checkbox"' + (hasLocation ? ' checked' : ' disabled') + '> Location: ' + escapeHtml(locationText) +
-      '</label>' +
-      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
-        '<input id="inatIncludeDescription' + idx + '" type="checkbox"> Description' +
-      '</label>' +
-      '<textarea id="inatQuickDescription' + idx + '" aria-label="Description" placeholder="Description (optional)" style="width:100%;min-height:48px;box-sizing:border-box;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:3px;padding:6px 8px;font-size:12px;resize:vertical;"></textarea>' +
-    '</fieldset>';
-  }
-
   var html = '<div class="inat-card" id="inatTokenSetup">' +
     '<div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:5px;">Direct submission needs an iNaturalist token</div>' +
     '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);margin-bottom:9px;">' +
@@ -288,6 +366,7 @@ function _inatRenderQuickCards(html) {
   var cards = /** @type {HTMLElement} */ (document.getElementById('inatCards'));
   cards.innerHTML = html;
   bindExternalLinks(cards);
+  _inatBindSpeciesChoices(cards, _inatQuickSpeciesChanged);
   cards.querySelectorAll('[data-inat-upload]').forEach(function(link) {
     var idx = Number(link.getAttribute('data-inat-upload'));
     link.addEventListener('click', function(event) { openInatQuickUpload(/** @type {MouseEvent} */ (event), idx); });
@@ -514,6 +593,7 @@ function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
           warn +
         '</div>' +
       '</div>' +
+      _inatSpeciesChoiceHtml(item, idx) +
       '<div class="inat-card-fields">' +
         '<div><label>Species / Taxon</label><input id="inatTaxon' + idx + '" value="' + escapeAttr(item.taxon_name) + '"></div>' +
         '<div><label>Date observed</label><input id="inatDate' + idx + '" type="date" value="' + escapeAttr(item.observed_on) + '"></div>' +
@@ -534,6 +614,7 @@ function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
   var cards = /** @type {HTMLElement} */ (document.getElementById('inatCards'));
   cards.innerHTML = html;
   bindExternalLinks(cards);
+  _inatBindSpeciesChoices(cards, _inatDirectSpeciesChanged);
   /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.add('open');
 }
 

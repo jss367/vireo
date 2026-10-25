@@ -1,12 +1,22 @@
 <section id="pendingArchives" class="pending-archives" hidden aria-label="Photos kept locally">
-  <strong class="pending-archives-label">Photos kept locally</strong>
+  <strong class="pending-archives-label">Photos kept locally in this workspace</strong>
+  <p class="pending-archive-safety">These local originals may be your only copies. Send them to the NAS to complete archiving.</p>
   <div id="pendingArchiveItems"></div>
+  <p class="pending-archive-estimate">Sizes are catalog estimates for main photo files. Paired files, sidecars and unindexed files may use more space.</p>
   <div id="pendingArchiveError" role="status"></div>
 </section>
 <style>
 .pending-archives { margin: 8px 20px 0; padding: 6px 10px; border: 1px solid var(--border-primary); border-radius: 8px; flex-shrink: 0; max-height: 180px; overflow: auto; display: flex; align-items: baseline; gap: 6px 16px; flex-wrap: wrap; font-size: 12px; }
 .pending-archives[hidden] { display: none; }
+.pending-archives[data-expanded="true"] { max-height: none; margin: 12px 0 20px; padding: 14px; border-color: var(--warning, #d69e2e); }
+.pending-archives[data-expanded="true"] .pending-archives-label { font-size: 14px; color: var(--text-primary); }
+.pending-archives[data-expanded="true"] .pending-archive-meta { font-size: 13px; color: var(--text-primary); }
+.pending-archives[data-expanded="true"] button { font-size: 12px; }
 .pending-archives-label { color: var(--text-secondary); }
+.pending-archive-safety, .pending-archive-estimate { flex-basis: 100%; margin: 0; line-height: 1.5; }
+.pending-archive-safety { color: var(--text-primary); }
+.pending-archive-estimate, .pending-archive-meta { color: var(--text-secondary); font-size: 11px; }
+.pending-archive-meta { flex-basis: 100%; margin-top: 6px; }
 #pendingArchiveItems { flex: 1; min-width: 0; }
 .pending-archive-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
 .pending-archive-row + .pending-archive-row { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-primary); }

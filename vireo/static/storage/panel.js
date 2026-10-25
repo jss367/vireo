@@ -1,14 +1,25 @@
 // The storage overview: totals, free space, locations, the working-copy
 // status, the category cards, Refresh, Clear safe caches and Open folder.
-// Classic page script.
+
+import { state } from './state.js';
+import {
+  loadDetectionCacheStats, loadEmbeddingCache, loadEmbeddingMatrix, loadPreviewCacheStatus,
+} from './caches.js';
+import { readWorkingCopyQuotaMb, updateWorkingCopyLimitState } from './config.js';
+import { storageEscapeAttr, storageEscapeHtml, storageFormatBytes } from './format.js';
+import { hfCacheCardNote } from './hf-cache.js';
+import { loadMasksCard } from './masks.js';
+import { renderStorageCards, showStorageLoadError } from './overview.js';
+import { loadRetainedStorage } from './retained.js';
+import { formatTime, safeFetch, showToast } from './shared.js';
 
 /** @param {string} id */
-function storageEl(id) {
+export function storageEl(id) {
   return /** @type {HTMLElement} */ (document.getElementById(id));
 }
 
 /** Free space on the tightest volume, and a warning for every low one. @param {StorageReport} s */
-function renderStorageVolumes(s) {
+export function renderStorageVolumes(s) {
   var volumes = s.volumes || [];
   var measuredVolumes = volumes.filter(function(v) { return v.free != null; });
   measuredVolumes.sort(function(a, b) { return /** @type {number} */ (a.free) - /** @type {number} */ (b.free); });
@@ -36,7 +47,7 @@ function renderStorageVolumes(s) {
 }
 
 /** The storage locations, each with an Open folder button (data-storage-location). @param {StorageReport} s */
-function renderStorageLocations(s) {
+export function renderStorageLocations(s) {
   var locationsHtml = '';
   (s.locations || []).forEach(function(location) {
     var locationVolume = location.volume || {};
@@ -53,8 +64,8 @@ function renderStorageLocations(s) {
 }
 
 /** @param {StorageWorkingCopies} working */
-function syncWorkingCopyStatus(working) {
-  _workingCopySizeBytes = working.size || 0;
+export function syncWorkingCopyStatus(working) {
+  state.workingCopySizeBytes = working.size || 0;
   // Sync the cached "committed" quota from the server's authoritative
   // value so a concurrent change (another tab, All Settings) is
   // reflected in the Apply button state. Without this, an outside
@@ -67,15 +78,15 @@ function syncWorkingCopyStatus(working) {
   // clobbered by a background refresh.
   if (working.quota_bytes != null) {
     var newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024));
-    if (newCommittedMb !== _committedWorkingCopyQuotaMb) {
+    if (newCommittedMb !== state.committedWorkingCopyQuotaMb) {
       var input = /** @type {HTMLInputElement} */ (storageEl('cfgWorkingCopyCacheMaxGb'));
       var currentInputMb = readWorkingCopyQuotaMb();
       var modal = /** @type {HTMLDialogElement | null} */ (document.getElementById('workingCopyLimitModal'));
       var modalOpen = modal && (modal.open || modal.classList.contains('open'));
-      if (!modalOpen && currentInputMb === _committedWorkingCopyQuotaMb) {
+      if (!modalOpen && currentInputMb === state.committedWorkingCopyQuotaMb) {
         input.value = String(newCommittedMb / 1024);
       }
-      _committedWorkingCopyQuotaMb = newCommittedMb;
+      state.committedWorkingCopyQuotaMb = newCommittedMb;
     }
   }
   updateWorkingCopyLimitState();
@@ -87,7 +98,7 @@ function syncWorkingCopyStatus(working) {
 }
 
 /** The category cards, the main caches first, then the auxiliary files. @param {StorageReport} s */
-function storageCategories(s) {
+export function storageCategories(s) {
   /** @type {StorageOverviewCategory[]} */
   var categories = [
     {name: 'Database', size: s.database.size, type: null, kind: 'keep', kindLabel: 'Keep'},
@@ -106,7 +117,7 @@ function storageCategories(s) {
 }
 
 /** The auxiliary files and folders, largest first in each category. @param {StorageAuxiliaryCategory[]} auxiliaryCategories */
-function renderStorageBreakdown(auxiliaryCategories) {
+export function renderStorageBreakdown(auxiliaryCategories) {
   var breakdownHtml = auxiliaryCategories.length
     ? '<p class="storage-legend">Files and folders below are sorted by size within each category. Sizes exclude data already counted in the main cache categories.</p>'
     : '';
@@ -124,7 +135,7 @@ function renderStorageBreakdown(auxiliaryCategories) {
   storageEl('storageBreakdown').innerHTML = breakdownHtml;
 }
 
-async function loadStoragePanel() {
+export async function loadStoragePanel() {
   /** @type {StorageReport | undefined} */
   var s;
   try {
@@ -145,14 +156,14 @@ async function loadStoragePanel() {
   } catch(e) {
     // Usage is unknown until the next successful scan; keep Apply disabled
     // so a stale zero can't skip the eviction confirmation.
-    _workingCopySizeBytes = null;
+    state.workingCopySizeBytes = null;
     updateWorkingCopyLimitState();
     showStorageLoadError();
   }
   await loadMasksCard(s && s.masks);
 }
 
-async function refreshStoragePage() {
+export async function refreshStoragePage() {
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('refreshStorageBtn'));
   if (btn) btn.disabled = true;
   await Promise.all([
@@ -160,11 +171,11 @@ async function refreshStoragePage() {
     loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(),
   ]);
   /** @type {HTMLElement} */ (document.getElementById('storageUpdatedAt')).textContent =
-    'Updated ' + window.VireoTime.time(new Date(), {hour: 'numeric', minute: '2-digit', second: '2-digit'});
+    'Updated ' + formatTime(new Date(), {hour: 'numeric', minute: '2-digit', second: '2-digit'});
   if (btn) btn.disabled = false;
 }
 
-async function clearSafeCaches() {
+export async function clearSafeCaches() {
   var size = /** @type {HTMLElement} */ (document.getElementById('storageReclaimableSize')).textContent;
   if (!confirm('Clear ' + size + ' of thumbnails, previews, and label embeddings? They will regenerate as needed.')) return;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('clearSafeCachesBtn'));
@@ -180,7 +191,7 @@ async function clearSafeCaches() {
 }
 
 /** @param {string} locationId */
-async function openStorageFolder(locationId) {
+export async function openStorageFolder(locationId) {
   try {
     var result = /** @type {{ok?: boolean, reason?: string}} */ (await safeFetch('/api/storage/open-folder', {
       method: 'POST',

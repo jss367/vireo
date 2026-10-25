@@ -36,7 +36,7 @@ def _results():
     return {'photos': photos, 'encounters': encounters, 'summary': {}}
 
 
-def _open(page, live_server, results=None, requests=None):
+def _open(page, live_server, results=None, requests=None, cards=None):
     results = results or _results()
     page.route('**/api/pipeline/page-init', lambda route: route.fulfill(json={'results': results}))
 
@@ -54,7 +54,7 @@ def _open(page, live_server, results=None, requests=None):
     page.route('**/api/pipeline/regroup-live', recompute)
     page.route('**/api/pipeline/reflow', recompute)
     page.goto(live_server['url'] + '/cull')
-    expect(page.locator('.cull-card')).to_have_count(len(results['photos']))
+    expect(page.locator('.cull-card')).to_have_count(cards if cards is not None else len(results['photos']))
 
 
 def _select(page, name):
@@ -114,6 +114,67 @@ def test_multi_species_selection_keeps_favorites_separate_and_can_expand_again(l
     page.get_by_role('button', name='Clear filters', exact=True).click()
     expect(page.locator('.species-section')).to_have_count(2)
     assert 'photo_ids' not in requests[-1]
+
+
+def _section(page, species):
+    # Match on the header: a two-species card names the other species too.
+    return page.locator('.species-section').filter(
+        has=page.locator('.species-name', has_text=species))
+
+
+def _two_species_results():
+    """A heron-and-robin frame (confirmed both) and one whose two boxes
+    carry different top predictions, among single-species frames."""
+    results = _results()
+    photos = {p['id']: p for p in results['photos']}
+    photos[13]['confirmed_species_list'] = ['American robin', 'Great blue heron']
+    photos[14].pop('confirmed_species')
+    photos[14]['species_top5'] = [['American robin', 0.9], ['Great blue heron', 0.7]]
+    photos[14]['subjects'] = [
+        {'detection_id': 1, 'predictions': [['American robin', 0.9, 'm']]},
+        {'detection_id': 2, 'predictions': [['Great blue heron', 0.7, 'm']]},
+    ]
+    return results
+
+
+def test_two_species_photo_is_listed_under_each_species_and_counted_once(live_server, page):
+    results = _two_species_results()
+    _open(page, live_server, results, cards=17)
+    heron = _section(page, 'Great blue heron')
+    robin = _section(page, 'American robin')
+    expect(heron.locator('.species-stats')).to_contain_text('14 photos')
+    expect(robin.locator('.species-stats')).to_contain_text('3 photos')
+    expect(page.locator('.summary-stat').filter(has_text='Photos')).to_contain_text('15')
+    expect(page.locator('.summary-stat').filter(has_text='Under 2+ species')).to_contain_text('2')
+    expect(heron.locator('.cull-card[data-photo-id="13"]')).to_contain_text('Also under American robin')
+    expect(robin.locator('.cull-card[data-photo-id="14"]')).to_contain_text('Also under Great blue heron')
+
+    # One decision covers both listings; the page-wide count stays at one.
+    heron.locator('.cull-card[data-photo-id="14"]').get_by_role('button', name='Reject', exact=True).click()
+    expect(page.locator('.cull-card[data-photo-id="14"].reject')).to_have_count(2)
+    expect(page.locator('#cullReviewRejected')).to_have_text('Review rejected (1)')
+
+    page.locator('#cullSpeciesSummary').click()
+    expect(page.locator('#cullSpeciesOptions label').filter(has_text='American robin')).to_have_text('American robin (3)')
+    expect(page.locator('#cullSpeciesOptions label').filter(has_text='Great blue heron')).to_have_text('Great blue heron (14)')
+    page.locator('#cullSpeciesSummary').click()
+
+    posted = []
+    page.route('**/api/culling/apply', lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={'ok': True})))
+    page.on('dialog', lambda dialog: dialog.accept())
+    page.locator('#applyBtn').click()
+    expect(page.locator('#cullStatus')).to_contain_text('Applied!')
+    assert posted[0]['rejects'] == [14]
+    assert len(posted[0]['keepers']) == len(set(posted[0]['keepers']))
+
+
+def test_species_filter_finds_a_two_species_photo_under_either_species(live_server, page):
+    requests = []
+    _open(page, live_server, _two_species_results(), requests, cards=17)
+    _select(page, 'American robin')
+    expect(page.locator('.species-section')).to_have_count(1)
+    expect(page.locator('.cull-card')).to_have_count(3)
+    assert set(requests[-1]['photo_ids']) == {13, 14, 15}
 
 
 def test_pinning_a_favorite_survives_recompute_and_filter_changes(live_server, page):

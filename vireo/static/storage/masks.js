@@ -1,15 +1,16 @@
 // The Masks card and its Manage modal: per-variant usage and deletes.
-// Classic page script.
 
-/** @type {StorageMasks | null} */
-var _masksData = null;
+import { state } from './state.js';
+import { storageEscapeHtml, storageFormatBytes } from './format.js';
+import { loadStoragePanel } from './panel.js';
+import { safeFetch } from './shared.js';
 
 /** @param {StorageMasks | undefined} storageData The masks summary /api/storage already returned, if any. */
-async function loadMasksCard(storageData) {
+export async function loadMasksCard(storageData) {
   var card = /** @type {HTMLElement} */ (document.getElementById('masksCard'));
   try {
     var data = storageData || /** @type {StorageMasks} */ (await safeFetch('/api/storage/masks', {}, { toast: false }));
-    _masksData = data;
+    state.masksData = data;
     var variants = data.variants || [];
     var totalBytes = data.total_bytes || 0;
     var stale = data.stale_count || 0;
@@ -59,21 +60,21 @@ async function loadMasksCard(storageData) {
   }
 }
 
-function openMasksModal() {
-  if (!_masksData) return;
+export function openMasksModal() {
+  if (!state.masksData) return;
   /** @type {HTMLElement} */ (document.getElementById('masksModalError')).style.display = 'none';
   renderMasksModalRows();
   /** @type {HTMLElement} */ (document.getElementById('masksModal')).classList.add('open');
 }
 
-function closeMasksModal() {
+export function closeMasksModal() {
   /** @type {HTMLElement} */ (document.getElementById('masksModal')).classList.remove('open');
 }
 
-function renderMasksModalRows() {
+export function renderMasksModalRows() {
   var rows = /** @type {HTMLElement} */ (document.getElementById('masksModalRows'));
   rows.textContent = '';
-  if (!_masksData || (_masksData.variants || []).length === 0) {
+  if (!state.masksData || (state.masksData.variants || []).length === 0) {
     var empty = document.createElement('li');
     empty.style.color = 'var(--text-ghost)';
     empty.style.fontSize = '13px';
@@ -82,7 +83,7 @@ function renderMasksModalRows() {
     rows.appendChild(empty);
     return;
   }
-  (_masksData.variants || []).forEach(function(v) {
+  (state.masksData.variants || []).forEach(function(v) {
     var isActive = (v.active_count || 0) > 0;
     var li = document.createElement('li');
     li.className = 'file-item';
@@ -121,14 +122,14 @@ function renderMasksModalRows() {
 }
 
 /** @param {string} msg */
-function _showMasksModalError(msg) {
+export function _showMasksModalError(msg) {
   var el = /** @type {HTMLElement} */ (document.getElementById('masksModalError'));
   el.textContent = msg;
   el.style.display = '';
 }
 
 /** @param {string} variant */
-async function deleteMaskVariant(variant) {
+export async function deleteMaskVariant(variant) {
   if (!confirm('Delete all "' + variant + '" masks? Files and DB rows will be removed.')) return;
   try {
     var resp = await fetch('/api/storage/masks/delete-variant', {
@@ -147,11 +148,11 @@ async function deleteMaskVariant(variant) {
     return;
   }
   await loadStoragePanel();
-  if (_masksData && (_masksData.variants || []).length > 0) renderMasksModalRows();
+  if (state.masksData && (state.masksData.variants || []).length > 0) renderMasksModalRows();
   else closeMasksModal();
 }
 
-async function deleteInactiveMasks() {
+export async function deleteInactiveMasks() {
   if (!confirm('Delete all non-active mask variants across photos? The active variant per photo is kept.')) return;
   try {
     await safeFetch('/api/storage/masks/delete-inactive', {
@@ -162,7 +163,7 @@ async function deleteInactiveMasks() {
   await loadStoragePanel();
 }
 
-async function deleteStaleMasks() {
+export async function deleteStaleMasks() {
   if (!confirm('Delete masks whose detection prompt no longer matches the photo primary detection?')) return;
   try {
     await safeFetch('/api/storage/masks/delete-stale', {
