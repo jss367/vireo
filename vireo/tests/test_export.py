@@ -29,7 +29,7 @@ from export import (
     sanitize_filename,
 )
 from PIL import Image
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 
 
 def test_resolve_template_original():
@@ -3464,7 +3464,7 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
     Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
         str(developed / stale_key / "IMG_0001.jpg"), "JPEG", quality=95,
     )
-    db.delete_folder(fid_old)
+    catalog_deletion.delete_folder(db, fid_old)
     _ = pid_old  # photo row is cascaded away with its folder
 
     # Step 2: add a NEW folder at a different path, with a photo that has

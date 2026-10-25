@@ -1,17 +1,19 @@
 // loadKeywords(): the identities fetch that every edit refetches through.
-// Classic page script; load boot.js after all definitions.
+
+import { state } from './state.js';
+import { render } from './render.js';
 
 // -- Load data --
-async function loadKeywords() {
+export async function loadKeywords() {
   try {
     const response = await fetch('/api/keywords/identities');
     if (!response.ok) throw new Error('Could not load keywords');
-    identityGroups = await response.json();
-    allKeywords = identityGroups.flatMap(group => group.members);
-    const editable = new Set((showRecords ? allKeywords : identityGroups.filter(k => k.members.length === 1)).map(k => k.id));
-    selectedIds.forEach(id => { if (!editable.has(id)) selectedIds.delete(id); });
-    parentMap = {};
-    allKeywords.forEach(k => { parentMap[k.id] = k.name; });
+    state.identityGroups = await response.json();
+    state.allKeywords = state.identityGroups.flatMap(group => group.members);
+    const editable = new Set((state.showRecords ? state.allKeywords : state.identityGroups.filter(k => k.members.length === 1)).map(k => k.id));
+    state.selectedIds.forEach(id => { if (!editable.has(id)) state.selectedIds.delete(id); });
+    state.parentMap = {};
+    state.allKeywords.forEach(k => { state.parentMap[k.id] = k.name; });
     render();
   } catch(e) {
     /** @type {HTMLElement} */ (document.getElementById('kwEmpty')).style.display = 'block';

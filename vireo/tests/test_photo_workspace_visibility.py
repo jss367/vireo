@@ -4,7 +4,7 @@ import pytest
 from db import Database
 from move import move_photos
 from repositories.photo_visibility import PhotoVisibilityRepository
-from services import browse_queries, dashboard_stats, missing_originals, photo_ingest
+from services import browse_queries, catalog_deletion, dashboard_stats, missing_originals, photo_ingest
 
 
 def _photo(db, folder, name, content=b"photo"):
@@ -211,7 +211,7 @@ def test_deleting_folder_does_not_delete_another_workspaces_granted_photo(tmp_pa
         db.photo_visibility.grant(b, [photo])
         db.photo_visibility.grant(a, [photo])
         db.conn.commit()
-        db.delete_folder(folder)
+        catalog_deletion.delete_folder(db, folder)
         assert db.photos.get(photo) is not None
         assert not db.photo_visibility.visible_photo_ids([photo])
         db.set_active_workspace(b)
@@ -228,7 +228,7 @@ def test_identity_fold_transfers_grants_without_sharing_destination(tmp_path):
         _, unrelated = _photo(db, tmp_path / "new", "unrelated.jpg", b"unrelated")
         db.photo_visibility.grant(b, [losing])
         remap_photo_visibility(db.conn, {losing: survivor})
-        db.delete_photos([losing])
+        catalog_deletion.delete_photos(db, [losing])
         db.set_active_workspace(b)
         assert db.photo_visibility.visible_photo_ids([survivor, unrelated]) == [survivor]
         assert not db.conn.execute("SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?", (b, destination)).fetchone()
@@ -675,7 +675,7 @@ def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp
     response = client.delete(f"/api/folders/{folder}")
     assert response.status_code == 404
     with pytest.raises(ValueError, match="not linked"):
-        db.delete_folder(folder)
+        catalog_deletion.delete_folder(db, folder)
     assert db.photos.get(shared) is not None
     assert db.photos.get(sibling) is not None
     assert db.photo_visibility.visible_photo_ids([shared, sibling]) == [shared]
@@ -743,7 +743,7 @@ def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp
         db.conn.execute("UPDATE photos SET timestamp='2026-05-01',quality_score=.8 WHERE id IN (?,?,?)", (shared, hidden, sibling))
         db.conn.commit()
         db.add_workspace_folder(owner, gap)
-        db.delete_folder(gap)  # Unlink the subtree from active, preserving the owner's catalog.
+        catalog_deletion.delete_folder(db, gap)  # Unlink the subtree from active, preserving the owner's catalog.
         db.photo_visibility.grant(active, [shared])
         db.conn.commit()
         tree = {row["id"]: row for row in db.folders.tree()}

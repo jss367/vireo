@@ -911,7 +911,7 @@ def create_pipeline_blueprint(
         db = get_db()
         cache_dir = os.path.dirname(db_path)
         # Self-heal: caches written before commit 5ad83fa (which wired
-        # cache pruning into db.delete_photos) can still reference photos
+        # cache pruning into catalog_deletion.delete_photos) can still reference photos
         # that were deleted afterwards through other paths. Reconcile
         # against the DB at read time so the review page never renders
         # orphan cards that 404 on /thumbnails/<id>.jpg.

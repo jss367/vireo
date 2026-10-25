@@ -1,7 +1,7 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
 import os
 
-from services import photo_ingest
+from services import catalog_deletion, photo_ingest
 from wait import wait_for_job_via_client
 
 
@@ -886,7 +886,7 @@ def test_last_scan_drops_group_whose_extra_copy_id_was_reused(app_and_db, tmp_pa
     assert sorted(first["buckets"][0]["file_hashes"]) == ["HKEEP", "HREUSE"]
     assert first["stale_group_count"] == 0
 
-    db.delete_photos([extra])
+    catalog_deletion.delete_photos(db, [extra])
     newcomer = photo_ingest.add_photo(
         db, folder_id=fid, filename="unrelated.jpg", extension=".jpg",
         file_size=5000, file_mtime=300.0, file_hash="HOTHER",
@@ -1029,7 +1029,7 @@ def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
     client = app.test_client()
     _scan_and_restore(client)
 
-    db.delete_photos([extra])
+    catalog_deletion.delete_photos(db, [extra])
 
     result = client.get("/api/duplicates/last-scan").get_json()["result"]
     assert result["stale_group_count"] == 1
@@ -1057,7 +1057,7 @@ def test_last_scan_keeps_group_with_a_current_extra_copy_left(app_and_db):
     gone = proposal["losers"][0]["id"]
     left = ({extra1, extra2} - {gone}).pop()
 
-    db.delete_photos([gone])
+    catalog_deletion.delete_photos(db, [gone])
 
     result = client.get("/api/duplicates/last-scan").get_json()["result"]
     assert result["stale_group_count"] == 0

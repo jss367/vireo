@@ -523,6 +523,12 @@ body {
         <div id="workingCopyNoticeText"></div>
         <ul class="unsafe-list" id="workingCopyFailures" style="display:none;"></ul>
       </div>
+      <!-- Filled by renderSidecarFailures() when a scan could not import the
+           keywords in some photos' XMP sidecars; those photos were imported. -->
+      <div id="sidecarFailureNotice" class="warn" style="display:none;">
+        <div id="sidecarFailureNoticeText"></div>
+        <ul class="unsafe-list" id="sidecarFailures"></ul>
+      </div>
       <div class="row" id="retryImportRow" style="display:none;margin-top:10px;">
         <button class="btn btn-primary" type="button" id="btnRetryImport"
                 onclick="retryFailedImport()">Retry failed files</button>

@@ -28,7 +28,7 @@ from db import Database, MissingPhotosCancelled
 from repositories.folders import FolderRepository
 from repositories.moves_merge import MovesMergeRepository
 from repositories.stats import StatsRepository
-from services import missing_originals, photo_ingest
+from services import catalog_deletion, missing_originals, photo_ingest
 
 
 class _RecordingCache:
@@ -1029,17 +1029,17 @@ def test_delete_folder_removes_subtree_photos_and_provenance(db, cache, monkeypa
     _set_provenance(db, survivor, "/d/c")
 
     delete_calls = []
-    real_delete = Database.delete_photos
+    real_delete = catalog_deletion.delete_photos
 
     def recording_delete(self, ids, *a, **kw):
         delete_calls.append((sorted(ids), a, kw))
         return real_delete(self, ids, *a, **kw)
 
-    monkeypatch.setattr(Database, "delete_photos", recording_delete)
+    monkeypatch.setattr(catalog_deletion, "delete_photos", recording_delete)
     pruned = []
-    monkeypatch.setattr(Database, "prune_pipeline_cache_for_ids", lambda self, ids: pruned.append(sorted(ids)))
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda self, ids: pruned.append(sorted(ids)))
 
-    result = db.delete_folder(root)
+    result = catalog_deletion.delete_folder(db, root)
     assert result["deleted_photos"] == 2
     assert sorted(f["photo_id"] for f in result["files"]) == sorted([p1, p2])
     assert delete_calls == [(sorted([p1, p2]), (), {"commit": False})]
@@ -1062,7 +1062,7 @@ def test_delete_folder_protected_target_is_only_unlinked(db, cache):
     child = db.add_folder("/pt/c", parent_id=root, workspace_root=False)
     _link(db, other, root, 1)
     pid = _photo(db, child, "x.jpg")
-    assert db.delete_folder(root) == {"deleted_photos": 0, "files": []}
+    assert catalog_deletion.delete_folder(db, root) == {"deleted_photos": 0, "files": []}
     assert _links(db, root) == {(other, 1)}
     assert _links(db, child) == set()
     assert _folder_row(db, child) is not None
@@ -1083,7 +1083,7 @@ def test_delete_folder_protected_descendant_is_reparented(db, cache):
     kept_kid = db.add_folder("/pd/kept/k", parent_id=kept, workspace_root=False)
     gone = db.add_folder("/pd/gone", parent_id=root, workspace_root=False)
     _link(db, other, kept, 0)
-    result = db.delete_folder(root)
+    result = catalog_deletion.delete_folder(db, root)
     assert result == {"deleted_photos": 0, "files": []}
     assert _folder_row(db, root) is None and _folder_row(db, gone) is None
     assert _folder_row(db, kept)["parent_id"] is None
@@ -1096,13 +1096,13 @@ def test_delete_folder_rolls_back_on_failure(db, cache, monkeypatch):
     child = db.add_folder("/rb/c", parent_id=root, workspace_root=False)
     _photo(db, child, "x.jpg")
     pruned = []
-    monkeypatch.setattr(Database, "prune_pipeline_cache_for_ids", lambda self, ids: pruned.append(ids))
+    monkeypatch.setattr(catalog_deletion, "prune_pipeline_cache_for_ids", lambda self, ids: pruned.append(ids))
     db.conn.execute(
         "CREATE TEMP TRIGGER no_folder_delete BEFORE DELETE ON folders "
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
     with pytest.raises(sqlite3.IntegrityError, match="blocked"):
-        db.delete_folder(root)
+        catalog_deletion.delete_folder(db, root)
     assert not db.conn.in_transaction
     assert _folder_row(db, root) is not None
     assert db.conn.execute("SELECT COUNT(*) FROM photos WHERE folder_id = ?", (child,)).fetchone()[0] == 1
@@ -1113,7 +1113,7 @@ def test_delete_folder_without_workspace_raises(db):
     fid = db.add_folder("/nows")
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.delete_folder(fid)
+        catalog_deletion.delete_folder(db, fid)
     assert _folder_row(db, fid) is not None
 
 
@@ -1125,7 +1125,7 @@ def test_delete_folder_chunks_wide_subtrees(db, cache):
         [(f"/wide/s{i}", root) for i in range(n)],
     )
     db.conn.commit()
-    assert db.delete_folder(root) == {"deleted_photos": 0, "files": []}
+    assert catalog_deletion.delete_folder(db, root) == {"deleted_photos": 0, "files": []}
     assert db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0] == 0
 
 
@@ -1370,15 +1370,14 @@ def test_get_folder_source_path_prefers_the_root_mapping(db):
 # -- structure ----------------------------------------------------------------
 
 # The folder methods that stay on ``Database``: the ones that coordinate other
-# domains (the workspace link, photo deletion, the new-images cache, the
-# pipeline-cache prune), and ``get_folder_subtree_ids``, which
-# ``PhotoRepository`` binds from the façade by name (``FACADE_METHODS``) and
-# the species-curation and location factories hand over bound.
+# domains (the workspace link, the new-images cache), and
+# ``get_folder_subtree_ids``, which ``PhotoRepository`` binds from the façade
+# by name (``FACADE_METHODS``) and the species-curation and location factories
+# hand over bound. ``delete_folder`` lives in ``services/catalog_deletion.py``.
 _DELEGATING_FOLDER_METHODS = (
     "repair_stale_folder_parents",
     "add_folder",
     "get_folder_subtree_ids",
-    "delete_folder",
 )
 
 # The forwarding wrappers this domain used to have on ``Database``; callers
@@ -1467,10 +1466,6 @@ _FACADE_CALLBACKS = {
         "transfer_gps_review": "moves_merge.transfer_gps_review",
         "transfer_embedded_offered": "photo_keywords.transfer_embedded_offered_keys",
     },
-    "delete_folder": {
-        "delete_photos": "delete_photos",
-        "remember_removals": "_remember_workspace_folder_removals",
-    },
 }
 
 
@@ -1487,6 +1482,32 @@ def test_folder_wrapper_passes_facade_methods_as_callbacks(name):
     }
     for kwarg, facade in _FACADE_CALLBACKS[name].items():
         assert passed.get(kwarg) == facade, (name, kwarg)
+
+
+def test_delete_folder_passes_the_photo_delete_and_removal_record_as_callbacks():
+    """``catalog_deletion.delete_folder`` hands the repository its callbacks.
+
+    The photo delete goes through the service's ``delete_photos`` (looked up
+    when each chunk runs, so a patch of it applies) and the removal record
+    through the façade.
+    """
+    assert not hasattr(Database, "delete_folder")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(catalog_deletion.delete_folder)))
+    passed = {
+        kw.arg: ast.unparse(kw.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "db.folders.delete"
+        for kw in node.keywords
+    }
+    assert passed == {
+        "delete_photos": "delete_chunk",
+        "remember_removals": "db._remember_workspace_folder_removals",
+    }
+    chunk = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "delete_chunk"
+    )
+    assert "delete_photos(db, chunk" in ast.unparse(chunk)
 
 
 def test_add_folder_keeps_the_workspace_link_on_the_facade():

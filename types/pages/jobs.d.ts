@@ -33,7 +33,7 @@ interface JobsResult {
   interrupted?: boolean; photo_ids?: number[]; carried_photo_ids?: number[]; recovered_photo_ids?: number[];
   photo_fingerprints?: Record<number,string>; carried_photo_fingerprints?: Record<number,string>;
   landed_files?: Record<string,unknown[]>; failed?: number; tags_applied?: boolean; chained?: boolean;
-  ok?: boolean; never_started?: boolean; after_import_skipped?: string; process_job_id?: string;
+  ok?: boolean; photos_ok?: boolean; sidecar_failures?: string[]; never_started?: boolean; after_import_skipped?: string; process_job_id?: string;
   tagging?: {errors?: unknown[]}; collection_id?: number | string; collection_name?: string; cancelled?: boolean;
   destinations?: JobsDestination[]; moved?: number; already_in_place?: number; errors?: string[];
   error?: string; last_progress_at?: string;

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import detection_store, photo_ingest, stage_counts, subject_masks
+from services import catalog_deletion, detection_store, photo_ingest, stage_counts, subject_masks
 from testing.waits import synchronization_timeout
 
 
@@ -2232,7 +2232,7 @@ def test_preview_returns_404_for_deleted_photo_even_with_stale_cache(app_and_db)
 
     # Delete the photo (cascades FK-dependent rows) then simulate a leftover
     # cache file, e.g. crash-after-commit-before-cleanup.
-    db.delete_photos([pid])
+    catalog_deletion.delete_photos(db, [pid])
     stale = os.path.join(preview_dir, f"{pid}_1920.jpg")
     Image.new("RGB", (10, 10)).save(stale, "JPEG")
 
@@ -8755,6 +8755,37 @@ def test_storage_files_limit_returns_bounded_preview_listing(client_with_photo):
     assert len(data["files"]) == 3
 
 
+def test_storage_files_lists_embeddings_with_manifest_metadata(client_with_photo, tmp_path, monkeypatch):
+    """The embeddings listing reads names from the embedding cache's manifest.
+
+    It used to import ``classifier._load_manifest``, which no longer exists,
+    so opening the Embeddings row in Storage answered 500.
+    """
+    import json
+
+    import classifier
+
+    app, _db, _photo_id = client_with_photo
+    embedding_dir = tmp_path / "embeddings"
+    embedding_dir.mkdir()
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+    (embedding_dir / "abc.npy").write_bytes(b"x" * 16)
+    (embedding_dir / "manifest.json").write_text(
+        json.dumps({"abc.npy": {"model": "bioclip", "label_count": 3}}),
+        encoding="utf-8",
+    )
+
+    resp = app.test_client().get("/api/storage/files?type=embeddings")
+
+    assert resp.status_code == 200
+    files = resp.get_json()["files"]
+    assert files == [{
+        "name": "abc.npy",
+        "size": 16,
+        "meta": {"model": "bioclip", "label_count": 3},
+    }]
+
+
 def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
     """/api/storage/clear type=thumbnails NULLs photos.thumb_path so the
     pipeline plan's count_photos_missing_thumb doesn't report phantoms.
@@ -12837,7 +12868,7 @@ def test_api_photos_query_visual_focus_holds_one_read_snapshot(
             # A separate connection — a cull or a scan committing mid-request.
             writer = Database(db_path)
             writer.set_active_workspace(ws_id)
-            writer.delete_photos([target])
+            catalog_deletion.delete_photos(writer, [target])
             writer.close()
             deleted.append(target)
         return original(self, ids, *args, **kwargs)
