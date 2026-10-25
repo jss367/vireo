@@ -2,6 +2,7 @@
 
 import pytest
 from playwright.sync_api import expect
+from services import detection_store
 
 
 def _legacy_library(live_server):
@@ -19,8 +20,11 @@ def test_legacy_nudge_queues_reclassify(live_server, page, outcome):
         requests.append(route.request.post_data_json)
         if outcome == "completed":
             db = live_server["db"]
-            db.conn.execute("UPDATE predictions SET labels_fingerprint = 'regenerated'")
-            db.conn.commit()
+            for photo in live_server["data"]["photos"]:
+                detection_store.write_detection_batch(db, photo, "megadetector-v6", [{
+                    "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                    "confidence": 0.95, "category": "animal",
+                }], runtime_fingerprint="raw-detector-runtime")
         route.fulfill(json={"job_id": "pipeline-legacy-test"})
 
     page.route("**/api/jobs/pipeline", enqueue)
@@ -45,6 +49,9 @@ def test_legacy_nudge_queues_reclassify(live_server, page, outcome):
         expect(page.locator("#btnReclassifyLegacy")).to_be_enabled()
     else:
         expect(card).to_be_hidden()
+        assert live_server["db"].conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE labels_fingerprint = 'legacy'",
+        ).fetchone()[0] == 5
     assert len(requests) == 1
     body = requests[0]
     assert sorted(body["folder_ids"]) == sorted(live_server["data"]["folders"])

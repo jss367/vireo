@@ -1,15 +1,17 @@
 """Upgrade discovery uses unfiltered legacy predictions in visible folders."""
 
-from services import moves_merge, photo_ingest, workspace_folders
+import pytest
+from services import detection_store, moves_merge, photo_ingest, workspace_folders
 
 
 def _predict(db, photo_id, *, fingerprint="legacy", model="old-model"):
     detection = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
         "confidence": 0.01, "category": "animal",
-    }], "old-detector")[0]
+    }], "megadetector-v6")[0]
     db.predictions.add(detection, "Robin", 0.01, model,
                        labels_fingerprint=fingerprint, status="rejected")
+    return detection
 
 
 def test_legacy_folders_count_photos_once_without_visibility_filters(app_and_db):
@@ -95,3 +97,43 @@ def test_legacy_scan_keeps_moved_photo_only_grants_without_exposing_siblings(db)
     }]
     db.set_active_workspace(empty)
     assert db.predictions.legacy_detection_folders() == []
+
+
+@pytest.mark.parametrize("empty_scene", [False, True])
+def test_raw_detector_run_hides_surviving_legacy_classifier_rows(db, empty_scene):
+    folder = workspace_folders.add_folder(db, "/photos/legacy")
+    photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
+    old_id = _predict(db, photo)
+    # A synthetic full-image subject may also survive an empty-scene rerun.
+    anchor = db.detections.save(photo, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1,
+    }], "full-image")[0]
+    db.predictions.add(anchor, "Robin", 0.9, "old-model")
+    assert db.predictions.legacy_detection_folders()[0]["photo_count"] == 1
+
+    ids = detection_store.write_detection_batch(db, photo, "megadetector-v6", [] if empty_scene else [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+        "confidence": 0.01, "category": "animal",
+    }], runtime_fingerprint="raw-detector-runtime")
+    if not empty_scene:
+        assert ids == [old_id]
+        assert db.conn.execute(
+            "SELECT 1 FROM predictions WHERE detection_id = ? AND labels_fingerprint = 'legacy'",
+            (old_id,),
+        ).fetchone()
+        # Reclassify clears only its selected label fingerprint, not legacy rows.
+        db.predictions.clear(model="old-model", collection_photo_ids=[photo], labels_fingerprint="current-labels")
+    assert db.conn.execute(
+        "SELECT 1 FROM predictions WHERE detection_id = ? AND labels_fingerprint = 'legacy'", (anchor,),
+    ).fetchone()
+    assert db.predictions.legacy_detection_folders() == []
+
+
+def test_legacy_detector_run_still_needs_raw_detection(db):
+    folder = workspace_folders.add_folder(db, "/photos/legacy")
+    photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
+    _predict(db, photo)
+    db.model_runs.record_detector_run(photo, "megadetector-v6", 1, runtime_fingerprint="legacy")
+    assert db.predictions.legacy_detection_folders() == [{
+        "id": folder, "path": "/photos/legacy", "photo_count": 1,
+    }]

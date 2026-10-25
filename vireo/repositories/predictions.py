@@ -141,18 +141,25 @@ class PredictionRepository:
         return self._resolve_workspace_id()
 
     def legacy_detection_folders(self) -> list[dict[str, Any]]:
-        """Folders with migration-sentinel predictions in the active workspace.
+        """Visible folders whose legacy predictions still need raw detection.
 
         Count photos once even when several detections/models carry the
         sentinel. Do not apply confidence or review filters: those can hide
         precisely the old, pre-filtered outputs this upgrade nudge explains.
+        A successful identified MegaDetector run proves raw boxes were stored,
+        including empty scenes. Old classifier rows can survive that run's
+        content-addressed detection upsert and must not keep the nudge alive.
         """
         return [dict(row) for row in self.conn.execute("""
             SELECT f.id, f.path, COUNT(*) AS photo_count
             FROM photos p
             JOIN folders f ON f.id = p.folder_id
             JOIN photo_workspace_visibility v ON v.photo_id = p.id
-            WHERE v.workspace_id = ? AND EXISTS (
+            WHERE v.workspace_id = ? AND NOT EXISTS (
+                SELECT 1 FROM detector_runs dr
+                WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
+                  AND dr.runtime_fingerprint != 'legacy'
+            ) AND EXISTS (
                 SELECT 1 FROM detections d
                 JOIN predictions pr ON pr.detection_id = d.id
                 WHERE d.photo_id = p.id AND pr.labels_fingerprint = 'legacy'
