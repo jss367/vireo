@@ -12,8 +12,8 @@ page globals, as the inline script and the older `cull-favorites.js` did.
 | `settings.js` | The scoring and grouping sliders: request configs, defaults, resets, Save grouping defaults, and the debounced recompute |
 | `analysis.js` | Storing results, the request body for the current scope, the pending state behind Apply, reflow and regroup, and loading the cached results |
 | `history.js` | The undo/redo page hooks (`beforeHistoryChange`, `afterHistoryChange`) |
-| `decisions.js` | Species names, flag and label to action, pin counts, `resolveCullDecision`, encounter labels |
-| `data.js` | `pipelineToCullData`: species groups, scene groups, each photo's decision, and the summary totals |
+| `decisions.js` | Species names (`speciesListForPhoto` / `speciesListForEncounter`: every species a photo counts under), flag and label to action, pin counts, `resolveCullDecision`, encounter labels |
+| `data.js` | `pipelineToCullData`: species groups, scene groups, each photo's decision, and the summary totals (`cullPhotoTallies`, once per photo) |
 | `render.js` | The summary's decision stats and actions, and `renderCulling` |
 | `focus.js` | The focused scene group and arrow-key movement |
 | `actions.js` | Expanding a species, changing, releasing and clearing decisions, and Apply |
@@ -39,3 +39,12 @@ comes with converting the page to modules.
   analysis, a debounced recompute, a delete or a history change is in flight.
 - `cullAnalysisSeq` / `cullAnalysisPending` drop superseded recompute
   responses (see `recomputeCulling` in `favorites.js`).
+- A photo can show more than one species. It is listed (and filterable)
+  under each: all its confirmed species, else each detected subject's top
+  prediction, else its single top prediction, else its encounter's species.
+  Each species' counts include it; the page-wide Photos, Favorites,
+  Undecided and Reject totals, the rejected-photos dialog and Apply count it
+  once (`cullPhotoTallies`, `cullDistinctPhotos`). It has one flag, so a
+  favorite suggested under one species is shown as that suggestion under the
+  others (`shareCullSuggestedFavorites`), and its card says where else it is
+  listed.

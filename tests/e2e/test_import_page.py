@@ -2566,7 +2566,7 @@ def test_mounted_nas_offers_managed_local_processing(live_server, page):
     assert page.evaluate("localProcessingRequest()") is False
 
 
-@pytest.mark.parametrize("path", ["/browse", "/import", "/jobs"])
+@pytest.mark.parametrize("path", ["/browse", "/import", "/jobs", "/dashboard", "/storage"])
 def test_pending_archive_panel_sends_remembered_destination(live_server, page, path):
     state = {"sent": False}
 
@@ -2575,6 +2575,7 @@ def test_pending_archive_panel_sends_remembered_destination(live_server, page, p
             "items": [] if state["sent"] else [{
                 "id": "import-test", "name": "Photos from the coast", "collection_id": 123,
                 "destination": "/Volumes/Photography/Coast", "state": "ready", "error": "",
+                "photo_count": 3159, "cataloged_bytes": 48 * 2**30, "created_at": "2026-10-01 12:00:00",
             }],
         }))
 
@@ -2585,15 +2586,21 @@ def test_pending_archive_panel_sends_remembered_destination(live_server, page, p
 
     page.route("**/api/import/pending-archives", pending)
     page.route("**/api/import/pending-archives/import-test/send", send)
+    page.add_init_script("Date.now = () => Date.UTC(2026, 9, 24, 12)")
     page.goto(live_server["url"] + path)
     panel = page.locator("#pendingArchives")
     expect(panel).to_be_visible()
     expect(panel).to_contain_text("Photos from the coast")
     destination = panel.locator(".pending-archive-destination")
-    expect(destination).to_be_hidden()
-    panel.locator("summary").click()
+    if path not in ("/dashboard", "/storage"):
+        expect(destination).to_be_hidden()
+        panel.locator("summary").click()
     expect(destination).to_be_visible()
     expect(destination).to_have_text("Destination: /Volumes/Photography/Coast")
+    expect(panel).to_contain_text("3,159 cataloged photos")
+    expect(panel).to_contain_text("48 GB estimated")
+    expect(panel).to_contain_text("Kept locally for 23 days")
+    expect(panel).to_contain_text("Awaiting NAS transfer")
     expect(panel.get_by_role("link", name="Review photos")).to_have_attribute("href", "/browse?collection_id=123")
     page.reload()
     expect(panel).to_be_visible()

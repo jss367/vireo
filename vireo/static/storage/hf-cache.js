@@ -3,13 +3,17 @@
  * Older Vireo downloads landed here before being copied into the models
  * folder, so each model took its size twice; downloads now skip the cache.
  * Settings only ever shows the models folder. This modal lists the cache per
- * model, identifies existing model folders, and removes entries. Depends on storageFormatBytes / storageEscapeHtml and
- * safeFetch (navbar), and on loadStoragePanel to refresh the cards.
+ * model, identifies existing model folders, and removes entries, then
+ * reloads the cards through loadStoragePanel.
  */
-/** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
+
+import { state } from './state.js';
+import { storageFormatBytes } from './format.js';
+import { loadStoragePanel } from './panel.js';
+import { safeFetch, showToast } from './shared.js';
 
 /** @param {{size?:number;unused_size?:number;retained_size?:number;installed_size?:number} | null | undefined} hf @returns {string | null} */
-function hfCacheCardNote(hf) {
+export function hfCacheCardNote(hf) {
   if (!hf || !hf.size) return null;
   if (hf.unused_size) {
     return storageFormatBytes(hf.unused_size) + ' backs no installed model';
@@ -20,7 +24,7 @@ function hfCacheCardNote(hf) {
     : 'No removable payloads';
 }
 
-async function openHfCacheModal() {
+export async function openHfCacheModal() {
   var modal = /** @type {HTMLElement} */ (document.getElementById('hfCacheModal'));
   /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'block';
@@ -30,13 +34,13 @@ async function openHfCacheModal() {
   await loadHfCacheRows();
 }
 
-function closeHfCacheModal() {
+export function closeHfCacheModal() {
   /** @type {HTMLElement} */ (document.getElementById('hfCacheModal')).classList.remove('open');
 }
 
-async function loadHfCacheRows() {
+export async function loadHfCacheRows() {
   try {
-    _hfCacheInventory = await safeFetch('/api/storage/hf-cache', {}, { toast: false });
+    state.hfCacheInventory = await safeFetch('/api/storage/hf-cache', {}, { toast: false });
   } catch (e) {
     /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'none';
     _showHfCacheError('Failed to load the Hugging Face cache.');
@@ -47,14 +51,14 @@ async function loadHfCacheRows() {
 }
 
 /** @param {string} msg */
-function _showHfCacheError(msg) {
+export function _showHfCacheError(msg) {
   var el = /** @type {HTMLElement} */ (document.getElementById('hfCacheError'));
   el.textContent = msg;
   el.style.display = '';
 }
 
 /** @param {HfCacheEntry} entry @returns {HTMLLIElement} */
-function _hfCacheRow(entry) {
+export function _hfCacheRow(entry) {
   var li = document.createElement('li');
   li.className = 'file-item';
   li.style.padding = '8px 0';
@@ -98,10 +102,10 @@ function _hfCacheRow(entry) {
   return li;
 }
 
-function renderHfCacheRows() {
+export function renderHfCacheRows() {
   var rows = /** @type {HTMLElement} */ (document.getElementById('hfCacheRows'));
   rows.textContent = '';
-  /** @type {HfCacheInventory} */ var inv = _hfCacheInventory || {entries: [], unused_size: 0};
+  /** @type {HfCacheInventory} */ var inv = state.hfCacheInventory || {entries: [], unused_size: 0};
   if (!inv.entries.length) {
     var empty = document.createElement('li');
     empty.style.color = 'var(--text-ghost)';
@@ -119,7 +123,7 @@ function renderHfCacheRows() {
 }
 
 /** @param {{keys?:string[];unused?:boolean}} body @param {string} failure */
-async function _postHfCacheRemove(body, failure) {
+export async function _postHfCacheRemove(body, failure) {
   /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
   try {
     /** @type {HfCacheInventory} */ var result = await safeFetch('/api/storage/hf-cache/remove', {
@@ -127,7 +131,7 @@ async function _postHfCacheRemove(body, failure) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     }, { toast: false });
-    _hfCacheInventory = result;
+    state.hfCacheInventory = result;
     var first = result.failed && result.failed[0];
     if (first) {
       // Some paths could not be deleted; they stay in the refreshed list.
@@ -149,14 +153,14 @@ async function _postHfCacheRemove(body, failure) {
 }
 
 /** @param {HfCacheEntry} entry */
-async function removeHfCacheEntry(entry) {
+export async function removeHfCacheEntry(entry) {
   if (!confirm('Remove "' + entry.name + '" (' + storageFormatBytes(entry.size) +
       ') from the Hugging Face cache? Installing that model again will download it from Hugging Face.')) return;
   await _postHfCacheRemove({keys: [entry.key]}, 'Failed to remove the cache entry');
 }
 
-async function removeUnusedHfCache() {
-  var inv = _hfCacheInventory;
+export async function removeUnusedHfCache() {
+  var inv = state.hfCacheInventory;
   if (!inv || !inv.unused_size) return;
   var count = inv.entries.filter(function(e) { return !e.installed && e.removable !== false; }).length;
   if (!confirm('Remove ' + count + (count === 1 ? ' entry' : ' entries') + ' (' +

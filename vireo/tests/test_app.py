@@ -913,7 +913,7 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
         '<dialog class="modal-overlay" id="workingCopyLimitModal"',
         'modal.showModal()',
         'MAX_WORKING_COPY_QUOTA_MB = 1048576',
-        'quotaMb > _committedWorkingCopyQuotaMb',
+        'quotaMb > state.committedWorkingCopyQuotaMb',
         'Lower working-copy storage limit?',
         'Lower limit and remove copies',
         'Your original photos will not be deleted',
@@ -935,7 +935,7 @@ def test_storage_page_confirms_destructive_working_copy_quota_reduction(
         # (another tab, All Settings) doesn't leave Apply disabled with
         # the input showing a stale value.
         'newCommittedMb = Math.round(working.quota_bytes / (1024 * 1024))',
-        'currentInputMb === _committedWorkingCopyQuotaMb',
+        'currentInputMb === state.committedWorkingCopyQuotaMb',
     ):
         assert marker in html
 

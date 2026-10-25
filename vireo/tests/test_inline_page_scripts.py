@@ -76,7 +76,6 @@ SPLIT_PAGES = {
     "/move": "move",
     "/keywords": "keywords",
     "/cull": "cull",
-    "/storage": "storage",
 }
 
 
