@@ -1,7 +1,7 @@
 // Endpoint contracts and shared script dependencies for Process.
 interface PipelineStage {suffix: string; label: string; enable: string | null;}
 interface PipelineWarning {message: string;}
-interface PipelinePlanEntry {state?: string; summary?: string; detail?: {pending?: number; eligible?: number; fingerprint_outdated?: boolean; fingerprint_invalidated?: boolean; fingerprint_reason?: string; import_no_new?: boolean; sam_variant_warning?: PipelineWarning | null};}
+interface PipelinePlanEntry {state?: string; summary?: string; detail?: {pending?: number; eligible?: number; fingerprint_outdated?: boolean; fingerprint_invalidated?: boolean; fingerprint_reason?: string; import_no_new?: boolean; sam_variant_warning?: PipelineWarning | null; label_read_error?: string};}
 interface PipelinePlan {stages?: Record<string,PipelinePlanEntry>;}
 interface PipelineStageResult {status?: string; error_count?: number; count?: number; cached?: number; seen?: number; cached_estimate?: number; total?: number; copied?: number; skipped_duplicate?: number; photos_indexed?: number; generated?: number; predictions_stored?: number; masked?: number; skipped?: number | string; unreadable?: number; failed?: number; reason?: string; errors?: string[]; processed?: number;}
 interface PipelineResult {notes?: string[]; errors?: string[]; stages?: Record<string,PipelineStageResult>; cancelled?: boolean; predictions_stored?: number; total?: number; labels_file?: string; species_count?: number; embedding_precompute?: PipelinePrecompute;}
