@@ -1798,8 +1798,14 @@ def test_culling_apply_unflag_undo_restores_flag(app_and_db):
     assert db.photos.get(pid)['flag'] == 'flagged'
 
 
-def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
-    """Clearing a photo that has no flag is a no-op, not a history entry."""
+def test_culling_apply_unflag_records_explicit_review_even_when_already_clear(app_and_db):
+    """Explicit Review on an already-``none`` photo is still a recorded decision.
+
+    The Cull UI only sends such a photo in ``unflag`` when the photographer
+    picked Review on purpose, so the server publishes attribution and an
+    edit-history row: a later ranking job must not replace the explicit
+    choice, and the user can Undo back to the unattributed state.
+    """
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]['id']
@@ -1809,7 +1815,12 @@ def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
                        json={'keepers': [], 'rejects': [], 'unflag': [pid]})
     assert resp.status_code == 200
     assert resp.get_json()['cleared'] == 0
-    assert db.edit_history.list_recent() == []
+    state = db.photo_review.culling_flag_states([pid])[pid]
+    assert state['confirmed_flag'] == 'none'
+    history = db.edit_history.list_recent()
+    assert len(history) == 1
+    assert history[0]['action_type'] == 'flag'
+    assert history[0]['new_value'] == 'culling_apply'
 
 
 def test_culling_apply_rejects_non_list_ids(app_and_db):

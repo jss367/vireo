@@ -122,10 +122,11 @@ class PhotoReviewService:
     ) -> dict[str, int]:
         """Save explicit Cull choices and their attribution as one reversible edit.
 
-        An ``unflag`` entry whose photo is already ``none`` is skipped: there is
-        nothing to clear, so no attribution is published and no edit-history row
-        is recorded. Keepers and rejects always confirm, even when the raw flag
-        would be unchanged.
+        Every explicit Review choice publishes photographer attribution and an
+        edit-history row even when the raw flag is already clear, so a later
+        ranking job cannot replace it and an unflag-only Apply still produces
+        an edit to Undo. ``cleared`` names the subset whose raw flag actually
+        changed, used only for the user-visible count.
         """
         ids = list(keepers) + list(rejects) + list(unflag)
         with self.db.photo_review.flag_write() as owns_transaction:
@@ -136,15 +137,14 @@ class PhotoReviewService:
                 self.db._verify_photo_in_workspace(pid)
             old = {pid: photos[pid]["flag"] or "none" for pid in ids}
             cleared = [pid for pid in unflag if old[pid] != "none"]
-            effective_unflag = cleared
-            effective_ids = list(keepers) + list(rejects) + effective_unflag
+            effective_ids = list(keepers) + list(rejects) + list(unflag)
             before = self.db.photo_review.flag_attributions(effective_ids)
             items = []
             summary = f"Culling: flagged {len(keepers)}, rejected {len(rejects)}"
             if cleared:
                 summary += f", cleared {len(cleared)}"
             for photo_ids, flag in (
-                (keepers, "flagged"), (rejects, "rejected"), (effective_unflag, "none"),
+                (list(keepers), "flagged"), (list(rejects), "rejected"), (list(unflag), "none"),
             ):
                 for pid in photo_ids:
                     self.db.photo_review.set_flag(pid, flag, _commit=False)
