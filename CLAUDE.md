@@ -56,7 +56,7 @@ Tests use temp databases. `vireo/tests/test_app.py` isolates config via `cfg.CON
 
 ### Impact-selected runs
 
-The full unit suite is ~7.5k tests. `scripts/select_tests.py` maps `git diff` onto a per-test coverage map recorded on `main` and runs only the tests that executed the changed functions (whole file for changed test files; templates/static/data resolved through the Python lines that reference them). Module-level, structurally ambiguous, and harness changes fall back to the full suite because import-time dependencies cannot be represented safely by line coverage.
+The full unit suite is ~7.5k tests. `scripts/select_tests.py` maps `git diff` onto a per-test coverage map recorded on `main` and runs only the tests that executed the changed functions (whole file for changed test files; templates/static/data resolved through the Python lines that reference them). Module-level, structurally ambiguous, and harness changes fall back to the full suite because import-time dependencies cannot be represented safely by line coverage. Only the change's own files are classified: the diff runs from the map's commit so hunk lines match the map, but a file only `main` changed since that map (CI passes the PR base sha as `--own-base`; locally it is the merge-base with `origin/main`) is set aside and left to `main`'s post-merge full run, so a `pyproject.toml` merge no longer forces the full suite on every open PR until the next map lands. A file both changed is still diffed from the map commit.
 
 ```bash
 python scripts/select_tests.py fetch-map            # newest map from the "Full tests" workflow (needs gh)
