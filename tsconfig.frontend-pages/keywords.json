@@ -19,6 +19,7 @@
     "../vireo/static/keywords/rename.js",
     "../vireo/static/keywords/render.js",
     "../vireo/static/keywords/selection.js",
+    "../vireo/static/keywords/shared.js",
     "../vireo/static/keywords/state.js",
     "../vireo/static/keywords/type-dropdown.js"
   ]

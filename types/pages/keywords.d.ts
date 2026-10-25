@@ -15,13 +15,19 @@ interface KeywordGooglePlace {place_id?:string;name?:string;formatted_address?:s
 interface KeywordPlaceSubmission {place_id:string;name:string;types:string[];lat:number;lng:number;address_components:Array<{name:string;short_name:string;types:string[]}>}
 interface KeywordAutocomplete {addListener(name:'place_changed',listener:()=>void):void;getPlace():KeywordGooglePlace}
 interface KeywordGoogle {maps:{places:{Autocomplete:new(input:HTMLInputElement,options:{types:string[];fields:string[]})=>KeywordAutocomplete}}}
-interface Window {_vireoLeafletPromise?:Promise<KeywordLeaflet>;L?:KeywordLeaflet;GOOGLE_MAPS_PREFER_ENGLISH?:boolean;GOOGLE_MAPS_API_KEY?:string;_gmapsCallback?:()=>void;google?:KeywordGoogle;__kwSelectedIds:Set<number>;__linkPlaceForTest:typeof submitLinkPlace}
-declare const VireoTextSearch:{readOptions(prefix:string):{matchCase?:boolean;wholeWord?:boolean};matchesFields(fields:string,query:string,options:{matchCase?:boolean;wholeWord?:boolean}):boolean};
-declare function escapeHtml(value:unknown):string;
-declare function escapeAttr(value:unknown):string;
-declare function showToast(message:string,type?:string):void;
-declare function openExternalLink(event:Event,url:string):boolean;
 interface KeywordMenuItem {label?:string;title?:string;disabled?:boolean;disabledHint?:string;onClick?:()=>void;separator?:boolean;chips?:KeywordMenuItem[]}
-declare function openContextMenu(event:MouseEvent,items:KeywordMenuItem[]):void;
-declare function coerceSelectionOnContext(ids:Set<number>,id:number):number[];
-declare function openLinkPlaceFromUrl(keywords:KeywordRecord[],open:(id:number,name:string)=>Promise<void>):void;
+// The shared globals the page's shared.js reads, and the Maps callback name
+// it sets for the Google Maps script.
+interface Window {
+  L?:KeywordLeaflet;
+  _gmapsCallback?:()=>void;
+  google?:KeywordGoogle;
+  VireoTextSearch:{readOptions(prefix:string):{matchCase?:boolean;wholeWord?:boolean};matchesFields(fields:string,query:string,options:{matchCase?:boolean;wholeWord?:boolean}):boolean;toggle(prefix:string,option:string,callback:()=>unknown):void};
+  escapeHtml(value:unknown):string;
+  escapeAttr(value:unknown):string;
+  showToast?(message:string,type?:string):void;
+  openExternalLink(event:Event,url:string):boolean;
+  openContextMenu(event:MouseEvent,items:KeywordMenuItem[]):void;
+  coerceSelectionOnContext(ids:Set<number>,id:number):number[];
+  openLinkPlaceFromUrl(keywords:KeywordRecord[],open:(id:number,name:string)=>Promise<void>):void;
+}

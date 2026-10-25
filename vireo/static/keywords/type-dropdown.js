@@ -1,8 +1,10 @@
 // Inline type change: the badge-click dropdown, closeDropdown, and updateType.
-// Classic page script; load boot.js after all definitions.
+
+import { state, TYPE_ICONS, TYPES } from './state.js';
+import { loadKeywords } from './loading.js';
 
 // -- Inline type change via badge click --
-function bindKeywordTypeBadges() {
+export function bindKeywordTypeBadges() {
   /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(e) {
     if (!(e.target instanceof Element)) return; const badge = e.target.closest(/** @type {'span'} */ ('.kw-type-badge'));
     if (!badge || !badge.dataset.id) return;
@@ -32,15 +34,15 @@ function bindKeywordTypeBadges() {
     });
 
     document.body.appendChild(dd);
-    activeDropdown = dd;
+    state.activeDropdown = dd;
   });
 }
 
-function closeDropdown() {
-  if (activeDropdown) { activeDropdown.remove(); activeDropdown = null; }
+export function closeDropdown() {
+  if (state.activeDropdown) { state.activeDropdown.remove(); state.activeDropdown = null; }
 }
 
-/** @param {number} kwId @param {string} newType */ async function updateType(kwId, newType) {
+/** @param {number} kwId @param {string} newType */ export async function updateType(kwId, newType) {
   try {
     const resp = await fetch('/api/keywords/' + kwId, {
       method: 'PUT',

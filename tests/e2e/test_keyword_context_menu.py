@@ -12,7 +12,19 @@ only "Show Photos with this Keyword"):
 - Delete
 """
 
+import pytest
 from playwright.sync_api import expect
+
+from e2e.module_pages import install_page_module_exposure
+
+
+@pytest.fixture
+def page(browser, page):
+    """The Keywords page's modules as ``pageModules.<file>`` and its state as
+    ``keywordsState`` after every navigation (see module_pages.py). Asks for
+    ``browser`` first, as conftest's ``page`` does, so the browser launches
+    before ``live_server`` moves HOME."""
+    return install_page_module_exposure(page, "keywords", "keywordsState")
 
 
 def test_keyword_right_click_opens_menu(live_server, page):
@@ -193,9 +205,9 @@ def test_keyword_right_click_outside_selection_coerces(live_server, page):
     expect(menu).to_be_visible()
 
     # Selection now contains only the right-clicked row.
-    size = page.evaluate("window.__kwSelectedIds && window.__kwSelectedIds.size")
+    size = page.evaluate("keywordsState.selectedIds && keywordsState.selectedIds.size")
     assert size == 1
     has_target = page.evaluate(
-        f"window.__kwSelectedIds && window.__kwSelectedIds.has({target_id})"
+        f"keywordsState.selectedIds && keywordsState.selectedIds.has({target_id})"
     )
     assert has_target is True

@@ -228,8 +228,8 @@
     <div class="kw-toolbar">
       <div class="search-control kw-search-control">
         <input type="text" class="kw-search" id="kwSearch" placeholder="Search keywords...">
-        <button id="kwSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('kwSearch', 'match_case', render)" title="Match case">Aa</button>
-        <button id="kwSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('kwSearch', 'whole_word', render)" title="Match whole word">ab</button>
+        <button id="kwSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match case">Aa</button>
+        <button id="kwSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" title="Match whole word">ab</button>
       </div>
       <button class="kw-filter-btn active" data-type="all">All</button>
       <button class="kw-filter-btn" data-type="general">General</button>
@@ -333,24 +333,6 @@
 </div>
 
 <script defer src="/static/keywords-link-place-url.js"></script>
-<script defer src="/static/keywords/state.js"></script>
-<script defer src="/static/keywords/loading.js"></script>
-<script defer src="/static/keywords/filtering.js"></script>
-<script defer src="/static/keywords/render.js"></script>
-<script defer src="/static/keywords/filters.js"></script>
-<script defer src="/static/keywords/location-review.js"></script>
-<script defer src="/static/keywords/selection.js"></script>
-<script defer src="/static/keywords/merge-state.js"></script>
-<script defer src="/static/keywords/merge-helpers.js"></script>
-<script defer src="/static/keywords/merge-map.js"></script>
-<script defer src="/static/keywords/merge-fields.js"></script>
-<script defer src="/static/keywords/merge-summary.js"></script>
-<script defer src="/static/keywords/merge-dialog.js"></script>
-<script defer src="/static/keywords/type-dropdown.js"></script>
-<script defer src="/static/keywords/rename.js"></script>
-<script defer src="/static/keywords/bulk.js"></script>
-<script defer src="/static/keywords/context-menu.js"></script>
-<script defer src="/static/keywords/link-place.js"></script>
-<script defer src="/static/keywords/boot.js"></script>
+<script type="module" src="/static/keywords/boot.js"></script>
 </body>
 </html>

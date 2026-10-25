@@ -1,14 +1,19 @@
 // The right-click menu for keyword rows and identity groups.
-// Classic page script; load boot.js after all definitions.
+
+import { state, TYPES } from './state.js';
+import { deleteSelectedKeywords } from './bulk.js';
+import { openMergeDialog } from './merge-dialog.js';
+import { renameKeyword } from './rename.js';
+import { render } from './render.js';
+import { updateType } from './type-dropdown.js';
+import { coerceSelectionOnContext, openContextMenu } from './shared.js';
 
 // -- Right-click context menu on keyword rows --
-// Expose selectedIds for tests to inspect Finder-style coercion.
-window.__kwSelectedIds = selectedIds;
 
-/** @param {number[]} kwIds */ function buildKeywordContextMenu(kwIds) {
+/** @param {number[]} kwIds */ export function buildKeywordContextMenu(kwIds) {
   const one = kwIds.length === 1;
   const hint = one ? undefined : 'Select a single keyword';
-  const singleKw = one ? allKeywords.find(k => k.id === kwIds[0]) : null;
+  const singleKw = one ? state.allKeywords.find(k => k.id === kwIds[0]) : null;
 
   /** @param {string} t */ const typeChip = function(t) {
     return {
@@ -44,7 +49,7 @@ window.__kwSelectedIds = selectedIds;
   ];
 }
 
-function bindKeywordContextMenu() {
+export function bindKeywordContextMenu() {
   document.addEventListener('contextmenu', function(e) {
     if (!(e.target instanceof Element)) return; const row = e.target.closest(/** @type {'tr'} */ ('tr[data-id]'));
     if (!row) return;
@@ -53,7 +58,7 @@ function bindKeywordContextMenu() {
     e.preventDefault();
     const kwId = parseInt(row.dataset.id || '', 10);
     if (!kwId) return;
-    const group = !showRecords && identityGroups.find(k => k.id === kwId);
+    const group = !state.showRecords && state.identityGroups.find(k => k.id === kwId);
     if (group && group.members.length > 1) {
       openContextMenu(e, [
         {label: 'Show photos', onClick: function() {
@@ -62,15 +67,15 @@ function bindKeywordContextMenu() {
         }},
         {label: 'Edit individual records', onClick: function() {
           /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).checked = true;
-          showRecords = true;
-          selectedIds.clear();
+          state.showRecords = true;
+          state.selectedIds.clear();
           render();
         }}
       ]);
       return;
     }
     // Finder-style coercion: right-click outside current selection replaces it.
-    const ids = coerceSelectionOnContext(selectedIds, kwId);
+    const ids = coerceSelectionOnContext(state.selectedIds, kwId);
     // Re-render so the checkbox visual state reflects the coerced selection.
     render();
     openContextMenu(e, buildKeywordContextMenu(ids));
