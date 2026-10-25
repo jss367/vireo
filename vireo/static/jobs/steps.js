@@ -1,24 +1,36 @@
 // A job's step tree: progress, throughput and ETA, errors, and file leaves.
-// Classic page script; load boot.js after all definitions.
+
+import { jobsElement, LEAF_MAX, state } from './state.js';
+import { formatElapsed, statusIcon, toggleIcon } from './format.js';
+import { escapeHtml } from './shared.js';
+
+// A failed step's Retry button used to carry onclick="event.stopPropagation();"
+// so its click never reached the detail pane's step toggle. Stop it at the
+// pane in the capture phase instead, before the pane's own click listener.
+export function bindStepRetryButtons() {
+  jobsElement('jobDetailPane', HTMLElement).addEventListener('click', function(e) {
+    if (e.target instanceof Element && e.target.closest('[data-step-retry]')) e.stopPropagation();
+  }, true);
+}
 
 // "key: value" lines for a finished job's result, in place of a raw
 // JSON dump. Keys the interruption bookkeeping adds (and the error,
 // which renders on its own line) are skipped; nested objects stay as
 // compact JSON so nothing is hidden.
-/** @param {JobsStep} step @param {JobsRow} job @param {boolean} isLive */ function renderRichStep(step, job, isLive) {
+/** @param {JobsStep} step @param {JobsRow} job @param {boolean} isLive */ export function renderRichStep(step, job, isLive) {
   var isRunning = step.status === 'running';
   var warningCount = step.error_count || (step.error ? 1 : 0);
   var isExpanded = isRunning || step.status === 'failed' || (step.status === 'completed' && warningCount > 0);
-  if (collapsedSteps[step.id] === true) isExpanded = false;
-  if (collapsedSteps[step.id] === false) isExpanded = true;
+  if (state.collapsedSteps[step.id] === true) isExpanded = false;
+  if (state.collapsedSteps[step.id] === false) isExpanded = true;
   // Import-in-place reuses one scan step across every source. Clear the
   // prior source's filenames as soon as the backend advances that source
   // index, even if the step is currently collapsed.
   if (job.type === 'import-in-place' &&
       typeof step.source_index === 'number' &&
-      leafBufferSources[step.id] !== step.source_index) {
-    delete leafBuffers[step.id];
-    leafBufferSources[step.id] = step.source_index;
+      state.leafBufferSources[step.id] !== step.source_index) {
+    delete state.leafBuffers[step.id];
+    state.leafBufferSources[step.id] = step.source_index;
   }
 
   var html = '<div class="tree-step" data-step-id="' + escapeHtml(step.id) + '">';
@@ -67,7 +79,7 @@
 
   // Retry button for failed steps on live jobs
   if (step.status === 'failed' && isLive) {
-    html += '<button class="btn-retry" onclick="event.stopPropagation();">Retry</button>';
+    html += '<button class="btn-retry" data-step-retry>Retry</button>';
   }
 
   html += '</div>'; // end header
@@ -216,7 +228,7 @@
     // stands alone instead of looking like it applies to the previous
     // source's leaves.
     if (isRunning && !importInPlacePhaseActive) {
-      var leaves = leafBuffers[step.id] || [];
+      var leaves = state.leafBuffers[step.id] || [];
       if (step.current_file) {
         var found = leaves.find(function(l) { return l.name === step.current_file; });
         if (!found) {
@@ -225,7 +237,7 @@
             var nonFailed = leaves.filter(function(l) { return l.status !== 'failed'; });
             var first = nonFailed[0]; if (nonFailed.length > LEAF_MAX && first) leaves.splice(leaves.indexOf(first), 1);
           }
-          leafBuffers[step.id] = leaves;
+          state.leafBuffers[step.id] = leaves;
         }
       }
       if (leaves.length > 0) {

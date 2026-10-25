@@ -81,6 +81,12 @@
     ],
     "sharedWrites": []
   },
+  "jobs": {
+    "route": "/jobs",
+    "template": "jobs.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "lightroom": {
     "route": "/lightroom",
     "template": "lightroom.html",

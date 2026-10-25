@@ -1,38 +1,40 @@
 // Original-folder cleanup after a date-organized move: review and Trash.
-// Classic page script; load boot.js after all definitions.
 
-/** @type {Record<string,JobsSourceCleanup>} */ var sourceCleanupReviews = {};
+import { jobsElement, state } from './state.js';
+import { renderDetail, renderHistoryDetail } from './detail.js';
+import { jobConfig, plural } from './format.js';
+import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
 
-/** @param {JobsRow} job */ function renderSourceCleanup(job) {
+/** @param {JobsRow} job */ export function renderSourceCleanup(job) {
   var cfg = jobConfig(job);
   var result = job.result || {};
   if (job.type !== 'move-folder' || job.status !== 'completed' ||
       !cfg.folder_template || !cfg.source_path || !result.moved ||
       result.ok === false || (result.errors || []).length) return '';
-  var review = sourceCleanupReviews[job.id];
+  var review = state.sourceCleanupReviews[job.id];
   if (!review) {
     // Move results describe completion time. Refresh on each page load so
     // a later cleanup (including one in another tab) is not shown as pending.
-    sourceCleanupReviews[job.id] = review = {checking: true};
+    state.sourceCleanupReviews[job.id] = review = {checking: true};
     Promise.resolve().then(function() { requestSourceCleanup(job.id, false, true); });
   }
-  var state = review;
+  var cleanup = review;
   var id = escapeAttr(job.id);
   var html = '<section class="move-cleanup" aria-label="Original folder cleanup">';
-  if (state.state === 'removed') {
+  if (cleanup.state === 'removed') {
     html += '<p>The original folder has been removed.</p>';
   } else {
-    if (state.checking) {
+    if (cleanup.checking) {
       html += '<p>Checking the original folder…</p>';
-    } else if (typeof state.file_count === 'number') {
-      var n = state.file_count;
+    } else if (typeof cleanup.file_count === 'number') {
+      var n = cleanup.file_count;
       html += '<p>The original folder still contains ' + n.toLocaleString() + ' ' +
-        (n > 0 && n === state.xmp_count ? 'XMP metadata ' : '') + plural(n, 'file') + '.</p>';
+        (n > 0 && n === cleanup.xmp_count ? 'XMP metadata ' : '') + plural(n, 'file') + '.</p>';
     } else {
       html += '<p>Check the original folder for files left after the move.</p>';
     }
-    if (state.message) html += '<p role="status">' + escapeHtml(state.message) + '</p>';
-    if (state.error) html += '<p role="alert">' + escapeHtml(state.error) + '</p>';
+    if (cleanup.message) html += '<p role="status">' + escapeHtml(cleanup.message) + '</p>';
+    if (cleanup.error) html += '<p role="alert">' + escapeHtml(cleanup.error) + '</p>';
     if (review && review.files && review.review_token) {
       if (review.files.length) {
         html += '<p>These files were not moved with the photos. Metadata files may contain editing settings.</p><ul>';
@@ -57,19 +59,19 @@
   return html + '</section>';
 }
 
-/** @param {string} jobId */ function refreshCleanupDetail(jobId) {
-  if (selectedJobId !== jobId) return;
-  var job = activeJobs.concat(historyJobs).find(function(item) { return item.id === jobId; });
+/** @param {string} jobId */ export function refreshCleanupDetail(jobId) {
+  if (state.selectedJobId !== jobId) return;
+  var job = state.activeJobs.concat(state.historyJobs).find(function(item) { return item.id === jobId; });
   if (job) {
-    if (selectedSource === 'active') renderDetail(job);
+    if (state.selectedSource === 'active') renderDetail(job);
     else renderHistoryDetail(job);
   }
 }
 
-/** @param {string} jobId @param {boolean} clean @param {boolean=} summary */ async function requestSourceCleanup(jobId, clean, summary) {
-  var prior = sourceCleanupReviews[jobId] || {};
+/** @param {string} jobId @param {boolean} clean @param {boolean=} summary */ export async function requestSourceCleanup(jobId, clean, summary) {
+  var prior = state.sourceCleanupReviews[jobId] || {};
   if (prior.busy || (clean && !prior.confirmed)) return;
-  sourceCleanupReviews[jobId] = Object.assign({}, prior, {busy: true, error: null});
+  state.sourceCleanupReviews[jobId] = Object.assign({}, prior, {busy: true, error: null});
   refreshCleanupDetail(jobId);
   try {
     /** @type {JobsSourceCleanup} */ var data = await safeFetch('/api/jobs/' + encodeURIComponent(jobId) + '/source-cleanup' +
@@ -83,21 +85,21 @@
         data.error = (data.failures || []).map(function(item) { return item.path + ': ' + item.error; }).join('; ');
       }
     }
-    sourceCleanupReviews[jobId] = data;
+    state.sourceCleanupReviews[jobId] = data;
   } catch (error) {
     // A failed or stale review never leaves an armed cleanup button.
-    sourceCleanupReviews[jobId] = {error: error instanceof Error ? error.message : String(error)};
+    state.sourceCleanupReviews[jobId] = {error: error instanceof Error ? error.message : String(error)};
   }
   refreshCleanupDetail(jobId);
 }
 
-function bindSourceCleanupConfirm() {
+export function bindSourceCleanupConfirm() {
   jobsElement('jobDetailPane', HTMLElement).addEventListener('change', function(e) {
     if (!(e.target instanceof Element)) return;
     var checkbox = /** @type {HTMLInputElement | null} */ (e.target.closest('[data-confirm-source-cleanup]'));
     if (!checkbox) return;
     var id = checkbox.getAttribute('data-confirm-source-cleanup'); if (!id) return;
-    var review = sourceCleanupReviews[id]; if (review) review.confirmed = checkbox.checked;
+    var review = state.sourceCleanupReviews[id]; if (review) review.confirmed = checkbox.checked;
     var button = checkbox.closest('.move-cleanup')?.querySelector(/** @type {'button'} */ ('button[data-clean-source]'));
     if (button) button.disabled = !checkbox.checked;
   });

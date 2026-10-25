@@ -1,7 +1,10 @@
 // Import Retry and Resume: in-flight retries, takeovers, and the retry body.
-// Classic page script; load boot.js after all definitions.
 
-/** @param {JobsRow} job */ function canRestartInPlace(job) {
+import { state } from './state.js';
+import { jobConfig } from './format.js';
+import { formatDateTime, importFailedBeforeStart } from './shared.js';
+
+/** @param {JobsRow} job */ export function canRestartInPlace(job) {
   if (!job || job.type !== 'import-in-place' ||
       ['failed', 'cancelled'].indexOf(job.status) < 0) return false;
   var cfg = jobConfig(job);
@@ -9,10 +12,10 @@
     (Array.isArray(cfg.sources) && cfg.sources.length > 0);
 }
 
-/** @param {JobsRow} job */ function inPlaceRestartJobId(job) {
-  var local = inPlaceRestarts[job.id];
+/** @param {JobsRow} job */ export function inPlaceRestartJobId(job) {
+  var local = state.inPlaceRestarts[job.id];
   if (local && local.jobId) return local.jobId;
-  var child = activeJobs.concat(historyJobs).find(function(candidate) {
+  var child = state.activeJobs.concat(state.historyJobs).find(function(candidate) {
     return candidate.type === 'import-in-place' &&
       jobConfig(candidate).restarted_from === job.id;
   });
@@ -30,10 +33,10 @@
 // folders). Matches either field so a retry-of-retry — whose direct
 // ``parent_import_job_id`` points at the first retry, not the
 // original failed import — still blocks the original's Retry button.
-/** @param {string} parentId */ function hasActiveRetryFor(parentId) {
+/** @param {string} parentId */ export function hasActiveRetryFor(parentId) {
   if (!parentId) return false;
-  if (pendingImportRetries[parentId]) return true;
-  return activeJobs.some(function(candidate) {
+  if (state.pendingImportRetries[parentId]) return true;
+  return state.activeJobs.some(function(candidate) {
     if (!candidate || candidate.type !== 'import') return false;
     var status = candidate.status;
     if (status === 'completed' || status === 'failed' ||
@@ -50,7 +53,7 @@
 // (``photo_ids``, even if empty): a resume must carry those into the
 // after-import processing, and an older interrupted row without the
 // list would silently leave them unprocessed.
-/** @param {JobsRow} job @param {JobsRow[]} rows */ function isResumableImport(job, rows) {
+/** @param {JobsRow} job @param {JobsRow[]} rows */ export function isResumableImport(job, rows) {
   var result = job && job.result;
   if (!(job && job.type === 'import' && job.status === 'failed' &&
       result && result.interrupted && Array.isArray(result.photo_ids))) {
@@ -75,11 +78,11 @@
   return true;
 }
 
-/** @param {JobsResult | null | undefined} result */ function hasFailedImportFiles(result) {
+/** @param {JobsResult | null | undefined} result */ export function hasFailedImportFiles(result) {
   return !!result && typeof result.failed === 'number' && result.failed > 0;
 }
 
-/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {boolean=} inferLegacy */ function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {boolean=} inferLegacy */ export function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
   var byId = new Map((rows || []).filter(function(row) {
     return row.type === 'import';
   }).map(function(row) { return [row.id, row]; }));
@@ -121,7 +124,7 @@
   }
 }
 
-/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId */ function importChainProcessJobGroups(config, result, rows, jobId) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId */ export function importChainProcessJobGroups(config, result, rows, jobId) {
   var recorded = importChainProcessJobIds(config, result, rows, jobId, false);
   if (!recorded.length) {
     var candidates = importChainProcessJobIds(config, result, rows, jobId);
@@ -152,13 +155,13 @@
   }
 }
 
-/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {Set<string>} neverStarted */ function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {Set<string>} neverStarted */ export function importChainInvalidated(config, result, rows, jobId, neverStarted) {
   return importChainProcessJobGroups(config, result, rows, jobId).some(function(group) {
     return group.every(function(id) { return neverStarted.has(id); });
   });
 }
 
-/** @param {JobsRow} row */ function pipelineNeverStarted(row) {
+/** @param {JobsRow} row */ export function pipelineNeverStarted(row) {
   return row.type === 'pipeline' && ((row.result && row.result.never_started) ||
     (row.status === 'cancelled' && row.result == null && row.duration === null));
 }
@@ -176,7 +179,7 @@
 // descendant to continue from, null while the parent itself is still
 // the place to continue; ``kind`` is "done" (nothing left), "resume"
 // (it was interrupted) or "retry" (it failed files after its tag pass).
-/** @param {JobsRow | undefined} parent @param {JobsRow[]} rows */ function importResumeTakeover(parent, rows) {
+/** @param {JobsRow | undefined} parent @param {JobsRow[]} rows */ export function importResumeTakeover(parent, rows) {
   var parentResult = parent && parent.result;
   var parentInterrupted = !!(parentResult && parentResult.interrupted);
   if (!(parent && parent.type === 'import' && parentResult &&
@@ -357,10 +360,10 @@
           parentInterrupted: parentInterrupted};
 }
 
-/** @param {JobsTakeover} takeover */ function importTakeoverNote(takeover) {
+/** @param {JobsTakeover} takeover */ export function importTakeoverNote(takeover) {
   var when = takeover.byStartedAt ? new Date(takeover.byStartedAt) : null;
   var which = when && !isNaN(when.getTime())
-    ? 'the import started ' + window.VireoTime.dateTime(when)
+    ? 'the import started ' + formatDateTime(when)
     : 'a later import';
   var resuming = takeover.parentInterrupted;
   var lead = (resuming ? 'Already resumed by ' : 'Already retried by ') + which;
@@ -375,7 +378,7 @@
   return lead + ', which had files fail. Retry them from that import instead; it carries these photos.';
 }
 
-/** @param {JobsRow} job */ function importResumeHint(job) {
+/** @param {JobsRow} job */ export function importResumeHint(job) {
   var landed = job.result?.photo_ids?.length || 0;
   // Files are recorded as landed before they're cataloged, so the
   // checkpointed photo ids can lag them. Count photos only when the ids
@@ -394,7 +397,7 @@
   return hint + '.';
 }
 
-/** @param {JobsRow | undefined} job */ function importRetryBody(job) {
+/** @param {JobsRow | undefined} job */ export function importRetryBody(job) {
   var cfg = jobConfig(job);
   if (!job || job.type !== 'import' || cfg.mode === 'in_place' ||
       !Array.isArray(cfg.sources) || !cfg.sources.length) return null;

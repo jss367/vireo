@@ -6,10 +6,13 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
+// The jobs/ files are ES modules: drop their `export` keywords so each
+// function declaration runs as a script.
 const src = fs.readFileSync('vireo/static/import-recovery.js', 'utf8') + '\n' + ['format.js', 'import-retry.js']
-  .map(file => fs.readFileSync('vireo/static/jobs/' + file, 'utf8')).join('\n');
+  .map(file => fs.readFileSync('vireo/static/jobs/' + file, 'utf8')
+    .replace(/^export /gm, '').replace(/(\*\/ )export /g, '$1')).join('\n');
 function fn(name) {
-  // Page functions are declared at the top level of their classic script.
+  // Page functions are declared at the top level of their module.
   const found = src.match(new RegExp('(?:^|\\n)(?:/\\*\\*[^\\n]*\\*/\\s*)?function ' + name + '\\([^]*?\\n\\}\\n'));
   assert(found, name);
   return found[0];
@@ -18,6 +21,8 @@ function fn(name) {
 const ctx = vm.createContext({});
 ctx.window = ctx;
 vm.runInContext(fs.readFileSync('vireo/static/vireo-time.js', 'utf8'), ctx);
+// shared.js's forwarder for the user's date-time format.
+ctx.formatDateTime = date => ctx.VireoTime.dateTime(date);
 for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'importChainProcessJobGroups', 'importChainInvalidated', 'pipelineNeverStarted', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
