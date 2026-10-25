@@ -15,6 +15,7 @@
     "../vireo/static/duplicates/results.js",
     "../vireo/static/duplicates/reveal.js",
     "../vireo/static/duplicates/same-shot.js",
+    "../vireo/static/duplicates/same-shot-review.js",
     "../vireo/static/duplicates/scan.js",
     "../vireo/static/duplicates/shared.js",
     "../vireo/static/duplicates/state.js",

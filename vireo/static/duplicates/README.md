@@ -21,7 +21,8 @@ and the browser loads every other file through `boot.js`'s imports.
 | `resolved.js` | Pruning resolved hashes from the last scan, rendering unresolved and resolved groups, the resolved section's toggle, and the protected-winner rule |
 | `trash-progress.js` | The batched Trash progress line and which skips are actionable |
 | `card.js` | Photo cards and their right-click menu |
-| `same-shot.js` | Review-only camera identity candidates, visual evidence, capture times and file-manager reveal; never feeds exact-byte resolution or cleanup |
+| `same-shot.js` | Camera identity candidates, evidence, capture times, review visibility and file-manager reveal; never feeds exact-byte resolution or cleanup |
+| `same-shot-review.js` | Side-by-side cached thumbnail comparison, saving library-wide review notes and reopening them; pending writes and stale response guards |
 | `restore.js` | Restoring the last scan or the catalog's rejected copies |
 | `reveal.js` | Reveal in the file manager for a bucket's folders |
 | `categories.js` | Filename/folder pattern categories, pure (unit-tested by `tests/frontend/duplicates-categories.test.mjs`) |
@@ -53,6 +54,8 @@ bucket card pinned above the results while its Keep-for-all runs:
 - `data-duplicate-category` on the category summary's buttons and
   `data-show-category` on the "View remaining copies" notice;
 - `data-same-shot-more` and `data-same-shot-reveal` in the same-shot list;
+- `data-same-shot-key` identifies a catalog snapshot for comparison and review
+  controls; `data-same-shot-toggle-reviewed` includes or hides reviewed groups;
 - `change` on a `.group-check` updates the apply bar;
 - card thumbnails (`img[data-dup-thumb]`) hide their placeholder on `load`
   and say "No thumbnail" on `error`, both listened for in the capture phase
@@ -88,5 +91,17 @@ Keep these intact when changing this code:
 - Same-shot candidates have no keeper/loser designation or cleanup actions.
   Photo filters reveal the whole matching group; filename categories apply
   only to exact-byte groups. Render candidates 50 groups at a time.
+- Same-shot review notes are library-wide database records, separate from photo
+  flags and exact-byte resolution. Reviewed groups are hidden by default and can
+  be shown and reopened. The server binds each note to camera identity plus the
+  sorted members' ids, hashes, paths, sizes, capture dates, visual hashes and edit
+  recipes; reload refreshes existing members, while a new scan also discovers
+  membership additions. Changed evidence gets a different review key. A save
+  validates the client key under a SQLite write transaction. Responses update
+  only matching current keys and always re-render through the active filters.
+- Comparison uses the duplicate-authorized thumbnail endpoint, including members
+  outside the active workspace. It labels cached thumbnails and missing images
+  explicitly; it never claims pixel identity or full-resolution verification.
+  Review notes never alter files, metadata, ratings, rejection flags or cleanup.
 - Bucket indexes stay stable: buckets are rendered from the unfiltered list,
   and one-group buckets are skipped inline.

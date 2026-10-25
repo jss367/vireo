@@ -45,6 +45,7 @@ function page() {
     KEPT_ANOTHER_COPY_REASON: 'kept another copy instead',
     window: {location: {search: ''}}, URLSearchParams,
     clearDuplicateTrashProgress() {}, hideRestoredBanner() {}, setEmptyVisible() {},
+    closeSameShotComparison() {},
     showProgress() {}, hideProgress() {}, safeEventSource() {},
     document: {
       getElementById: element,
