@@ -3,12 +3,15 @@
   "files": [
     "../types/pages/id-conflicts.d.ts",
     "../types/page-hooks.d.ts",
-    "../vireo/static/id-conflicts/state.js",
-    "../vireo/static/id-conflicts/loading.js",
+    "../vireo/static/id-conflicts/boot.js",
     "../vireo/static/id-conflicts/controls.js",
-    "../vireo/static/id-conflicts/render.js",
-    "../vireo/static/id-conflicts/table.js",
     "../vireo/static/id-conflicts/decisions.js",
-    "../vireo/static/id-conflicts/boot.js"
+    "../vireo/static/id-conflicts/events.js",
+    "../vireo/static/id-conflicts/loading.js",
+    "../vireo/static/id-conflicts/render.js",
+    "../vireo/static/id-conflicts/shared.js",
+    "../vireo/static/id-conflicts/state.js",
+    "../vireo/static/id-conflicts/table.js",
+    "../vireo/static/id-conflicts/threshold.js"
   ]
 }
