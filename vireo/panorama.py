@@ -55,7 +55,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
     """Render, align, blend and save; checkpoints surround native stitching calls.
 
     OpenCV can discard disconnected frames even on success. Require the whole
-    selection before composing so the saved image never silently omits a photo.
+    selection when composing so the saved image never silently omits a photo.
     """
     import cv2
 
@@ -99,17 +99,12 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
     try:
         progress(len(images), total, "Aligning photos")
         _check_status(stitcher.estimateTransform(images))
-        included = set(stitcher.component())
-        if included != set(range(len(images))):
-            missing = [photos[pid]["filename"] for i, pid in enumerate(photo_ids) if i not in included]
-            raise ValueError(
-                "Could not match all selected photos: "
-                + ", ".join(missing)
-                + ". Select a connected set of overlapping views."
-            )
         checkpoint()
         progress(len(images) + 1, total, "Blending panorama")
-        status, pixels = stitcher.composePanorama()
+        # component() is C++-only. Passing the full inputs to this overload
+        # makes OpenCV check their count against its retained image set and
+        # reject disconnected selections instead of composing only a subset.
+        status, pixels = stitcher.composePanorama(images)
         _check_status(status)
         checkpoint()
         if pixels is None or not pixels.size:
@@ -117,7 +112,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
         rgb = cv2.cvtColor(pixels, cv2.COLOR_BGR2RGB)
         output = Image.fromarray(rgb)
     except cv2.error as exc:
-        raise ValueError("Could not stitch these photos. Try fewer photos with more overlap.") from exc
+        raise ValueError("Could not stitch all selected photos. Try fewer photos with more overlap.") from exc
 
     out_path = None
     try:
