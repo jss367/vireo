@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from canonical_schema import (
+    CURRENT_FLAG_ATTRIBUTION_OBJECTS,
     FORMERLY_LAZY_OBJECTS,
     JOB_HISTORY_LATER_COLUMNS,
     JOB_HISTORY_WORKSPACE_OBJECTS,
@@ -222,6 +223,19 @@ def _add_species_provenance(conn):
             conn.execute(f'ALTER TABLE {table} ADD COLUMN species_provenance TEXT')
 
 
+def _retain_global_flag_attribution(conn):
+    """Workspace deletion removes origin context, not the global flag decision."""
+    columns = {row[1]: row for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
+    if not columns["workspace_id"][3]:
+        return
+    conn.execute("DROP TRIGGER IF EXISTS invalidate_current_flag_attribution")
+    conn.execute("ALTER TABLE current_flag_attribution RENAME TO old_current_flag_attribution")
+    conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[0])
+    conn.execute("INSERT INTO current_flag_attribution SELECT * FROM old_current_flag_attribution")
+    conn.execute("DROP TABLE old_current_flag_attribution")
+    conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[1])
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -254,6 +268,7 @@ MIGRATIONS = (
     Migration(26, "species_assignment_provenance", _add_species_provenance),
     Migration(27, "same_shot_reviews", create_same_shot_reviews),
     Migration(28, "flag_attribution_history", create_current_flag_attribution),
+    Migration(29, "global_flag_attribution_lifetime", _retain_global_flag_attribution),
 )
 
 

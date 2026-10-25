@@ -422,6 +422,115 @@ class CullingCatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(self.db.edit_history.list_recent(), history)
         self.assertFalse(self.db.conn.in_transaction)
 
+    def test_workspace_deletion_keeps_global_confirmation_and_replay(self):
+        from services import workspace_folders, workspace_lifecycle
+
+        origin = self.db.active_workspace_id
+        pid = self.ids[0]
+        self.service.set_flag(pid, "flagged")
+        other = self.db.create_workspace("Surviving workspace")
+        workspace_folders.add_workspace_folder(self.db, other, self.db.photos.get(pid)["folder_id"])
+        self.db.set_active_workspace(other)
+        workspace_lifecycle.delete_workspace(self.db, origin)
+        state = self.db.photo_review.culling_flag_states([pid])[pid]
+        self.assertEqual(state["confirmed_flag"], "flagged")
+        self.assertIsNone(self.db.photo_review.flag_attributions([pid])[pid]["workspace_id"])
+        self.service.set_flag(pid, "rejected")
+        self.db.undo_last_edit()
+        self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
+        self.db.redo_last_undo()
+        self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "rejected")
+
+    def test_replay_of_snapshot_from_deleted_workspace_retains_confirmation(self):
+        from services import workspace_folders, workspace_lifecycle
+
+        origin = self.db.active_workspace_id
+        pid = self.ids[0]
+        self.service.set_flag(pid, "flagged")
+        other = self.db.create_workspace("Surviving workspace")
+        workspace_folders.add_workspace_folder(self.db, other, self.db.photos.get(pid)["folder_id"])
+        self.db.set_active_workspace(other)
+        self.service.set_flag(pid, "rejected")
+        workspace_lifecycle.delete_workspace(self.db, origin)
+        self.db.undo_last_edit()
+        self.assertEqual(self.db.photo_review.culling_flag_states([pid])[pid]["confirmed_flag"], "flagged")
+        self.assertIsNone(self.db.photo_review.flag_attributions([pid])[pid]["workspace_id"])
+
+    def test_merge_carries_only_the_queue_winners_matching_attribution(self):
+        from repositories.photo_row_deletion import photo_row_deletion
+        from services import photo_ingest
+
+        folder = self.db.photos.get(self.ids[0])["folder_id"]
+        for winner_is_loser, evidence in [(True, "manual"), (False, "manual"),
+                                         (True, "unknown"), (True, "automated"), (True, "stale")]:
+            with self.subTest(winner_is_loser=winner_is_loser, evidence=evidence):
+                loser, survivor = [photo_ingest.add_photo(
+                    self.db, folder, f"merge-{winner_is_loser}-{evidence}-{n}.jpg", ".jpg", 10, 1.0,
+                ) for n in range(2)]
+                winner = loser if winner_is_loser else survivor
+                self.service.set_flag(loser, "rejected", source="ranker" if evidence == "automated" else None)
+                self.service.set_flag(survivor, "flagged")
+                if evidence == "unknown":
+                    self.db.photo_review.set_flag(loser, "rejected")
+                winning_flag = "rejected" if winner_is_loser else "flagged"
+                if evidence == "stale":
+                    winning_flag = "none"
+                before = self.db.photo_review.flag_attributions([loser, survivor])
+                self.db.conn.execute("DELETE FROM pending_changes WHERE photo_id IN (?,?)", (loser, survivor))
+                for pid in (loser, survivor):
+                    self.db.conn.execute(
+                        "INSERT INTO pending_changes(photo_id,workspace_id,change_type,value,created_at) "
+                        "VALUES (?,?,'flag',?,?)",
+                        (pid, self.db.active_workspace_id, winning_flag if pid == winner else "none",
+                         "2026-10-25" if pid == winner else "2026-10-24"),
+                    )
+                self.db.conn.commit()
+                self.db.moves_merge.transfer_review_state(loser, survivor)
+                self.assertTrue(self.db.conn.in_transaction)
+                self.db.conn.rollback()
+                self.assertEqual(self.db.photo_review.flag_attributions([loser, survivor]), before)
+                self.db.moves_merge.transfer_review_state(loser, survivor)
+                self.db.conn.execute("UPDATE pending_changes SET photo_id=? WHERE photo_id=?", (survivor, loser))
+                with photo_row_deletion(self.db.conn) as rows:
+                    rows.delete({loser: survivor})
+                self.db.conn.commit()
+                state = self.db.photo_review.culling_flag_states([survivor])[survivor]
+                self.assertEqual(state["flag"], winning_flag)
+                self.assertEqual(state["confirmed_flag"], winning_flag if evidence == "manual" else None)
+                note = self.db.photo_review.flag_attributions([survivor]).get(survivor)
+                if evidence in ("manual", "automated"):
+                    self.assertEqual(note, dict(before[winner], photo_id=survivor))
+                else:
+                    self.assertIsNone(note)
+
+    def test_version_28_attribution_migration_preserves_data_and_global_lifetime(self):
+        from canonical_schema import CURRENT_FLAG_ATTRIBUTION_OBJECTS
+        from schema import ensure_schema
+
+        pid = self.ids[0]
+        self.service.set_flag(pid, "flagged")
+        before = self.db.photo_review.flag_attributions([pid])
+        self.db.conn.execute("DROP TRIGGER invalidate_current_flag_attribution")
+        self.db.conn.execute("ALTER TABLE current_flag_attribution RENAME TO new_attribution")
+        self.db.conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[0].replace(
+            "workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL",
+            "workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE",
+        ))
+        self.db.conn.execute("INSERT INTO current_flag_attribution SELECT * FROM new_attribution")
+        self.db.conn.execute("DROP TABLE new_attribution")
+        self.db.conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[1])
+        self.db.conn.execute("PRAGMA user_version=28")
+        self.db.conn.commit()
+        ensure_schema(str(self.db_path))
+        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+        self.assertEqual(self.db.photo_review.flag_attributions([pid]), before)
+        self.db.conn.execute("DELETE FROM workspaces WHERE id=?", (self.db.active_workspace_id,))
+        self.db.conn.commit()
+        self.assertIsNone(self.db.conn.execute(
+            "SELECT workspace_id FROM current_flag_attribution WHERE photo_id=?", (pid,),
+        ).fetchone()[0])
+        self.assertEqual(list(self.db.conn.execute("PRAGMA foreign_key_check")), [])
+
     def test_manual_apply_round_trip_is_one_attributed_reversible_edit(self):
         from flask import Flask, jsonify
         from web.caches import create_caches_blueprint

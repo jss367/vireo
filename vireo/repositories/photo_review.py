@@ -270,6 +270,24 @@ class PhotoReviewRepository:
             result.update({row["photo_id"]: dict(row) for row in rows})
         return result
 
+    def transfer_flag_for_merge(self, source_id, surviving_id, flag):
+        """Carry only the winning queue photo's matching current attribution.
+
+        Capture before the flag UPDATE invalidates attribution, including when
+        the survivor itself wins. Unknown or stale evidence stays unknown.
+        The merge owns the transaction and the losing photo's deletion.
+        """
+        state = self.flag_attributions([source_id]).get(source_id)
+        self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, surviving_id))
+        if state is not None and state["flag"] == flag:
+            self.conn.execute(
+                """INSERT INTO current_flag_attribution
+                   (photo_id,workspace_id,flag,source,reason,description,created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (surviving_id, state["workspace_id"], flag, state["source"],
+                 state["reason"], state["description"], state["created_at"]),
+            )
+
     def record_flag_attribution_history(self, edit_id, photo_ids, before, after):
         """Keep replay metadata with its edit; history pruning cascades it away."""
         if not self.conn.in_transaction:
@@ -295,10 +313,10 @@ class PhotoReviewRepository:
         self.conn.execute(
             """INSERT INTO current_flag_attribution
                (photo_id,workspace_id,flag,source,reason,description,created_at)
-               SELECT p.id,w.id,p.flag,?,?,?,? FROM photos p JOIN workspaces w ON w.id=?
+               SELECT p.id,(SELECT id FROM workspaces WHERE id=?),p.flag,?,?,?,? FROM photos p
                WHERE p.id=? AND p.flag IS ?""",
-            (state["source"], state["reason"], state["description"], state["created_at"],
-             state["workspace_id"], photo_id, state["flag"]),
+            (state["workspace_id"], state["source"], state["reason"], state["description"],
+             state["created_at"], photo_id, state["flag"]),
         )
 
     def _verify_photo(self, photo_id):

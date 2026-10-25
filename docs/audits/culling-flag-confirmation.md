@@ -12,7 +12,10 @@ state, and the Cull client requires that state. Explicit Apply records keep,
 reject and Review decisions atomically with flags, sidecar intents and one undo
 entry. Undo and redo restore captured attribution; old undo entries without a
 snapshot cannot manufacture it. Schema migration 28 adds these replay snapshots.
-History pruning removes snapshots without deleting current attribution.
+History pruning removes snapshots without deleting current attribution. Migration
+29 keeps global decisions when their originating workspace is deleted (the origin
+becomes null). Photo merges carry only the winning queued flag's matching current
+attribution, including when the survivor wins; unknown flags stay unknown.
 
 Sharpness ranking can flag an unchosen candidate, but cannot replace an existing
 flag or an explicitly confirmed clear flag. Its provisional flag remains

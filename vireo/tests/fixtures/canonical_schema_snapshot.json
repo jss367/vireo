@@ -1024,7 +1024,7 @@
    "table",
    "current_flag_attribution",
    "current_flag_attribution",
-   "CREATE TABLE current_flag_attribution (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n        flag TEXT NOT NULL,\n        source TEXT,\n        reason TEXT,\n        description TEXT NOT NULL,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+   "CREATE TABLE current_flag_attribution (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL,\n        flag TEXT NOT NULL,\n        source TEXT,\n        reason TEXT,\n        description TEXT NOT NULL,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
   ],
   [
    "trigger",
