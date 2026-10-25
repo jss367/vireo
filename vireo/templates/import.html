@@ -517,6 +517,12 @@ body {
       <div id="chainInfo" class="hint" style="margin-top:8px;"></div>
       <div id="taggingInfo" class="hint" style="margin-top:8px;"></div>
       <div id="modelWarning" class="warn" style="display:none;"></div>
+      <!-- Filled by renderWorkingCopyNotice() when the import's working-copy
+           pass fell short; the import itself still succeeded. -->
+      <div id="workingCopyNotice" class="warn" style="display:none;">
+        <div id="workingCopyNoticeText"></div>
+        <ul class="unsafe-list" id="workingCopyFailures" style="display:none;"></ul>
+      </div>
       <div class="row" id="retryImportRow" style="display:none;margin-top:10px;">
         <button class="btn btn-primary" type="button" id="btnRetryImport"
                 onclick="retryFailedImport()">Retry failed files</button>

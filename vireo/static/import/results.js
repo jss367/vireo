@@ -89,9 +89,7 @@ function renderResult(res, status) {
         (status && status !== 'completed' ? ' · job ' + status : '');
     }
     /** @type {HTMLElement} */ (document.getElementById('resultFolders')).innerHTML = '';
-    renderChainInfo(res);
-    renderTaggingInfo(res);
-    renderModelWarning(res);
+    renderResultNotes(res);
     return;
   }
   if (res.safe_to_format) {
@@ -174,9 +172,41 @@ function renderResult(res, status) {
     refreshImportRecoveryOptions(lastFinishedImportJob);
   }
 
+  renderResultNotes(res);
+}
+
+/** The lines under the result that both import modes share. @param {ImportResult} res */
+function renderResultNotes(res) {
   renderChainInfo(res);
   renderTaggingInfo(res);
   renderModelWarning(res);
+  renderWorkingCopyNotice(res);
+}
+
+// Working copies the import could not make. The server words the notice;
+// the import itself succeeded, so this sits beside the result, not in it.
+var WORKING_COPY_FAILURES_SHOWN = 20;
+
+/** @param {ImportResult} res */
+function renderWorkingCopyNotice(res) {
+  const box = /** @type {HTMLElement} */ (document.getElementById('workingCopyNotice'));
+  const list = /** @type {HTMLElement} */ (document.getElementById('workingCopyFailures'));
+  /** @type {HTMLElement} */ (document.getElementById('workingCopyNoticeText')).textContent =
+    res.working_copy_notice || '';
+  list.innerHTML = '';
+  const failures = res.working_copy_failures || [];
+  failures.slice(0, WORKING_COPY_FAILURES_SHOWN).forEach((path) => {
+    const li = document.createElement('li');
+    li.textContent = path;
+    list.appendChild(li);
+  });
+  if (failures.length > WORKING_COPY_FAILURES_SHOWN) {
+    const li = document.createElement('li');
+    li.textContent = 'and ' + (failures.length - WORKING_COPY_FAILURES_SHOWN).toLocaleString() + ' more';
+    list.appendChild(li);
+  }
+  list.style.display = failures.length ? '' : 'none';
+  box.style.display = res.working_copy_notice ? '' : 'none';
 }
 
 /** @param {ImportResult} res */

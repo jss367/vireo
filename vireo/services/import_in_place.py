@@ -804,6 +804,10 @@ class _InPlaceImportRun:
             "source_index": 0,
         }
         self.working_copy_scope: list[_WorkingCopyScopeEntry] = []
+        # Photos the deferred working-copy pass could not make a copy for;
+        # the result's notice names them (a crash of the whole pass is a
+        # job error instead, see ``_extract_deferred_working_copies``).
+        self.working_copy_failures: list[str] = []
         self.working_copy_scope_baselines: dict[_WorkingCopyScopeEntry, dict[str, bool]] = {}
         self.working_copy_scope_identities: dict[_WorkingCopyScopeEntry, dict[str, object]] = {}
         self.source_mount_baselines: dict[str, dict[str, bool]] = {}
@@ -1536,6 +1540,12 @@ class _InPlaceImportRun:
     def _extract_deferred_working_copies(self) -> None:
         revalidated_scope = self._revalidated_working_copy_scope()
         if revalidated_scope:
+            # Share this list with the batch so a crash partway through
+            # still names every photo it had already marked failed;
+            # otherwise ``_record_error`` would carry the pass-level
+            # error alone and the per-photo failures the pass committed
+            # would stay as silent 24h markers on the catalog rows.
+            self.working_copy_failures = []
             try:
                 self.extract_working_copies(
                     self.thread_db,
@@ -1543,6 +1553,7 @@ class _InPlaceImportRun:
                     status_callback=self._status_cb,
                     scope=revalidated_scope,
                     cancel_check=self._cancel_check,
+                    failed_paths_sink=self.working_copy_failures,
                 )
             except Exception as exc:
                 log.exception(
@@ -1644,9 +1655,13 @@ class _InPlaceImportRun:
         )
 
     def _cancelled_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
+        summary = f"{indexed} photos (cancelled)"
+        if self.working_copy_failures:
+            n = len(self.working_copy_failures)
+            summary += f", {n:,} without a working copy"
         self.runner.update_step(
             self.job["id"], "scan", status="cancelled",
-            summary=f"{indexed} photos (cancelled)",
+            summary=summary,
         )
         result = {
             "mode": "in_place",
@@ -1660,14 +1675,37 @@ class _InPlaceImportRun:
         }
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
+        # The working-copy pass commits a 24h failure marker on every
+        # photo it marked failed before cancel. Carry those paths through
+        # so the result and step summary say so, matching the completed
+        # path; the per-photo markers would otherwise stay silent.
+        self._add_working_copy_notice(result)
         self._apply_import_tags(result)
         return result
+
+    def _add_working_copy_notice(self, result: JsonDict) -> None:
+        """Name the photos left without a working copy (a notice, not an error).
+
+        The photos were cataloged either way; failing the import over a
+        derived copy would skip after-import processing.
+        """
+        if not self.working_copy_failures:
+            return
+        from scanner import import_working_copy_notice
+
+        result["working_copy_failures"] = list(self.working_copy_failures)
+        result["working_copy_notice"] = import_working_copy_notice(
+            self.working_copy_failures, None,
+        )
 
     def _completed_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
         snapshot_missing = self.snapshot_missing
         snapshot_unreadable = self.snapshot_unreadable
         metadata_warning = scan_metadata_warning()
         summary = f"{indexed} photos"
+        if self.working_copy_failures:
+            n = len(self.working_copy_failures)
+            summary += f", {n:,} without a working copy"
         if metadata_warning:
             summary += f" — {metadata_warning}"
         snapshot_failures = (
@@ -1715,6 +1753,7 @@ class _InPlaceImportRun:
         }
         if self.snapshot_paths is not None:
             result.update(self._snapshot_result_fields(snapshot_unindexed))
+        self._add_working_copy_notice(result)
         self._apply_import_tags(result)
         # Pause before publishing the collection or handing off to a
         # child job. Once the handoff starts, late parent requests must

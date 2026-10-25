@@ -279,6 +279,9 @@ class _WorkingCopyBatch:
         # generated from the previous state.
         self.retained_new_snapshots = {}
         self.stop_after_current = False
+        # Cataloged paths of the rows whose extraction failed this pass, so
+        # a caller can tell the user which photos have no working copy.
+        self.failed_paths: list[str] = []
 
     def _adopt_quota(self, quota_mb: int) -> None:
         self.quota_mb = quota_mb
@@ -946,9 +949,17 @@ class _WorkingCopyBatch:
         # this id has different extraction inputs and the failure we saw
         # is not its failure. ``working_copy_path IS NULL`` so a concurrent
         # on-demand writer's successful publication is not clobbered with
-        # a failure marker.
-        self.db.working_copies.mark_failed(row, extraction.failure_source)
+        # a failure marker. When ``mark_failed`` matches no rows, the
+        # photo at ``id`` either already has a working copy from another
+        # publisher or is no longer the one we extracted — in either
+        # case telling the user it is "without a working copy" would be
+        # false, so we skip the append and leave the marker off the row.
+        matched = self.db.working_copies.mark_failed(row, extraction.failure_source)
         self.db.commit_with_retry()
+        if matched:
+            self.failed_paths.append(
+                os.path.join(row["folder_path"], row["filename"]),
+            )
 
     # -- staying under the quota -------------------------------------
 

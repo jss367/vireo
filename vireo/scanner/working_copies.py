@@ -122,8 +122,12 @@ def _extract_working_copies(
     status_callback: StatusCallback | None = None,
     scope: Sequence[WorkingCopyScopeEntry] | None = None, cancel_check: CheckCallback | None = None,
     source_paths: SourcePaths | None = None,
-) -> None:
+    failed_paths_sink: list[str] | None = None,
+) -> list[str]:
     """Extract working copies for all RAW photos missing one.
+
+    Returns the cataloged paths of the photos whose extraction failed in this
+    pass (each is also marked failed, see below), so a caller can name them.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
     copy into ``<vireo_dir>/working/<photo_id>.jpg``.  When the photo has a
@@ -164,11 +168,18 @@ def _extract_working_copies(
     verified archive path. Applies to both the primary and the companion
     lookup; paths absent from the map read from the catalog location as
     usual.
+
+    ``failed_paths_sink``, when supplied, is the list the batch appends
+    cataloged paths to as it marks each per-photo failure. On the normal
+    return path it is the same list the function returns. A caller that
+    wraps this call in a try/except reads the sink after an exception
+    propagates and still has the paths of photos the pass had already
+    marked failed before it stopped.
     """
     import config as cfg
 
     if scope is not None and len(scope) == 0:
-        return
+        return []
 
     user_cfg = cfg.load()
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
@@ -179,13 +190,13 @@ def _extract_working_copies(
     # quota pass below to delete it immediately.
     wc_cache_max_mb = _working_copy_quota_mb(lambda: user_cfg)
     if wc_cache_max_mb <= 0:
-        return
+        return []
 
     rows = _working_copy_candidate_rows(db, wc_max_size, scope)
     if not rows:
-        return
+        return []
 
-    _WorkingCopyBatch(
+    batch = _WorkingCopyBatch(
         db, vireo_dir, rows,
         wc_max_size=wc_max_size,
         wc_quality=wc_quality,
@@ -195,7 +206,52 @@ def _extract_working_copies(
         cancel_check=cancel_check,
         progress_callback=progress_callback,
         status_callback=status_callback,
-    ).run()
+    )
+    if failed_paths_sink is not None:
+        # Share the caller's list so a mid-pass crash still surfaces the
+        # photos the batch had already committed as failed: the batch
+        # appends to this same object, and the caller reads it even on
+        # the exception path.
+        batch.failed_paths = failed_paths_sink
+    batch.run()
+    return batch.failed_paths
+
+
+def import_working_copy_notice(failed_paths: Sequence[str], pass_error: str | None) -> str | None:
+    """What an import tells the user about working copies it could not make.
+
+    ``failed_paths`` are the photos the pass marked failed: the scanner
+    skips those until 24 hours have passed or the file changes (see
+    ``_working_copy_candidate_predicate``). ``pass_error`` is the error that
+    stopped the whole pass; the photos it never reached carry no failure
+    marker, so the next scan of their folder picks them up. None when there
+    is nothing to say. Not an import failure: the originals were imported.
+    """
+    parts = []
+    if failed_paths:
+        n = len(failed_paths)
+        if n == 1:
+            parts.append(
+                "Vireo could not create a working copy for 1 photo. The "
+                "original was imported; only its working copy is missing. "
+                "Vireo tries again the next time it scans the folder, once 24 "
+                "hours have passed or sooner if the file changes."
+            )
+        else:
+            parts.append(
+                f"Vireo could not create a working copy for {n:,} photos. The "
+                "originals were imported; only the working copies are missing. "
+                "Vireo tries again the next time it scans their folders, once "
+                "24 hours have passed or sooner if a file changes."
+            )
+    if pass_error:
+        parts.append(
+            f"Vireo stopped creating working copies after an error ({pass_error}), "
+            "so some photos from this import may not have one yet. The "
+            "originals were imported. Vireo creates the missing working copies "
+            "the next time it scans their folders."
+        )
+    return " ".join(parts) or None
 
 
 def _working_copy_scope_clause(db: Database, scope: Iterable[WorkingCopyScopeEntry]) -> str:
