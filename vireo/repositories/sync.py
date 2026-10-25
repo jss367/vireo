@@ -28,7 +28,6 @@ caller owns the transaction, and no method here commits unless the
 ``Database`` method it backs did.
 """
 
-import contextlib
 import os
 import sqlite3
 import uuid
@@ -36,6 +35,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from typing import Any
 
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from sidecar_identity import sidecar_paths_alias
 
 # How a staged-scope read names a pending row: its ``change_token``, or
 # ``("id", id)`` for rows that predate the column.
@@ -319,19 +319,11 @@ class SyncRepository:
                 def sidecar_path(row):
                     return os.path.join(row["path"], os.path.splitext(row["filename"])[0] + ".xmp")
 
-                own_path = os.path.normcase(os.path.realpath(sidecar_path(own)))
+                own_path = os.path.realpath(sidecar_path(own))
                 for path in {sidecar_path(row) for row in candidates}:
-                    other_path = os.path.normcase(os.path.realpath(path))
-                    if own_path == other_path:
+                    if sidecar_paths_alias(own_path, os.path.realpath(path)):
                         needs_inverse = True
                         break
-                    if own_path.casefold() == other_path.casefold():
-                        # Scheduling may over-group case variants;
-                        # cancellation must confirm they are aliases.
-                        with contextlib.suppress(OSError):
-                            needs_inverse = os.path.samefile(own_path, other_path)
-                        if needs_inverse:
-                            break
         return needs_inverse
 
     # -- writes ---------------------------------------------------------------
