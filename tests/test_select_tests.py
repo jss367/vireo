@@ -774,6 +774,129 @@ def test_harness_changes_force_the_full_suite(repo, path):
     assert path in sel.full_reason
 
 
+# --------------------------------------------------------------------------
+# own base: main's movement since the map is not the PR's change
+# --------------------------------------------------------------------------
+
+
+def test_harness_file_only_main_changed_is_set_aside_with_own_base(repo):
+    # main merges a pyproject change after the map was built ...
+    _write(repo, "pyproject.toml", "[tool.x]\n")
+    drift = _commit(repo, "main: pyproject")
+    # ... and the PR under test edits alpha on top of it.
+    _write(repo, "vireo/app.py", APP_SRC.replace("return x + 1", "return x + 2"))
+    _commit(repo, "pr: edit alpha")
+
+    without = _select(repo)
+    assert without.mode == "full"
+    assert "pyproject.toml" in without.full_reason
+
+    sel = _select(repo, own_base=drift)
+
+    assert sel.mode == "subset"
+    assert sel.ids == {"vireo/tests/test_app.py::test_alpha"}
+    assert any(n.startswith("set aside") and "pyproject.toml" in n for n in sel.notes)
+
+
+def test_harness_file_the_change_itself_touched_still_forces_full(repo):
+    _write(repo, "docs/notes.md", "main moved\n")
+    drift = _commit(repo, "main: docs")
+    _write(repo, "pyproject.toml", "[tool.x]\n")
+    _commit(repo, "pr: pyproject")
+
+    sel = _select(repo, own_base=drift)
+
+    assert sel.mode == "full"
+    assert "pyproject.toml" in sel.full_reason
+
+
+def test_file_both_main_and_the_change_edited_keeps_main_hunks(repo):
+    # main edited alpha since the map; the PR edits beta in the same file.
+    _write(repo, "vireo/app.py", APP_SRC.replace("return x + 1", "return x + 2"))
+    drift = _commit(repo, "main: alpha")
+    _write(repo, "vireo/app.py", APP_SRC.replace("return x + 1", "return x + 2").replace('return "b"', 'return "B"'))
+    _commit(repo, "pr: beta")
+
+    sel = _select(repo, own_base=drift)
+
+    # Hunks are taken from the map commit, so main's alpha edit is still
+    # covered: the file is the PR's own, and widening is the safe side.
+    assert sel.mode == "subset"
+    assert sel.ids == {"vireo/tests/test_app.py::test_alpha", "vireo/tests/test_app.py::test_beta"}
+
+
+def test_only_main_moved_since_the_map_selects_nothing(repo):
+    _write(repo, "vireo/app.py", APP_SRC.replace("return x + 1", "return x + 2"))
+    drift = _commit(repo, "main: alpha")
+    _write(repo, "docs/notes.md", "pr\n")
+    _commit(repo, "pr: docs only")
+
+    sel = _select(repo, own_base=drift)
+
+    assert sel.mode == "none"
+    assert any(n.startswith("set aside") and "vireo/app.py" in n for n in sel.notes)
+
+
+def test_resolve_own_base_prefers_explicit_then_merge_base_then_gives_up(repo):
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    _write(repo, "docs/notes.md", "branch\n")
+    _commit(repo, "branch work")
+
+    assert select_tests.resolve_own_base(base, "HEAD", repo) == (base, None)
+    assert select_tests.resolve_own_base(select_tests.OWN_BASE_DISABLED, "HEAD", repo) == (None, None)
+
+    commit, problem = select_tests.resolve_own_base("0" * 40, "HEAD", repo)
+    assert commit is None and "not reachable" in problem
+
+    # HEAD is main itself: nothing branched off, count every change.
+    commit, problem = select_tests.resolve_own_base(None, "HEAD", repo)
+    assert commit is None and "not ahead of main" in problem
+
+    # No origin/main or main ref: fall back to counting every change.
+    _git(repo, "branch", "-M", "work")
+    commit, problem = select_tests.resolve_own_base(None, "HEAD", repo)
+    assert commit is None and "merge-base" in problem
+
+    # A main ref makes the default the merge-base with it.
+    _git(repo, "branch", "main", base)
+    assert select_tests.resolve_own_base(None, "HEAD", repo) == (base, None)
+
+
+def test_cli_own_base_sets_main_drift_aside(repo):
+    _write(repo, "pyproject.toml", "[tool.x]\n")
+    drift = _commit(repo, "main: pyproject")
+    _write(repo, "vireo/app.py", APP_SRC.replace("return x + 1", "return x + 2"))
+    _commit(repo, "pr: edit alpha")
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/select_tests.py"), "--repo", str(repo), "--own-base", drift],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "subset"
+    assert "own changes: since " + drift[:10] in result.stderr
+    selection = (repo / select_tests.MAP_DIR / select_tests.SELECTION_FILE).read_text()
+    assert f"# own-base: {drift}" in selection
+    assert "# set aside" in selection and "pyproject.toml" in selection
+
+
+def test_cli_unreachable_own_base_counts_every_change(repo):
+    _write(repo, "pyproject.toml", "[tool.x]\n")
+    _commit(repo, "main: pyproject")
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/select_tests.py"), "--repo", str(repo), "--own-base", "0" * 40],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "full"
+    assert "own base 0000000000 is not reachable" in result.stderr
+
+
 def test_missing_map_forces_full_suite(tmp_path):
     impact, meta, problem = select_tests.load_map(tmp_path / "nowhere")
 

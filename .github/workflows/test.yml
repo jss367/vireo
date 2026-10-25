@@ -196,6 +196,10 @@ jobs:
         shell: bash
         env:
           FORCE_FULL: ${{ needs.changes.outputs.full }}
+          # The PR's own base: files only main changed between the map
+          # commit and this sha are left to main's post-merge full run
+          # instead of widening every open PR (see select_tests.py).
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mkdir -p .test-impact
           if [ "$FORCE_FULL" = "true" ]; then
@@ -203,7 +207,8 @@ jobs:
             echo "mode: full (full-suite override)" | tee .test-impact/select.log
           else
             set +e
-            python scripts/select_tests.py --explain --output .test-impact/selected.txt \
+            python scripts/select_tests.py --explain --own-base "$PR_BASE_SHA" \
+              --output .test-impact/selected.txt \
               > .test-impact/mode.txt 2> .test-impact/select.log
             status=$?
             set -e

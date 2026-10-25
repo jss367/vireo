@@ -36,6 +36,18 @@ Selection is conservative and precise at the same time:
   suite.
 * Missing or unreadable map, or an unreachable map commit, falls back to
   the full suite. Selection can only ever *narrow*; a bad input widens.
+* Only the change's *own* files are classified. The diff that feeds the
+  rules above runs from the map commit to ``head`` so that hunk line
+  numbers match the map, but ``main`` keeps moving between map builds,
+  and every file it touched in that window would otherwise count as part
+  of every open PR (a ``pyproject.toml`` merge was forcing the full suite
+  on unrelated PRs for the better part of an hour, several times a day).
+  A second diff from the change's own base (in CI the PR's base commit,
+  locally the merge-base with ``origin/main``) names the files the change
+  itself touched; a file only ``main`` changed since the map is set aside
+  and left to ``main``'s own post-merge full run. A file both changed is
+  still diffed from the map commit, so ``main``'s hunks in it are kept.
+  Without a resolvable own base, every file since the map counts.
 
 The map is a standard ``coverage.py`` data file written with
 ``--cov-context=test`` (see ``.github/workflows/test-main.yml``). ``main``
@@ -157,6 +169,42 @@ def _ensure_commit(sha: str, cwd: Path) -> bool:
         capture_output=True,
     )
     return _commit_exists(sha, cwd)
+
+
+OWN_BASE_DISABLED = "none"
+
+
+def resolve_own_base(requested: str | None, head: str, cwd: Path) -> tuple[str | None, str | None]:
+    """``(commit, problem)``: the commit the change under test branched from.
+
+    ``requested`` is a commit (CI passes the PR's base sha), ``"none"`` to
+    count every change since the map, or ``None`` for the merge-base of
+    ``head`` with ``origin/main`` (then ``main``). ``commit`` is ``None``
+    when nothing usable was found, with ``problem`` saying why; the caller
+    then falls back to counting every file changed since the map, which
+    only ever widens the selection.
+    """
+    if requested == OWN_BASE_DISABLED:
+        return None, None
+    if requested:
+        if not _ensure_commit(requested, cwd):
+            return None, f"own base {requested[:10]} is not reachable; counting every change since the map"
+        return _git("rev-parse", f"{requested}^{{commit}}", cwd=cwd).strip(), None
+    for ref in ("origin/main", "main"):
+        result = subprocess.run(
+            ["git", "merge-base", ref, head],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            merge_base = result.stdout.strip()
+            if merge_base == _git("rev-parse", f"{head}^{{commit}}", cwd=cwd).strip():
+                # ``head`` is on main (or behind it): nothing branched off,
+                # so everything since the map is the change under test.
+                return None, f"{head} is not ahead of {ref}; counting every change since the map"
+            return merge_base, None
+    return None, "no origin/main to take a merge-base with; counting every change since the map"
 
 
 def _show(sha: str, path: str, cwd: Path) -> str | None:
@@ -545,11 +593,12 @@ class Selection:
         """Node ids not already implied by a whole selected file."""
         return {i for i in self.ids if i.split("::", 1)[0] not in self.files}
 
-    def write(self, path: Path, base: str, head: str) -> None:
+    def write(self, path: Path, base: str, head: str, own_base: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as fh:
             fh.write(f"# mode: {self.mode}\n")
             fh.write(f"# base: {base}\n# head: {head}\n")
+            fh.write(f"# own-base: {own_base or '(every change since the map)'}\n")
             for note in self.notes:
                 fh.write(f"# {note}\n")
             for f in sorted(self.files):
@@ -742,13 +791,32 @@ def select(
     impact: ImpactMap | None,
     cwd: Path = ROOT,
     explain: bool = False,
+    own_base: str | None = None,
 ) -> Selection:
+    """Select for the diff ``base``..``head``, ``base`` being the map commit.
+
+    With ``own_base`` (see ``resolve_own_base``), only files that also
+    differ between ``own_base`` and ``head`` are classified; the rest is
+    ``main``'s own movement since the map was built, validated by its
+    post-merge full run. Hunks still come from ``base`` so their line
+    numbers match the map.
+    """
     sel = Selection()
     if impact is None:
         sel.force_full("no impact map available")
         return sel
 
     changes = changed_files(base, head, cwd)
+    if own_base is not None:
+        own_paths = {path for _, path in changed_files(own_base, head, cwd)}
+        set_aside = sorted(path for _, path in changes if path not in own_paths)
+        changes = [(status, path) for status, path in changes if path in own_paths]
+        if set_aside:
+            shown = ", ".join(set_aside[:8]) + (", ..." if len(set_aside) > 8 else "")
+            sel.note(
+                f"set aside {len(set_aside)} file(s) only main changed since the map "
+                f"(validated by main's own full run): {shown}"
+            )
     if not changes:
         sel.mode = "none"
         sel.note("no files changed")
@@ -1040,12 +1108,14 @@ def fetch_map(map_dir: Path, cwd: Path = ROOT) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _summary(sel: Selection, meta: dict, base: str) -> str:
+def _summary(sel: Selection, meta: dict, base: str, own_base: str | None = None) -> str:
     lines = [f"mode: {sel.mode}"]
     if sel.mode == "full":
         lines.append(f"reason: {sel.full_reason}")
     if meta:
         lines.append(f"map: main @ {base[:10]} ({meta.get('contexts', '?')} tests, built {meta.get('built_at', '?')})")
+    if own_base:
+        lines.append(f"own changes: since {own_base[:10]}; files only main changed since the map are set aside")
     if sel.mode == "subset":
         lines.append(f"selected: {len(sel.files)} whole files + {len(sel.effective_ids)} individual tests")
     return "\n".join(lines)
@@ -1057,6 +1127,7 @@ def cmd_select(args: argparse.Namespace) -> int:
     impact, meta, problem = load_map(map_dir)
     base = args.base or meta.get("sha", "")
     head = args.head
+    own_base, own_problem = resolve_own_base(args.own_base, head, cwd)
 
     if impact is None:
         sel = Selection()
@@ -1065,11 +1136,15 @@ def cmd_select(args: argparse.Namespace) -> int:
         sel = Selection()
         sel.force_full(f"map commit {base[:10]} is not reachable from this checkout")
     else:
-        sel = select(base, head, impact, cwd=cwd, explain=args.explain)
+        sel = select(base, head, impact, cwd=cwd, explain=args.explain, own_base=own_base)
+    if own_problem:
+        sel.note(own_problem)
 
     output = cwd / (args.output or f"{args.map_dir}/{SELECTION_FILE}")
-    sel.write(output, base, head)
-    print(_summary(sel, meta, base), file=sys.stderr)
+    sel.write(output, base, head, own_base)
+    print(_summary(sel, meta, base, own_base), file=sys.stderr)
+    if own_problem:
+        print(own_problem, file=sys.stderr)
     if args.explain:
         for note in sel.notes:
             print(f"  {note}", file=sys.stderr)
@@ -1120,6 +1195,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_select = sub.add_parser("select", help="select tests for the current changes (default)")
     p_select.add_argument("--base", help="commit the map was built at (default: from meta.json)")
     p_select.add_argument("--head", default="HEAD", help="commit to test (default: HEAD)")
+    p_select.add_argument(
+        "--own-base",
+        help=(
+            "commit the change branched from; files only main changed between the map "
+            "commit and this are set aside (CI passes the PR base sha; default: merge-base "
+            f"with origin/main; '{OWN_BASE_DISABLED}' counts every change since the map)"
+        ),
+    )
     p_select.add_argument("--output", help=f"selection file (default: <map-dir>/{SELECTION_FILE})")
     p_select.add_argument("--explain", action="store_true", help="print why each file selected what it did")
     p_select.add_argument("--run", action="store_true", help="run pytest on the selection; extra args after --")
