@@ -60,7 +60,7 @@ def _classify_patches():
     return [
         patch("classify_job.job_run.get_active_model", return_value=fake_model),
         patch("classify_job.job_run.get_models", return_value=[fake_model]),
-        patch("classify_job.common._load_taxonomy", return_value=None),
+        patch("classify_job.job_run._load_job_taxonomy", return_value=None),
         patch(
             "classify_job.job_run._load_labels",
             return_value=(["Northern Cardinal"], False, []),
