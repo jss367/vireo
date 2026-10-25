@@ -31,9 +31,6 @@ if TYPE_CHECKING:
     # dict a route built from one. Any: its columns are mixed SQLite values.
     PredictionRow = sqlite3.Row | Mapping[str, Any]
 
-    # ``(photo_id, species, identity, detection_id) -> category``, the
-    # closure ``effective_category_resolver`` returns.
-    CategoryOf = Callable[[int | None, str | None, SpeciesIdentity | None, int | None], str | None]
 
     # ``compare.compare_prediction_to_keywords``.
     CompareToKeywords = Callable[[str, list[str], Taxonomy | None], object]
@@ -41,7 +38,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -> CategoryOf | None:
+def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -> CategoryResolver | None:
     """Build ``(photo_id, species) -> category`` against *current* keywords.
 
     ``predictions.category`` is a snapshot of how the prediction compared
@@ -91,7 +88,10 @@ def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -
     keyword as unattributed and goes to Review.
 
     Returns None when no comparison is possible (compare or the photo set
-    unavailable) so callers can fall back to the stored snapshot.
+    unavailable) so callers can fall back to the stored snapshot. The
+    resolver's ``compared_species`` names the keywords a prediction was
+    compared against, so a "disagrees with" label never names the other
+    subject's species.
     """
     photo_ids = [pid for pid in dict.fromkeys(photo_ids) if pid is not None]
     if not photo_ids:
@@ -122,16 +122,39 @@ def effective_category_resolver(db: Database, photo_ids: Iterable[int | None]) -
     )
 
 
+class CategoryResolver:
+    """``effective_category_resolver``'s result.
+
+    Calling it gives ``(photo_id, species, identity, detection_id)``'s
+    category; ``compared_species`` gives the keyword names that comparison
+    used.
+    """
+
+    def __init__(
+        self,
+        category: Callable[[int | None, str | None, SpeciesIdentity | None, int | None], str | None],
+        compared_species: Callable[[int | None, int | None], list[str]],
+    ) -> None:
+        self._category = category
+        self.compared_species = compared_species
+
+    def __call__(
+        self, photo_id: int | None, species: str | None,
+        identity: SpeciesIdentity | None = None, detection_id: int | None = None,
+    ) -> str | None:
+        return self._category(photo_id, species, identity, detection_id)
+
+
 def _category_resolver(
     db: Database, resolver: SpeciesResolver, photo_ids: Sequence[int],
     species_by_photo: Mapping[int, list[JsonDict]],
     compare_prediction_to_keywords: CompareToKeywords, taxonomy: Taxonomy | None,
-) -> CategoryOf:
-    """Build the ``_category`` closure ``effective_category_resolver`` returns.
+) -> CategoryResolver:
+    """Build the ``CategoryResolver`` ``effective_category_resolver`` returns.
 
     ``species_by_photo`` is the photos' current species keywords; the
     keyword comparison names and the per-detection holder index are built
-    here, in that order, before the closure is returned.
+    here, in that order, before the resolver is returned.
     """
     resolved: dict[str, str] = {}
     cache: dict[tuple[int, str, int | None], str | None] = {}
@@ -161,6 +184,16 @@ def _category_resolver(
         holders = detections_by_key.get(photo_id, {}).get(keyword_key)
         return bool(holders) and detection_id not in holders
 
+    def _compared_species(photo_id: int | None, detection_id: int | None) -> list[str]:
+        """The photo's species keywords this detection is compared against."""
+        if photo_id is None:
+            return []
+        return [
+            entry["name"] for entry in species_by_photo.get(photo_id, [])
+            if detection_id is None
+            or not _held_by_other_subject(photo_id, entry["key"], detection_id)
+        ]
+
     def _category(
         photo_id: int | None, species: str | None, identity: SpeciesIdentity | None = None,
         detection_id: int | None = None,
@@ -188,7 +221,7 @@ def _category_resolver(
                 )
         return cache[key]
 
-    return _category
+    return CategoryResolver(_category, _compared_species)
 
 
 def _detections_by_consensus_key(
