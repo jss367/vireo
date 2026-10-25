@@ -108,7 +108,7 @@ def test_overlapping_boxes_do_not_authorize_unbound_legacy_eye(app_and_db):
 
 
 def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch):
-    import web.media as media
+    import web.media_crops as media
     app, db = app_and_db
     pid = db.photos.list_page()[0]['id']
     _working_copy(app, db, pid)

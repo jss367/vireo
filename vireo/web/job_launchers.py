@@ -139,10 +139,8 @@ def _photo_is_raw_jpeg_pair(photo: Row | None) -> bool:
 
 def _paired_jpeg_preview_exists(preview_dir: str, photo: Row, size: int, db: Database) -> bool:
     """Check the exact current JPEG artifact using the renderer's predicate."""
-    from web.media import (
-        _paired_preview_path,
-        _paired_render_state_hash,
-    )
+    from web.media_common import _paired_render_state_hash
+    from web.media_previews import _paired_preview_path
 
     if not photo or not photo["companion_path"]:
         return False

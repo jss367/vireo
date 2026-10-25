@@ -522,9 +522,9 @@ def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
     """Record that ``(photo_id, size)``'s on-disk preview must not be adopted.
 
     ``preview_cache_invalidations`` is the durable "do not adopt" marker
-    web.media's ``_serve_preview`` consults. Backdating a preview file does
-    nothing: the lazy-adoption branch there tests ``os.path.exists`` with no
-    mtime comparison, so an on-disk preview that outlived its owner gets
+    consulted by ``web.media_previews._PreviewServer._serve_preview``.
+    Backdating a preview file does nothing: lazy adoption checks file existence,
+    without comparing mtimes, so an on-disk preview that outlived its owner gets
     adopted and re-registered verbatim. Only this row keeps it out. The table
     is part of the canonical schema (``canonical_schema.FORMERLY_LAZY_OBJECTS``).
     """

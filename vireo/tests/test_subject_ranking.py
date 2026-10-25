@@ -171,7 +171,7 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     pack = _pack(app, pids, requested_species=TARGET)
     card = pack["cards"][0]
     # Observe geometry/selection independently of disk decode plumbing.
-    monkeypatch.setattr("web.media._focus_source_image", lambda *args: (Image.new("RGB", (320, 160), "white"), "original"))
+    monkeypatch.setattr("web.media_crops._focus_source_image", lambda *args: (Image.new("RGB", (320, 160), "white"), "original"))
     client = app.test_client()
     mask = client.get(card["mask_url"])
     assert mask.status_code == 200
@@ -322,7 +322,7 @@ def test_focus_refuses_source_replaced_while_decoding(comparison_library, monkey
     def replacing_decoder(*args):
         Image.new("RGB", (320, 160), "black").save(source_path(db, db.photos.get(card["id"])))
         return Image.new("RGB", (320, 160), "black"), "original"
-    monkeypatch.setattr("web.media._focus_source_image", replacing_decoder)
+    monkeypatch.setattr("web.media_crops._focus_source_image", replacing_decoder)
     response = app.test_client().get(card["focus_crop_mask_url"])
     assert response.status_code == 404
     assert "stale" in response.get_json()["error"]
@@ -424,7 +424,7 @@ def test_previously_returned_media_rejects_a_new_identity_conflict(comparison_li
     db.predictions.add(card["subject"]["detection_id"], "Mule Deer", .9, "conflicting-model", status="accepted")
     def never_decode(*args):
         raise AssertionError("Conflicted subject must be rejected before loading pixels")
-    monkeypatch.setattr("web.media._focus_source_image", never_decode)
+    monkeypatch.setattr("web.media_crops._focus_source_image", never_decode)
     client = app.test_client()
     for url in (card["focus_crop_url"], card["focus_crop_mask_url"], card["mask_url"]):
         response = client.get(url)

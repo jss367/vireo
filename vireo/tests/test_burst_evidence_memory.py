@@ -266,8 +266,10 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         ),
     )
     ns["get_db"] = lambda: db
-    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image", "_validated_focus_source", "_focus_geometry_error"})
-    return ns["serve_focus_crop"](1), events
+    nested("web/media_common.py", ns, {"_focus_source_image"})
+    nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error"})
+    route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
+    return ns["serve_focus_crop"](route, 1), events
 
 
 def focus_checks():
@@ -694,7 +696,7 @@ def test_forced_working_source_cannot_decode_original():
                "image_loader": types.SimpleNamespace(load_image=forbidden,
                    load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}
     helper_ns["__builtins__"] = {**vars(builtins), "__import__": lambda name, *a, **kw: modules[name]}
-    nested("web/media.py", helper_ns, {"_focus_source_image"})
+    nested("web/media_common.py", helper_ns, {"_focus_source_image"})
     assert helper_ns["_focus_source_image"](
         helper_ns["config"], {"folder_id": 1, "filename": "invented.raw"}, {"path": "/invented"}, "working",
     ) == (None, "original")

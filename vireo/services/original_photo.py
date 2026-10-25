@@ -1,6 +1,6 @@
 """Source resolution, decoding and extraction for ``/photos/<id>/original``.
 
-``web.media._OriginalPhotoRequest`` serves the full-resolution image for 1:1
+``web.media_originals._OriginalPhotoRequest`` serves the full-resolution image for 1:1
 zoom. The steps that need no Flask live here, each collaborator owning only
 the state it writes:
 
@@ -21,7 +21,7 @@ the state it writes:
   the catalog commit.
 
 The responses (``send_file``, streamed renditions, artifact flights) and the
-locks held around them stay in ``web.media``. Publication runs inside the
+locks held around them stay in ``web.media_originals``. Publication runs inside the
 caller's ``publication`` context (the route's ``_preparation_publication``),
 which refuses a late write by raising.
 """
