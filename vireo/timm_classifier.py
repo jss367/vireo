@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from match_confidence import LOGIT
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _MODEL_DIR_MAP = {
     "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21": "timm-inat21-eva02-l",
 }
 
-_MODELS_ROOT = os.path.expanduser("~/.vireo/models")
+_MODELS_ROOT = default_path("models")
 
 # Bounded retry for the background label_descriptions.json heal.
 #

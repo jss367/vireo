@@ -19,6 +19,7 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app_paths import default_path
 from file_replace import replace_file
 
 try:
@@ -47,11 +48,11 @@ _LOCK_BYTES = 1
 
 
 def _runtime_path() -> Path:
-    return Path(os.path.expanduser("~/.vireo/runtime.json"))
+    return Path(default_path("runtime"))
 
 
 def _lock_path() -> Path:
-    return Path(os.path.expanduser("~/.vireo/runtime.lock"))
+    return Path(default_path("runtime_lock"))
 
 
 # Module-global FD. When this process owns the single-instance slot, we

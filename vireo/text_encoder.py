@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ _MODEL_DIR_MAP = {
     "hf-hub:imageomics/bioclip-2.5-vith14": "bioclip-2.5-vith14",
 }
 
-_MODELS_ROOT = os.path.expanduser("~/.vireo/models")
+_MODELS_ROOT = default_path("models")
 
 # Context length for CLIP-style tokenizers
 _CONTEXT_LENGTH = 77

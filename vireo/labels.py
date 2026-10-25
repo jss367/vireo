@@ -15,6 +15,7 @@ import urllib.request
 from collections import OrderedDict
 
 import certifi
+from app_paths import default_path
 from file_replace import replace_file
 
 log = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 INAT_API = "https://api.inaturalist.org/v1"
 
-LABELS_DIR = os.path.expanduser("~/.vireo/labels")
+LABELS_DIR = default_path("labels")
 
 
 class SpeciesLabels(list):
@@ -732,7 +733,7 @@ def get_active_labels():
         list of metadata dicts (each has at least 'labels_file').
         Empty list if nothing is configured or files are missing.
     """
-    config_path = os.path.expanduser("~/.vireo/labels_active.json")
+    config_path = default_path("active_labels")
     if not os.path.exists(config_path):
         return []
 
@@ -775,7 +776,7 @@ def set_active_labels(labels_files):
         labels_files: list of label file paths, or a single path string
                       (for backward compat).
     """
-    config_path = os.path.expanduser("~/.vireo/labels_active.json")
+    config_path = default_path("active_labels")
     if isinstance(labels_files, str):
         labels_files = [labels_files]
     # Atomic: a torn in-place write reads back as [] in get_active_labels,

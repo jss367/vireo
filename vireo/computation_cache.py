@@ -21,6 +21,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from app_paths import default_path
 from file_replace import replace_file
 from services import detection_store
 from services.retained_cache import guarded_reader, reader_guard
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
 
 ARTIFACT_SCHEMA = 1
 BUNDLE_FORMAT = 1
-DEFAULT_CACHE_DIR = "~/.vireo/computation-cache"
+DEFAULT_CACHE_DIR = default_path("computation_cache", expand_user=False)
 
 MAX_OBJECTS = 10_000
 MAX_OBJECT_BYTES = 8 * 1024 * 1024

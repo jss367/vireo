@@ -74,9 +74,8 @@ def test_session_loader_missing_model(tmp_path):
     dino_embed._variant_loaded = None
 
     with patch.dict(os.environ, {"HOME": str(tmp_path)}):
-        with patch("os.path.expanduser", return_value=str(tmp_path)):
-            with pytest.raises(FileNotFoundError, match="DINOv2 ONNX model not found"):
-                dino_embed._get_dinov2_session("vit-b14")
+        with pytest.raises(FileNotFoundError, match="DINOv2 ONNX model not found"):
+            dino_embed._get_dinov2_session("vit-b14")
 
 
 # -- Singleton caching --
@@ -114,7 +113,7 @@ def test_singleton_reloads_for_different_variant(tmp_path):
     model_path.write_bytes(b"fake")
 
     mock_new_session = MagicMock()
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("dino_embed.onnx_runtime.create_session", return_value=mock_new_session):
             result = dino_embed._get_dinov2_session("vit-b14")
 
@@ -169,10 +168,10 @@ def test_concurrent_first_load_creates_only_one_session(tmp_path):
     # Apply patches once on the main thread, not from inside each worker.
     # ``mock.patch`` mutates a module global; two threads independently
     # entering/exiting a patch on the same target can race the restore
-    # and leak the patched function past the test boundary — flaking
+    # and leak the patched environment past the test boundary — flaking
     # unrelated tests on the same xdist worker that call
     # ``os.path.expanduser`` (e.g. ``test_runtime.py``).
-    with patch("os.path.expanduser", return_value=str(tmp_path)), patch(
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}), patch(
         "dino_embed.onnx_runtime.create_session",
         side_effect=slow_create,
     ):
@@ -234,7 +233,7 @@ def test_get_session_passes_pure_cancel_probe_to_create_session(tmp_path):
         return MagicMock()
 
     try:
-        with patch("os.path.expanduser", return_value=str(tmp_path)), patch(
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}), patch(
             "dino_embed.onnx_runtime.create_session",
             side_effect=capturing_create,
         ):

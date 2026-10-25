@@ -8,6 +8,7 @@ import os
 import threading
 
 import numpy as np
+from app_paths import default_path
 from file_replace import replace_file
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -19,7 +20,7 @@ _lock = threading.Lock()
 _download_lock = threading.Lock()
 
 # MegaDetector ONNX model path — downloaded to ~/.vireo/models/megadetector-v6/
-MEGADETECTOR_ONNX_DIR = os.path.expanduser("~/.vireo/models/megadetector-v6")
+MEGADETECTOR_ONNX_DIR = os.path.join(default_path("models"), "megadetector-v6")
 MEGADETECTOR_ONNX_PATH = os.path.join(MEGADETECTOR_ONNX_DIR, "model.onnx")
 
 # MegaDetector input size

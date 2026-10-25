@@ -13,6 +13,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from app_paths import default_path
 from file_replace import replace_file
 from services.hf_cache_lock import cache_access
 
@@ -55,7 +56,7 @@ _dinov2_session_lock = threading.Lock()
 
 def _dinov2_model_path(variant):
     model_dir = os.path.join(
-        os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+        default_path("models"), f"dinov2-{variant}"
     )
     return model_dir, os.path.join(model_dir, "model.onnx")
 
@@ -320,7 +321,7 @@ def _get_dinov2_session(variant="vit-b14"):
             return _session
 
         model_dir = os.path.join(
-            os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+            default_path("models"), f"dinov2-{variant}"
         )
         model_path = os.path.join(model_dir, "model.onnx")
 

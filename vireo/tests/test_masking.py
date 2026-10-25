@@ -342,7 +342,7 @@ def test_sam2_sessions_missing_model(tmp_path):
 
     from unittest.mock import patch
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         try:
             masking._get_sam2_sessions("sam2-small")
             assert False, "Should have raised FileNotFoundError"
@@ -406,7 +406,7 @@ def test_sam2_sessions_reloads_for_different_variant(tmp_path):
         call_count[0] += 1
         return result
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session", side_effect=mock_create_session):
             enc, dec = masking._get_sam2_sessions("sam2-small")
 
@@ -446,7 +446,7 @@ def test_sam2_sessions_drop_coreml_on_apple(tmp_path):
     def mock_get_providers():
         return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session",
                    side_effect=mock_create_session):
             with patch("masking.onnx_runtime.get_providers",
@@ -489,7 +489,7 @@ def test_sam2_sessions_keep_cuda_on_linux_gpu(tmp_path):
     def mock_get_providers():
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-    with patch("os.path.expanduser", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session",
                    side_effect=mock_create_session):
             with patch("masking.onnx_runtime.get_providers",

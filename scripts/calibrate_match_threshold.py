@@ -381,9 +381,12 @@ def fmt(value, score_kind):
 
 
 def main(argv=None):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from vireo.app_paths import default_path
+
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--db", default=os.path.expanduser("~/.vireo/vireo.db"),
+        "--db", default=default_path("database"),
         help="catalog to calibrate against (default ~/.vireo/vireo.db)",
     )
     parser.add_argument(
