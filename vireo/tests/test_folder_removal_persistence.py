@@ -6,7 +6,7 @@ import pytest
 from db import Database
 from repositories.workspace_folders import WorkspaceFolderRepository
 from scanner import ScanOptions
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -15,13 +15,13 @@ def shared_tree(tmp_path):
     workspace = db._ws_id()
     parent_path = tmp_path / "photos"
     parent_path.mkdir()
-    parent = db.add_folder(str(parent_path))
-    missing = db.add_folder(str(parent_path / "missing"), parent_id=parent,
+    parent = workspace_folders.add_folder(db, str(parent_path))
+    missing = workspace_folders.add_folder(db, str(parent_path / "missing"), parent_id=parent,
                             workspace_root=False)
-    child = db.add_folder(str(parent_path / "missing" / "child"), parent_id=missing,
+    child = workspace_folders.add_folder(db, str(parent_path / "missing" / "child"), parent_id=missing,
                           workspace_root=False)
     other = db.create_workspace("All")
-    db.add_workspace_folder(other, parent)
+    workspace_folders.add_workspace_folder(db, other, parent)
     db.folders.check_health()
     yield db, workspace, other, parent, missing, child
     db.close()
@@ -33,19 +33,19 @@ def test_removed_shared_folders_stay_removed_after_refresh_and_restart(shared_tr
     if operation == "delete":
         assert catalog_deletion.delete_folder(db, missing)["deleted_photos"] == 0
     elif operation == "unlink_tree":
-        db.remove_workspace_folder_tree(workspace, missing)
+        workspace_folders.remove_workspace_folder_tree(db, workspace, missing)
     else:
-        db.remove_workspace_folder(workspace, child)
-        db.remove_workspace_folder(workspace, missing)
+        workspace_folders.remove_workspace_folder(db, workspace, child)
+        workspace_folders.remove_workspace_folder(db, workspace, missing)
 
     for _ in range(2):
-        assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
-        db.get_workspace_root_folder_ids(workspace)
-        db.get_workspace_folder_roots(workspace)
+        assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent}
+        workspace_folders.get_workspace_root_folder_ids(db, workspace)
+        workspace_folders.get_workspace_folder_roots(db, workspace)
         db.folders.check_health()
         assert db.folders.missing() == []
         assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
-        assert {f["id"] for f in db.get_workspace_folders(other)} == {parent, missing, child}
+        assert {f["id"] for f in workspace_folders.get_workspace_folders(db, other)} == {parent, missing, child}
         if _ == 0:
             db_path = db._db_path
             db.close()
@@ -61,23 +61,23 @@ def test_scanning_parent_does_not_restore_removed_missing_descendants(shared_tre
     catalog_deletion.delete_folder(db, missing)
 
     scan(db.folders.get(parent)["path"], db, options=ScanOptions(extract_full_metadata=False))
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent}
     assert db.folders.missing() == []
 
 
 def test_explicit_add_restores_removed_subtree(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     catalog_deletion.delete_folder(db, missing)
-    db.add_workspace_folder(workspace, missing)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, missing, child}
+    workspace_folders.add_workspace_folder(db, workspace, missing)
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, missing, child}
     assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
 def test_exact_import_restores_only_the_selected_folder(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     catalog_deletion.delete_folder(db, missing)
-    db.add_workspace_folder_exact(workspace, missing)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, missing}
+    workspace_folders.add_workspace_folder_exact(db, workspace, missing)
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, missing}
 
 
 def test_removing_shared_folder_preserves_other_workspaces_photos(shared_tree):
@@ -85,18 +85,18 @@ def test_removing_shared_folder_preserves_other_workspaces_photos(shared_tree):
     photo = photo_ingest.add_photo(db, folder_id=child, filename="bird.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     assert catalog_deletion.delete_folder(db, missing) == {"deleted_photos": 0, "files": []}
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent}
     assert db.photos.get(photo) is not None
-    assert {f["id"] for f in db.get_workspace_folders(other)} == {parent, missing, child}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, other)} == {parent, missing, child}
 
 
 def test_new_descendants_still_materialize(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     catalog_deletion.delete_folder(db, missing)
     db.set_active_workspace(other)
-    new_folder = db.add_folder(db.folders.get(parent)["path"] + "/new",
+    new_folder = workspace_folders.add_folder(db, db.folders.get(parent)["path"] + "/new",
                                parent_id=parent, workspace_root=False)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, new_folder}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, new_folder}
 
 
 @pytest.mark.parametrize("operation", ["delete", "unlink_tree"])
@@ -105,31 +105,31 @@ def test_new_folders_under_removed_subtree_stay_hidden(shared_tree, operation):
     if operation == "delete":
         catalog_deletion.delete_folder(db, missing)
     else:
-        db.remove_workspace_folder_tree(workspace, missing)
+        workspace_folders.remove_workspace_folder_tree(db, workspace, missing)
     db.set_active_workspace(other)
     removed_path = db.folders.get(missing)["path"]
-    new_folder = db.add_folder(removed_path + "/new", parent_id=missing, workspace_root=False)
-    sibling = db.add_folder(removed_path + "-sibling", parent_id=parent, workspace_root=False)
+    new_folder = workspace_folders.add_folder(db, removed_path + "/new", parent_id=missing, workspace_root=False)
+    sibling = workspace_folders.add_folder(db, removed_path + "-sibling", parent_id=parent, workspace_root=False)
     assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(new_folder)} == {other}
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, sibling}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, sibling}
 
     # Registration during a parent rescan must use the same subtree rule.
     db.set_active_workspace(workspace)
-    db.add_folder(db.folders.get(parent)["path"])
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, sibling}
-    db.add_workspace_folder(workspace, missing)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {
+    workspace_folders.add_folder(db, db.folders.get(parent)["path"])
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, sibling}
+    workspace_folders.add_workspace_folder(db, workspace, missing)
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {
         parent, missing, child, new_folder, sibling,
     }
 
 
 def test_single_folder_unlink_does_not_remove_descendants(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
-    db.remove_workspace_folder(workspace, missing)
+    workspace_folders.remove_workspace_folder(db, workspace, missing)
     db.set_active_workspace(other)
-    new_folder = db.add_folder(db.folders.get(missing)["path"] + "/new",
+    new_folder = workspace_folders.add_folder(db, db.folders.get(missing)["path"] + "/new",
                                parent_id=missing, workspace_root=False)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, child, new_folder}
     assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
@@ -141,9 +141,9 @@ def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree)
         [(f"{path}/folder-{i}", missing) for i in range(3000)],
     )
     db.conn.commit()
-    db.add_workspace_folder(workspace, parent)
-    db.add_workspace_folder(other, parent)
-    db.remove_workspace_folder_tree(workspace, missing)
+    workspace_folders.add_workspace_folder(db, workspace, parent)
+    workspace_folders.add_workspace_folder(db, other, parent)
+    workspace_folders.remove_workspace_folder_tree(db, workspace, missing)
     ticks = 0
 
     def limit_query_work():
@@ -155,7 +155,7 @@ def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree)
     # record for every descendant used to scan the catalog quadratically.
     db.conn.set_progress_handler(limit_query_work, 1000)
     try:
-        assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
+        assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent}
     finally:
         db.conn.set_progress_handler(None, 0)
 
@@ -163,11 +163,11 @@ def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree)
 def test_explicit_subfolder_root_can_override_removed_ancestor(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     catalog_deletion.delete_folder(db, missing)
-    db.add_workspace_folder(workspace, child)
+    workspace_folders.add_workspace_folder(db, workspace, child)
     db.set_active_workspace(other)
-    new_folder = db.add_folder(db.folders.get(child)["path"] + "/new",
+    new_folder = workspace_folders.add_folder(db, db.folders.get(child)["path"] + "/new",
                                parent_id=child, workspace_root=False)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent, child, new_folder}
     assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
@@ -188,7 +188,7 @@ def test_background_discovery_cannot_restore_a_concurrent_removal(shared_tree, m
         return snapshot
 
     monkeypatch.setattr(WorkspaceFolderRepository, "removed_ids", remove_after_discovery_snapshot)
-    assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, workspace)} == {parent}
     assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
 
 
@@ -210,14 +210,14 @@ def test_existing_catalog_gains_removal_tracking(shared_tree):
     with Database(db._db_path) as upgraded:
         upgraded.set_active_workspace(workspace)
         catalog_deletion.delete_folder(upgraded, missing)
-        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
+        assert {f["id"] for f in workspace_folders.get_workspace_folders(upgraded, workspace)} == {parent}
 
 
 @pytest.mark.parametrize("column_default", [0, 1])
 def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_tree, column_default):
     db, workspace, other, parent, missing, child = shared_tree
     catalog_deletion.delete_folder(db, missing)
-    db.add_workspace_folder(workspace, child)
+    workspace_folders.add_workspace_folder(db, workspace, child)
     # Earlier branch schemas used either default, but explicit tree removals
     # stored the same recursive flag in both. Preserve that recorded intent.
     db.conn.execute("DROP VIEW workspace_removed_folders")
@@ -230,11 +230,11 @@ def test_upgrade_preserves_recorded_recursive_scope_with_restored_child(shared_t
     db.conn.commit()
     with Database(db._db_path) as upgraded:
         upgraded.set_active_workspace(other)
-        upgraded.add_folder(upgraded.folders.get(missing)["path"] + "/sibling",
+        workspace_folders.add_folder(upgraded, upgraded.folders.get(missing)["path"] + "/sibling",
                             parent_id=missing, workspace_root=False)
-        new_child = upgraded.add_folder(upgraded.folders.get(child)["path"] + "/new",
+        new_child = workspace_folders.add_folder(upgraded, upgraded.folders.get(child)["path"] + "/new",
                                         parent_id=child, workspace_root=False)
-        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent, child, new_child}
+        assert {f["id"] for f in workspace_folders.get_workspace_folders(upgraded, workspace)} == {parent, child, new_child}
 
 
 def test_global_folder_delete_cleans_up_removal_records(shared_tree):
@@ -250,11 +250,11 @@ def test_global_folder_delete_cleans_up_removal_records(shared_tree):
 def test_missing_folder_delete_survives_background_polls(app_and_db, tmp_path):
     app, db = app_and_db
     workspace = db._ws_id()
-    parent = db.add_folder(str(tmp_path))
-    missing = db.add_folder(str(tmp_path / "missing"), parent_id=parent,
+    parent = workspace_folders.add_folder(db, str(tmp_path))
+    missing = workspace_folders.add_folder(db, str(tmp_path / "missing"), parent_id=parent,
                             workspace_root=False)
     other = db.create_workspace("All")
-    db.add_workspace_folder(other, parent)
+    workspace_folders.add_workspace_folder(db, other, parent)
     client = app.test_client()
 
     before = client.post("/api/folders/check-health").get_json()["missing"]

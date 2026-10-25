@@ -21,7 +21,7 @@ from inat_export import (
 )
 from metadata import _exiftool_command, find_exiftool
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def test_exif_datetime_preserves_time_and_offset():
@@ -170,7 +170,7 @@ def test_export_inat_photo_renders_separate_edited_jpeg(tmp_path):
     source = source_dir / "cardinal.jpg"
     Image.new("RGB", (32, 24), (190, 30, 20)).save(source)
     source_before = source.read_bytes()
-    folder_id = db.add_folder(str(source_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=source.name,
@@ -208,7 +208,7 @@ def test_export_inat_photo_uses_bounded_staging_filename(tmp_path):
     long_stem = "b" * 240
     source = source_dir / f"{long_stem}.jpg"
     Image.new("RGB", (32, 24), (190, 30, 20)).save(source)
-    folder_id = db.add_folder(str(source_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=source.name,
@@ -255,7 +255,7 @@ def test_export_inat_photo_restores_rendered_file_mode(tmp_path):
     source_dir.mkdir()
     source = source_dir / "cardinal.jpg"
     Image.new("RGB", (32, 24), (190, 30, 20)).save(source)
-    folder_id = db.add_folder(str(source_dir), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(source_dir), name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id,
         filename=source.name,

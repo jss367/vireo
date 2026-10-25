@@ -9,7 +9,7 @@ import os
 
 import pytest
 from db import Database
-from services import missing_originals, photo_ingest
+from services import missing_originals, photo_ingest, workspace_folders
 from wait import wait_for_job_via_client
 
 
@@ -53,8 +53,8 @@ def test_get_missing_photos_scoped_to_folder(tmp_path):
     a.mkdir()
     b = tmp_path / "B"
     b.mkdir()
-    fa = db.add_folder(str(a), name="A")
-    fb = db.add_folder(str(b), name="B")
+    fa = workspace_folders.add_folder(db, str(a), name="A")
+    fb = workspace_folders.add_folder(db, str(b), name="B")
     pa = _add_photo_file(db, a, fa, "a1.jpg")
     _add_photo_file(db, b, fb, "b1.jpg")
 
@@ -76,8 +76,8 @@ def test_get_missing_photos_scope_includes_subtree(tmp_path):
     root.mkdir()
     sub = root / "sub"
     sub.mkdir()
-    froot = db.add_folder(str(root), name="root")
-    fsub = db.add_folder(str(sub), name="sub", parent_id=froot)
+    froot = workspace_folders.add_folder(db, str(root), name="root")
+    fsub = workspace_folders.add_folder(db, str(sub), name="sub", parent_id=froot)
     ps = _add_photo_file(db, sub, fsub, "s1.jpg")
 
     (sub / "s1.jpg").unlink()
@@ -102,13 +102,13 @@ def test_get_missing_photos_scope_uses_temp_table_over_variable_cap(tmp_path, mo
     db = _db_with_active_ws(tmp_path)
     root = tmp_path / "root"
     root.mkdir()
-    froot = db.add_folder(str(root), name="root")
+    froot = workspace_folders.add_folder(db, str(root), name="root")
     ghost_ids = []
     # Enough subfolders to exceed the patched chunk size several times over.
     for i in range(10):
         sub = root / f"sub{i}"
         sub.mkdir()
-        fsub = db.add_folder(str(sub), name=f"sub{i}", parent_id=froot)
+        fsub = workspace_folders.add_folder(db, str(sub), name=f"sub{i}", parent_id=froot)
         pid = _add_photo_file(db, sub, fsub, f"g{i}.jpg")
         (sub / f"g{i}.jpg").unlink()
         ghost_ids.append(pid)
@@ -130,9 +130,9 @@ def test_get_missing_photos_scope_includes_legacy_null_parent_descendants(tmp_pa
     root.mkdir()
     sub = root / "sub"
     sub.mkdir()
-    froot = db.add_folder(str(root), name="root")
+    froot = workspace_folders.add_folder(db, str(root), name="root")
     # Simulate a legacy row: descendant path under root, but no parent_id link.
-    fsub = db.add_folder(str(sub), name="sub", parent_id=None)
+    fsub = workspace_folders.add_folder(db, str(sub), name="sub", parent_id=None)
     ps = _add_photo_file(db, sub, fsub, "s1.jpg")
 
     (sub / "s1.jpg").unlink()
@@ -167,8 +167,8 @@ def app_with_real_folders(tmp_path, monkeypatch):
     a.mkdir()
     b = tmp_path / "B"
     b.mkdir()
-    fa = db.add_folder(str(a), name="A")
-    fb = db.add_folder(str(b), name="B")
+    fa = workspace_folders.add_folder(db, str(a), name="A")
+    fb = workspace_folders.add_folder(db, str(b), name="B")
     pa = _add_photo_file(db, a, fa, "a1.jpg")
     _add_photo_file(db, b, fb, "b1.jpg")
     (a / "a1.jpg").unlink()  # A's original is gone

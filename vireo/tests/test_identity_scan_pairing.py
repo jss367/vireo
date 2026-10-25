@@ -7,7 +7,7 @@ from db import Database
 from PIL import Image
 from repositories.identity_alternatives import IdentityMergeConflict
 from scanner import ScanOptions, scan
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -15,7 +15,7 @@ def _catalog(tmp_path, conflict_first, *, conflicting=True):
     db = Database(str(tmp_path / 'pairing.db'))
     existing = tmp_path / 'existing'
     existing.mkdir()
-    folder = db.add_folder(str(existing))
+    folder = workspace_folders.add_folder(db, str(existing))
     good_stem, bad_stem = ('b-good', 'a-conflict') if conflict_first else ('a-good', 'b-conflict')
     pairs = {}
     for key, stem in [('good', good_stem), ('bad', bad_stem)]:
@@ -27,7 +27,7 @@ def _catalog(tmp_path, conflict_first, *, conflicting=True):
             save_alternatives(db, [pairs['bad'][1]], ['Heron', 'Egret'], 'JPEG evidence', 'Call')
     sharing = db.create_workspace('Shared pair review')
     db.set_active_workspace(1)
-    db.add_workspace_folder(sharing, folder)
+    workspace_folders.add_workspace_folder(db, sharing, folder)
     members = sum(pairs.values(), [])
     collection = db.conn.execute('INSERT INTO collections(name,rules,workspace_id) VALUES (?,?,?)',
                                  ('Pairs', json.dumps([{'field': 'photo_ids', 'value': members}]), 1)).lastrowid

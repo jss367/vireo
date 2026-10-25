@@ -17,6 +17,8 @@ import copy
 import json
 import logging
 import os
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol, cast
 
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
@@ -24,10 +26,19 @@ from pipeline_results import auto_detach_burst_for_species
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+    from web.web_types import GetDb
+
 log = logging.getLogger(__name__)
 
 
-def create_encounters_blueprint(get_db, json_error, db_path):
+def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: str) -> Blueprint:
     """Build the encounter species-confirmation blueprint.
 
     ``db_path`` locates the pipeline results cache (it lives next to the
@@ -36,7 +47,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
     blueprint = Blueprint("encounters", __name__)
 
     @blueprint.route("/api/encounters/species", methods=["POST"])
-    def api_encounter_species():
+    def api_encounter_species() -> ResponseReturnValue:
         """Confirm species for all photos in an encounter or a single burst.
 
         Expects JSON: {"species": "Blue Jay", "photo_ids": [1, 2, 3],
@@ -70,7 +81,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
                 json_error=json_error,
             )
 
-    def _confirm_encounter_species(db):
+    def _confirm_encounter_species(db: Database) -> ErrorResponse | Response:
         """Confirm species while holding the grouping and database writer locks."""
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -144,7 +155,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         )
 
     @blueprint.route("/api/encounters/species/bulk", methods=["POST"])
-    def api_encounter_species_bulk():
+    def api_encounter_species_bulk() -> ResponseReturnValue:
         """Add distinct species selections atomically, with one compact result."""
         from pipeline_locks import acquire_workspace_regroup
         db = get_db()
@@ -157,7 +168,16 @@ def create_encounters_blueprint(get_db, json_error, db_path):
     return blueprint
 
 
-def _apply_confirmation(confirmation, low_confidence_photo_ids, response_mode):
+
+class _ErrorFor(Protocol):
+    """``json_error`` or a wrapper naming the bulk assignment at fault."""
+
+    def __call__(self, msg: str, status: int = 400, /) -> ErrorResponse: ...
+
+
+def _apply_confirmation(
+    confirmation: _SpeciesConfirmation, low_confidence_photo_ids: list[int], response_mode: str,
+) -> tuple[JsonDict, JsonDict | None]:
     """Stage an individual confirmation without committing or saving the cache."""
     ws_id = confirmation.db.require_workspace_id()
     confirmation.resolve_target_keyword()
@@ -170,7 +190,10 @@ def _apply_confirmation(confirmation, low_confidence_photo_ids, response_mode):
     return confirmation.response(low_confidence_photo_ids, response_mode), confirmation.cached
 
 
-def _commit_species_edit(db, before_cached, cache_dir, work):
+def _commit_species_edit(
+    db: Database, before_cached: JsonDict | None, cache_dir: str,
+    work: Callable[[], tuple[JsonDict, JsonDict | None]],
+) -> Response:
     """Commit catalog and cache together, restoring both after a failed write."""
     from pipeline import save_results_raw
     attempted_save = False
@@ -197,7 +220,7 @@ def _commit_species_edit(db, before_cached, cache_dir, work):
     return jsonify(result)
 
 
-def _bulk_species(db, body, db_path, json_error):
+def _bulk_species(db: Database, body: object, db_path: str, json_error: JsonError) -> ErrorResponse | Response:
     """Validate every target before starting an all-or-nothing additive batch."""
     if not isinstance(body, dict) or set(body) - {"assignments", "response_mode"}:
         return json_error("Expected assignments and optional response_mode")
@@ -208,7 +231,7 @@ def _bulk_species(db, body, db_path, json_error):
         return json_error("assignments must contain between 1 and 100 selections")
     validated = []
     for i, assignment in enumerate(assignments):
-        def invalid(message, status=400, index=i):
+        def invalid(message: str, status: int = 400, index: int = i) -> ErrorResponse:
             return json_error(f"Assignment {index}: {message}; no assignments applied", status)
         if not isinstance(assignment, dict) or set(assignment) - {"species", "photo_ids", "detection_ids"}:
             return invalid("Expected species, photo_ids and optional detection_ids (additive only)")
@@ -222,8 +245,9 @@ def _bulk_species(db, body, db_path, json_error):
         error = _detection_ids_error(db, assignment, invalid)
         if error is not None:
             return error
+        # _photo_ids_error accepted ``ids`` as a list of unique ints.
         validated.append({**assignment, "species": normalize_keyword_display(species),
-                          "low_confidence_photo_ids": _low_confidence_photo_ids(db, ids)})
+                          "low_confidence_photo_ids": _low_confidence_photo_ids(db, cast("list[int]", ids))})
     from pipeline import load_results_raw
     from services.bulk_species_assignments import apply_assignments
     cache_dir = os.path.dirname(db_path)
@@ -234,7 +258,7 @@ def _bulk_species(db, body, db_path, json_error):
     )
 
 
-def _detection_ids_error(db, assignment, json_error):
+def _detection_ids_error(db: Database, assignment: JsonDict, json_error: _ErrorFor) -> ErrorResponse | None:
     """Subject selections must belong to exactly the submitted photos."""
     if "detection_ids" not in assignment:
         return None
@@ -250,7 +274,9 @@ def _detection_ids_error(db, assignment, json_error):
     return None
 
 
-def _review_preview(db, confirmation, body, json_error):
+def _review_preview(
+    db: Database, confirmation: _SpeciesConfirmation, body: JsonDict, json_error: JsonError,
+) -> ErrorResponse | Response | None:
     """Preview and revalidate a deliberate, exact subset before any writes."""
     if not body.get("preview") and "preview_token" not in body:
         if "group_changes" in body:
@@ -277,11 +303,12 @@ def _review_preview(db, confirmation, body, json_error):
     if body.get("split") and set(confirmation.photo_ids) == set(enc["photo_ids"]):
         return json_error("Select fewer than all encounter photos to separate a transition")
     if confirmation.is_replacement and confirmation.old_kid_row is not None:
-        key = keyword_match_key(confirmation.previous_species)
+        key = keyword_match_key(confirmation._replaced_species)
         confirmation._collect_old_rows(key, _HomonymConflicts(db, key))
     from services.review_group_changes import InvalidGroupChanges, validate_group_changes
     try:
-        confirmation.group_plan = validate_group_changes(db, confirmation.cached, enc, body)
+        # ``enc`` came from the loaded cache, so the cache is not None.
+        confirmation.group_plan = validate_group_changes(db, cast("JsonDict", confirmation.cached), enc, body)
     except InvalidGroupChanges as exc:
         return json_error(str(exc), 409)
     result = preview(db, confirmation, body)
@@ -296,7 +323,7 @@ def _review_preview(db, confirmation, body, json_error):
     return None
 
 
-def _photo_ids_error(db, photo_ids, json_error):
+def _photo_ids_error(db: Database, photo_ids: object, json_error: _ErrorFor) -> ErrorResponse | None:
     """The error response for unknown or out-of-workspace photo_ids, else None."""
     if (not isinstance(photo_ids, list) or not photo_ids
             or any(type(pid) is not int for pid in photo_ids)
@@ -319,7 +346,7 @@ def _photo_ids_error(db, photo_ids, json_error):
     return None
 
 
-def _low_confidence_photo_ids(db, photo_ids):
+def _low_confidence_photo_ids(db: Database, photo_ids: list[int]) -> list[int]:
     """Photos whose only detections are below detector_confidence.
 
     Surface photos whose only detections are below the workspace's
@@ -360,12 +387,12 @@ class _HomonymConflicts:
     each unique taxon gets its own homonym conflict answer.
     """
 
-    def __init__(self, db, old_target_key):
+    def __init__(self, db: Database, old_target_key: str) -> None:
         self.db = db
         self.old_target_key = old_target_key
-        self.cache = {}
+        self.cache: dict[tuple[int | None, int | None], bool] = {}
 
-    def check(self, target_taxon_id, target_kid_id):
+    def check(self, target_taxon_id: int | None, target_kid_id: int) -> bool:
         cache_key = (
             target_taxon_id,
             None if target_taxon_id is not None else target_kid_id,
@@ -383,7 +410,9 @@ class _HomonymConflicts:
         return conflict
 
 
-def _is_previous_species_row(row, photo_old, old_target_key, homonym_conflicts):
+def _is_previous_species_row(
+    row: Row, photo_old: Row, old_target_key: str, homonym_conflicts: _HomonymConflicts,
+) -> bool:
     """Whether an attached species row is the photo's resolved old species."""
     eff_taxon_id = photo_old["taxon_id"]
     eff_kid_id = photo_old["id"]
@@ -413,9 +442,9 @@ class _SpeciesConfirmation:
     """
 
     def __init__(
-        self, db, json_error, species, photo_ids, burst_index, *,
-        add_mode, remove_mode, cache_dir,
-    ):
+        self, db: Database, json_error: JsonError, species: str, photo_ids: list[int], burst_index: int | None, *,
+        add_mode: bool, remove_mode: bool, cache_dir: str,
+    ) -> None:
         self.db = db
         self.json_error = json_error
         self.species = species
@@ -425,19 +454,19 @@ class _SpeciesConfirmation:
         self.remove_mode = remove_mode
         self.cache_dir = cache_dir
 
-        self.group_plan = None
-        self.group_photo_states = None
+        self.group_plan: JsonDict | None = None
+        self.group_photo_states: dict[int, JsonDict] | None = None
         self.preview_scope = False
         self.split = False
-        self.cached = None
-        self.before_cached = None
-        self.target_enc = None
-        self.target_enc_idx = None
-        self.current_species_list = []
-        self.previous_species = None
+        self.cached: JsonDict | None = None
+        self.before_cached: JsonDict | None = None
+        self.target_enc: JsonDict | None = None
+        self.target_enc_idx: int | None = None
+        self.current_species_list: list[str] = []
+        self.previous_species: str | None = None
 
         self.is_replacement = False
-        self.old_kid_row = None
+        self.old_kid_row: Row | None = None
         # ``per_photo_old_row`` maps each submitted photo to the effective
         # old-species keyword row the removal loop should match against.
         # For root-lookup (parent_id IS NULL) hits every photo shares the
@@ -448,26 +477,32 @@ class _SpeciesConfirmation:
         # ``best_taxon`` used to select one row for the whole batch would
         # leave every photo on a different taxon with its old leaf still
         # attached — the removal loop matches by ``taxon_id``.
-        self.per_photo_old_row = {}
+        self.per_photo_old_row: dict[int, Row] = {}
 
-        self.kid = None
-        self.already_has_new = set()
-        self.newly_tagged = []
-        self.old_rows_by_photo = {}
-        self.had_old = set()
-        self.photo_edit_id = None
-        self.provenance = None
-        self.attribution_only = []
-        self.undo_edit_id = None
+        self.kid: int | None = None
+        self.already_has_new: set[int] = set()
+        self.newly_tagged: list[int] = []
+        self.old_rows_by_photo: dict[int, list[Row]] = {}
+        self.had_old: set[int] = set()
+        self.photo_edit_id: int | None = None
+        self.provenance: JsonDict | None = None
+        self.attribution_only: list[int] = []
+        self.undo_edit_id: int | None = None
 
-        self.new_species_list = []
-        self.cache_description = None
-        self.actual_by_photo = None
-        self.new_burst_override = None
+        self.new_species_list: list[str] = []
+        # Set by compute_cache_state / _read_frame_species before any reader.
+        self.cache_description = ""
+        self.actual_by_photo: dict[int, list[str]] = {}
+        self.new_burst_override: JsonDict | None = None
         self.will_auto_detach = False
-        self.new_encounter_state = None
+        self.new_encounter_state: JsonDict | None = None
 
-    def read_provenance(self, body):
+    @property
+    def _replaced_species(self) -> str:
+        """``previous_species``, which is set whenever ``is_replacement`` holds."""
+        return cast(str, self.previous_species)
+
+    def read_provenance(self, body: JsonDict) -> ErrorResponse | None:
         if 'provenance' not in body:
             return None
         from services.species_provenance import validate_provenance
@@ -479,7 +514,7 @@ class _SpeciesConfirmation:
 
     # -- request against the cache ----------------------------------
 
-    def load_cache(self, load_results_raw):
+    def load_cache(self, load_results_raw: Callable[[str, int | None], JsonDict | None]) -> None:
         """Load the pipeline results and find the encounter holding the photos."""
         self.cached = load_results_raw(
             self.cache_dir, self.db.active_workspace_id,
@@ -497,7 +532,7 @@ class _SpeciesConfirmation:
                 self.target_enc_idx = enc_idx
                 break
 
-    def burst_error(self):
+    def burst_error(self) -> ErrorResponse | None:
         """Reject a burst_index that does not hold the submitted photos.
 
         If this is a burst-scoped request, the burst must actually exist in
@@ -525,7 +560,7 @@ class _SpeciesConfirmation:
             )
         return None
 
-    def read_current_species(self):
+    def read_current_species(self) -> None:
         """Read the burst's (or encounter's) confirmed species list."""
         from pipeline_results import (
             burst_species_list,
@@ -558,7 +593,7 @@ class _SpeciesConfirmation:
             ) if name
         ]
 
-    def _confirmed_species_matching(self, name):
+    def _confirmed_species_matching(self, name: str) -> str | None:
         """The current list's entry with ``name``'s match key, else None."""
         requested_key = keyword_match_key(name)
         return next(
@@ -569,7 +604,7 @@ class _SpeciesConfirmation:
             None,
         )
 
-    def resolve_previous_species(self, requested_previous):
+    def resolve_previous_species(self, requested_previous: str | None) -> ErrorResponse | None:
         """Pick the species this edit replaces or removes, per mode."""
         if self.remove_mode:
             # Only a currently confirmed species can be removed; otherwise a
@@ -614,7 +649,7 @@ class _SpeciesConfirmation:
 
     # -- previous species rows ---------------------------------------
 
-    def resolve_old_species_rows(self):
+    def resolve_old_species_rows(self) -> None:
         """Resolve which keyword row stands for the previous species per photo."""
         previous_species = self.previous_species
         # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
@@ -640,7 +675,7 @@ class _SpeciesConfirmation:
         # type='taxonomy' (the Keywords type dropdown) doesn't set the
         # legacy is_species column, and the rest of the app treats
         # (is_species = 1 OR type = 'taxonomy') as species.
-        self.old_kid_row = self.db.keyword_taxa.species_root_by_name(previous_species)
+        self.old_kid_row = self.db.keyword_taxa.species_root_by_name(self._replaced_species)
         if self.old_kid_row is not None and self.old_kid_row["taxon_id"] is None:
             # Unlinked root: ``previous_species`` names a specific
             # legacy row whose identity is that row's own id, not a
@@ -658,7 +693,7 @@ class _SpeciesConfirmation:
         else:
             self._resolve_per_photo_old_rows()
 
-    def _resolve_per_photo_old_rows(self):
+    def _resolve_per_photo_old_rows(self) -> None:
         """Resolve the previous species from each photo's attached rows.
 
         Linked root (its identity IS the taxon, and taxon-based
@@ -704,7 +739,7 @@ class _SpeciesConfirmation:
         # a different taxon (a legitimate homonym duplicate repair leaves
         # alone).
         candidate_rows = self.db.photo_species.previous_species_candidates(
-            self.photo_ids, self.previous_species, linked_root_taxon,
+            self.photo_ids, self._replaced_species, linked_root_taxon,
         )
         for row in candidate_rows:
             # SQL orders root rows first, then by id — first
@@ -722,7 +757,7 @@ class _SpeciesConfirmation:
 
     # -- keyword writes (inside the transaction) ---------------------
 
-    def resolve_target_keyword(self):
+    def resolve_target_keyword(self) -> None:
         """Resolve the target species keyword and which photos already carry it.
 
         Resolve the target species keyword id up front so we can precheck
@@ -757,7 +792,7 @@ class _SpeciesConfirmation:
             pid for pid in self.photo_ids if pid not in self.already_has_new
         ]
 
-    def untag_previous_species(self, ws_id):
+    def untag_previous_species(self, ws_id: int) -> None:
         """Untag the previous species and queue its sidecar removes.
 
         Resolve every attached keyword row equivalent to the previous
@@ -775,7 +810,7 @@ class _SpeciesConfirmation:
             # (e.g. resolved ``Desert Verdin`` for requested
             # ``Verdin``), and the NULL-taxon fallback should still
             # match a legacy ``Verdin`` row on the photo.
-            old_target_key = keyword_match_key(self.previous_species)
+            old_target_key = keyword_match_key(self._replaced_species)
             homonym_conflicts = _HomonymConflicts(self.db, old_target_key)
             self._collect_old_rows(old_target_key, homonym_conflicts)
             self._restore_lost_equivalence()
@@ -783,7 +818,7 @@ class _SpeciesConfirmation:
 
         self.had_old = set(self.old_rows_by_photo)
 
-    def _collect_old_rows(self, old_target_key, homonym_conflicts):
+    def _collect_old_rows(self, old_target_key: str, homonym_conflicts: _HomonymConflicts) -> None:
         """Group every attached row equivalent to the previous species by photo."""
         for row in self.db.photo_species.attached_species_rows(self.photo_ids):
             photo_old = self.per_photo_old_row.get(row["photo_id"])
@@ -797,7 +832,7 @@ class _SpeciesConfirmation:
             ):
                 self.old_rows_by_photo.setdefault(row["photo_id"], []).append(row)
 
-    def _restore_lost_equivalence(self):
+    def _restore_lost_equivalence(self) -> None:
         """Re-tag photos whose only equivalent rows are about to be untagged.
 
         Same-taxon replacements (e.g., renaming to a scientific-name
@@ -832,7 +867,7 @@ class _SpeciesConfirmation:
                 if pid not in self.already_has_new
             ]
 
-    def _untag_old_rows(self, ws_id):
+    def _untag_old_rows(self, ws_id: int) -> None:
         for pid, old_rows in self.old_rows_by_photo.items():
             remove_names = []
             for old in old_rows:
@@ -849,7 +884,7 @@ class _SpeciesConfirmation:
                     self.db, pid, old_name, workspace_id=ws_id, _commit=False,
                 )
 
-    def tag_new_species(self, ws_id):
+    def tag_new_species(self, ws_id: int) -> None:
         for pid in self.newly_tagged:
             self.db.tag_photo(pid, self.kid, source="manual", _commit=False,
                               provenance=self.provenance, _record_provenance=True)
@@ -860,14 +895,15 @@ class _SpeciesConfirmation:
         if self.provenance is not None and not self.remove_mode:
             from services.species_provenance import remember_before
             # Equivalent hierarchy aliases must retain their actual keyword ID.
-            equivalent = self.db.photo_species.equivalent_assignment_ids(self.already_has_new, self.kid)
+            # Not remove mode, so resolve_target_keyword stored the new keyword id.
+            equivalent = self.db.photo_species.equivalent_assignment_ids(self.already_has_new, cast(int, self.kid))
             for pid, keyword_ids in equivalent.items():
                 for keyword_id in keyword_ids:
                     remember_before(self.db, pid, keyword_id, force=True)
                     self.db.species_provenance.set(pid, keyword_id, self.provenance)
                 self.attribution_only.append(pid)
 
-    def record_photo_edit(self):
+    def record_photo_edit(self) -> None:
         """Record the keyword change in edit history for undo."""
         kid = self.kid
         if self.is_replacement and self.had_old:
@@ -937,7 +973,7 @@ class _SpeciesConfirmation:
 
     # -- pipeline cache (inside the transaction) ---------------------
 
-    def compute_cache_state(self):
+    def compute_cache_state(self) -> None:
         """Work out the confirmed list and the cache fields this edit writes."""
         from pipeline_results import updated_species_list
 
@@ -986,7 +1022,7 @@ class _SpeciesConfirmation:
                 ),
             }
 
-    def _read_frame_species(self):
+    def _read_frame_species(self) -> tuple[bool, set[str], set[str]]:
         """Whether every frame carries the edited list, and the shared keys."""
         from pipeline_results import species_key_set
 
@@ -1009,7 +1045,7 @@ class _SpeciesConfirmation:
         )
         return frames_share, shared_keys, recorded
 
-    def _new_burst_override(self, frames_share, shared_keys, recorded):
+    def _new_burst_override(self, frames_share: bool, shared_keys: set[str], recorded: set[str]) -> JsonDict | None:
         from pipeline_results import (
             build_species_override,
             empty_species_override,
@@ -1031,7 +1067,7 @@ class _SpeciesConfirmation:
             new_species_list, confirmed=False,
         )
 
-    def _burst_will_auto_detach(self):
+    def _burst_will_auto_detach(self) -> bool:
         """Whether the edited burst splits out of its encounter.
 
         Auto-detach if the burst's species no longer overlap
@@ -1052,7 +1088,8 @@ class _SpeciesConfirmation:
             species_key_set,
         )
 
-        target_enc = self.target_enc
+        # compute_cache_state only asks once the cached encounter is found.
+        target_enc = cast("JsonDict", self.target_enc)
         enc_species_list = encounter_confirmed_species_list(target_enc)
         if not enc_species_list and target_enc.get("species"):
             enc_species_list = [target_enc["species"][0]]
@@ -1067,7 +1104,7 @@ class _SpeciesConfirmation:
             and len(target_enc["bursts"]) > 1
         )
 
-    def record_cache_only_confirmation(self):
+    def record_cache_only_confirmation(self) -> None:
         """Give a confirmation that only changes the cache its history entry."""
         if self.preview_scope:
             return
@@ -1096,7 +1133,8 @@ class _SpeciesConfirmation:
             record_species_confirm_cache,
         )
 
-        target_enc = self.target_enc
+        # ``cache_only_write`` required the cached encounter.
+        target_enc = cast("JsonDict", self.target_enc)
         if self.burst_index is not None:
             burst_target = target_enc["bursts"][self.burst_index]
             current_override = burst_target.get("species_override")
@@ -1130,7 +1168,7 @@ class _SpeciesConfirmation:
                     ),
                 )
 
-    def apply_cache_mutation(self):
+    def apply_cache_mutation(self) -> None:
         """Stage cache and history changes inside the caller's transaction.
 
         The shared commit helper persists the cache and restores it on failure.
@@ -1153,7 +1191,8 @@ class _SpeciesConfirmation:
             self._apply_burst_override()
         else:
             self._apply_encounter_species()
-        before_cached = self.before_cached
+        # A deep copy of ``cached``, taken when it was loaded.
+        before_cached = cast("JsonDict", self.before_cached)
         if self.group_plan is not None:
             self._apply_combined_group(flag_items)
         elif (
@@ -1162,7 +1201,8 @@ class _SpeciesConfirmation:
         ):
             # Labels and confirmation counts are part of the same user
             # action even when no burst moves to another encounter.
-            photo_edit = self.db.edit_history.action_and_new_value(self.photo_edit_id)
+            # The edit row this request recorded, read in its transaction.
+            photo_edit = cast("Row", self.db.edit_history.action_and_new_value(self.photo_edit_id))
             change = {
                 "before": before_cached["encounters"],
                 "after": cached["encounters"],
@@ -1177,37 +1217,56 @@ class _SpeciesConfirmation:
                 "before": before_cached["encounters"], "after": cached["encounters"],
             })
 
-    def _apply_combined_group(self, flag_items):
+    def _loaded_cache(self) -> tuple[JsonDict, JsonDict, JsonDict]:
+        """``(cached, before_cached, target_enc)`` for the cache-mutation helpers.
+
+        ``apply_cache_mutation`` calls them only once the cache is loaded and
+        holds the target encounter; ``before_cached`` is the cache's deep copy.
+        """
+        return (
+            cast("JsonDict", self.cached), cast("JsonDict", self.before_cached),
+            cast("JsonDict", self.target_enc),
+        )
+
+    def _apply_combined_group(self, flag_items: list[JsonDict]) -> None:
         """Record the completed species/cull decision as one history entry."""
         from services.grouping_history import convert_to_grouping_edit, record_grouping_edit
 
+        cached, before_cached, _ = self._loaded_cache()
+        # Called only with a group plan, whose photos validate_group_changes checked.
+        group_plan = cast("JsonDict", self.group_plan)
         self.group_photo_states = {
-            pid: {"flag": self.db.photos.get(pid)["flag"] or "none"}
-            for key in ("picks", "rejects", "candidates") for pid in self.group_plan[key]
+            pid: {"flag": cast("Row", self.db.photos.get(pid))["flag"] or "none"}
+            for key in ("picks", "rejects", "candidates") for pid in group_plan[key]
         }
-        change = {"before": self.before_cached["encounters"], "after": self.cached["encounters"],
+        change = {"before": before_cached["encounters"], "after": cached["encounters"],
                   "label_edit": True, "flag_items": flag_items}
         if self.photo_edit_id is not None:
-            change["photo_edit"] = dict(self.db.edit_history.action_and_new_value(self.photo_edit_id))
+            # The edit row this request recorded, read in its transaction.
+            photo_edit = cast("Row", self.db.edit_history.action_and_new_value(self.photo_edit_id))
+            change["photo_edit"] = dict(photo_edit)
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
         elif flag_items or change["before"] != change["after"]:
             if flag_items:
                 change["photo_edit"] = {"action_type": "flag", "new_value": "pipeline_group_apply"}
             self.undo_edit_id = record_grouping_edit(self.db, "Applied Group Review species and cull decisions", change, flag_items)
 
-    def _apply_burst_override(self):
-        self.target_enc["bursts"][self.burst_index]["species_override"] = (
+    def _apply_burst_override(self) -> None:
+        cached, before_cached, target_enc = self._loaded_cache()
+        # A burst-scoped request: burst_error validated the index.
+        burst_index = cast(int, self.burst_index)
+        target_enc["bursts"][burst_index]["species_override"] = (
             self.new_burst_override
         )
         if not self.will_auto_detach:
             return
         auto_detach_burst_for_species(
-            self.cached, self.target_enc_idx, self.burst_index,
+            cached, self.target_enc_idx, burst_index,
             self.new_species_list[0],
         )
         change = {
-            "before": self.before_cached["encounters"],
-            "after": self.cached["encounters"],
+            "before": before_cached["encounters"],
+            "after": cached["encounters"],
         }
         if self.photo_edit_id is None:
             from services.grouping_history import record_grouping_edit
@@ -1215,13 +1274,15 @@ class _SpeciesConfirmation:
                 self.db, self.cache_description + "1 burst", change, [],
             )
 
-    def _apply_encounter_species(self):
+    def _apply_encounter_species(self) -> None:
         from pipeline_results import set_encounter_confirmed_species
 
-        target_enc = self.target_enc
+        _, _, target_enc = self._loaded_cache()
+        # compute_cache_state set it for an encounter-scoped request.
+        new_encounter_state = cast("JsonDict", self.new_encounter_state)
         set_encounter_confirmed_species(target_enc, self.new_species_list)
         target_enc["species_confirmed"] = bool(
-            self.new_encounter_state["species_confirmed"]
+            new_encounter_state["species_confirmed"]
         )
         # Child bursts may carry overrides serialize_results (or
         # an earlier burst edit) materialized for the pre-edit
@@ -1250,7 +1311,7 @@ class _SpeciesConfirmation:
 
     # -- response ----------------------------------------------------
 
-    def response(self, low_confidence_photo_ids, response_mode="full"):
+    def response(self, low_confidence_photo_ids: list[int], response_mode: str = "full") -> JsonDict:
         """The JSON body for a landed confirmation."""
         # Report `replaced` consistent with the actual replacement decision
         # (is_replacement, which uses keyword_match_key to match SQLite's

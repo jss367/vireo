@@ -20,7 +20,7 @@ import textwrap
 import db as db_module
 import pytest
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _reader(db):
@@ -79,7 +79,7 @@ def _add_photos(db, folder_id, count, prefix="p"):
 @pytest.fixture
 def photos(db):
     """Three photos visible in the active workspace."""
-    folder_id = db.add_folder("/photos", name="photos")
+    folder_id = workspace_folders.add_folder(db, "/photos", name="photos")
     return _add_photos(db, folder_id, 3)
 
 
@@ -89,7 +89,7 @@ def outsider(db):
     active = db._ws_id()
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    folder_id = db.add_folder("/elsewhere", name="elsewhere")
+    folder_id = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere")
     (photo_id,) = _add_photos(db, folder_id, 1, prefix="out")
     db.set_active_workspace(active)
     return photo_id
@@ -151,7 +151,7 @@ def test_batch_update_photo_rating_verifies_before_writing(db, photos, outsider)
 
 
 def test_batch_update_photo_rating_chunks(db, monkeypatch):
-    folder_id = db.add_folder("/many", name="many")
+    folder_id = workspace_folders.add_folder(db, "/many", name="many")
     ids = _add_photos(db, folder_id, 5)
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     db.photo_review.set_ratings(ids, 1)
@@ -159,7 +159,7 @@ def test_batch_update_photo_rating_chunks(db, monkeypatch):
 
 
 def test_batch_update_photo_rating_rolls_back_partial_chunks(db, monkeypatch):
-    folder_id = db.add_folder("/many", name="many")
+    folder_id = workspace_folders.add_folder(db, "/many", name="many")
     ids = _add_photos(db, folder_id, 3)
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
     db.conn.execute(

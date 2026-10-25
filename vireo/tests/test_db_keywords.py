@@ -20,7 +20,7 @@ import textwrap
 
 import pytest
 from db import Database
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _visible(db, sql, params=()):
@@ -79,7 +79,7 @@ def case(tmp_path, monkeypatch):
 @pytest.fixture
 def lib(db, case):
     ws = db._active_workspace_id
-    fid = db.add_folder("/kw", name="kw")
+    fid = workspace_folders.add_folder(db, "/kw", name="kw")
     photos = [photo_ingest.add_photo(db, fid, f"p{i}.jpg", ".jpg", 10 + i, float(i)) for i in range(4)]
     _taxon(db, 1, "Aves", "class")
     _taxon(db, 2, "Turdus", "genus", 1)
@@ -582,7 +582,7 @@ def test_get_keyword_rename_state_reads_name_species_and_type(db, lib):
 def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib):
     p0, p1, p2, _ = lib["p"]
     other_ws = db.create_workspace("Other")
-    db.add_workspace_folder(other_ws, lib["fid"])
+    workspace_folders.add_workspace_folder(db, other_ws, lib["fid"])
     kid = db.add_keyword("Alpha")
     db.tag_photo(p0, kid)
     db.tag_photo(p1, kid)
@@ -592,8 +592,8 @@ def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib)
         [(p0, lib["ws"]), (p1, lib["ws"]), (p0, other_ws), (p1, other_ws)]
     )
     # A photo no workspace can see has no row.
-    db.remove_workspace_folder(other_ws, lib["fid"])
-    db.remove_workspace_folder(lib["ws"], lib["fid"])
+    workspace_folders.remove_workspace_folder(db, other_ws, lib["fid"])
+    workspace_folders.remove_workspace_folder(db, lib["ws"], lib["fid"])
     assert db.photo_keywords.photo_workspaces_tagged_with(kid) == []
 
 
@@ -910,7 +910,7 @@ def test_keyword_tree_and_counts(db, lib):
 def test_get_all_keywords_counts(db, lib):
     """``photo_count`` is distinct workspace photos in the subtree; ``direct_photo_count`` is the keyword's own."""
     p0, p1, p2 = lib["p"][:3]
-    other_fid = db.add_folder("/elsewhere", name="elsewhere")
+    other_fid = workspace_folders.add_folder(db, "/elsewhere", name="elsewhere")
     hidden = photo_ingest.add_photo(db, other_fid, "hidden.jpg", ".jpg", 99, 9.0)
     db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (other_fid,))
     birds = db.add_keyword("Birds")

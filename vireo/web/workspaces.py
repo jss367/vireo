@@ -17,7 +17,7 @@ import sqlite3
 from config import settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
 from flask import Blueprint, abort, jsonify, request
-from services import stage_counts
+from services import stage_counts, workspace_folders, workspace_lifecycle
 from services.local_folder import (
     affected_workspace_ids as local_folder_workspace_ids,
 )
@@ -405,13 +405,13 @@ def _new_workspace_move_error(db, ws_id, folder_ids):
     """Why the selected folders cannot seed a new workspace, or None."""
     if not db.workspaces.get(ws_id):
         return f"Source workspace {ws_id} not found"
-    source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    source_folder_ids = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     for fid in folder_ids:
         if fid not in source_folder_ids:
             return f"Folder {fid} does not belong to source workspace {ws_id}"
     from db import _path_for_subtree_match
 
-    source_folders = db.get_workspace_folders(ws_id)
+    source_folders = workspace_folders.get_workspace_folders(db, ws_id)
     selected = set(folder_ids)
     remaining_paths = [_path_for_subtree_match(f["path"]) for f in source_folders
                        if f["id"] not in selected and f["path"]]
@@ -513,7 +513,7 @@ def create_workspace_blueprint(
         # Navigation only needs workspace identity. Folder photo counts can
         # take seconds on large libraries and must not delay the switcher.
         if request.args.get("include_folders") != "0":
-            result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
+            result["folders"] = [dict(f) for f in workspace_folders.get_workspace_folder_roots(db, ws["id"])]
         return jsonify(result)
 
     def _validate_workspace_config_overrides(overrides, db):
@@ -673,7 +673,7 @@ def create_workspace_blueprint(
                 db.collections.create_defaults(workspace_id=ws_id)
                 # Link selected folders if provided
                 for folder_id in folder_ids:
-                    db.add_workspace_folder(ws_id, folder_id)
+                    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
                 db.workspace_folders.mark_roots(ws_id, folder_ids)
                 ws = db.workspaces.get(ws_id)
             return jsonify(dict(ws))
@@ -769,7 +769,7 @@ def create_workspace_blueprint(
                         409,
                     )
             try:
-                cleanup_errors = db.delete_workspace(ws_id)
+                cleanup_errors = workspace_lifecycle.delete_workspace(db, ws_id)
             except ValueError as e:
                 return json_error(str(e), 409)
         # Drop this workspace's cached Missing Originals payload so a
@@ -835,7 +835,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
         db = get_db()
-        folders = db.get_workspace_folder_roots(ws_id)
+        folders = workspace_folders.get_workspace_folder_roots(db, ws_id)
         return jsonify([dict(f) for f in folders])
 
     @blueprint.route("/api/workspaces/<int:ws_id>/folders", methods=["POST"])
@@ -878,7 +878,7 @@ def create_workspace_blueprint(
                     "Sync or discard that workspace's local copy before linking the folder here.",
                     409,
                 )
-            db.add_workspace_folder(ws_id, folder_id)
+            workspace_folders.add_workspace_folder(db, ws_id, folder_id)
         # A newly linked folder can introduce ghosts (or resolve them if it
         # was previously offline). The missing-originals cache is keyed by
         # workspace, so leaving a stale ready payload here would keep serving
@@ -933,7 +933,7 @@ def create_workspace_blueprint(
                         "removing this folder.",
                         409,
                     )
-            db.remove_workspace_folder_tree(ws_id, folder_id)
+            workspace_folders.remove_workspace_folder_tree(db, ws_id, folder_id)
             for descendant_id in descendant_root_ids:
                 mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
                 db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
@@ -999,7 +999,7 @@ def create_workspace_blueprint(
                     return json_error(f"Failed to create workspace: {e}")
 
             try:
-                result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
+                result = workspace_folders.move_folders_to_workspace(db, ws_id, target_ws_id, folder_ids)
                 result["target_workspace_id"] = target_ws_id
                 # Transfer the rebased descendant rows the subtree walk missed
                 # so the target workspace can reach the shared local session

@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _touch_image(path):
@@ -88,7 +88,7 @@ def test_api_new_images_reports_unscanned_files(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     client = app.test_client()
     resp = client.get("/api/workspaces/active/new-images")
@@ -112,7 +112,7 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    fid = db.add_folder(str(root), name="shoot")
+    fid = workspace_folders.add_folder(db, str(root), name="shoot")
     photo_ingest.add_photo(db, folder_id=fid, filename="IMG.JPG", extension=".JPG",
                  file_size=1, file_mtime=0.0)
 
@@ -144,7 +144,7 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     release = threading.Event()
     started = threading.Event()
@@ -190,7 +190,7 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     release = threading.Event()
     move_id = app._job_runner.start(
@@ -235,7 +235,7 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     client = app.test_client()
     # First request: walk is fast on tmp_path so the 500ms wait will catch it
@@ -272,7 +272,7 @@ def test_api_new_images_response_trims_sample_but_caches_full_list(app_and_db):
     root = tmp_path / "shoot"
     for i in range(8):
         _touch_image(str(root / f"IMG_{i:03d}.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     client = app.test_client()
     resp = client.get("/api/workspaces/active/new-images")
@@ -349,7 +349,7 @@ def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     def boom(*args, **kwargs):
         raise RuntimeError("disk unreachable")
@@ -391,7 +391,7 @@ def test_api_new_images_records_job_and_history_on_cache_cold(app_and_db, monkey
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     release = threading.Event()
     started = threading.Event()
@@ -474,7 +474,7 @@ def test_api_new_images_job_marked_failed_when_walk_raises(app_and_db, monkeypat
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     def boom(*args, **kwargs):
         raise RuntimeError("disk unreachable")
@@ -521,7 +521,7 @@ def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     client = app.test_client()
     # Prime the cache.
@@ -570,7 +570,7 @@ def test_api_new_images_does_not_hot_loop_on_persistent_failure(app_and_db, monk
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     call_count = {"n": 0}
     lock = threading.Lock()
@@ -628,7 +628,7 @@ def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     folder.mkdir()
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     _touch_image(str(folder / "IMG_001.JPG"))
     _touch_image(str(folder / "IMG_002.JPG"))
 
@@ -657,7 +657,7 @@ def test_post_snapshot_reuses_live_navbar_cache_without_rewalk(app_and_db, monke
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     folder.mkdir()
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     # Simulate the navbar's cache after an earlier probe: two images were
     # on disk and captured in the (complete) sample.
@@ -708,7 +708,7 @@ def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     call_count = {"n": 0}
     started = threading.Event()
@@ -772,7 +772,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     folder.mkdir()
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     old_path = str(folder / "IMG_001.JPG")
     _touch_image(old_path)
 
@@ -835,7 +835,7 @@ def test_post_snapshot_surfaces_async_error_without_retry_loop(
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     call_count = {"n": 0}
     started = threading.Event()
@@ -897,7 +897,7 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     call_count = {"n": 0}
     real_count = new_images_module.count_new_images_for_workspace
@@ -946,7 +946,7 @@ def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monk
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     release = threading.Event()
     started = threading.Event()
@@ -988,7 +988,7 @@ def test_post_snapshot_202_reports_live_walk_progress(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     release = threading.Event()
 
@@ -1040,7 +1040,7 @@ def test_post_snapshot_registers_job_when_walk_needed(
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     _touch_image(str(folder / "IMG_001.JPG"))
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
 
     release = threading.Event()
     started = threading.Event()
@@ -1091,7 +1091,7 @@ def test_get_snapshot_returns_summary(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
     folder.mkdir()
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     _touch_image(str(folder / "IMG_001.JPG"))
 
     with app.test_client() as client:
@@ -1149,7 +1149,7 @@ def test_new_images_preview_returns_folder_preview_shape(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "shoot"
     folder.mkdir()
-    db.add_folder(str(folder), name="shoot")
+    workspace_folders.add_folder(db, str(folder), name="shoot")
     _touch_image(str(folder / "IMG_001.JPG"))
     _touch_image(str(folder / "sub" / "IMG_002.JPG"))
 
@@ -1209,7 +1209,7 @@ def test_new_images_preview_leaves_out_excluded_folders(app_and_db):
     child = root / "2020-10-08"
     _touch_image(str(root / "parent.jpg"))
     _touch_image(str(child / "child.jpg"))
-    db.add_folder(str(root))
+    workspace_folders.add_folder(db, str(root))
     snap_id = db.workspaces.create_new_images_snapshot([
         str(root / "parent.jpg"), str(child / "child.jpg"),
     ])
@@ -1240,7 +1240,7 @@ def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
     shoot_a = tmp_path / "photos" / "shoot_a"
     shoot_a.mkdir(parents=True)
     _touch_image(str(shoot_a / "pic.jpg"))
-    db.add_folder(str(shoot_a), name="shoot_a-in-ws-A")
+    workspace_folders.add_folder(db, str(shoot_a), name="shoot_a-in-ws-A")
 
     # Workspace B owns /photos/shoot_a/inner — a longer prefix that, if
     # not filtered by workspace, would steal the subfolder label. Switch
@@ -1250,7 +1250,7 @@ def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
     inner = shoot_a / "inner"
     inner.mkdir()
     _touch_image(str(inner / "deep.jpg"))
-    db.add_folder(str(inner), name="inner-in-ws-B")
+    workspace_folders.add_folder(db, str(inner), name="inner-in-ws-B")
     db.set_active_workspace(ws_a)
 
     snap_id = db.workspaces.create_new_images_snapshot([
@@ -1288,8 +1288,8 @@ def test_new_images_preview_groups_by_top_level_root_not_scanned_descendants(app
 
     # Simulate the post-scan state: top-level root + auto-registered
     # descendant both linked to the active workspace.
-    root_id = db.add_folder(str(root), name="shoot")
-    db.add_folder(str(root / "trip1"), name="trip1", parent_id=root_id)
+    root_id = workspace_folders.add_folder(db, str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root / "trip1"), name="trip1", parent_id=root_id)
 
     snap_id = db.workspaces.create_new_images_snapshot([
         str(root / "edge.jpg"),
@@ -1327,8 +1327,8 @@ def test_new_images_preview_disambiguates_duplicate_basenames(app_and_db):
     card_b.mkdir(parents=True)
     _touch_image(str(card_a / "a.jpg"))
     _touch_image(str(card_b / "b.jpg"))
-    db.add_folder(str(card_a), name="DCIM")
-    db.add_folder(str(card_b), name="DCIM")
+    workspace_folders.add_folder(db, str(card_a), name="DCIM")
+    workspace_folders.add_folder(db, str(card_b), name="DCIM")
 
     snap_id = db.workspaces.create_new_images_snapshot([
         str(card_a / "a.jpg"),
@@ -1357,7 +1357,7 @@ def test_new_images_preview_reports_missing_files(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "shoot"
     folder.mkdir()
-    db.add_folder(str(folder), name="shoot")
+    workspace_folders.add_folder(db, str(folder), name="shoot")
     _touch_image(str(folder / "here.jpg"))
 
     # Snapshot includes a path that doesn't exist on disk.
@@ -1403,7 +1403,7 @@ def test_api_new_images_polls_do_not_wait_on_an_inflight_walk(app_and_db, monkey
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     release = threading.Event()
     started = threading.Event()
@@ -1449,7 +1449,7 @@ def test_api_new_images_payload_names_unreachable_roots(app_and_db, monkeypatch)
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     def walk_with_offline_root(*args, **kwargs):
         return {
@@ -1489,7 +1489,7 @@ def test_new_images_walk_job_completes_with_offline_caveat(app_and_db, monkeypat
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     def walk_with_offline_root(*args, **kwargs):
         return {
@@ -1539,7 +1539,7 @@ def test_recheck_rewalks_a_workspace_stuck_on_an_offline_result(app_and_db, monk
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     walks = {"n": 0}
 
@@ -1589,7 +1589,7 @@ def test_recheck_clears_the_error_backoff(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root), name="shoot")
+    workspace_folders.add_folder(db, str(root), name="shoot")
 
     walks = {"n": 0}
 
@@ -1674,7 +1674,7 @@ def test_automatic_discovery_defers_to_processing_then_recovers(app_and_db, job_
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root))
+    workspace_folders.add_folder(db, str(root))
     release = threading.Event()
     job_id = app._job_runner.start(job_type, lambda _: release.wait(synchronization_timeout(5)), workspace_id=ws_id)
     client = app.test_client()
@@ -1705,7 +1705,7 @@ def test_manual_recheck_bypasses_foreground_job_deferral(app_and_db, snapshot):
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
-    db.add_folder(str(root))
+    workspace_folders.add_folder(db, str(root))
     release = threading.Event()
     job_id = app._job_runner.start(
         "pipeline", lambda _: release.wait(synchronization_timeout(5)), workspace_id=ws_id,

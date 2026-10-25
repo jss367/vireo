@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
-from services import detection_store, photo_ingest, subject_masks
+from services import detection_store, photo_ingest, subject_masks, workspace_folders
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -413,9 +413,9 @@ def test_pipeline_local_processing_merges_into_tracked_destination(
 
     from db import Database
     db = Database(db_path)
-    base_id = db.add_folder(str(final_dest))
-    prior_id = db.add_folder(
-        str(prior_dir), parent_id=base_id, workspace_root=False
+    base_id = workspace_folders.add_folder(db, str(final_dest))
+    prior_id = workspace_folders.add_folder(
+        db, str(prior_dir), parent_id=base_id, workspace_root=False
     )
     photo_ingest.add_photo(
         db, prior_id, "old.jpg", ".jpg",
@@ -507,7 +507,7 @@ def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
 
     from db import Database
     db = Database(db_path)
-    db.add_folder(str(tracked_root))
+    workspace_folders.add_folder(db, str(tracked_root))
     db.close()
 
     src = tmp_path / "card_ancestor"
@@ -601,7 +601,7 @@ def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
     # Only the child is tracked in the catalog; the parent is NOT.
     from db import Database
     db = Database(db_path)
-    db.add_folder(str(tracked_child))
+    workspace_folders.add_folder(db, str(tracked_child))
     db.close()
 
     src = tmp_path / "card_wrap"
@@ -703,9 +703,9 @@ def test_pipeline_merges_new_shoot_into_existing_archive(
 
     from db import Database
     db = Database(db_path)
-    base_id = db.add_folder(str(archive_base))
-    prior_id = db.add_folder(
-        str(prior_dir), parent_id=base_id, workspace_root=False
+    base_id = workspace_folders.add_folder(db, str(archive_base))
+    prior_id = workspace_folders.add_folder(
+        db, str(prior_dir), parent_id=base_id, workspace_root=False
     )
     for f in (prior_a, prior_b):
         photo_ingest.add_photo(
@@ -1693,9 +1693,9 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     db = Database(db_path)
     seed_folder = tmp_path / "seed"
     seed_folder.mkdir()
-    folder_id = db.add_folder(str(seed_folder))
+    folder_id = workspace_folders.add_folder(db, str(seed_folder))
     ws_id = db._active_workspace_id
-    db.add_workspace_folder(ws_id, folder_id)
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_ingest.add_photo(
         db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
@@ -1777,9 +1777,9 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     db = Database(db_path)
     seed_folder = tmp_path / "seed-filtered-credit"
     seed_folder.mkdir()
-    folder_id = db.add_folder(str(seed_folder))
+    folder_id = workspace_folders.add_folder(db, str(seed_folder))
     ws_id = db._active_workspace_id
-    db.add_workspace_folder(ws_id, folder_id)
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_ingest.add_photo(
         db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
@@ -2085,9 +2085,9 @@ def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
 
     from db import Database
     db = Database(db_path)
-    folder_id = db.add_folder(str(real_dest))
+    folder_id = workspace_folders.add_folder(db, str(real_dest))
     ws_id = db._active_workspace_id
-    db.add_workspace_folder(ws_id, folder_id)
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_ingest.add_photo(
         db, folder_id=folder_id, filename="fresh.jpg", extension=".jpg",
         file_size=0, file_mtime=1.0, file_hash=None,
@@ -2198,9 +2198,9 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     db = Database(db_path)
     seed_folder = tmp_path / "seed"
     seed_folder.mkdir()
-    folder_id = db.add_folder(str(seed_folder))
+    folder_id = workspace_folders.add_folder(db, str(seed_folder))
     ws_id = db._active_workspace_id
-    db.add_workspace_folder(ws_id, folder_id)
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_ingest.add_photo(
         db, folder_id=folder_id, filename="dup.jpg", extension=".jpg",
         file_size=dup_path.stat().st_size, file_mtime=1.0,
@@ -2574,11 +2574,11 @@ def test_destination_preview_flags_managed_archive(setup, tmp_path):
 
     from db import Database
     seed = Database(db_path)
-    base_id = seed.add_folder(str(archive))
-    prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
+    base_id = workspace_folders.add_folder(seed, str(archive))
+    prior_id = workspace_folders.add_folder(seed, str(prior), parent_id=base_id, workspace_root=False)
     for f in (p1, p2):
         photo_ingest.add_photo(seed, prior_id, f.name, ".jpg", f.stat().st_size, f.stat().st_mtime)
-    gone_id = seed.add_folder(str(gone), parent_id=base_id, workspace_root=False)
+    gone_id = workspace_folders.add_folder(seed, str(gone), parent_id=base_id, workspace_root=False)
     photo_ingest.add_photo(seed, gone_id, g1.name, ".jpg", g1.stat().st_size, g1.stat().st_mtime)
     seed.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_id,)
@@ -2644,8 +2644,8 @@ def test_destination_preview_inside_managed_archive_flags_ancestor(setup, tmp_pa
 
     from db import Database
     seed = Database(db_path)
-    base_id = seed.add_folder(str(archive))
-    prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
+    base_id = workspace_folders.add_folder(seed, str(archive))
+    prior_id = workspace_folders.add_folder(seed, str(prior), parent_id=base_id, workspace_root=False)
     photo_ingest.add_photo(seed, prior_id, p1.name, ".jpg", p1.stat().st_size, p1.stat().st_mtime)
     seed.close()
 
@@ -2692,9 +2692,9 @@ def test_destination_preview_above_managed_archive_does_not_claim_merge(
 
     from db import Database
     seed = Database(db_path)
-    managed_id = seed.add_folder(str(managed))
-    shoot_id = seed.add_folder(
-        str(shoot), parent_id=managed_id, workspace_root=False,
+    managed_id = workspace_folders.add_folder(seed, str(managed))
+    shoot_id = workspace_folders.add_folder(
+        seed, str(shoot), parent_id=managed_id, workspace_root=False,
     )
     photo_ingest.add_photo(
         seed, shoot_id, old.name, ".jpg", old.stat().st_size, old.stat().st_mtime,
@@ -2744,9 +2744,9 @@ def test_destination_preview_generated_folder_inside_managed_archive_flags_merge
 
     from db import Database
     seed = Database(db_path)
-    managed_id = seed.add_folder(str(managed))
-    existing_id = seed.add_folder(
-        str(existing), parent_id=managed_id, workspace_root=False,
+    managed_id = workspace_folders.add_folder(seed, str(managed))
+    existing_id = workspace_folders.add_folder(
+        seed, str(existing), parent_id=managed_id, workspace_root=False,
     )
     photo_ingest.add_photo(
         seed, existing_id, old.name, ".jpg",
@@ -2801,9 +2801,9 @@ def test_destination_preview_partial_managed_archive_overlap(setup, tmp_path):
 
     from db import Database
     seed = Database(db_path)
-    managed_id = seed.add_folder(str(managed))
-    existing_id = seed.add_folder(
-        str(existing), parent_id=managed_id, workspace_root=False,
+    managed_id = workspace_folders.add_folder(seed, str(managed))
+    existing_id = workspace_folders.add_folder(
+        seed, str(existing), parent_id=managed_id, workspace_root=False,
     )
     photo_ingest.add_photo(
         seed, existing_id, old.name, ".jpg",
@@ -2859,10 +2859,10 @@ def test_destination_preview_multiple_managed_archives(setup, tmp_path):
 
     from db import Database
     seed = Database(db_path)
-    m25 = seed.add_folder(str(managed_2025))
-    m26 = seed.add_folder(str(managed_2026))
-    d25 = seed.add_folder(str(prior_25), parent_id=m25, workspace_root=False)
-    d26 = seed.add_folder(str(prior_26), parent_id=m26, workspace_root=False)
+    m25 = workspace_folders.add_folder(seed, str(managed_2025))
+    m26 = workspace_folders.add_folder(seed, str(managed_2026))
+    d25 = workspace_folders.add_folder(seed, str(prior_25), parent_id=m25, workspace_root=False)
+    d26 = workspace_folders.add_folder(seed, str(prior_26), parent_id=m26, workspace_root=False)
     photo_ingest.add_photo(
         seed, d25, old_25.name, ".jpg",
         old_25.stat().st_size, old_25.stat().st_mtime,
@@ -3057,7 +3057,7 @@ def test_pipeline_rejects_source_snapshot_id(setup, tmp_path):
     folder.mkdir()
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.close()
 
@@ -3141,7 +3141,7 @@ def test_pipeline_rejects_snapshot_combined_with_stale_sources(setup, tmp_path):
     folder.mkdir()
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.close()
 
@@ -3172,7 +3172,7 @@ def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
     folder.mkdir()
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
-    db.add_folder(str(folder))
+    workspace_folders.add_folder(db, str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.close()
 
@@ -3253,8 +3253,8 @@ def _seed_workspace_with_masks(db_path):
     from db import Database
     db = Database(db_path)
     ws_id = db._active_workspace_id  # Default workspace, auto-created
-    fid = db.add_folder("/photos/seed", name="seed")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, "/photos/seed", name="seed")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -3275,8 +3275,8 @@ def _seed_workspace_with_large_only_masks(db_path):
     from db import Database
     db = Database(db_path)
     ws_id = db._active_workspace_id
-    fid = db.add_folder("/photos/large-only", name="large-only")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, "/photos/large-only", name="large-only")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
     photo_ids = []
     for name in ("a.jpg", "b.jpg"):
         pid = photo_ingest.add_photo(db, folder_id=fid, filename=name, extension=".jpg",
@@ -3508,8 +3508,8 @@ def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup
     from db import Database
     db = Database(db_path)
     ws = db._active_workspace_id
-    fid = db.add_folder("/photos/seed_no_masks", name="seed_no_masks")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/seed_no_masks", name="seed_no_masks")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -3583,10 +3583,10 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
         ws_a = db.create_workspace("A")
         ws_b = db.create_workspace("B")
 
-        f_a = db.add_folder("/a", name="a")
-        f_b = db.add_folder("/b", name="b")
-        db.add_workspace_folder(ws_a, f_a)
-        db.add_workspace_folder(ws_b, f_b)
+        f_a = workspace_folders.add_folder(db, "/a", name="a")
+        f_b = workspace_folders.add_folder(db, "/b", name="b")
+        workspace_folders.add_workspace_folder(db, ws_a, f_a)
+        workspace_folders.add_workspace_folder(db, ws_b, f_b)
 
         p_a = photo_ingest.add_photo(db, folder_id=f_a, filename="a.jpg",
                            extension=".jpg", file_size=1, file_mtime=1.0)
@@ -3656,7 +3656,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
             "pipeline": {"burst_time_gap": saved_gap, "weak_detection_confidence": 0.12,
                          "weak_detection_rescue_enabled": True},
         })
-        folder = db.add_folder(str(tmp_path / "sequence"))
+        folder = workspace_folders.add_folder(db, str(tmp_path / "sequence"))
         ids = []
         for i in range(3):
             pid = photo_ingest.add_photo(db, folder, f"{i}.jpg", ".jpg", 100, 1,

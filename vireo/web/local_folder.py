@@ -8,6 +8,7 @@ import unicodedata
 
 from db import Database
 from flask import Blueprint, jsonify, request
+from services import workspace_folders
 from services.local_folder import (
     LOCAL_FOLDER_JOB_TYPES,
     LocalWorkspaceCancelled,
@@ -296,7 +297,7 @@ def create_local_folder_blueprint(
         # Ids only: the blocker endpoint is polled every 15s from Browse and
         # must not run the per-root photo-count subquery that
         # ``get_workspace_folder_roots`` pays for (~0.75s on a large catalog).
-        return db.get_workspace_root_folder_ids(workspace_id)
+        return workspace_folders.get_workspace_root_folder_ids(db, workspace_id)
 
     def _requested_roots(db, workspace_id, body, *, local_only=False):
         active_roots = set(_active_root_ids(db, workspace_id))

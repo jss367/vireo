@@ -9,7 +9,7 @@ import pytest
 from app import create_app
 from pipeline import load_results, load_results_raw, save_results_raw
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 from subject_readiness import REQUIRED_QUALITY_FIELDS, SCORE_FIELDS
 from test_subject_readiness import complete_photo
 
@@ -21,7 +21,7 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def _photo(db, tmp_path, name="duck.jpg"):
-    folder = db.add_folder(str(tmp_path / name), name=name)
+    folder = workspace_folders.add_folder(db, str(tmp_path / name), name=name)
     return photo_ingest.add_photo(db, folder, name, ".jpg", 100, 1.)
 
 
@@ -183,7 +183,7 @@ def test_saved_view_entry_points_recover_exact_reported_membership(db, tmp_path,
     fixture = json.loads((Path(__file__).parent / "data/saved_review_mandarin.json").read_text())
     original_rejects = {p["id"] for p in fixture["photos"] if p["label"] == "REJECT"}
     assert len(fixture["photos"]) == 71 and len(original_rejects) == 61
-    folder = db.add_folder(str(tmp_path / "ducks"), name="Ducks")
+    folder = workspace_folders.add_folder(db, str(tmp_path / "ducks"), name="Ducks")
     for photo in fixture["photos"]:
         db.conn.execute("INSERT INTO photos (id, folder_id, filename, extension, timestamp, flag, rating) "
                         "VALUES (?, ?, ?, '.NEF', ?, ?, 0)",

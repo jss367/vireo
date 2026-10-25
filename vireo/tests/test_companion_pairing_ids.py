@@ -16,7 +16,7 @@ import sqlite3
 import pytest
 from PIL import Image
 from scanner import ScanHooks, ScanOptions
-from services import catalog_deletion, photo_ingest
+from services import catalog_deletion, photo_ingest, workspace_folders
 from testing.waits import synchronization_timeout
 
 
@@ -48,7 +48,7 @@ def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_
     from services.import_in_place import _InPlaceImportRun
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     raw_id = photo_ingest.add_photo(db, folder_id, "PAIR.cr3", ".cr3", 256, None)
     jpeg_id = photo_ingest.add_photo(db, folder_id, "PAIR.jpg", ".jpg", 256, None)
     jpeg_path = str(tmp_path / "PAIR.jpg")
@@ -98,7 +98,7 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
     (unrelated / "OTHER.cr3").write_bytes(b"cataloged RAW placeholder")
     db = Database(str(tmp_path / "test.db"))
     writer = Database(str(tmp_path / "test.db"))
-    first_id, unrelated_id = db.add_folder(str(first)), db.add_folder(str(unrelated))
+    first_id, unrelated_id = workspace_folders.add_folder(db, str(first)), workspace_folders.add_folder(db, str(unrelated))
     old_id = photo_ingest.add_photo(db, first_id, original.name, ".jpg", original.stat().st_size, original.stat().st_mtime)
     collected = []
     run = SimpleNamespace(
@@ -160,7 +160,7 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
     writer = Database(db_path)
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     raw_id = photo_ingest.add_photo(db, folder_id, "IMG_001.cr3", ".cr3", 256, None)
     jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG_001.jpg", ".jpg", 256, None)
     merged = scanner.companions._pair_raw_jpeg_companions(db)
@@ -220,7 +220,7 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
     writer = Database(db_path)
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     # Seed the unrelated RAW first so the original JPEG claims the
     # table's current max id; deleting it then frees the max rowid,
     # which SQLite (no AUTOINCREMENT) hands to the very next insert.
@@ -297,7 +297,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     db = Database(db_path)
     writer = Database(db_path)
     writer.conn.execute("PRAGMA busy_timeout=0")
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     raw_id = photo_ingest.add_photo(db, folder_id, "IMG_001.cr3", ".cr3", 256, None)
     jpeg_id = photo_ingest.add_photo(db, folder_id, "IMG_001.jpg", ".jpg", 256, None)
     merged = scanner.companions._pair_raw_jpeg_companions(db)
@@ -1162,7 +1162,7 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
         raw_id = _photo_ids_by_filename(db)[raw.name]
         other = tmp_path / "other"
         other.mkdir()
-        other_folder = writer.add_folder(str(other))
+        other_folder = workspace_folders.add_folder(writer, str(other))
         writer.conn.execute("PRAGMA busy_timeout = 0")
         published = []
         blocked = []
@@ -1292,7 +1292,7 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
         consumer.conn.commit()
         if wait_kind == "owner_replaced":
             catalog_deletion.delete_photos(consumer, [raw_id])
-            folder_id = consumer.add_folder(str(tmp_path / "other"))
+            folder_id = workspace_folders.add_folder(consumer, str(tmp_path / "other"))
             assert photo_ingest.add_photo(consumer, folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
     finally:
         resume.set()
@@ -1318,7 +1318,7 @@ def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "shoot"))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "shoot"))
 
     repo = db._photos_repository()
     first_id, first_inserted = repo.add(
@@ -1342,7 +1342,7 @@ def test_database_add_photo_returning_inserted(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path / "shoot"))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "shoot"))
 
     first = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="owl.jpg", extension=".jpg",

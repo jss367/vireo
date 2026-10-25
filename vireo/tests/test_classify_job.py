@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from classify_job import ClassifyParams, run_classify_job
 from PIL import Image
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 def test_classify_params_is_dataclass():
@@ -1058,7 +1058,7 @@ def test_detect_batch_stores_all_detections(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder("/photos")
+    fid = workspace_folders.add_folder(db, "/photos")
     pid = photo_ingest.add_photo(db, fid, "multi.jpg", ".jpg", 1000, 1234567890.0)
     # Verify that save_detections stores all detections
     detections_list = [
@@ -1195,10 +1195,10 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     """A photo with no animals is recorded in detector_runs; rerun skips detection."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "empty.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -1241,10 +1241,10 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "broken.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1300,10 +1300,10 @@ def test_detect_batch_skips_quality_score_when_primary_below_threshold(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "noise.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1372,10 +1372,10 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "bird.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1427,10 +1427,10 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
 
     db = Database(str(tmp_path / "test.db"))
     offline_dir = "/mnt/offline-nas/photos"
-    folder_id = db.add_folder(offline_dir)
+    folder_id = workspace_folders.add_folder(db, offline_dir)
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
 
     # Working copy lives under vireo_dir. Source folder does NOT exist.
     vireo_dir = tmp_path / "vireo"
@@ -1631,7 +1631,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1711,7 +1711,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1832,7 +1832,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1944,7 +1944,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -2191,10 +2191,10 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2248,10 +2248,10 @@ def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2306,10 +2306,10 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2373,10 +2373,10 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{idx}.jpg", extension=".jpg",
@@ -2456,10 +2456,10 @@ def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{idx}.jpg", extension=".jpg",
@@ -2555,10 +2555,10 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2636,10 +2636,10 @@ def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypa
     from xmp import write_sidecar
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2708,10 +2708,10 @@ def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
     from xmp import write_sidecar
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2785,10 +2785,10 @@ def test_hierarchy_keyword_still_auto_accepts_single_species_match(
     monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2861,10 +2861,10 @@ def test_multiple_distinct_descendants_stay_pending(tmp_path, monkeypatch):
     monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -2957,10 +2957,10 @@ def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
     monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -3025,10 +3025,10 @@ def test_match_flip_preserves_manual_review_on_reuse(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -3093,10 +3093,10 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{i}.jpg", extension=".jpg",
@@ -3177,10 +3177,10 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{i}.jpg", extension=".jpg",
@@ -3282,10 +3282,10 @@ def test_mixed_burst_never_groups_so_displayed_species_is_accepted_species(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{i}.jpg", extension=".jpg",
@@ -3374,10 +3374,10 @@ def test_grouped_burst_consensus_equals_each_row_species(tmp_path, monkeypatch):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{i}.jpg", extension=".jpg",
@@ -3452,10 +3452,10 @@ def test_ungrouped_burst_clears_stale_group_id_on_reuse(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(str(tmp_path))
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id, f"{i}.jpg", extension=".jpg",
@@ -3552,10 +3552,10 @@ def test_stored_prediction_species_folds_curly_apostrophe(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     try:
-        folder_id = db.add_folder("/tmp/p")
+        folder_id = workspace_folders.add_folder(db, "/tmp/p")
         ws = db.create_workspace("A")
         db._active_workspace_id = ws
-        db.add_workspace_folder(ws, folder_id)
+        workspace_folders.add_workspace_folder(db, ws, folder_id)
         photo_id = photo_ingest.add_photo(
             db, folder_id, "a.jpg", extension=".jpg", file_size=100,
             file_mtime=1.0,
@@ -3596,10 +3596,10 @@ def test_stored_prediction_species_preserves_okina(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     try:
-        folder_id = db.add_folder("/tmp/p")
+        folder_id = workspace_folders.add_folder(db, "/tmp/p")
         ws = db.create_workspace("A")
         db._active_workspace_id = ws
-        db.add_workspace_folder(ws, folder_id)
+        workspace_folders.add_workspace_folder(db, ws, folder_id)
         photo_id = photo_ingest.add_photo(
             db, folder_id, "a.jpg", extension=".jpg", file_size=100,
             file_mtime=1.0,
@@ -3632,10 +3632,10 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -3676,10 +3676,10 @@ def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatc
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -3712,10 +3712,10 @@ def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -3770,10 +3770,10 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
 
     photo_hash = "1" * 64
     db = Database(str(tmp_path / "src.db"))
-    folder_id = db.add_folder("/tmp/photos")
+    folder_id = workspace_folders.add_folder(db, "/tmp/photos")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100,
         file_mtime=1.0, file_hash=photo_hash,
@@ -3925,7 +3925,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -3964,10 +3964,10 @@ def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
     """When a classifier runs, the labels fingerprint is upserted."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -4317,7 +4317,7 @@ def test_flush_batch_writes_per_detection_embedding(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/photos", name="photos")
+    folder_id = workspace_folders.add_folder(db, "/photos", name="photos")
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="bird.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
@@ -4459,7 +4459,7 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
     det_ids = db.detections.save(pid, [
@@ -5109,8 +5109,8 @@ def _setup_two_photo_classify_workspace(tmp_path):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
 
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    db.add_workspace_folder(ws, folder_id)
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     p1 = photo_ingest.add_photo(
         db, folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
     )
@@ -5364,8 +5364,8 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    db.add_workspace_folder(ws, folder_id)
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     p1 = photo_ingest.add_photo(
         db, folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
     )
@@ -5441,8 +5441,8 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
-    db.add_workspace_folder(ws, folder_id)
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     p1 = photo_ingest.add_photo(
         db, folder_id, "p1.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
     )
@@ -5495,10 +5495,10 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
     from tests.test_scanner import _FlakyConn
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder("/tmp/p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
     ws = db.create_workspace("A")
     db._active_workspace_id = ws
-    db.add_workspace_folder(ws, folder_id)
+    workspace_folders.add_workspace_folder(db, ws, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
     )
@@ -5634,7 +5634,7 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid_first = photo_ingest.add_photo(
         db, folder_id, "first.jpg", extension=".jpg",
@@ -5744,7 +5744,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
@@ -6077,7 +6077,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid_first = photo_ingest.add_photo(
         db, folder_id, "first.jpg", extension=".jpg",
@@ -6194,7 +6194,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
@@ -6291,7 +6291,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
@@ -6383,7 +6383,7 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder(str(tmp_path), name="p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path), name="p")
 
     pid_a = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
@@ -7327,7 +7327,7 @@ def test_precancelled_job_finalizes_all_step_rows(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -7384,7 +7384,7 @@ def test_store_pending_alt_that_folds_to_primary_does_not_hide_top1(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0,
                        timestamp="2024-01-15T10:00:00")
@@ -7451,7 +7451,7 @@ def test_store_match_alt_that_folds_to_primary_preserves_auto_accept(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
@@ -7505,7 +7505,7 @@ def test_store_match_alt_that_only_differs_in_case_preserves_auto_accept(
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
@@ -7554,7 +7554,7 @@ def test_store_match_alt_non_ascii_case_preserves_both_predictions(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.detections.save(pid, [
@@ -7659,7 +7659,7 @@ def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     covered = photo_ingest.add_photo(
         db, folder_id, "covered.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -7705,7 +7705,7 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -7798,7 +7798,7 @@ def test_all_photos_cache_satisfied_rejects_stale_classifier_runtime(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -7931,7 +7931,7 @@ def test_all_photos_cache_satisfied_rejects_pre_synonym_classifier_runtime(
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8044,7 +8044,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
         "Strict", config_overrides={"detector_confidence": 0.5},
     )
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8113,7 +8113,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8227,7 +8227,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8279,7 +8279,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
     db = Database(db_path)
     workspace_id = db.ensure_default_workspace()
     db.set_active_workspace(workspace_id)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     photo_id = photo_ingest.add_photo(
         db, folder_id, "legacy.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8349,7 +8349,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8462,7 +8462,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8550,7 +8550,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8628,7 +8628,7 @@ def test_describe_cached_label_source_ignores_runs_coverage_ignores(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8686,7 +8686,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8731,7 +8731,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8824,7 +8824,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8892,7 +8892,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -8956,7 +8956,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     # Two photos captured within a burst window — imported cache carries
     # matching predictions for each so grouping/consensus should apply.
     pid_a = photo_ingest.add_photo(
@@ -9053,7 +9053,7 @@ def test_pre_heal_classifier_run_does_not_satisfy_cache(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -9174,7 +9174,7 @@ def test_all_photos_cache_satisfied_excludes_unreviewed_legacy_timm_after_heal(
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -9300,7 +9300,7 @@ def test_all_photos_cache_satisfied_still_grandfathers_legacy_bioclip(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -9429,7 +9429,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    folder_id = db.add_folder("/tmp/p", name="p")
+    folder_id = workspace_folders.add_folder(db, "/tmp/p", name="p")
     pid = photo_ingest.add_photo(
         db, folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,

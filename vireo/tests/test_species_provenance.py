@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 from db import Database
-from services import catalog_deletion, moves_merge
+from services import catalog_deletion, moves_merge, workspace_folders
 
 
 def confirm(client, species, photos=(1,), **kwargs):
@@ -267,7 +267,7 @@ def test_sidecar_reconciliation_does_not_leak_into_later_undo(app_and_db):
 def test_non_undoable_species_removals_do_not_accumulate_snapshots(db):
     from services import photo_ingest
 
-    fid = db.add_folder('/photos')
+    fid = workspace_folders.add_folder(db, '/photos')
     pid = photo_ingest.add_photo(db, fid, 'bird.jpg', '.jpg', 100, 1.0)
     for index in range(100):
         kid = db.add_keyword(f'Species {index}', is_species=True)
@@ -286,8 +286,8 @@ def test_photo_association_moves_preserve_evidence(db, tmp_path, operation, exis
     source_dir, target_dir = tmp_path / 'source', tmp_path / 'target'
     source_dir.mkdir()
     target_dir.mkdir()
-    source_folder = db.add_folder(str(source_dir))
-    target_folder = db.add_folder(str(target_dir))
+    source_folder = workspace_folders.add_folder(db, str(source_dir))
+    target_folder = workspace_folders.add_folder(db, str(target_dir))
     losing = photo_ingest.add_photo(db, source_folder, 'bird.jpg', '.jpg', 100, 1.0)
     survivor = photo_ingest.add_photo(db, target_folder, 'bird.jpg', '.jpg', 100, 1.0)
     kid = db.add_keyword('Mallard', is_species=True)

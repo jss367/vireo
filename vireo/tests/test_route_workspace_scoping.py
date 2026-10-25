@@ -12,7 +12,7 @@ import os
 import time
 
 import pytest
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def scoped(app_and_db, tmp_path):
     db.set_active_workspace(other_ws)
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    other_fid = db.add_folder(str(other_dir), name="other")
+    other_fid = workspace_folders.add_folder(db, str(other_dir), name="other")
     foreign_pid = photo_ingest.add_photo(
         db, folder_id=other_fid, filename="foreign.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
@@ -154,7 +154,7 @@ def test_audit_import_untracked_rejects_symlink_escape(scoped, tmp_path):
     db = scoped["db"]
     root_dir = tmp_path / "shoot"
     root_dir.mkdir()
-    db.add_folder(str(root_dir), name="shoot")
+    workspace_folders.add_folder(db, str(root_dir), name="shoot")
     outside_dir = tmp_path / "elsewhere"
     outside_dir.mkdir()
     (outside_dir / "x.jpg").write_bytes(b"jpg")
@@ -182,7 +182,7 @@ def test_audit_import_untracked_accepts_file_symlink(scoped, tmp_path, nested):
     db, client = scoped["db"], scoped["client"]
     root_dir = tmp_path / "shoot"
     root_dir.mkdir()
-    db.add_folder(str(root_dir), name="shoot")
+    workspace_folders.add_folder(db, str(root_dir), name="shoot")
     parent = root_dir / "day" if nested else root_dir
     parent.mkdir(exist_ok=True)
     outside_dir = tmp_path / "elsewhere"
@@ -394,7 +394,7 @@ def staged(scoped, tmp_path):
     (source / "a.jpg").write_bytes(b"jpg")
     local = tmp_path / "local-folders" / "2024-05-01"
     local.mkdir(parents=True)
-    fid = db.add_folder(str(local), name="2024-05-01")
+    fid = workspace_folders.add_folder(db, str(local), name="2024-05-01")
     db.conn.execute(
         "INSERT INTO local_folders (root_folder_id, state, created_at) "
         "VALUES (?, 'active', ?)",
@@ -482,7 +482,7 @@ def test_scan_over_symlink_alias_of_staged_source_is_refused(staged, tmp_path):
 
 def test_folder_rescan_refuses_folder_containing_local_copy(staged):
     db = staged["db"]
-    archive_fid = db.add_folder(staged["archive"], name="archive")
+    archive_fid = workspace_folders.add_folder(db, staged["archive"], name="archive")
 
     resp = staged["client"].post(f"/api/folders/{archive_fid}/rescan", json={})
 
@@ -500,7 +500,7 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     db = staged["db"]
     # Register the archive so the snapshot's frozen path resolves to a
     # workspace root, exactly like the "captured before staging" case.
-    db.add_folder(staged["archive"], name="archive")
+    workspace_folders.add_folder(db, staged["archive"], name="archive")
     frozen = os.path.join(staged["source"], "a.jpg")
     snap_id = db.workspaces.create_new_images_snapshot([frozen])
 
@@ -528,7 +528,7 @@ def test_new_images_leaves_out_staged_source_so_snapshot_import_runs(staged):
     from wait import wait_for_job_via_client
 
     db, client = staged["db"], staged["client"]
-    db.add_folder(staged["archive"], name="archive")
+    workspace_folders.add_folder(db, staged["archive"], name="archive")
     elsewhere = os.path.join(staged["archive"], "2024-06-01")
     os.mkdir(elsewhere)
     genuinely_new = os.path.join(elsewhere, "new.jpg")
@@ -601,7 +601,7 @@ def test_pending_stage_refusal_names_owner_and_status(
     active = db._active_workspace_id
     pending_source = tmp_path / "pending-source"
     pending_source.mkdir()
-    fid = db.add_folder(str(pending_source), name="pending")
+    fid = workspace_folders.add_folder(db, str(pending_source), name="pending")
     jobs = [{
         "id": "stage-1",
         "type": "work-locally-folder-stage",
@@ -754,7 +754,7 @@ def test_audit_import_untracked_refuses_paths_in_staged_source(staged):
     db = staged["db"]
     # Register the archive as a workspace root so the source's file passes
     # the containment check and would otherwise be importable.
-    db.add_folder(staged["archive"], name="archive")
+    workspace_folders.add_folder(db, staged["archive"], name="archive")
     original = os.path.join(staged["source"], "a.jpg")
     photos_before = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
@@ -790,7 +790,7 @@ def test_repair_metadata_refuses_root_containing_staged_source(
     db = staged["db"]
     # Register the archive as a workspace root so the metadata-repair job
     # would walk it (and its staged descendant) if not guarded.
-    db.add_folder(staged["archive"], name="archive")
+    workspace_folders.add_folder(db, staged["archive"], name="archive")
 
     resp = staged["client"].post("/api/jobs/repair-metadata")
 
@@ -890,7 +890,7 @@ def test_scan_conflict_sees_queued_folder_stage_job(staged, tmp_path):
     # Register a fresh folder that is NOT yet staged: no mapping row exists.
     pending_source = tmp_path / "queued-source"
     pending_source.mkdir()
-    fid = db.add_folder(str(pending_source), name="queued")
+    fid = workspace_folders.add_folder(db, str(pending_source), name="queued")
 
     def list_jobs():
         return [
@@ -925,7 +925,7 @@ def test_scan_conflict_ignores_stage_job_in_terminal_state(staged, tmp_path):
     db = staged["db"]
     pending_source = tmp_path / "done-source"
     pending_source.mkdir()
-    fid = db.add_folder(str(pending_source), name="done")
+    fid = workspace_folders.add_folder(db, str(pending_source), name="done")
 
     def list_jobs():
         return [
@@ -965,7 +965,7 @@ def test_stage_admission_refuses_when_scan_registered_first(
     pending_source = tmp_path / "to-stage"
     pending_source.mkdir()
     (pending_source / "b.jpg").write_bytes(b"jpg")
-    stage_fid = db.add_folder(str(pending_source), name="to-stage")
+    stage_fid = workspace_folders.add_folder(db, str(pending_source), name="to-stage")
 
     real_runner = staged["app"]._job_runner
     fake_scan_job = {
@@ -1007,7 +1007,7 @@ def test_stage_admission_refuses_when_pipeline_registered_first(
     pending_source = tmp_path / "to-stage-pipeline"
     pending_source.mkdir()
     (pending_source / "b.jpg").write_bytes(b"jpg")
-    stage_fid = db.add_folder(str(pending_source), name="to-stage-pipeline")
+    stage_fid = workspace_folders.add_folder(db, str(pending_source), name="to-stage-pipeline")
 
     real_runner = staged["app"]._job_runner
     fake_pipeline_job = {
@@ -1048,7 +1048,7 @@ def test_stage_admission_refuses_when_scan_overlaps_destination(
     pending_source = tmp_path / "to-stage-destination"
     pending_source.mkdir()
     (pending_source / "b.jpg").write_bytes(b"jpg")
-    stage_fid = db.add_folder(str(pending_source), name="to-stage-destination")
+    stage_fid = workspace_folders.add_folder(db, str(pending_source), name="to-stage-destination")
     destination_base = tmp_path / "custom-destination"
     destination_base.mkdir()
     final_destination = str(local_path_for_base(

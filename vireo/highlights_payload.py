@@ -1061,7 +1061,7 @@ def _life_list_species_entry(
 
 def build_life_list_payload(
     db,
-    photos_per_species=12,
+    photos_per_species: int | None = 12,
     photo_offset=0,
     species_filter=None,
 ):

@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 def _seed_working_copies(tmp_path, sizes):
@@ -10,7 +10,7 @@ def _seed_working_copies(tmp_path, sizes):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.ensure_default_workspace()
     db.set_active_workspace(workspace_id)
-    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"), name="photos")
     working_dir = tmp_path / "working"
     working_dir.mkdir()
 
@@ -937,7 +937,7 @@ def test_eviction_reads_atime_as_recency_alongside_mtime(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     try:
-        folder_id = db.add_folder(str(tmp_path / "photos"))
+        folder_id = workspace_folders.add_folder(db, str(tmp_path / "photos"))
         (tmp_path / "photos").mkdir()
         ids = []
         for i in range(2):

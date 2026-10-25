@@ -20,7 +20,7 @@ from burst_evidence import (
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
-from services import catalog_deletion, missing_originals
+from services import catalog_deletion, missing_originals, workspace_folders
 from services.local_folder import (
     local_copy_scan_conflict,
     local_root_for_folder,
@@ -235,7 +235,7 @@ def create_folders_blueprint(
         # workspace see one photo in a folder owned by others; permitting
         # relocation on that basis would rewrite paths for every hidden
         # sibling the grant-only workspace has no claim to.
-        if not db.workspace_has_folder_link(folder_id):
+        if not workspace_folders.workspace_has_folder_link(db, folder_id):
             return json_error("folder not found", 404)
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -331,7 +331,7 @@ def create_folders_blueprint(
         db = get_db()
         # The missing-folder list may contain photo-only grants. Its scoped
         # count never authorizes cascading deletion of hidden sibling rows.
-        if not db.workspace_has_folder_link(folder_id):
+        if not workspace_folders.workspace_has_folder_link(db, folder_id):
             return json_error("folder not found", 404)
         # Deleting a folder that a local workspace has rebased removes the
         # folders row that local_workspace_folders and the manifest depend on,

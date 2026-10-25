@@ -7,7 +7,7 @@ import os
 import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def life_app(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos/2024", name="2024")
+    fid = workspace_folders.add_folder(db, "/photos/2024", name="2024")
 
     # Cardinal: two keepers (p2 outscores p1) plus one rejected photo
     # that must not count.
@@ -399,7 +399,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     kid = db.add_keyword(species, is_species=True)
 
     db.set_active_workspace(jan_ws)
-    jan_fid = db.add_folder("/photos/january", name="january")
+    jan_fid = workspace_folders.add_folder(db, "/photos/january", name="january")
     jan_pid = photo_ingest.add_photo(
         db, folder_id=jan_fid, filename="jan-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=10.0, timestamp="2024-01-10T09:00:00",
@@ -408,7 +408,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     db.set_species_representative(species, jan_pid)
 
     db.set_active_workspace(feb_ws)
-    feb_fid = db.add_folder("/photos/february", name="february")
+    feb_fid = workspace_folders.add_folder(db, "/photos/february", name="february")
     feb_pid = photo_ingest.add_photo(
         db, folder_id=feb_fid, filename="feb-cardinal.jpg", extension=".jpg",
         file_size=1000, file_mtime=20.0, timestamp="2024-02-10T09:00:00",
@@ -416,8 +416,8 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     db.tag_photo(feb_pid, kid)
     db.set_species_representative(species, feb_pid)
 
-    db.add_workspace_folder(year_ws, jan_fid)
-    db.add_workspace_folder(year_ws, feb_fid)
+    workspace_folders.add_workspace_folder(db, year_ws, jan_fid)
+    workspace_folders.add_workspace_folder(db, year_ws, feb_fid)
 
     db.set_active_workspace(jan_ws)
     assert db.species_curation.get_representative_lists()[species] == [jan_pid]
@@ -1344,7 +1344,7 @@ def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
 def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
     app, db, ids = life_app
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
-    other_folder = db.add_folder("/photos/2025", name="2025")
+    other_folder = workspace_folders.add_folder(db, "/photos/2025", name="2025")
     for folder_id in (ids["folder"], other_folder):
         pid = photo_ingest.add_photo(
             db, folder_id=folder_id,
@@ -1413,7 +1413,7 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder("/photos", name="photos")
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
     taxon_id = db.conn.execute(
         "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
         "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"

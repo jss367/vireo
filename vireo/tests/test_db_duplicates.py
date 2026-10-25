@@ -21,7 +21,7 @@ import textwrap
 import pytest
 from db import Database
 from repositories.duplicates import DuplicatesRepository
-from services import duplicate_resolution, photo_ingest
+from services import duplicate_resolution, photo_ingest, workspace_folders
 
 
 def _photo(db, folder_id, filename, file_hash=None, *, file_mtime=100.0,
@@ -108,7 +108,7 @@ class _SqlRecorder:
 def folder(db, tmp_path):
     path = str(tmp_path / "photos")
     os.makedirs(path, exist_ok=True)
-    return db.add_folder(path), path
+    return workspace_folders.add_folder(db, path), path
 
 
 # -- check_and_resolve_duplicates_for_hash ------------------------------------
@@ -700,8 +700,8 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
 def test_bulk_resolve_reports_every_skip_reason_in_order(db, tmp_path):
     keep = str(tmp_path / "keep")
     other = str(tmp_path / "other")
-    fk = db.add_folder(keep)
-    fo = db.add_folder(other)
+    fk = workspace_folders.add_folder(db, keep)
+    fo = workspace_folders.add_folder(db, other)
     # "fewer than 2 candidates": one live row plus a rejected twin.
     _photo(db, fk, "solo.jpg", "SOLO")
     _photo(db, fo, "solo.jpg", "SOLO", flag="rejected")
@@ -734,8 +734,8 @@ def test_bulk_resolve_reports_every_skip_reason_in_order(db, tmp_path):
 def test_bulk_resolve_keeps_the_folder_copy_and_merges(db, tmp_path):
     keep = str(tmp_path / "keep")
     other = str(tmp_path / "other")
-    fk = db.add_folder(keep)
-    fo = db.add_folder(other)
+    fk = workspace_folders.add_folder(db, keep)
+    fo = workspace_folders.add_folder(db, other)
     # The resolver alone would pick the shorter "other" path; keep_folder wins.
     w = _photo(db, fk, "long_keep_name.jpg", "H1", rating=1)
     lo = _photo(db, fo, "a.jpg", "H1", rating=4)
@@ -766,10 +766,10 @@ def test_bulk_resolve_keeps_the_folder_copy_and_merges(db, tmp_path):
 
 def test_bulk_resolve_matches_a_trailing_slash_folder_row(db, tmp_path):
     keep = str(tmp_path / "keep")
-    fk = db.add_folder(keep)
+    fk = workspace_folders.add_folder(db, keep)
     db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (keep + "/", fk))
     db.conn.commit()
-    fo = db.add_folder(str(tmp_path / "other"))
+    fo = workspace_folders.add_folder(db, str(tmp_path / "other"))
     w = _photo(db, fk, "a.jpg", "H")
     lo = _photo(db, fo, "a.jpg", "H")
     _touch(os.path.join(keep, "a.jpg"))
@@ -781,8 +781,8 @@ def test_bulk_resolve_matches_a_trailing_slash_folder_row(db, tmp_path):
 
 def test_bulk_resolve_uses_the_resolver_among_same_folder_copies(db, tmp_path):
     keep = str(tmp_path / "keep")
-    fk = db.add_folder(keep)
-    fo = db.add_folder(str(tmp_path / "other"))
+    fk = workspace_folders.add_folder(db, keep)
+    fo = workspace_folders.add_folder(db, str(tmp_path / "other"))
     dirty = _photo(db, fk, "owl (2).jpg", "H")
     clean = _photo(db, fk, "owl.jpg", "H")
     missing = _photo(db, fk, "o.jpg", "H")  # shortest, but not on disk
@@ -818,8 +818,8 @@ def test_bulk_resolve_empty_keep_folder_matches_nothing(db, tmp_path, keep_folde
 
 def test_bulk_resolve_routes_each_merge_through_the_facade(db, tmp_path, monkeypatch):
     keep = str(tmp_path / "keep")
-    fk = db.add_folder(keep)
-    fo = db.add_folder(str(tmp_path / "other"))
+    fk = workspace_folders.add_folder(db, keep)
+    fo = workspace_folders.add_folder(db, str(tmp_path / "other"))
     w1 = _photo(db, fk, "a.jpg", "H1")
     l1 = _photo(db, fo, "a.jpg", "H1")
     w2 = _photo(db, fk, "b.jpg", "H2")

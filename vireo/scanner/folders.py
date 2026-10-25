@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from image_loader import is_excluded_scan_path
+from services import workspace_folders
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -92,7 +93,7 @@ class _ScanFolders:
         # intermediate ancestor between it and ``restrict_dirs`` exist
         # only to satisfy the ``folders.parent_id`` chain — they are not
         # part of what the user asked to import. Linking them to the
-        # workspace would fire ``_add_workspace_folder_no_commit`` and
+        # workspace would fire ``add_workspace_folder_no_commit`` and
         # its path-prefix subtree cascade, pulling every pre-existing
         # cataloged descendant of ``root_path`` (unrelated archive
         # subtrees from prior scans / other workspaces) into the active
@@ -108,8 +109,8 @@ class _ScanFolders:
             or (self.register_restrict_dirs_as_roots and is_restrict_target)
         )
 
-        folder_id = db.add_folder(
-            path=self.catalog_folder_path(
+        folder_id = workspace_folders.add_folder(
+            db, path=self.catalog_folder_path(
                 db, folder_str, aliases=self.folder_aliases,
             ),
             name=folder_path.name,
@@ -126,8 +127,8 @@ class _ScanFolders:
             # below an existing workspace root. Link only that leaf: the
             # regular subtree-linking API would also attach unrelated known
             # descendants that this restricted scan never touched.
-            db.add_workspace_folder_exact(
-                db.active_workspace_id, folder_id, is_root=False,
+            workspace_folders.add_workspace_folder_exact(
+                db, db.active_workspace_id, folder_id, is_root=False,
             )
         self.folder_cache[folder_str] = folder_id
         return folder_id

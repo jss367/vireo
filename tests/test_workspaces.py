@@ -1,7 +1,14 @@
 import json
 
 import pytest
-from services import dashboard_stats, moves_merge, photo_ingest, workspace_config
+from services import (
+    dashboard_stats,
+    moves_merge,
+    photo_ingest,
+    workspace_config,
+    workspace_folders,
+    workspace_lifecycle,
+)
 
 
 def test_database_creates_tables(db):
@@ -64,15 +71,15 @@ def test_update_workspace(db):
 
 def test_delete_workspace(db):
     ws_id = db.create_workspace("Temp")
-    db.delete_workspace(ws_id)
+    workspace_lifecycle.delete_workspace(db, ws_id)
     assert db.workspaces.get(ws_id) is None
 
 
 def test_workspace_folders(db):
     ws_id = db.create_workspace("Test")
-    folder_id = db.add_folder("/photos/kenya", name="kenya")
-    db.add_workspace_folder(ws_id, folder_id)
-    folders = db.get_workspace_folders(ws_id)
+    folder_id = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
+    folders = workspace_folders.get_workspace_folders(db, ws_id)
     assert len(folders) == 1
     assert folders[0]["id"] == folder_id
 
@@ -80,18 +87,18 @@ def test_workspace_folders(db):
 def test_workspace_folder_roots_hide_recursive_descendants(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
-    child_id = db.add_folder(
-        "/photos/usa/2026/2026-05-01",
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
+    child_id = workspace_folders.add_folder(
+        db, "/photos/usa/2026/2026-05-01",
         name="2026-05-01",
         parent_id=root_id,
     )
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
-    roots = db.get_workspace_folder_roots(ws_id)
+    folders = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
+    roots = workspace_folders.get_workspace_folder_roots(db, ws_id)
 
     assert root_id in folders
     assert child_id in folders
@@ -101,16 +108,16 @@ def test_workspace_folder_roots_hide_recursive_descendants(db):
 def test_workspace_root_materializes_existing_path_descendants(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
     # Historical DBs can have path-descendant folders without parent_id.
-    child_id = db.add_folder("/photos/usa/2026/2026-05-01", name="2026-05-01")
+    child_id = workspace_folders.add_folder(db, "/photos/usa/2026/2026-05-01", name="2026-05-01")
     photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
-    roots = db.get_workspace_folder_roots(ws_id)
+    folders = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
+    roots = workspace_folders.get_workspace_folder_roots(db, ws_id)
     photos = db.photos.list_page()
 
     assert root_id in folders
@@ -123,22 +130,22 @@ def test_existing_folder_is_reparented_when_surrounding_root_is_added(db):
     """A standalone folder root should nest once its parent is known."""
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    usa_id = db.add_folder("/photos/USA", name="USA")
-    year_id = db.add_folder("/photos/USA/2026", name="2026")
-    date_id = db.add_folder(
-        "/photos/USA/2026/2026-01-19",
+    usa_id = workspace_folders.add_folder(db, "/photos/USA", name="USA")
+    year_id = workspace_folders.add_folder(db, "/photos/USA/2026", name="2026")
+    date_id = workspace_folders.add_folder(
+        db, "/photos/USA/2026/2026-01-19",
         name="2026-01-19",
         parent_id=year_id,
     )
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, year_id)
-    db.add_workspace_folder(ws_id, usa_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, usa_id)
 
     # A later scan/import walks the full parent chain and now knows 2026's
     # parent. Reusing the row must fill in the missing parent_id.
-    assert db.add_folder(
-        "/photos/USA/2026",
+    assert workspace_folders.add_folder(
+        db, "/photos/USA/2026",
         name="2026",
         parent_id=usa_id,
         workspace_root=False,
@@ -194,9 +201,9 @@ def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
 def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
-    child_id = db.add_folder(
-        "/photos/usa/2026/2026-05-01",
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
+    child_id = workspace_folders.add_folder(
+        db, "/photos/usa/2026/2026-05-01",
         name="2026-05-01",
         parent_id=root_id,
     )
@@ -204,9 +211,9 @@ def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db)
     photo_ingest.add_photo(db, child_id, "child.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    assert [f["id"] for f in db.get_workspace_folder_roots(ws_id)] == [root_id]
+    assert [f["id"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)] == [root_id]
     assert {p["filename"] for p in db.photos.list_page()} == {"root.jpg", "child.jpg"}
 
 
@@ -215,23 +222,23 @@ def test_workspace_folder_roots_report_subtree_photo_counts(db):
     db.set_active_workspace(None)
     # Root with no direct photos — all images live in subfolders. The
     # direct-only folders.photo_count would read 0 here.
-    root_id = db.add_folder("/photos/usa", name="usa")
-    child_a = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
-    child_b = db.add_folder("/photos/usa/2025", name="2025", parent_id=root_id)
+    root_id = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    child_a = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026", parent_id=root_id)
+    child_b = workspace_folders.add_folder(db, "/photos/usa/2025", name="2025", parent_id=root_id)
     photo_ingest.add_photo(db, child_a, "a1.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, child_a, "a2.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, child_b, "b1.jpg", ".jpg", 1000, 1.0)
     # A separate sibling root — its photos must not bleed into usa's count.
-    other_root = db.add_folder("/photos/canada", name="canada")
+    other_root = workspace_folders.add_folder(db, "/photos/canada", name="canada")
     photo_ingest.add_photo(db, other_root, "c1.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
-    db.add_workspace_folder(ws_id, other_root)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, other_root)
 
     counts = {
         f["path"]: f["workspace_photo_count"]
-        for f in db.get_workspace_folder_roots(ws_id)
+        for f in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert counts["/photos/usa"] == 3
     assert counts["/photos/canada"] == 1
@@ -241,40 +248,40 @@ def test_workspace_root_count_is_scoped_to_its_workspace(db):
     # The same folder tree lives in two workspaces; each root's count must
     # reflect only photos and folders linked to that workspace.
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/usa", name="usa")
-    child_id = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
+    root_id = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    child_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026", parent_id=root_id)
     photo_ingest.add_photo(db, child_id, "a.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, child_id, "b.jpg", ".jpg", 1000, 1.0)
 
     ws_a = db.create_workspace("A")
     ws_b = db.create_workspace("B")
     db.set_active_workspace(ws_a)
-    db.add_workspace_folder(ws_a, root_id)
+    workspace_folders.add_workspace_folder(db, ws_a, root_id)
 
     counts_a = {
         f["path"]: f["workspace_photo_count"]
-        for f in db.get_workspace_folder_roots(ws_a)
+        for f in workspace_folders.get_workspace_folder_roots(db, ws_a)
     }
     assert counts_a["/photos/usa"] == 2
     # ws_b never linked the folder — it has no roots to report.
-    assert db.get_workspace_folder_roots(ws_b) == []
+    assert workspace_folders.get_workspace_folder_roots(db, ws_b) == []
 
 
 def test_workspace_root_materializes_windows_style_descendants(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder(r"C:\photos\usa\2026", name="2026")
-    child_id = db.add_folder(
-        r"C:\photos\usa\2026\2026-05-01",
+    root_id = workspace_folders.add_folder(db, r"C:\photos\usa\2026", name="2026")
+    child_id = workspace_folders.add_folder(
+        db, r"C:\photos\usa\2026\2026-05-01",
         name="2026-05-01",
     )
     photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
-    roots = db.get_workspace_folder_roots(ws_id)
+    folders = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
+    roots = workspace_folders.get_workspace_folder_roots(db, ws_id)
     photos = db.photos.list_page()
 
     assert root_id in folders
@@ -286,16 +293,16 @@ def test_workspace_root_materializes_windows_style_descendants(db):
 def test_workspace_root_materialization_is_case_sensitive(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/USA/2026", name="2026")
-    child_id = db.add_folder("/photos/USA/2026/2026-05-01", name="2026-05-01")
-    other_id = db.add_folder("/photos/usa/2026/2026-05-02", name="2026-05-02")
+    root_id = workspace_folders.add_folder(db, "/photos/USA/2026", name="2026")
+    child_id = workspace_folders.add_folder(db, "/photos/USA/2026/2026-05-01", name="2026-05-01")
+    other_id = workspace_folders.add_folder(db, "/photos/usa/2026/2026-05-02", name="2026-05-02")
     photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, other_id, "wrong-case.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    folders = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
     assert root_id in folders
     assert child_id in folders
     assert other_id not in folders
@@ -305,33 +312,33 @@ def test_workspace_root_materialization_is_case_sensitive(db):
 def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
-    root_id = db.add_folder("/photos/big", name="big")
+    root_id = workspace_folders.add_folder(db, "/photos/big", name="big")
     for idx in range(1005):
-        db.add_folder(f"/photos/big/day-{idx:04d}", name=f"day-{idx:04d}")
+        workspace_folders.add_folder(db, f"/photos/big/day-{idx:04d}", name=f"day-{idx:04d}")
     db.set_active_workspace(ws_id)
 
-    db.add_workspace_folder(ws_id, root_id)
+    workspace_folders.add_workspace_folder(db, ws_id, root_id)
 
-    assert len(db.get_workspace_folders(ws_id)) == 1006
-    assert [f["id"] for f in db.get_workspace_folder_roots(ws_id)] == [root_id]
+    assert len(workspace_folders.get_workspace_folders(db, ws_id)) == 1006
+    assert [f["id"] for f in workspace_folders.get_workspace_folder_roots(db, ws_id)] == [root_id]
 
     target_ws_id = db.create_workspace("Target")
-    result = db.move_folders_to_workspace(ws_id, target_ws_id, [root_id])
+    result = workspace_folders.move_folders_to_workspace(db, ws_id, target_ws_id, [root_id])
 
     assert result["folders_moved"] == 1
-    assert len(db.get_workspace_folders(ws_id)) == 0
-    assert len(db.get_workspace_folders(target_ws_id)) == 1006
-    assert [f["id"] for f in db.get_workspace_folder_roots(target_ws_id)] == [root_id]
+    assert len(workspace_folders.get_workspace_folders(db, ws_id)) == 0
+    assert len(workspace_folders.get_workspace_folders(db, target_ws_id)) == 1006
+    assert [f["id"] for f in workspace_folders.get_workspace_folder_roots(db, target_ws_id)] == [root_id]
 
-    db.remove_workspace_folder_tree(target_ws_id, root_id)
+    workspace_folders.remove_workspace_folder_tree(db, target_ws_id, root_id)
 
-    assert len(db.get_workspace_folders(target_ws_id)) == 0
+    assert len(workspace_folders.get_workspace_folders(db, target_ws_id)) == 0
 
 
 def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
     ws_id = db.create_workspace("USA 2026")
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
-    child_id = db.add_folder("/photos/usa/2026/day-1", name="day-1")
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
+    child_id = workspace_folders.add_folder(db, "/photos/usa/2026/day-1", name="day-1")
 
     db.conn.execute(
         """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
@@ -343,7 +350,7 @@ def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
         db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
     )
 
-    folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    folders = {f["id"] for f in workspace_folders.get_workspace_folders(db, ws_id)}
 
     assert child_id in folders
     assert db._new_images_cache.get(db._db_path, ws_id) is None
@@ -351,25 +358,25 @@ def test_materializing_workspace_descendants_invalidates_new_images_cache(db):
 
 def test_remove_workspace_folder(db):
     ws_id = db.create_workspace("Test")
-    folder_id = db.add_folder("/photos/kenya", name="kenya")
-    db.add_workspace_folder(ws_id, folder_id)
-    db.remove_workspace_folder(ws_id, folder_id)
-    assert len(db.get_workspace_folders(ws_id)) == 0
+    folder_id = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
+    workspace_folders.remove_workspace_folder(db, ws_id, folder_id)
+    assert len(workspace_folders.get_workspace_folders(db, ws_id)) == 0
 
 
 def test_remove_workspace_root_unlinks_descendants(db):
     ws_id = db._active_workspace_id
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
-    child_id = db.add_folder(
-        "/photos/usa/2026/2026-05-01",
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
+    child_id = workspace_folders.add_folder(
+        db, "/photos/usa/2026/2026-05-01",
         name="2026-05-01",
         parent_id=root_id,
     )
     photo_ingest.add_photo(db, child_id, "bird.jpg", ".jpg", 1000, 1.0)
 
-    db.remove_workspace_folder_tree(ws_id, root_id)
+    workspace_folders.remove_workspace_folder_tree(db, ws_id, root_id)
 
-    assert len(db.get_workspace_folders(ws_id)) == 0
+    assert len(workspace_folders.get_workspace_folders(db, ws_id)) == 0
     assert db.photos.list_page() == []
 
 
@@ -394,8 +401,8 @@ def test_ensure_default_workspace(db):
 def db_with_workspace(db):
     """DB with a workspace, folder, and a photo ready for predictions."""
     ws_id = db.create_workspace("Test WS")
-    folder_id = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, folder_id)
     photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws_id)
     return db, ws_id, folder_id, photo_id
@@ -414,8 +421,8 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     # Second workspace with a different folder + photo.
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
-    folder2 = db.add_folder("/photos2", name="photos2")
-    db.add_workspace_folder(ws2, folder2)
+    folder2 = workspace_folders.add_folder(db, "/photos2", name="photos2")
+    workspace_folders.add_workspace_folder(db, ws2, folder2)
     photo2 = photo_ingest.add_photo(db, folder2, "bird2.jpg", ".jpg", 1000, 1.0)
     det_ids2 = db.detections.save(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
@@ -475,7 +482,7 @@ def test_create_default_collections_per_workspace(db_with_workspace):
 def test_cascade_delete_removes_collections(db_with_workspace):
     db, ws_id, _, _ = db_with_workspace
     db.collections.add("Test", "[]")
-    db.delete_workspace(ws_id)
+    workspace_lifecycle.delete_workspace(db, ws_id)
     count = db.conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
     assert count == 0
 
@@ -541,7 +548,7 @@ def test_queue_change_dedup_within_workspace(db_with_workspace):
 def test_cascade_delete_removes_pending_changes(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
-    db.delete_workspace(ws_id)
+    workspace_lifecycle.delete_workspace(db, ws_id)
     count = db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
     assert count == 0
 
@@ -736,9 +743,9 @@ def test_api_workspace_folders(client):
 def test_get_photos_scoped_to_workspace(db):
     """Photos from folders not in workspace are not returned."""
     ws = db.create_workspace("Test")
-    f1 = db.add_folder("/photos/kenya", name="kenya")
-    f2 = db.add_folder("/photos/usa", name="usa")
-    db.add_workspace_folder(ws, f1)
+    f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    workspace_folders.add_workspace_folder(db, ws, f1)
     # f2 NOT linked to workspace
     photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
@@ -750,9 +757,9 @@ def test_get_photos_scoped_to_workspace(db):
 
 def test_count_photos_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
-    f1 = db.add_folder("/photos/kenya", name="kenya")
-    f2 = db.add_folder("/photos/usa", name="usa")
-    db.add_workspace_folder(ws, f1)
+    f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    workspace_folders.add_workspace_folder(db, ws, f1)
     photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
     photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws)
@@ -761,18 +768,18 @@ def test_count_photos_scoped_to_workspace(db):
 
 def test_count_folders_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
-    f1 = db.add_folder("/photos/kenya", name="kenya")
-    f2 = db.add_folder("/photos/usa", name="usa")
-    db.add_workspace_folder(ws, f1)
+    f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    workspace_folders.add_workspace_folder(db, ws, f1)
     db.set_active_workspace(ws)
     assert db.folders.count() == 1
 
 
 def test_get_folder_tree_scoped_to_workspace(db):
     ws = db.create_workspace("Test")
-    f1 = db.add_folder("/photos/kenya", name="kenya")
-    f2 = db.add_folder("/photos/usa", name="usa")
-    db.add_workspace_folder(ws, f1)
+    f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    workspace_folders.add_workspace_folder(db, ws, f1)
     db.set_active_workspace(ws)
     folders = db.folders.tree()
     assert len(folders) == 1
@@ -783,8 +790,8 @@ def test_count_keywords_scoped_by_workspace(db):
     """count_keywords only counts keywords used by photos in the active workspace."""
     # Workspace A with a folder and photo
     ws_a = db.create_workspace("A")
-    fid_a = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws_a, fid_a)
+    fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k1 = db.add_keyword("Robin")
@@ -794,8 +801,8 @@ def test_count_keywords_scoped_by_workspace(db):
 
     # Workspace B with a different folder and photo
     ws_b = db.create_workspace("B")
-    fid_b = db.add_folder("/photos/b", name="b")
-    db.add_workspace_folder(ws_b, fid_b)
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
+    workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
@@ -819,16 +826,16 @@ def test_count_keywords_empty_workspace(db):
 def test_dashboard_top_keywords_scoped_by_workspace(db):
     """get_dashboard_stats top_keywords only includes current workspace's keywords."""
     ws_a = db.create_workspace("A")
-    fid_a = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws_a, fid_a)
+    fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k1 = db.add_keyword("Robin")
     db.tag_photo(pid_a, k1)
 
     ws_b = db.create_workspace("B")
-    fid_b = db.add_folder("/photos/b", name="b")
-    db.add_workspace_folder(ws_b, fid_b)
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
+    workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
     k2 = db.add_keyword("Hawk")
@@ -850,8 +857,8 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
 def test_keyword_tree_scoped_by_workspace(db):
     """get_keyword_tree returns only keywords used by photos in the active workspace."""
     ws_a = db.create_workspace("A")
-    fid_a = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws_a, fid_a)
+    fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k1 = db.add_keyword("Robin")
@@ -860,8 +867,8 @@ def test_keyword_tree_scoped_by_workspace(db):
     db.tag_photo(pid_a, k2)
 
     ws_b = db.create_workspace("B")
-    fid_b = db.add_folder("/photos/b", name="b")
-    db.add_workspace_folder(ws_b, fid_b)
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
+    workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k3 = db.add_keyword("Hawk")
@@ -894,9 +901,9 @@ def test_keyword_tree_empty_workspace(db):
 def test_get_collection_photos_scoped_to_workspace_folders(db):
     """Collection should only return photos from workspace folders."""
     ws = db.create_workspace("Test")
-    f1 = db.add_folder("/photos/kenya", name="kenya")
-    f2 = db.add_folder("/photos/usa", name="usa")
-    db.add_workspace_folder(ws, f1)
+    f1 = workspace_folders.add_folder(db, "/photos/kenya", name="kenya")
+    f2 = workspace_folders.add_folder(db, "/photos/usa", name="usa")
+    workspace_folders.add_workspace_folder(db, ws, f1)
     p1 = photo_ingest.add_photo(db, f1, "lion.jpg", ".jpg", 1000, 1.0)
     p2 = photo_ingest.add_photo(db, f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.photo_review.set_rating(p1, 5)
@@ -942,14 +949,14 @@ def test_set_workspace_active_labels_preserves_other_overrides(db):
 def test_merge_duplicate_keywords_scoped_by_workspace(db):
     """merge_duplicate_keywords only merges duplicates used in the active workspace."""
     ws_a = db.create_workspace("A")
-    fid_a = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws_a, fid_a)
+    fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
     ws_b = db.create_workspace("B")
-    fid_b = db.add_folder("/photos/b", name="b")
-    db.add_workspace_folder(ws_b, fid_b)
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
+    workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
@@ -1124,8 +1131,8 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     next XMP sync writes/removes the canonical text instead of leaking the
     stray-quote spelling back into the sidecar."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1186,8 +1193,8 @@ def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
 def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     """Cleanup should collapse existing edge-quote variants to a clean spelling."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1233,8 +1240,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     even though the tag itself was retained.
     """
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1327,8 +1334,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     even though the tag was retained.
     """
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_survivor = photo_ingest.add_photo(db, folder_id=fid, filename="s.jpg", extension=".jpg",
                                 file_size=100, file_mtime=1.0)
     pid_legacy = photo_ingest.add_photo(db, folder_id=fid, filename="l.jpg", extension=".jpg",
@@ -1440,15 +1447,15 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     """
     # Workspace A owns folder A with the duplicate keyword rows to clean up.
     ws_a = db.create_workspace("A")
-    fid_a = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws_a, fid_a)
+    fid_a = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws_a, fid_a)
     pid_a = photo_ingest.add_photo(db, folder_id=fid_a, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     # Workspace B owns a separate folder and has its own legacy keyword row
     # that is NOT part of workspace A's cleanup scope.
     ws_b = db.create_workspace("B")
-    fid_b = db.add_folder("/photos/b", name="b")
-    db.add_workspace_folder(ws_b, fid_b)
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
+    workspace_folders.add_workspace_folder(db, ws_b, fid_b)
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
 
@@ -1570,8 +1577,8 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     them as separate keywords.
     """
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1615,8 +1622,8 @@ def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
     of two distinct keywords that ``add_keyword()`` kept separate.
     """
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos/a", name="a")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_a = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     pid_b = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1655,8 +1662,8 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     with different types are distinct by design and must NOT merge; only
     case-variants in the same (parent, type) slot are duplicates."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
@@ -1696,8 +1703,8 @@ def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
     them and spread the species flag to photos carrying the ordinary tag.
     """
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_species = photo_ingest.add_photo(
         db, folder_id=fid, filename="species.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -1742,8 +1749,8 @@ def test_merge_duplicate_keywords_reparents_children(db):
     so the untagged Birds/birds parents must still be found via the
     descendant walk."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
@@ -1787,8 +1794,8 @@ def test_merge_duplicate_keywords_merges_exact_name_children(db):
     duplicate of the survivor's sibling — it must merge into it (keeping
     its photo associations), not get renamed to 'Heron (id-N)'."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid1 = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                         file_size=100, file_mtime=1.0)
     pid2 = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1835,8 +1842,8 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     group's keep_id still exists, the loop would UPDATE photo_keywords
     toward a non-existent FK target and trip an IntegrityError."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
     db.set_active_workspace(ws)
@@ -1904,8 +1911,8 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     name), not silently merged into a different-type sibling — that would
     retag photos across the type boundary and drop one typed keyword."""
     ws = db.create_workspace("A")
-    fid = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos", name="photos")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid_general = photo_ingest.add_photo(db, folder_id=fid, filename="a.jpg", extension=".jpg",
                                file_size=100, file_mtime=1.0)
     pid_genre = photo_ingest.add_photo(db, folder_id=fid, filename="b.jpg", extension=".jpg",
@@ -1990,8 +1997,8 @@ def test_empty_workspace_labels_does_not_fallback_to_global(db):
 def test_keyword_tree_includes_ancestors(db):
     """get_keyword_tree includes untagged ancestor keywords so hierarchy is navigable."""
     ws = db.create_workspace("Hier")
-    fid = db.add_folder("/photos/h", name="h")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/photos/h", name="h")
+    workspace_folders.add_workspace_folder(db, ws, fid)
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="h.jpg", extension=".jpg",
                        file_size=100, file_mtime=1.0)
 
@@ -2029,13 +2036,13 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
 
     ws2 = db.create_workspace("Target")
 
-    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
     assert result["folders_moved"] == 1
     assert result["pending_changes_moved"] == 1
 
     # Folder moved: ws2 has it, ws1 does not
-    assert len(db.get_workspace_folders(ws2)) == 1
-    assert len(db.get_workspace_folders(ws1)) == 0
+    assert len(workspace_folders.get_workspace_folders(db, ws2)) == 1
+    assert len(workspace_folders.get_workspace_folders(db, ws1)) == 0
 
     # Predictions follow the folder's workspace membership (detections are global).
     db.set_active_workspace(ws2)
@@ -2077,7 +2084,7 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
     before_src = version(ws1)
     before_dst = version(ws2)
 
-    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
     assert result["pending_changes_moved"] == 1
 
     assert version(ws1) > before_src
@@ -2092,7 +2099,7 @@ def test_move_folders_moves_photo_preferences(db_with_workspace):
     db.species_curation.add_highlight("Robin", photo_id)
 
     ws2 = db.create_workspace("Target")
-    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
 
     assert result["photo_preferences_moved"] == 2
     assert result["species_highlights_moved"] == 1
@@ -2114,10 +2121,10 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
 
-    src_folder = db.add_folder("/src", name="src")
-    tgt_folder = db.add_folder("/tgt", name="tgt")
-    db.add_workspace_folder(ws1, src_folder)
-    db.add_workspace_folder(ws2, tgt_folder)
+    src_folder = workspace_folders.add_folder(db, "/src", name="src")
+    tgt_folder = workspace_folders.add_folder(db, "/tgt", name="tgt")
+    workspace_folders.add_workspace_folder(db, ws1, src_folder)
+    workspace_folders.add_workspace_folder(db, ws2, tgt_folder)
 
     src_photo = photo_ingest.add_photo(db, folder_id=src_folder, filename="src.jpg",
                              extension=".jpg", file_size=100, file_mtime=1.0)
@@ -2129,7 +2136,7 @@ def test_move_folders_reranks_species_highlights_on_collision(db):
     db.set_active_workspace(ws2)
     db.species_curation.add_highlight("Robin", tgt_photo)
 
-    result = db.move_folders_to_workspace(ws1, ws2, [src_folder])
+    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [src_folder])
     assert result["species_highlights_moved"] == 1
 
     db.set_active_workspace(ws2)
@@ -2146,7 +2153,7 @@ def test_move_folders_collections_stay_behind(db_with_workspace):
     db.collections.add("Flagged", "[]")
 
     ws2 = db.create_workspace("Target")
-    db.move_folders_to_workspace(ws1, ws2, [folder_id])
+    workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
 
     db.set_active_workspace(ws1)
     assert len(db.collections.list_all()) == 1
@@ -2157,19 +2164,19 @@ def test_move_folders_collections_stay_behind(db_with_workspace):
 def test_move_folders_blocks_descendant_when_source_root_remains(db):
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
-    root_id = db.add_folder("/photos/usa/2026", name="2026")
-    child_id = db.add_folder(
-        "/photos/usa/2026/day-1",
+    root_id = workspace_folders.add_folder(db, "/photos/usa/2026", name="2026")
+    child_id = workspace_folders.add_folder(
+        db, "/photos/usa/2026/day-1",
         name="day-1",
         parent_id=root_id,
     )
-    db.add_workspace_folder(ws1, root_id)
+    workspace_folders.add_workspace_folder(db, ws1, root_id)
 
     with pytest.raises(ValueError, match="covered by another source workspace folder"):
-        db.move_folders_to_workspace(ws1, ws2, [child_id])
+        workspace_folders.move_folders_to_workspace(db, ws1, ws2, [child_id])
 
-    assert {f["id"] for f in db.get_workspace_folders(ws1)} == {root_id, child_id}
-    assert db.get_workspace_folders(ws2) == []
+    assert {f["id"] for f in workspace_folders.get_workspace_folders(db, ws1)} == {root_id, child_id}
+    assert workspace_folders.get_workspace_folders(db, ws2) == []
 
 
 def test_archive_merge_preserves_narrower_workspace_root(db):
@@ -2179,17 +2186,17 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
     # Existing archive rows are globally known from another workspace/history,
     # but this workspace is intentionally rooted only at the 2026 subtree.
     db.set_active_workspace(None)
-    archive_id = db.add_folder("/archive/USA", name="USA")
-    year_id = db.add_folder("/archive/USA/2026", name="2026")
-    old_year_id = db.add_folder(
-        "/archive/USA/2020",
+    archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
+    year_id = workspace_folders.add_folder(db, "/archive/USA/2026", name="2026")
+    old_year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2020",
         name="2020",
         parent_id=archive_id,
     )
     photo_ingest.add_photo(db, old_year_id, "old.jpg", ".jpg", 1000, 1.0)
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
     db.conn.executemany(
         """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
            VALUES (?, ?, 0)""",
@@ -2200,32 +2207,32 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
     # Staging mirrors local-processing imports: the broad staging folder is
     # just the archive shell; the touched dated leaf is the user-facing import
     # root while it is still in staging.
-    staged_archive_id = db.add_folder(
-        "/staging/job/USA",
+    staged_archive_id = workspace_folders.add_folder(
+        db, "/staging/job/USA",
         name="USA",
         workspace_root=False,
     )
-    staged_year_id = db.add_folder(
-        "/staging/job/USA/2026",
+    staged_year_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026",
         name="2026",
         parent_id=staged_archive_id,
         workspace_root=False,
     )
-    staged_leaf_id = db.add_folder(
-        "/staging/job/USA/2026/2026-07-02",
+    staged_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026/2026-07-02",
         name="2026-07-02",
         parent_id=staged_year_id,
         workspace_root=True,
     )
     photo_ingest.add_photo(db, staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
-    staged_other_year_id = db.add_folder(
-        "/staging/job/USA/2027",
+    staged_other_year_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2027",
         name="2027",
         parent_id=staged_archive_id,
         workspace_root=False,
     )
-    staged_other_leaf_id = db.add_folder(
-        "/staging/job/USA/2027/2027-01-01",
+    staged_other_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2027/2027-01-01",
         name="2027-01-01",
         parent_id=staged_other_year_id,
         workspace_root=True,
@@ -2242,7 +2249,7 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
     assert result["new_photos"] == 2
     assert db._new_images_cache.get(db._db_path, ws_id) is None
     root_paths = {
-        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert "/archive/USA/2026" in root_paths
     assert "/archive/USA" not in root_paths
@@ -2306,25 +2313,25 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
     ws_id = db.create_workspace("USA2026")
 
     db.set_active_workspace(None)
-    archive_id = db.add_folder("/archive/USA", name="USA")
-    year_id = db.add_folder("/archive/USA/2026", name="2026")
+    archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
+    year_id = workspace_folders.add_folder(db, "/archive/USA/2026", name="2026")
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
 
-    staged_archive_id = db.add_folder(
-        "/staging/job/USA",
+    staged_archive_id = workspace_folders.add_folder(
+        db, "/staging/job/USA",
         name="USA",
         workspace_root=False,
     )
-    staged_year_id = db.add_folder(
-        "/staging/job/USA/2026",
+    staged_year_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026",
         name="2026",
         parent_id=staged_archive_id,
         workspace_root=False,
     )
-    staged_leaf_id = db.add_folder(
-        "/staging/job/USA/2026/2026-07-02",
+    staged_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026/2026-07-02",
         name="2026-07-02",
         parent_id=staged_year_id,
         workspace_root=True,
@@ -2345,28 +2352,28 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
     ws_id = db.create_workspace("USA2026")
 
     db.set_active_workspace(None)
-    archive_id = db.add_folder("/archive/USA", name="USA")
-    year_id = db.add_folder(
-        "/archive/USA/2026",
+    archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
+    year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2026",
         name="2026",
         parent_id=archive_id,
     )
-    db.add_folder(
-        "/archive/USA/2020",
+    workspace_folders.add_folder(
+        db, "/archive/USA/2020",
         name="2020",
         parent_id=archive_id,
     )
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
 
-    staged_year_id = db.add_folder(
-        "/staging/job/2027",
+    staged_year_id = workspace_folders.add_folder(
+        db, "/staging/job/2027",
         name="2027",
         workspace_root=False,
     )
-    staged_leaf_id = db.add_folder(
-        "/staging/job/2027/2027-01-01",
+    staged_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/2027/2027-01-01",
         name="2027-01-01",
         parent_id=staged_year_id,
         workspace_root=True,
@@ -2380,7 +2387,7 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
 
     assert result["new_photos"] == 1
     root_paths = {
-        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert root_paths == {"/archive/USA/2026"}
 
@@ -2415,18 +2422,18 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     ws_id = db.create_workspace("USA2026")
 
     db.set_active_workspace(None)
-    archive_id = db.add_folder("/archive/USA", name="USA")
-    year_id = db.add_folder(
-        "/archive/USA/2026",
+    archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
+    year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2026",
         name="2026",
         parent_id=archive_id,
     )
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
 
-    staged_trip_id = db.add_folder(
-        "/staging/job/Trip",
+    staged_trip_id = workspace_folders.add_folder(
+        db, "/staging/job/Trip",
         name="Trip",
         workspace_root=True,
     )
@@ -2440,7 +2447,7 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     assert result["new_photos"] == 1
 
     root_paths = {
-        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert root_paths == {"/archive/USA/2026"}
 
@@ -2459,7 +2466,7 @@ def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(d
     # get_workspace_folders() runs _materialize_workspace_descendants; the
     # merged Trip subtree must remain invisible to this scoped workspace.
     linked_paths = {
-        r["path"] for r in db.get_workspace_folders(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folders(db, ws_id)
     }
     assert "/archive/USA/2027" not in linked_paths
     assert "/archive/USA/2027/Trip" not in linked_paths
@@ -2493,17 +2500,17 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     ws_id = db.create_workspace("USA2026")
 
     db.set_active_workspace(None)
-    archive_id = db.add_folder("/archive/USA", name="USA")
-    year_id = db.add_folder(
-        "/archive/USA/2026",
+    archive_id = workspace_folders.add_folder(db, "/archive/USA", name="USA")
+    year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2026",
         name="2026",
         parent_id=archive_id,
     )
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
     # Seed the stale broad non-root link that this fix must clean up.
-    db.add_workspace_folder(ws_id, archive_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, ws_id, archive_id, is_root=False)
 
     archive_link_before = db.conn.execute(
         """SELECT is_root FROM workspace_folders
@@ -2513,8 +2520,8 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     assert archive_link_before is not None
     assert archive_link_before["is_root"] == 0
 
-    staged_trip_id = db.add_folder(
-        "/staging/job/Trip",
+    staged_trip_id = workspace_folders.add_folder(
+        db, "/staging/job/Trip",
         name="Trip",
         workspace_root=True,
     )
@@ -2529,7 +2536,7 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
 
     # The narrower root survives untouched.
     root_paths = {
-        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert root_paths == {"/archive/USA/2026"}
 
@@ -2545,7 +2552,7 @@ def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
     # the merged Trip subtree and the new 2027 intermediate must remain
     # invisible to this scoped workspace.
     linked_paths = {
-        r["path"] for r in db.get_workspace_folders(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folders(db, ws_id)
     }
     assert "/archive/USA" not in linked_paths
     assert "/archive/USA/2027" not in linked_paths
@@ -2578,56 +2585,56 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
     ws_id = db.create_workspace("USA2026")
 
     db.set_active_workspace(None)
-    archive_base_id = db.add_folder("/archive", name="archive")
-    usa_id = db.add_folder(
-        "/archive/USA",
+    archive_base_id = workspace_folders.add_folder(db, "/archive", name="archive")
+    usa_id = workspace_folders.add_folder(
+        db, "/archive/USA",
         name="USA",
         parent_id=archive_base_id,
     )
-    year_id = db.add_folder(
-        "/archive/USA/2026",
+    year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2026",
         name="2026",
         parent_id=usa_id,
     )
-    old_year_id = db.add_folder(
-        "/archive/USA/2020",
+    old_year_id = workspace_folders.add_folder(
+        db, "/archive/USA/2020",
         name="2020",
         parent_id=usa_id,
     )
     photo_ingest.add_photo(db, old_year_id, "old.jpg", ".jpg", 1000, 1.0)
 
     db.set_active_workspace(ws_id)
-    db.add_workspace_folder(ws_id, year_id)
+    workspace_folders.add_workspace_folder(db, ws_id, year_id)
     # Seed the stale broad non-root ancestor link. This mirrors what a
     # restricted scan leaves behind on the scan base above the scoped root.
-    db.add_workspace_folder(ws_id, archive_base_id, is_root=False)
+    workspace_folders.add_workspace_folder(db, ws_id, archive_base_id, is_root=False)
 
-    staged_archive_id = db.add_folder(
-        "/staging/job/USA",
+    staged_archive_id = workspace_folders.add_folder(
+        db, "/staging/job/USA",
         name="USA",
         workspace_root=False,
     )
-    staged_year_id = db.add_folder(
-        "/staging/job/USA/2026",
+    staged_year_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026",
         name="2026",
         parent_id=staged_archive_id,
         workspace_root=False,
     )
-    staged_leaf_id = db.add_folder(
-        "/staging/job/USA/2026/2026-07-02",
+    staged_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2026/2026-07-02",
         name="2026-07-02",
         parent_id=staged_year_id,
         workspace_root=True,
     )
     photo_ingest.add_photo(db, staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
-    staged_other_year_id = db.add_folder(
-        "/staging/job/USA/2027",
+    staged_other_year_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2027",
         name="2027",
         parent_id=staged_archive_id,
         workspace_root=False,
     )
-    staged_other_leaf_id = db.add_folder(
-        "/staging/job/USA/2027/2027-01-01",
+    staged_other_leaf_id = workspace_folders.add_folder(
+        db, "/staging/job/USA/2027/2027-01-01",
         name="2027-01-01",
         parent_id=staged_other_year_id,
         workspace_root=True,
@@ -2638,7 +2645,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
 
     # Scoped root survives untouched.
     root_paths = {
-        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ws_id)
     }
     assert root_paths == {"/archive/USA/2026"}
 
@@ -2655,7 +2662,7 @@ def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
     # ``get_workspace_folders`` invokes ``_materialize_workspace_descendants``;
     # verify neither the broad archive base nor sibling years surface.
     linked_paths = {
-        r["path"] for r in db.get_workspace_folders(ws_id)
+        r["path"] for r in workspace_folders.get_workspace_folders(db, ws_id)
     }
     assert "/archive" not in linked_paths
     assert "/archive/USA" not in linked_paths
@@ -2687,21 +2694,21 @@ def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")
     with pytest.raises(ValueError, match="Source workspace"):
-        db.move_folders_to_workspace(9999, ws, [1])
+        workspace_folders.move_folders_to_workspace(db, 9999, ws, [1])
 
 
 def test_move_folders_validates_target_workspace(db):
     """Raises ValueError if target workspace doesn't exist."""
     ws = db.create_workspace("A")
     with pytest.raises(ValueError, match="Target workspace"):
-        db.move_folders_to_workspace(ws, 9999, [1])
+        workspace_folders.move_folders_to_workspace(db, ws, 9999, [1])
 
 
 def test_move_folders_validates_same_workspace(db):
     """Raises ValueError when source == target."""
     ws = db.create_workspace("A")
     with pytest.raises(ValueError, match="same"):
-        db.move_folders_to_workspace(ws, ws, [1])
+        workspace_folders.move_folders_to_workspace(db, ws, ws, [1])
 
 
 def test_move_folders_validates_folder_belongs_to_source(db):
@@ -2709,16 +2716,16 @@ def test_move_folders_validates_folder_belongs_to_source(db):
     ws1 = db.create_workspace("Source")
     ws2 = db.create_workspace("Target")
     db.set_active_workspace(ws1)
-    fid = db.add_folder("/photos/a", name="a")
+    fid = workspace_folders.add_folder(db, "/photos/a", name="a")
     with pytest.raises(ValueError, match="does not belong"):
-        db.move_folders_to_workspace(ws1, ws2, [fid, 9999])
+        workspace_folders.move_folders_to_workspace(db, ws1, ws2, [fid, 9999])
 
 
 def test_move_folders_empty_list(db):
     """Moving an empty list returns zeros without error."""
     ws1 = db.create_workspace("A")
     ws2 = db.create_workspace("B")
-    result = db.move_folders_to_workspace(ws1, ws2, [])
+    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [])
     assert result["folders_moved"] == 0
 
 

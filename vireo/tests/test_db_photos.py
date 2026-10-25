@@ -19,7 +19,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import _SQLITE_PARAM_CHUNK_SIZE, Database
-from services import browse_queries, catalog_deletion, duplicate_resolution, photo_ingest
+from services import browse_queries, catalog_deletion, duplicate_resolution, photo_ingest, workspace_folders
 
 
 @pytest.fixture
@@ -69,13 +69,13 @@ def cache(db, monkeypatch):
 @pytest.fixture
 def lib(db, tmp_path):
     """A workspace with two visible folders and one foreign folder."""
-    root = db.add_folder(str(tmp_path / "lib"), name="lib")
-    child = db.add_folder(str(tmp_path / "lib" / "c"), name="c", parent_id=root)
+    root = workspace_folders.add_folder(db, str(tmp_path / "lib"), name="lib")
+    child = workspace_folders.add_folder(db, str(tmp_path / "lib" / "c"), name="c", parent_id=root)
     other_ws = db.create_workspace("Other")
-    foreign = db.add_folder(
-        str(tmp_path / "foreign"), name="foreign", link_to_workspace=False,
+    foreign = workspace_folders.add_folder(
+        db, str(tmp_path / "foreign"), name="foreign", link_to_workspace=False,
     )
-    db.add_workspace_folder(other_ws, foreign)
+    workspace_folders.add_workspace_folder(db, other_ws, foreign)
     a = _photo(db, root, "a.jpg", timestamp="2024-01-05T10:00:00")
     b = _photo(db, root, "b.jpg", timestamp="2024-03-07T10:00:00")
     c = _photo(db, child, "c.jpg", timestamp="2023-06-01T10:00:00")
@@ -90,7 +90,7 @@ def lib(db, tmp_path):
 
 
 def test_add_photo_commits_and_returns_new_id(db):
-    fid = db.add_folder("/p", name="p")
+    fid = workspace_folders.add_folder(db, "/p", name="p")
     pid = _photo(db, fid, "x.jpg", timestamp="2024-01-01", width=10,
                  height=20, xmp_mtime=5.0, file_hash="h1")
     assert not db.conn.in_transaction
@@ -105,7 +105,7 @@ def test_add_photo_commits_and_returns_new_id(db):
 
 
 def test_add_photo_existing_row_returns_existing_id_without_update(db):
-    fid = db.add_folder("/p", name="p")
+    fid = workspace_folders.add_folder(db, "/p", name="p")
     pid = _photo(db, fid, "x.jpg", file_size=1)
     again = _photo(db, fid, "x.jpg", file_size=999)
     assert again == pid
@@ -120,7 +120,7 @@ def test_add_photo_runs_duplicate_resolution_only_with_hash(db, monkeypatch):
         duplicate_resolution, "check_and_resolve_duplicates_for_hash",
         lambda _db, file_hash: calls.append(file_hash),
     )
-    fid = db.add_folder("/p", name="p")
+    fid = workspace_folders.add_folder(db, "/p", name="p")
     _photo(db, fid, "x.jpg")
     assert calls == []
     _photo(db, fid, "y.jpg", file_hash="abc")
@@ -131,7 +131,7 @@ def test_add_photo_runs_duplicate_resolution_only_with_hash(db, monkeypatch):
 
 
 def test_add_photo_duplicate_hash_rejects_loser(db):
-    fid = db.add_folder("/p", name="p")
+    fid = workspace_folders.add_folder(db, "/p", name="p")
     first = _photo(db, fid, "x.jpg", file_hash="same")
     second = _photo(db, fid, "y.jpg", file_hash="same")
     flags = dict(db.conn.execute(
@@ -155,7 +155,7 @@ def test_add_photo_uses_retry_helpers(db, monkeypatch):
         seen.append(("commit",))
         return real_commit(conn, *a, **kw)
 
-    fid = db.add_folder("/p", name="p")
+    fid = workspace_folders.add_folder(db, "/p", name="p")
     monkeypatch.setattr(db_module, "execute_with_retry", exec_spy)
     monkeypatch.setattr(db_module, "commit_with_retry", commit_spy)
     _photo(db, fid, "x.jpg")
@@ -426,7 +426,7 @@ def test_photos_by_paths(db, lib, tmp_path):
 
 
 def test_photos_by_paths_batches_filenames_per_directory(db, tmp_path):
-    fid = db.add_folder(str(tmp_path / "big"), name="big")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "big"), name="big")
     pid = _photo(db, fid, "keep.jpg")
     paths = [str(tmp_path / "big" / "keep.jpg")] + [
         str(tmp_path / "big" / f"n{i}.jpg") for i in range(805)
@@ -460,7 +460,7 @@ def test_get_photo_ids_at_paths(db, lib, tmp_path):
 
 
 def test_get_photo_ids_at_paths_is_one_statement_for_many_paths(db, tmp_path):
-    fid = db.add_folder(str(tmp_path / "big"), name="big")
+    fid = workspace_folders.add_folder(db, str(tmp_path / "big"), name="big")
     pid = _photo(db, fid, "keep.jpg")
     paths = [str(tmp_path / "big" / "keep.jpg")] + [
         str(tmp_path / "big" / f"n{i}.jpg") for i in range(1200)
@@ -978,7 +978,7 @@ def test_deleted_photo_id_reused_by_sqlite_does_not_join_foreign_collection(db, 
     # id to the next insert. A static collection in another workspace that
     # still named the deleted id would silently gain the new photo.
     doomed = _photo(db, lib["root"], "doomed.jpg")
-    db.add_workspace_folder(lib["other_ws"], lib["root"])
+    workspace_folders.add_workspace_folder(db, lib["other_ws"], lib["root"])
     foreign = db.conn.execute(
         "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
         ("foreign", json.dumps([{"field": "photo_ids", "value": [doomed]}]),
@@ -996,7 +996,7 @@ def test_deleted_photo_id_reused_by_sqlite_does_not_join_foreign_collection(db, 
 
 def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
     lib_path = str(tmp_path / "lib")
-    dest = db.add_folder(str(tmp_path / "dest"), name="dest")
+    dest = workspace_folders.add_folder(db, str(tmp_path / "dest"), name="dest")
     moved_a = _photo(db, dest, "a.cr3")
     moved_b = _photo(db, dest, "b.cr3")
     db.conn.execute(

@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 from PIL import Image
-from services import detection_store, photo_ingest, stage_counts, subject_masks
+from services import detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
 from subjects import analyze_photo, payload, select_primary
 
 
 @pytest.fixture
 def subject_photo(db, tmp_path):
-    folder = db.add_folder(str(tmp_path), name="Subjects")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Subjects")
     path = tmp_path / "pair.jpg"
     pixels = np.full((160, 320, 3), 90, dtype=np.uint8)
     # A sharp, lower-confidence animal on the right; blurry animal on left.

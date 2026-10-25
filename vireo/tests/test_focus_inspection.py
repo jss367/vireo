@@ -4,6 +4,7 @@ import io
 import pytest
 from focus_crop import focus_point, valid_subject_box, validate_raster_geometry
 from PIL import Image
+from services import workspace_folders
 from test_burst_evidence import _working_copy
 
 
@@ -69,7 +70,7 @@ def test_crop_raster_rejects_subject_coordinates_and_reports_native_scale(app_an
 def test_exif_upright_subject_and_manual_center_hit_same_pixels(app_and_db, tmp_path):
     from services import photo_ingest
     app, db = app_and_db
-    folder = db.add_folder(str(tmp_path), name='EXIF focus')
+    folder = workspace_folders.add_folder(db, str(tmp_path), name='EXIF focus')
     path = tmp_path / 'portrait.jpg'
     image = Image.new('RGB', (600, 400), 'blue')
     image.paste('red', (100, 50, 200, 150))

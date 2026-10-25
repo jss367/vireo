@@ -84,7 +84,7 @@ def exif_orientation(exif_data):
     return metadata.get("Orientation")
 
 
-def recipe_source_dimensions(photo, exif_data=_UNSET):
+def recipe_source_dimensions(photo, exif_data=_UNSET) -> tuple[int, int]:
     """Return the photo's (width, height) as ``load_image`` sees them.
 
     Stored width/height are the unrotated sensor axes; this normalizes them to
@@ -107,7 +107,7 @@ def recipe_source_dimensions(photo, exif_data=_UNSET):
     return width, height
 
 
-def scaled_recipe_source_dimensions(photo, max_size=None, exif_data=_UNSET):
+def scaled_recipe_source_dimensions(photo, max_size=None, exif_data=_UNSET) -> tuple[int, int]:
     """Like :func:`recipe_source_dimensions` but scaled down to ``max_size``.
 
     Mirrors ``load_image``'s long-edge downscale so callers can compare a

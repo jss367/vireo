@@ -12,6 +12,7 @@ import os
 
 import pytest
 from PIL import Image
+from services import workspace_folders
 from test_import_job import FakeRunner, _run_import, _stub_extractor
 
 
@@ -120,7 +121,7 @@ def test_the_extraction_pass_returns_the_photos_it_failed(tmp_path, monkeypatch)
     folder.mkdir()
     (folder / "bird.NEF").write_bytes(b"raw")
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(folder), name="photos")
+    fid = workspace_folders.add_folder(db, str(folder), name="photos")
     photo_ingest.add_photo(db, folder_id=fid, filename="bird.NEF", extension=".nef",
                            file_size=3, file_mtime=1.0)
 
@@ -287,7 +288,7 @@ def test_a_concurrent_publisher_does_not_turn_into_a_false_failure(tmp_path, mon
     folder.mkdir()
     (folder / "bird.NEF").write_bytes(b"raw")
     db = Database(str(tmp_path / "t.db"))
-    fid = db.add_folder(str(folder), name="photos")
+    fid = workspace_folders.add_folder(db, str(folder), name="photos")
     photo_ingest.add_photo(
         db, folder_id=fid, filename="bird.NEF", extension=".nef",
         file_size=3, file_mtime=1.0,

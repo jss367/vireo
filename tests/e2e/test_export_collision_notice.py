@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest
+from services import photo_ingest, workspace_folders
 
 PREFLIGHT = "/api/jobs/export/preflight"
 
@@ -16,7 +16,7 @@ def export_photos(live_server, tmp_path):
     db = live_server["db"]
     folder = tmp_path / "field"
     folder.mkdir()
-    folder_id = db.add_folder(str(folder))
+    folder_id = workspace_folders.add_folder(db, str(folder))
     ids = []
     for index, name in enumerate(["kestrel-a.jpg", "kestrel-b.jpg"]):
         path = folder / name

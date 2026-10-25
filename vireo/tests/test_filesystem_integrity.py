@@ -24,7 +24,7 @@ import pytest
 import staged_copy
 from db import Database
 from PIL import Image
-from services import duplicate_resolution, photo_ingest
+from services import duplicate_resolution, photo_ingest, workspace_folders
 
 # The racer unlinks our O_EXCL placeholder while we still hold it open. Windows
 # refuses to delete an open file, so that interleaving cannot happen there.
@@ -515,8 +515,8 @@ def three_photo_move(tmp_path):
     src = tmp_path / "src"
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
     ids = []
     for i in (1, 2, 3):
         path = _jpeg(src / f"IMG_{i}.JPG", color=("red", "green", "blue")[i - 1])
@@ -577,8 +577,8 @@ def test_move_photos_carries_uppercase_xmp_sidecar(tmp_path):
     src = tmp_path / "src"
     dst = tmp_path / "dst"
     dst.mkdir()
-    fid = db.add_folder(str(src), name="src")
-    db.add_folder(str(dst), name="dst")
+    fid = workspace_folders.add_folder(db, str(src), name="src")
+    workspace_folders.add_folder(db, str(dst), name="dst")
     photo = _jpeg(src / "IMG_9.JPG")
     (src / "IMG_9.XMP").write_text("<x/>")
     pid = photo_ingest.add_photo(
@@ -602,7 +602,7 @@ def _paired_db(tmp_path, raw_meta, jpeg_meta):
     from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
-    fid = db.add_folder(str(tmp_path / "day"))
+    fid = workspace_folders.add_folder(db, str(tmp_path / "day"))
     ids = {}
     for name, meta in (("IMG_0001.CR3", raw_meta), ("IMG_0001.JPG", jpeg_meta)):
         ids[name] = photo_ingest.add_photo(
@@ -1076,8 +1076,8 @@ def resolved_pair(tmp_path):
     laptop.mkdir()
     (nas / "owl.jpg").write_bytes(b"x")
     (laptop / "owl-2.jpg").write_bytes(b"x")
-    kept = _dup_add(db, db.add_folder(str(nas)), "owl.jpg", "H")
-    loser = _dup_add(db, db.add_folder(str(laptop)), "owl-2.jpg", "H")
+    kept = _dup_add(db, workspace_folders.add_folder(db, str(nas)), "owl.jpg", "H")
+    loser = _dup_add(db, workspace_folders.add_folder(db, str(laptop)), "owl-2.jpg", "H")
     assert _flag_map(db, [kept, loser]) == {kept: "none", loser: "rejected"}
     return db, nas, laptop, kept, loser
 
@@ -1117,8 +1117,8 @@ def test_duplicate_scan_offline_copy_is_not_a_missing_loser(tmp_path, monkeypatc
     nas.mkdir()
     laptop.mkdir()
     (laptop / "owl-2.jpg").write_bytes(b"x")
-    nas_fid = db.add_folder(str(nas))
-    laptop_fid = db.add_folder(str(laptop))
+    nas_fid = workspace_folders.add_folder(db, str(nas))
+    laptop_fid = workspace_folders.add_folder(db, str(laptop))
     # Insert directly so add_photo's auto-resolve leaves the group open.
     for fid, name in ((nas_fid, "owl.jpg"), (laptop_fid, "owl-2.jpg")):
         db.conn.execute(
@@ -1153,8 +1153,8 @@ def test_duplicate_scan_all_offline_is_not_reported_as_all_missing(
     nas_b = tmp_path / "nas_b"
     nas_a.mkdir()
     nas_b.mkdir()
-    a_fid = db.add_folder(str(nas_a))
-    b_fid = db.add_folder(str(nas_b))
+    a_fid = workspace_folders.add_folder(db, str(nas_a))
+    b_fid = workspace_folders.add_folder(db, str(nas_b))
     for fid, name in ((a_fid, "owl.jpg"), (b_fid, "owl-2.jpg")):
         db.conn.execute(
             "INSERT INTO photos (folder_id, filename, extension, file_size,"
@@ -1185,7 +1185,7 @@ def test_duplicate_scan_all_missing_ignores_offline_flag_when_files_gone(
     db = Database(str(tmp_path / "t.db"))
     a = tmp_path / "a"
     a.mkdir()
-    fid = db.add_folder(str(a))
+    fid = workspace_folders.add_folder(db, str(a))
     for name in ("owl.jpg", "owl-2.jpg"):
         db.conn.execute(
             "INSERT INTO photos (folder_id, filename, extension, file_size,"
@@ -1225,8 +1225,8 @@ def test_resolution_plan_probes_reachability_before_stat(
     nas.mkdir()
     laptop.mkdir()
     (laptop / "owl.jpg").write_bytes(b"x")
-    nas_fid = db.add_folder(str(nas))
-    laptop_fid = db.add_folder(str(laptop))
+    nas_fid = workspace_folders.add_folder(db, str(nas))
+    laptop_fid = workspace_folders.add_folder(db, str(laptop))
     for fid, name in ((nas_fid, "owl-nas.jpg"), (laptop_fid, "owl.jpg")):
         db.conn.execute(
             "INSERT INTO photos (folder_id, filename, extension, file_size,"
@@ -1291,8 +1291,8 @@ def test_resolution_plan_defers_when_any_candidate_offline(tmp_path, monkeypatch
     nas.mkdir()
     laptop.mkdir()
     (laptop / "owl.jpg").write_bytes(b"x")
-    nas_fid = db.add_folder(str(nas))
-    laptop_fid = db.add_folder(str(laptop))
+    nas_fid = workspace_folders.add_folder(db, str(nas))
+    laptop_fid = workspace_folders.add_folder(db, str(laptop))
     for fid, name in ((nas_fid, "owl.jpg"), (laptop_fid, "owl.jpg")):
         db.conn.execute(
             "INSERT INTO photos (folder_id, filename, extension, file_size,"
@@ -1360,7 +1360,7 @@ def test_duplicate_scan_does_not_reopen_for_hand_rejected_sibling(tmp_path):
     a = tmp_path / "a"
     a.mkdir()
     (a / "owl-2.jpg").write_bytes(b"x")
-    fid = db.add_folder(str(a))
+    fid = workspace_folders.add_folder(db, str(a))
     for name, flag in (("owl.jpg", "none"), ("owl-2.jpg", "rejected")):
         db.conn.execute(
             "INSERT INTO photos (folder_id, filename, extension, file_size,"
@@ -1423,7 +1423,7 @@ def test_ingest_filtered_card_sibling_still_forces_suffix_on_survivor(tmp_path):
     other = tmp_path / "elsewhere"
     other.mkdir()
     (other / "IMG_0001.CR3").write_bytes(card_raw.read_bytes())
-    folder_id = db.add_folder(str(other))
+    folder_id = workspace_folders.add_folder(db, str(other))
     photo_ingest.add_photo(
         db, folder_id=folder_id, filename="IMG_0001.CR3", extension=".CR3",
         file_size=card_raw.stat().st_size,

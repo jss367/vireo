@@ -8,7 +8,7 @@ import json
 import os
 
 import pytest
-from services import photo_ingest, stage_counts
+from services import photo_ingest, stage_counts, workspace_folders
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -63,7 +63,7 @@ def _seed_workspace(db, name="WS1", folder_path="/photos/ws1", n_photos=2):
         ws_id = cur.lastrowid
         db.conn.commit()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(folder_path, name=os.path.basename(folder_path))
+    fid = workspace_folders.add_folder(db, folder_path, name=os.path.basename(folder_path))
     photo_ids = []
     for i in range(n_photos):
         pid = photo_ingest.add_photo(

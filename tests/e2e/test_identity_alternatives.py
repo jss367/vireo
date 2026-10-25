@@ -4,6 +4,7 @@ import re
 
 import pytest
 from playwright.sync_api import expect
+from services import workspace_folders
 
 
 def open_panel(live_server, page):
@@ -98,7 +99,7 @@ def test_stale_create_form_cannot_edit_a_new_active_workspace(live_server, page)
     db.tag_photo(ids[0], kid)
     before = db.photo_species.get_species_for_photos(ids)
     other = db.create_workspace('Another shared workspace')
-    db.add_workspace_folder(other, db.photos.get(ids[0])['folder_id'])
+    workspace_folders.add_workspace_folder(db, other, db.photos.get(ids[0])['folder_id'])
     db.workspaces.update(other, last_opened_at='2099-01-01T00:00:00')
     page.locator('#identitySave').click()
     expect(page.locator('#identityAlternativesStatus')).to_contain_text('The active workspace changed')

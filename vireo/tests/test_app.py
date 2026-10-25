@@ -16,6 +16,7 @@ from services import (
     photo_ingest,
     subject_masks,
     workspace_config,
+    workspace_folders,
 )
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
@@ -226,7 +227,7 @@ def test_api_add_keyword_clears_shared_flat_removals(app_and_db):
     wildlife_id = db.add_keyword("Wildlife", kw_type="genre")
     ws1 = db._ws_id()
     ws2 = db.create_workspace("keyword-readd-sibling")
-    db.add_workspace_folder(ws2, photo["folder_id"])
+    workspace_folders.add_workspace_folder(db, ws2, photo["folder_id"])
     for ws_id in (ws1, ws2):
         db.queue_change(
             photo["id"], "keyword_remove_flat", "Wildlife",
@@ -325,7 +326,7 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    other_fid = db.add_folder('/other/photos', name='other')
+    other_fid = workspace_folders.add_folder(db, '/other/photos', name='other')
     photo_ingest.add_photo(db, folder_id=other_fid, filename='only.cr2', extension='.cr2',
                  file_size=1, file_mtime=1.0)
     db.set_active_workspace(default_ws)
@@ -707,7 +708,7 @@ def test_api_folder_get_rejects_other_workspace(app_and_db):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
     # Folder added while other_ws is active; only linked to other_ws.
-    other_fid = db.add_folder('/secret/ws', name='secret')
+    other_fid = workspace_folders.add_folder(db, '/secret/ws', name='secret')
     db.set_active_workspace(default_ws)
     client = app.test_client()
     resp = client.get(f'/api/folders/{other_fid}')
@@ -728,9 +729,9 @@ def test_api_folder_workspaces_lists_inherited_and_direct_memberships(app_and_db
         "SELECT id FROM folders WHERE path = '/photos/2024/January'"
     ).fetchone()
     inherited_ws = db.create_workspace("Inherited Photos")
-    db.add_workspace_folder(inherited_ws, root["id"])
+    workspace_folders.add_workspace_folder(db, inherited_ws, root["id"])
     direct_ws = db.create_workspace("Direct Photos")
-    db.add_workspace_folder(direct_ws, child["id"])
+    workspace_folders.add_workspace_folder(db, direct_ws, child["id"])
 
     resp = client.get(f'/api/folders/{child["id"]}/workspaces')
     assert resp.status_code == 200
@@ -751,7 +752,7 @@ def test_api_folder_workspaces_rejects_folder_hidden_from_active_workspace(
     active_ws = db._active_workspace_id
     other_ws = db.create_workspace("Private Workspace")
     db.set_active_workspace(other_ws)
-    hidden_id = db.add_folder('/private/folder', name='folder')
+    hidden_id = workspace_folders.add_folder(db, '/private/folder', name='folder')
     db.set_active_workspace(active_ws)
 
     resp = app.test_client().get(f'/api/folders/{hidden_id}/workspaces')
@@ -768,7 +769,7 @@ def test_api_folder_workspaces_does_not_expand_restricted_exact_links(app_and_db
         "SELECT id FROM folders WHERE path = '/photos/2024/January'"
     ).fetchone()
     restricted_ws = db.create_workspace("Restricted Import")
-    db.add_workspace_folder_exact(restricted_ws, root["id"], is_root=False)
+    workspace_folders.add_workspace_folder_exact(db, restricted_ws, root["id"], is_root=False)
 
     resp = app.test_client().get(f'/api/folders/{root["id"]}/workspaces')
     assert resp.status_code == 200
@@ -790,9 +791,9 @@ def test_api_folder_workspaces_infers_late_recursive_child_without_mutation(
         "SELECT id FROM folders WHERE path = '/photos/2024'"
     ).fetchone()
     recursive_ws = db.create_workspace("Recursive Library")
-    db.add_workspace_folder(recursive_ws, root["id"])
-    late_child_id = db.add_folder(
-        "/photos/2024/Late Discovery", name="Late Discovery"
+    workspace_folders.add_workspace_folder(db, recursive_ws, root["id"])
+    late_child_id = workspace_folders.add_folder(
+        db, "/photos/2024/Late Discovery", name="Late Discovery"
     )
     assert db.conn.execute(
         "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
@@ -4568,7 +4569,7 @@ def test_api_pipeline_photo_detail_rejects_other_workspace(app_and_db):
     default_ws = db._active_workspace_id
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
-    other_fid = db.add_folder('/secret/ws', name='secret')
+    other_fid = workspace_folders.add_folder(db, '/secret/ws', name='secret')
     other_pid = photo_ingest.add_photo(db, other_fid, 'hidden.jpg', '.jpg', 1000, 0.0)
     db.set_active_workspace(default_ws)
     client = app.test_client()
@@ -7176,7 +7177,7 @@ def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
     p1 = by_name["bird1.jpg"]
     p2 = by_name["bird2.jpg"]
     p3 = by_name["bird3.jpg"]
-    missing_fid = db.add_folder("/photos/missing", name="missing")
+    missing_fid = workspace_folders.add_folder(db, "/photos/missing", name="missing")
     missing_pid = photo_ingest.add_photo(
         db, folder_id=missing_fid,
         filename="missing.jpg",
@@ -8027,7 +8028,7 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     # Create workspace B with its own folder and photo
     ws_b = db.create_workspace("B")
     db.set_active_workspace(ws_b)
-    fid_b = db.add_folder("/photos/b", name="b")
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     # Insert a case-variant of "Sparrow" directly to bypass dedup
@@ -8130,7 +8131,7 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
     # Create workspace B with its own folder, photo, and keyword "Penguin"
     ws_b = db.create_workspace("B")
     db.set_active_workspace(ws_b)
-    fid_b = db.add_folder("/photos/b", name="b")
+    fid_b = workspace_folders.add_folder(db, "/photos/b", name="b")
     pid_b = photo_ingest.add_photo(db, folder_id=fid_b, filename="b.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0)
     k_penguin = db.add_keyword("Penguin")
@@ -8852,8 +8853,8 @@ def test_rename_species_highlights_species_chunks_scoped_photo_ids(
     _app, db = app_and_db
     ws = db._ws_id()
     kid_old = db.add_keyword("OldBird", is_species=True)
-    fid = db.add_folder("/renamed", name="renamed")
-    db.add_workspace_folder(ws, fid)
+    fid = workspace_folders.add_folder(db, "/renamed", name="renamed")
+    workspace_folders.add_workspace_folder(db, ws, fid)
 
     # Seed enough photos+highlight rows to exceed the shrunk parameter cap
     # in a single un-chunked query.
@@ -9015,7 +9016,7 @@ def _seed_anianiau_bucket(db):
     """Seed one species folder mirroring the real bug: a scored pick, two
     unscored picks, scored/unscored non-picks, and a rejected photo. Returns
     (folder_id, {label: photo_id})."""
-    fid = db.add_folder('/photos/hawaii', name='hawaii')
+    fid = workspace_folders.add_folder(db, '/photos/hawaii', name='hawaii')
     kid = db.add_keyword('Anianiau', is_species=True)
     spec = [
         # label, quality, flag, timestamp
@@ -9165,7 +9166,7 @@ def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotio
     )
 
     _app, db = app_and_db
-    fid = db.add_folder('/photos/curate', name='curate')
+    fid = workspace_folders.add_folder(db, '/photos/curate', name='curate')
     kid = db.add_keyword('Iiwi', is_species=True)
     scored_a = photo_ingest.add_photo(
         db, folder_id=fid, filename='scored_a.jpg', extension='.jpg',
@@ -9323,8 +9324,8 @@ def test_rename_keyword_queues_for_all_workspaces(app_and_db):
 
     # Create a second workspace with its own folder and photo
     ws2 = db.create_workspace("Second")
-    fid2 = db.add_folder("/photos/ws2", name="ws2")
-    db.add_workspace_folder(ws2, fid2)
+    fid2 = workspace_folders.add_folder(db, "/photos/ws2", name="ws2")
+    workspace_folders.add_workspace_folder(db, ws2, fid2)
     p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2bird.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
@@ -9364,8 +9365,8 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
     client = app.test_client()
 
     ws2 = db.create_workspace("Second")
-    fid2 = db.add_folder("/photos/ws2del", name="ws2del")
-    db.add_workspace_folder(ws2, fid2)
+    fid2 = workspace_folders.add_folder(db, "/photos/ws2del", name="ws2del")
+    workspace_folders.add_workspace_folder(db, ws2, fid2)
     p_ws2 = photo_ingest.add_photo(db, folder_id=fid2, filename="ws2del.jpg", extension=".jpg",
                          file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
@@ -9961,8 +9962,8 @@ def test_add_keyword_route_handles_non_string_type(app_and_db):
     JSON value must not 500 — the bad value should be ignored and the
     keyword still created with its default type."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/p")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -9988,8 +9989,8 @@ def test_add_keyword_route_handles_non_string_type(app_and_db):
 def test_wildlife_excluded_route_does_not_add_landscape_keyword(app_and_db):
     """Not Wildlife is workflow state, not a hidden Landscape keyword."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/p")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10048,8 +10049,8 @@ def test_batch_wildlife_excluded_updates_only_changed_photos_and_undoes(app_and_
 def test_batch_keyword_route_handles_non_string_type(app_and_db):
     """Same regression for the batch endpoint."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/q")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/q")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "q.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10071,8 +10072,8 @@ def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
     clean 400 rather than 500-ing on add_keyword's ValueError, and must not
     insert an empty keyword row."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/pe")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/pe")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10099,8 +10100,8 @@ def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
 def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
     """Same normalized-empty guard on the batch endpoint."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/qe")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/qe")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10127,8 +10128,8 @@ def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
     string and the add/remove pair cancels instead of both persisting to
     XMP."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/qn")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/qn")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10174,8 +10175,8 @@ def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
     """Batch endpoint must queue the stored keyword name too, so the
     per-photo add/remove pair cancels the same way the single endpoint does."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/qb")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/qb")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10339,7 +10340,7 @@ def test_selection_wildlife_state_ignores_photos_outside_active_workspace(app_an
     other_ws = db.create_workspace("other")
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
-    stray_folder = db.add_folder("/other-only", name="other-only")
+    stray_folder = workspace_folders.add_folder(db, "/other-only", name="other-only")
     stray = photo_ingest.add_photo(
         db, folder_id=stray_folder, filename="stray.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -10411,7 +10412,7 @@ def test_batch_wildlife_excluded_skips_missing_and_out_of_workspace(app_and_db):
     other_ws = db.create_workspace("other-batch")
     original_ws = db._active_workspace_id
     db.set_active_workspace(other_ws)
-    stray_folder = db.add_folder("/batch-stray", name="batch-stray")
+    stray_folder = workspace_folders.add_folder(db, "/batch-stray", name="batch-stray")
     stray = photo_ingest.add_photo(
         db, folder_id=stray_folder, filename="batch-stray.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
@@ -10456,8 +10457,8 @@ def test_batch_wildlife_excluded_uses_chunked_workspace_lookup(app_and_db):
     tens of thousands of redundant SQLite queries and blocks the request.
     """
     app, db = app_and_db
-    folder_id = db.add_folder("/bulk", name="bulk")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/bulk", name="bulk")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_ids = [
         photo_ingest.add_photo(
             db, folder_id=folder_id,
@@ -10761,8 +10762,8 @@ def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db)
     the existing row's type. add_keyword's reconciliation logic (only
     upgrades 'general') must run instead of a force-UPDATE."""
     app, db = app_and_db
-    folder_id = db.add_folder("/tmp/p")
-    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    workspace_folders.add_workspace_folder(db, db._active_workspace_id, folder_id)
     photo_id = photo_ingest.add_photo(
         db, folder_id, "p.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
     )
@@ -10883,7 +10884,7 @@ def test_api_photos_missing(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_present = photo_ingest.add_photo(db, folder_id=fid, filename="here.jpg",
                                extension=".jpg", file_size=1, file_mtime=1.0)
     pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
@@ -10925,7 +10926,7 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -10962,7 +10963,7 @@ def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, 
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11013,7 +11014,7 @@ def test_api_photos_missing_automatic_gate_uses_scan_start_time(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11107,7 +11108,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11286,7 +11287,7 @@ def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11331,7 +11332,7 @@ def test_api_folder_relocate_invalidates_missing_cache(app_and_db, tmp_path):
     # as a ghost.
     old_dir = tmp_path / "orig"
     old_dir.mkdir()
-    fid = db.add_folder(str(old_dir), name="orig")
+    fid = workspace_folders.add_folder(db, str(old_dir), name="orig")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11382,7 +11383,7 @@ def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path
 
     live_dir = tmp_path / "live"
     live_dir.mkdir()
-    fid = db.add_folder(str(live_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(live_dir), name="live")
     (live_dir / "keep.NEF").write_bytes(b"stub")
     photo_ingest.add_photo(
         db, folder_id=fid,
@@ -11751,7 +11752,7 @@ def test_scan_job_invalidates_missing_originals_cache(app_and_db, tmp_path):
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     (real_dir / "keep.jpg").write_bytes(b"jpegbytes")
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
 
     # Seed a stale ready cache directly (the folder is healthy, so
     # the scan's own pre-flight would not invalidate it via the
@@ -11953,7 +11954,7 @@ def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -11997,7 +11998,7 @@ def test_api_audit_import_untracked_invalidates_missing_cache(
     img_path.parent.mkdir()
     img_path.write_bytes(b"stub")
     # import-untracked only accepts files under the workspace's roots.
-    db.add_folder(str(img_path.parent), name="shoot")
+    workspace_folders.add_folder(db, str(img_path.parent), name="shoot")
 
     key = (db._db_path, db._active_workspace_id, None)
     with app._missing_originals_lock:
@@ -12042,7 +12043,7 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     winner_file = real_dir / "winner.jpg"
     winner_file.write_bytes(b"jpeg-winner")
     loser_file = real_dir / "loser.jpg"
@@ -12129,8 +12130,8 @@ def test_batch_delete_invalidates_missing_cache_across_workspaces(
 
     shared_dir = tmp_path / "shared"
     shared_dir.mkdir()
-    fid = db.add_folder(str(shared_dir), name="shared")
-    db.add_workspace_folder(other_ws, fid)
+    fid = workspace_folders.add_folder(db, str(shared_dir), name="shared")
+    workspace_folders.add_workspace_folder(db, other_ws, fid)
 
     pid_ghost = photo_ingest.add_photo(
         db, folder_id=fid,
@@ -12196,7 +12197,7 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     decoy_xmp = real_dir / "decoy.xmp"
     decoy_xmp.write_text("<x:xmpmeta/>")
 
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
     pid_decoy = photo_ingest.add_photo(db, folder_id=fid, filename="decoy.jpg",
@@ -12228,7 +12229,7 @@ def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path
     real_dir = tmp_path / "live"
     real_dir.mkdir()
     # Ghost stays missing: nothing on disk for this row.
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_ghost = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
     # Restored: original file is back on disk (simulated), sidecar too.
@@ -12278,7 +12279,7 @@ def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
     # Ghost sidecar left on disk — must not be deleted while folder offline.
@@ -12319,7 +12320,7 @@ def test_api_photos_missing_remove_skips_unreadable_folder(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -12368,7 +12369,7 @@ def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
 
@@ -12400,7 +12401,7 @@ def test_api_photos_missing_delete_sidecars_skips_unreadable_folder(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid = photo_ingest.add_photo(
         db, folder_id=fid,
         filename="ghost.NEF",
@@ -12496,7 +12497,7 @@ def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid_sized = photo_ingest.add_photo(db, folder_id=fid, filename="sized.NEF",
                              extension=".nef", file_size=1, file_mtime=1.0)
     pid_legacy = photo_ingest.add_photo(db, folder_id=fid, filename="legacy.NEF",
@@ -12539,7 +12540,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    fid = db.add_folder(str(real_dir), name="live")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="live")
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="ghost.NEF",
                        extension=".nef", file_size=1, file_mtime=1.0)
     catalog_deletion.delete_photos(db, [
@@ -12571,7 +12572,7 @@ def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
     real_dir = tmp_path / "ok"
     real_dir.mkdir()
     Image.new("RGB", (10, 10)).save(real_dir / "still_here.jpg")
-    fid = db.add_folder(str(real_dir), name="ok")
+    fid = workspace_folders.add_folder(db, str(real_dir), name="ok")
     photo_ingest.add_photo(db, folder_id=fid, filename="still_here.jpg", extension=".jpg",
                  file_size=1, file_mtime=1.0)
     catalog_deletion.delete_photos(db, [
@@ -12620,8 +12621,8 @@ def test_api_folder_relocate_conflict_after_revalidation_invalidates_missing_cac
     target_path = tmp_path / "target"
     source_path.mkdir()
     target_path.mkdir()
-    source_id = db.add_folder(str(source_path), name="source")
-    db.add_folder(str(target_path), name="target")
+    source_id = workspace_folders.add_folder(db, str(source_path), name="source")
+    workspace_folders.add_folder(db, str(target_path), name="target")
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id = ?", (source_id,)
     )
@@ -12666,7 +12667,7 @@ def test_api_folder_relocate_rebases_configured_developed_dir(app_and_db, tmp_pa
     new_dir = str(tmp_path / "new_birds")
     os.makedirs(new_dir)
 
-    fid = db.add_folder(old_dir, name="birds")
+    fid = workspace_folders.add_folder(db, old_dir, name="birds")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
     db.conn.commit()
 
@@ -12701,8 +12702,8 @@ def test_api_folder_relocate_rebases_cascaded_child_developed_dirs(app_and_db, t
     new_child = os.path.join(new_parent, "child")
     os.makedirs(new_child)
 
-    pfid = db.add_folder(old_parent, name="parent")
-    cfid = db.add_folder(old_child, name="child", parent_id=pfid)
+    pfid = workspace_folders.add_folder(db, old_parent, name="parent")
+    cfid = workspace_folders.add_folder(db, old_child, name="child", parent_id=pfid)
     db.conn.execute(
         "UPDATE folders SET status = 'missing' WHERE id IN (?, ?)", (pfid, cfid)
     )
@@ -12735,8 +12736,8 @@ def test_api_folder_relocate_merge(app_and_db, tmp_path):
     os.makedirs(dir_a)
     os.makedirs(dir_b)
 
-    fid_a = db.add_folder(dir_a, name="a")
-    fid_b = db.add_folder(dir_b, name="b")
+    fid_a = workspace_folders.add_folder(db, dir_a, name="a")
+    fid_b = workspace_folders.add_folder(db, dir_b, name="b")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
     db.conn.commit()
 
@@ -16445,8 +16446,8 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(tmp_path), name="photos")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
 
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     # Two encounters of 3 photos each, separated by 5 minutes (hard time cut).
@@ -16544,8 +16545,8 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(tmp_path), name="photos")
-    db.add_workspace_folder(ws_id, fid)
+    fid = workspace_folders.add_folder(db, str(tmp_path), name="photos")
+    workspace_folders.add_workspace_folder(db, ws_id, fid)
 
     base_time = datetime(2026, 3, 20, 10, 0, 0)
     collection_pids = []
@@ -17664,7 +17665,7 @@ def test_api_audit_import_untracked_warns_when_exiftool_missing(
     img_path = tmp_path / "shoot" / "IMG_0001.JPG"
     _touch_jpeg(str(img_path))
     # import-untracked only accepts files under the workspace's roots.
-    db.add_folder(str(img_path.parent), name="shoot")
+    workspace_folders.add_folder(db, str(img_path.parent), name="shoot")
 
     client = app.test_client()
     resp = client.post(
@@ -17692,7 +17693,7 @@ def test_api_audit_import_untracked_silent_when_exiftool_present(
     img_path = tmp_path / "shoot" / "IMG_0001.JPG"
     _touch_jpeg(str(img_path))
     # import-untracked only accepts files under the workspace's roots.
-    db.add_folder(str(img_path.parent), name="shoot")
+    workspace_folders.add_folder(db, str(img_path.parent), name="shoot")
 
     client = app.test_client()
     resp = client.post(
@@ -18302,7 +18303,7 @@ def test_pipeline_plan_folder_scope_unlinked_404(app_and_db):
     original_ws = db._active_workspace_id
     other = db.create_workspace("PlanOther")
     db.set_active_workspace(other)
-    foreign = db.add_folder("/photos/plan-foreign", name="plan-foreign")
+    foreign = workspace_folders.add_folder(db, "/photos/plan-foreign", name="plan-foreign")
     db.set_active_workspace(original_ws)
     client = app.test_client()
     resp = client.post("/api/pipeline/plan", json={"folder_ids": [foreign]})
@@ -18348,7 +18349,7 @@ def test_build_explorer_payload_rollup(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
@@ -18406,7 +18407,7 @@ def test_build_explorer_payload_multi_found_species_rollup(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     p1 = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                       file_size=1, file_mtime=1.0)
     p2 = photo_ingest.add_photo(db, folder_id=fid, filename='b.jpg', extension='.jpg',
@@ -18447,7 +18448,7 @@ def test_build_explorer_species_leaf(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
@@ -18498,7 +18499,7 @@ def test_build_explorer_rank_families(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
@@ -18529,7 +18530,7 @@ def test_build_explorer_rank_species_has_photo(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     p = photo_ingest.add_photo(db, folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=1, file_mtime=1.0)
     k = db.add_keyword('Song Sparrow')
@@ -18598,7 +18599,7 @@ def test_explorer_uncounted_identifications_are_class_aware_and_reasoned(db):
     ).lastrowid
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
 
     tags = [
         ('New World sparrows', ids['Passerellidae']),
@@ -18661,7 +18662,7 @@ def test_build_explorer_payload_always_includes_default_aves_class(db):
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
     # User has tagged species — but NONE of them are birds.
-    fid = db.add_folder('/p', name='p')
+    fid = workspace_folders.add_folder(db, '/p', name='p')
     # No mammal species seeded; leave the mammal tag unmatched so `found` is
     # empty but the class ancestor list would still not include Aves without
     # the fix. That still isolates the "default Aves always present" behavior.

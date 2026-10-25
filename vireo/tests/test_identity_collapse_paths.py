@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
-from services import catalog_deletion, moves_merge, photo_ingest
+from services import catalog_deletion, moves_merge, photo_ingest, workspace_folders
 from services.identity_alternatives import resolve_alternatives, save_alternatives
 
 
@@ -22,8 +22,8 @@ def _photo(db, folder, filename):
 def _fixture(db, tmp_path, path):
     target_path = tmp_path / 'target'
     target_path.mkdir()
-    target = db.add_folder(str(target_path))
-    source = db.add_folder(str(tmp_path / 'source')) if path == 'folder' else target
+    target = workspace_folders.add_folder(db, str(target_path))
+    source = workspace_folders.add_folder(db, str(tmp_path / 'source')) if path == 'folder' else target
     survivor = _photo(db, target, 'bird.jpg' if path == 'folder' else 'bird.raf')
     losing = _photo(db, source, 'bird.jpg')
     for filename in ('bird.jpg', 'bird.raf'):
@@ -39,7 +39,7 @@ def test_collapse_preserves_identity_tags_provenance_and_replay(db, tmp_path, pa
     ws = db.require_workspace_id()
     sharing = db.create_workspace('Shared collapse')
     db.set_active_workspace(ws)
-    db.add_workspace_folder(sharing, source)
+    workspace_folders.add_workspace_folder(db, sharing, source)
     note = db.add_keyword('Unrelated note')
     db.tag_photo(survivor, note, source='manual')
     db.photo_review.set_flag(survivor, 'rejected')
@@ -187,7 +187,7 @@ def test_staged_identity_intents_cannot_be_acknowledged_by_old_path_writer(db, t
     from services.pending_changes import clear_pending_by_token
     from test_db_moves_merge import _collision_tree
     tree = _collision_tree(db, tmp_path, same_hash=same_hash)
-    db.add_workspace_folder(db.require_workspace_id(), tree['stage_root'])
+    workspace_folders.add_workspace_folder(db, db.require_workspace_id(), tree['stage_root'])
     losing, survivor = (tree['staged'], tree['survivor']) if same_hash else (tree['survivor'], tree['staged'])
     with db._commits_held():
         save_alternatives(db, [losing], ['Heron', 'Egret'], 'Moved decision', 'Bill')

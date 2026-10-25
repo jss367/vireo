@@ -14,13 +14,13 @@ import textwrap
 import pytest
 from db import Database
 from repositories.pipeline_features import PipelineFeaturesRepository
-from services import detection_store, photo_ingest
+from services import detection_store, photo_ingest, workspace_folders
 
 
 @pytest.fixture
 def catalog(db, tmp_path):
     ws = db.require_workspace_id()
-    folder = db.add_folder(str(tmp_path), name="Pipeline")
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Pipeline")
     photos = [
         photo_ingest.add_photo(db, folder_id=folder, filename=f"{i}.jpg", extension=".jpg",
                      file_size=1, file_mtime=1, timestamp=f"2026-01-01T00:00:0{i}")

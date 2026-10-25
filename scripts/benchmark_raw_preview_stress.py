@@ -22,7 +22,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / 'vireo'))
-from services import photo_ingest  # noqa: E402
+from services import photo_ingest, workspace_folders  # noqa: E402
 
 from scripts.benchmark_raw_previews import ROOT, corpus_entries, environment, provenance, summarize  # noqa: E402
 
@@ -118,7 +118,7 @@ def run_trial(spec):
             for source in spec['sources']:
                 path = Path(source['path'])
                 stat = path.stat()
-                folder = db.add_folder(str(path.parent))
+                folder = workspace_folders.add_folder(db, str(path.parent))
                 photo = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=path.suffix.lower(),
                                      file_size=stat.st_size, file_mtime=stat.st_mtime,
                                      width=source['source_dimensions'][0], height=source['source_dimensions'][1])
