@@ -4,7 +4,8 @@ import numpy as np
 import presence
 import pytest
 from detail import apply_detail
-from image_edits import RecipeError, apply_recipe_to_loaded_image, normalize_recipe
+from edit_recipe import RecipeError, normalize_recipe
+from image_edits import apply_recipe_to_loaded_image
 from PIL import Image
 from presence import apply_presence
 

@@ -25,7 +25,7 @@ import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
-from keyword_identity import embedded_keyword_associations_for_merge
+from repositories.keyword_identity_sql import embedded_keyword_associations_for_merge
 from sql_chunks import chunked
 
 

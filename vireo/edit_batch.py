@@ -5,12 +5,7 @@ import json
 import math
 from typing import Any
 
-from image_edits import (
-    _ADJUSTMENT_RANGES,
-    RecipeError,
-    _number,
-    normalize_recipe,
-)
+from edit_recipe import _ADJUSTMENT_RANGES, RecipeError, _number, normalize_recipe
 
 # Explicit paths make a missing source value mean "reset this setting", while
 # settings outside the selection always retain the destination's value.

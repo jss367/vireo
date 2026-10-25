@@ -742,12 +742,8 @@ def fit_loaded_image(
         )
         from .tone import RANGE_RADIUS
     except ImportError:
-        from image_edits import (
-            _PRESENCE_KEYS,
-            _apply_geometry,
-            detail_render_scale,
-            normalize_recipe,
-        )
+        from edit_recipe import _PRESENCE_KEYS, normalize_recipe
+        from image_edits import _apply_geometry, detail_render_scale
         from tone import RANGE_RADIUS
 
     normalized = normalize_recipe(recipe) or {}

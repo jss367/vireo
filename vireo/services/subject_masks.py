@@ -141,7 +141,7 @@ def list_photos_for_eye_keypoint_stage(
 
     Returns one row per photo. Only the effective primary detection
     can supply eye predictions, resolved with the same
-    threshold-aware ordering (``subjects.primary_order_sql``) that
+    threshold-aware ordering (``repositories.subject_order.primary_order_sql``) that
     mask extraction and ``set_active_mask_variant`` use: user
     override in ``photo_subject_choices`` → subject-analysis quality
     score → detector confidence. Anchoring on the current floor
@@ -158,7 +158,7 @@ def list_photos_for_eye_keypoint_stage(
     box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
     scientific_name, species.
     """
-    from pipeline import EYE_KP_FINGERPRINT_VERSION
+    from catalog_stamps import EYE_KP_FINGERPRINT_VERSION
     # Resolve the workspace before reading the config or staging the
     # photo scope (an empty scope returns early), as the eagerly scoped
     # repository did.

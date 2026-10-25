@@ -696,7 +696,7 @@ def test_rules_engine_rejects_malformed_groups_and_metadata(db):
 
 
 def test_keyword_identity_rule(db, folder):
-    from keyword_identity import identity_sql
+    from repositories.keyword_identity_sql import identity_sql
 
     a = _photo(db, folder, "a.jpg")
     _photo(db, folder, "b.jpg")

@@ -168,9 +168,9 @@ class PipelineFeaturesRepository:
     ) -> list[sqlite3.Row]:
         """Every qualifying animal detection with its subject analysis.
 
-        Ordered by photo, then primary-subject order (``subjects.primary_order_sql``).
+        Ordered by photo, then primary-subject order (``repositories.subject_order.primary_order_sql``).
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         floor_sql, floor_params = self._detection_floor(min_conf, weak_confidence)
         scope_sql = _SCOPE_SQL if scoped else ""
         return self.conn.execute(
@@ -429,9 +429,9 @@ class PipelineFeaturesRepository:
         """The top-ordered non-full-image detection at ``min_conf``, or None.
 
         Carries ``id`` and ``box_x/y/w/h``; ordered by
-        ``subjects.primary_order_sql``, as the mask and eye stages choose.
+        ``repositories.subject_order.primary_order_sql``, as the mask and eye stages choose.
         """
-        from subjects import primary_order_sql
+        from repositories.subject_order import primary_order_sql
         return self.conn.execute(
             f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
                   FROM detections d

@@ -2092,7 +2092,7 @@ class _StagedTreeMerge:
         only on the losing side. The shared conflict clause keeps the
         survivor's existing evidence when both rows carried one.
         """
-        from keyword_identity import embedded_keyword_associations_for_merge
+        from repositories.keyword_identity_sql import embedded_keyword_associations_for_merge
 
         for row in embedded_keyword_associations_for_merge(self.conn, losing_id, survivor_id):
             self.conn.execute(

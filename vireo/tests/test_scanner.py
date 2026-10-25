@@ -3309,7 +3309,7 @@ def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
 def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     """Pairing raw+JPEG preserves a recipe stored on the deleted companion."""
     from db import Database
-    from image_edits import recipe_to_json
+    from edit_recipe import recipe_to_json
     from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"

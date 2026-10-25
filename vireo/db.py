@@ -11,12 +11,12 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict
 
-from keyword_identity import resolve_import_alias
 from keyword_normalization import (
     keyword_match_key,
     normalize_keyword_display,
 )
 from new_images import get_shared_cache
+from repositories.keyword_identity_sql import resolve_import_alias
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.species_taxon_lookup import taxon_lookup_variants
 

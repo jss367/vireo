@@ -54,7 +54,7 @@ def create_history_blueprint(
     blueprint = Blueprint("history", __name__)
 
     def _edit_recipe_history_updates(db: Database, edit_id: int) -> dict[str, JsonDict | None]:
-        from image_edits import recipe_to_json
+        from edit_recipe import recipe_to_json
         photo_ids = db.edit_history.item_photo_ids(edit_id)
         if not photo_ids:
             return {}

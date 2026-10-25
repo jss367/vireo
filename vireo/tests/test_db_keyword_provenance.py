@@ -271,7 +271,7 @@ def test_merge_keyword_into_disambiguates_cross_type_children_through_the_facade
 def test_merge_keyword_into_keeps_distinct_taxa_apart_and_hands_over_the_database(
     db, lib, monkeypatch,
 ):
-    import keyword_identity
+    from repositories import keyword_identity_sql as keyword_identity
 
     db.conn.execute(
         "INSERT INTO taxa (id, inat_id, name, rank) VALUES "

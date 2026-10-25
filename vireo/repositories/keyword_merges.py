@@ -16,7 +16,7 @@ writer before a merge revalidates its preview. Nothing here commits; the
 merges run inside the caller's ``db.transaction()``.
 """
 
-from keyword_identity import identity_sql
+from repositories.keyword_identity_sql import identity_sql
 
 
 class KeywordMergeRepository:

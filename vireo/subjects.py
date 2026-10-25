@@ -14,17 +14,6 @@ from services import detection_store
 ANALYSIS_VERSION = 1
 
 
-def primary_order_sql(alias="detections"):
-    """Shared ordering for readers that choose one detection per photo."""
-    return f"""CASE WHEN {alias}.category = 'animal'
-                     AND {alias}.detector_model != 'full-image' THEN 1 ELSE 0 END DESC,
-        COALESCE({alias}.id = (SELECT detection_id FROM photo_subject_choices
-                              WHERE photo_id = {alias}.photo_id), 0) DESC,
-        (SELECT quality_score FROM detection_subjects
-         WHERE detection_id = {alias}.id) DESC,
-        {alias}.detector_confidence DESC, {alias}.id ASC"""
-
-
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
     detections = (dict(d) for d in detection_store.get_detections(
         db, photo_id, min_conf=min_conf, detector_model=detector_model))

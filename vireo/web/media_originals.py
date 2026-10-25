@@ -147,7 +147,8 @@ def _full_resolution_render_signature(photo: Row, recipe: JsonDict | None, file_
     signature into the JPEG filename lets /original safely reuse prepared
     renders without a database table or cross-recipe cache race.
     """
-    from image_edits import EDIT_MATH_VERSION, recipe_to_json
+    from edit_recipe import recipe_to_json
+    from image_edits import EDIT_MATH_VERSION
 
     return {
         "photo_id": int(photo["id"]),

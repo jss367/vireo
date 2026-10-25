@@ -184,7 +184,7 @@ class _EditPreviewRequest:
         and short-circuiting to a 4096-capped working copy would silently
         serve half-resolution pixels as "1:1".
         """
-        from image_edits import SCHEMA_VERSION
+        from edit_recipe import SCHEMA_VERSION
         from image_loader import RAW_EXTENSIONS
 
         photo = self.photo
@@ -493,8 +493,8 @@ def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, s
     import cv2
     from db import Database
     from detail_backend import detail_thread_budget
+    from edit_recipe import RecipeError
     from float_image import FloatImage
-    from image_edits import RecipeError
 
     cfg.CONFIG_PATH = payload['config_path']
     cv2.setNumThreads(payload.get('threads', 2))
@@ -654,12 +654,8 @@ class EditingRoutes:
             recipe = db.get_photo_edit_recipe(photo_id) or {}
 
         import local_masks
-        from image_edits import (
-            LOCAL_FEATHER_RANGE,
-            RecipeError,
-            local_weight_map,
-            normalize_recipe,
-        )
+        from edit_recipe import LOCAL_FEATHER_RANGE, RecipeError, normalize_recipe
+        from image_edits import local_weight_map
         try:
             normalized = normalize_recipe(recipe) or {}
         except RecipeError as e:
@@ -754,7 +750,7 @@ class EditingRoutes:
             return "Invalid recipe", 400
 
         try:
-            from image_edits import RecipeError, normalize_recipe
+            from edit_recipe import RecipeError, normalize_recipe
             recipe = normalize_recipe(recipe) or {}
             apply_crop = request.args.get("apply_crop") == "1"
             display_recipe = dict(recipe)
@@ -843,7 +839,7 @@ class EditingRoutes:
         if style not in auto_tone.STYLES:
             return self._json_error("Unknown Auto Tone style")
 
-        from image_edits import RecipeError, normalize_recipe
+        from edit_recipe import RecipeError, normalize_recipe
         try:
             recipe = normalize_recipe(recipe) or {}
         except RecipeError as e:

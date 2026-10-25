@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import suppress
 
 import numpy as np
+from catalog_stamps import EYE_KP_FINGERPRINT_VERSION
 from file_replace import replace_file
 from repositories.masks_features import PipelineFeatures
 from services import dashboard_stats, detection_store, stage_counts, subject_masks
@@ -2239,13 +2240,6 @@ _EYE_KEYPOINT_MODEL_FOR_CLASS = {
     "Aves": "superanimal-bird",
     "Mammalia": "superanimal-quadruped",
 }
-
-
-# Bump this string when the eye-keypoint routing or weights change in a
-# way that invalidates previously persisted (eye_x, eye_y, eye_conf,
-# eye_tenengrad) values. The pipeline page reads photos.eye_kp_fingerprint
-# and treats != current as "Outdated".
-EYE_KP_FINGERPRINT_VERSION = "v1"
 
 
 def compute_group_fingerprint(config):

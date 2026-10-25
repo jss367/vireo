@@ -13,7 +13,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns
+from canonical_schema import EXIF_SUMMARY_COLUMNS
+from metadata import exif_summary_columns
 from scanner.companions import (
     _companion_bytes_unchanged,
     _fill_primary_metadata_gaps,

@@ -125,8 +125,8 @@ def source_path(db, photo):
 def analysis_key(path, detection, effective_cfg):
     """Bind a generation to exact source, box, model settings, and pixel scale."""
     import keypoints as kp
+    from catalog_stamps import EYE_KP_FINGERPRINT_VERSION
     from masking import _sam2_model_dir
-    from pipeline import EYE_KP_FINGERPRINT_VERSION
     pipeline = effective_cfg.get("pipeline", {})
     stat = os.stat(path)
     weights = []

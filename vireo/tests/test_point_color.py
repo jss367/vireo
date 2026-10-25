@@ -2,7 +2,8 @@
 import image_edits
 import numpy as np
 import pytest
-from image_edits import RecipeError, apply_recipe, normalize_recipe, recipe_to_json
+from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
+from image_edits import apply_recipe
 from PIL import Image
 from tone import (
     LocalAdjustments,

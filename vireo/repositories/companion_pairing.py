@@ -28,7 +28,7 @@ transaction, and the scanner owns the commit.
 import sqlite3
 from contextlib import contextmanager
 
-from metadata import EXIF_SUMMARY_COLUMNS
+from canonical_schema import EXIF_SUMMARY_COLUMNS
 from repositories.identity_alternatives import (
     identity_merge_transaction,
     merge_candidate_names,

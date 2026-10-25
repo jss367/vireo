@@ -39,6 +39,7 @@ from datetime import date
 import certifi
 import requests
 from app_paths import default_path
+from catalog_stamps import COMMON_NAME_IDENTITY_VERSION
 from file_replace import replace_file
 
 log = logging.getLogger(__name__)
@@ -1067,9 +1068,6 @@ RANK_ORDER = [
     "species",
     "subspecies",
 ]
-
-
-COMMON_NAME_IDENTITY_VERSION = 1
 
 
 def _scientific_entries(data):

@@ -78,7 +78,8 @@ def _paired_render_state_hash(
     what prevents the shadow cache from returning bytes rendered from a
     prior state.
     """
-    from image_edits import EDIT_MATH_VERSION, recipe_to_json
+    from edit_recipe import recipe_to_json
+    from image_edits import EDIT_MATH_VERSION
 
     source_state = None
     if pair_source_path:
