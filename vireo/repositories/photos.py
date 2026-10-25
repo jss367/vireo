@@ -13,9 +13,9 @@ names, bound from the instance (see ``FACADE_METHODS``) so patches of those
 methods still apply, and take the collection-rules SQL and sort clauses from
 a ``CollectionRepository`` built when they are needed; the calls happen at
 the same point as before.
-``delete_photos`` keeps the
-companion resolution, the new-images cache invalidation and the pipeline
-cache prune on the façade; ``services.photo_ingest.add_photo`` runs the
+``services.catalog_deletion.delete_photos``
+keeps the companion resolution, the new-images cache invalidation and the
+pipeline cache prune; ``services.photo_ingest.add_photo`` runs the
 duplicate auto-resolve hook after ``add``. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 (``photo_labels``) have their own repositories. The working-copy and
 thumbnail column writes here are the ones the on-demand image routes make,
@@ -1199,7 +1199,7 @@ class PhotoRepository:
         filesystem operation leaves the photo visible and retryable in Vireo.
 
         Returns a dict with ``ids``, ``files``, and the private ``_rows`` used
-        by :meth:`delete_photos`. ``files`` retains the long-standing cleanup
+        by ``catalog_deletion.delete_photos``. ``files`` retains the long-standing cleanup
         shape and additionally includes ``folder_id`` for callers that need to
         group related paths.
         """

@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 from db import Database
+from services import catalog_deletion, moves_merge
 
 
 def confirm(client, species, photos=(1,), **kwargs):
@@ -350,7 +351,7 @@ def test_copied_historical_subject_can_be_preserved_after_source_deletion(app_an
     kid = db.add_keyword('Mallard', is_species=True)
     db.tag_photo(1, kid, provenance={'method': 'direct_visual', 'detection_id': did, 'supporting_photo_ids': [1]})
     db.keyword_provenance.carry_companion_keywords(1, 2)
-    db.delete_photos([1])
+    catalog_deletion.delete_photos(db, [1])
     db.commit()
     client = app.test_client()
     copied = assignments(client, 2)['Mallard']
@@ -379,7 +380,7 @@ def test_archive_photo_merge_preserves_evidence(db, tmp_path, same_hash):
     db.tag_photo(losing, kid, provenance=original)
     db.photo_keywords.record_embedded_offered_keys(losing, ['mallard'])
     db.commit()
-    db.merge_staged_tree_into_archive(tree['stage_root'], tree['arch'])
+    moves_merge.merge_staged_tree_into_archive(db, tree['stage_root'], tree['arch'])
     copied = next(a for a in db.species_provenance.assignments(survivor) if a['keyword_id'] == kid)
     assert {key: copied[key] for key in original} == original
     assert db.photos.get(losing) is None

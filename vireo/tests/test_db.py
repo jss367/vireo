@@ -8,12 +8,14 @@ from repositories.masks_features import MaskQuality, PipelineFeatures
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services import (
     browse_queries,
+    catalog_deletion,
     classify_preflight,
     dashboard_stats,
     detection_store,
     duplicate_resolution,
     miss_flags,
     missing_originals,
+    moves_merge,
     pending_changes,
     photo_ingest,
     stage_counts,
@@ -4508,12 +4510,12 @@ def test_query_move_rule_matches_has_predictions_honors_threshold(tmp_path):
     ], detector_model="MDV6")[0]
     db.predictions.add(det_b, species='Sparrow', confidence=0.9, model='bioclip')
 
-    has = db.query_move_rule_matches({"has_predictions": True})
+    has = moves_merge.query_move_rule_matches(db, {"has_predictions": True})
     assert has == [pids[0]], (
         f"has_predictions=True must apply detector_confidence floor; "
         f"expected only photo 0, got {has}"
     )
-    none = db.query_move_rule_matches({"has_predictions": False})
+    none = moves_merge.query_move_rule_matches(db, {"has_predictions": False})
     assert pids[1] in none, (
         f"Photo with only below-threshold predictions must match "
         f"has_predictions=False; got {none}"
@@ -4535,9 +4537,9 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     ], detector_model="MDV6")
     db.predictions.add(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
 
-    hits = db.query_move_rule_matches({"has_predictions": True})
+    hits = moves_merge.query_move_rule_matches(db, {"has_predictions": True})
     assert hits == [pids[0]]
-    misses = db.query_move_rule_matches({"has_predictions": False})
+    misses = moves_merge.query_move_rule_matches(db, {"has_predictions": False})
     assert misses == [pids[1]]
 
 
@@ -10242,7 +10244,7 @@ def test_delete_folder(tmp_path):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
 
-    result = db.delete_folder(fid)
+    result = catalog_deletion.delete_folder(db, fid)
     assert result["deleted_photos"] == 1
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
@@ -10267,7 +10269,7 @@ def test_delete_folder_with_descendants(tmp_path):
         for fid in (parent, child, grand)
     ]
 
-    result = db.delete_folder(parent)
+    result = catalog_deletion.delete_folder(db, parent)
     assert result["deleted_photos"] == 3
 
     for fid in (parent, child, grand):
@@ -10314,7 +10316,7 @@ def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
     # subtree unlinked), so the cached count must be dropped.
     db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
 
-    result = db.delete_folder(parent)
+    result = catalog_deletion.delete_folder(db, parent)
     # Only the photos outside B's root are deleted.
     assert result["deleted_photos"] == 2
 
@@ -10376,7 +10378,7 @@ def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
     # since the folder no longer contributes to A's backlog.
     db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
 
-    result = db.delete_folder(parent)
+    result = catalog_deletion.delete_folder(db, parent)
     assert result["deleted_photos"] == 0
     assert result["files"] == []
 
@@ -10433,7 +10435,7 @@ def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp
                              file_size=1000, file_mtime=1.0)
 
     # Workspace A deletes /photos/2024 — B still sees it via its /photos root.
-    result = db.delete_folder(child)
+    result = catalog_deletion.delete_folder(db, child)
     assert result["deleted_photos"] == 0
     assert result["files"] == []
 
@@ -10489,7 +10491,7 @@ def test_delete_folder_includes_path_only_descendants(tmp_path):
         for fid in (parent, child)
     ]
 
-    result = db.delete_folder(parent)
+    result = catalog_deletion.delete_folder(db, parent)
     assert result["deleted_photos"] == 2
 
     for fid in (parent, child):
@@ -10523,7 +10525,7 @@ def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_
     pid_child = photo_ingest.add_photo(db, folder_id=child, filename="c.jpg", extension=".jpg",
                              file_size=1000, file_mtime=1.0)
 
-    result = db.delete_folder(parent)
+    result = catalog_deletion.delete_folder(db, parent)
     assert result["deleted_photos"] == 1
 
     # /photos and its photo are gone.
@@ -11201,7 +11203,7 @@ def test_merge_staged_tree_new_subfolders(db):
     photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=200, file_mtime=2.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     # New leaf now lives under the base, parented to its (new) target parent.
     leaf = db.conn.execute(
@@ -11275,7 +11277,7 @@ def test_merge_staged_tree_downgrades_staged_root_leaf(db):
     ).fetchone()
     assert pre is not None and pre["is_root"] == 1
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     # The folded leaf now lives under the archive as a NON-root descendant.
     leaf = db.conn.execute(
@@ -11349,7 +11351,7 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
     kw = db.add_keyword("Osprey")
     db.tag_photo(dup_pid, kw)
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # No duplicate dup.raf row; fresh.raf reparented into the existing folder.
     names = {r["filename"] for r in db.conn.execute(
@@ -11415,7 +11417,7 @@ def test_merge_staged_tree_links_archive_to_active_workspace(db):
     new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf",
                            extension=".raf", file_size=200, file_mtime=2.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     # Archive base is now the active workspace's root; the subtree pull in
     # add_workspace_folder linked the existing date folder along with it.
@@ -11491,7 +11493,7 @@ def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
     new_pid = photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf",
                            extension=".raf", file_size=200, file_mtime=2.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/NewShoot")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/NewShoot")
 
     # The tracked ancestor /arch is now a root of the active workspace, so
     # get_workspace_folder_roots() has an anchor for the merged tree.
@@ -11543,7 +11545,7 @@ def test_merge_staged_tree_ancestor_base_stays_non_root(db):
     photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=200, file_mtime=2.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/Photos/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/Photos/USA")
 
     # The base is linked to the workspace but as a NON-root.
     base_link = db.conn.execute(
@@ -11591,7 +11593,7 @@ def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
     photo_ingest.add_photo(db, folder_id=stage_leaf, filename="new.raf", extension=".raf",
                  file_size=100, file_mtime=1.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/NewShoot")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/Photos/2026/NewShoot")
 
     # The intermediate archive folder now has a real folder row parented
     # under the tracked root — not floating with parent_id=NULL.
@@ -11683,7 +11685,7 @@ def test_merge_staged_tree_intermediate_insert_survives_race(db):
 
     db.conn = _RacingConn()
     try:
-        db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/A")
+        moves_merge.merge_staged_tree_into_archive(db, stage_root, "/Photos/2026/A")
     finally:
         db.conn = real_conn
 
@@ -11744,7 +11746,7 @@ def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
                            extension=".raf", file_size=200, file_mtime=2.0,
                            file_hash="NEWHASH")
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The staged photo survived and now lives on the archive date folder — it
     # was NOT dropped as already_present.
@@ -11808,7 +11810,7 @@ def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
                            extension=".raf", file_size=200, file_mtime=2.0,
                            file_hash="NEWHASH")
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The freshly-copied bytes are represented by the STAGED row (which
     # accurately describes them), not the stale phantom row.
@@ -11872,7 +11874,7 @@ def test_merge_staged_tree_defaults_to_phantom_when_hashes_missing(
                            extension=".raf", file_size=100,
                            file_mtime=2.0)
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Without hash-based verification the guard defaults to phantom, so
     # the staged (newly-imported) photo is preserved and the unverifiable
@@ -11961,7 +11963,7 @@ def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
         return any(e.lower() == base for e in entries)
     monkeypatch.setattr("db.os.path.exists", case_insensitive_exists)
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The staged row was dropped, not reparented — one row remains for the
     # archived file.
@@ -12027,7 +12029,7 @@ def test_merge_staged_tree_intra_staged_case_alias_collision(
     import move
     monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Exactly one photo row ends up in the target folder — the first
     # staged row was reparented, the second was dropped as
@@ -12081,7 +12083,7 @@ def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
     import move
     monkeypatch.setattr(move, "_case_insensitive_root", lambda p: None)
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     rows = {r["filename"]: r["id"] for r in db.conn.execute(
         "SELECT id, filename FROM photos WHERE folder_id = ? ORDER BY filename",
@@ -12153,7 +12155,7 @@ def test_merge_staged_tree_intra_staged_after_phantom_replacement_case_alias(
     # phantom-replacement branch (``real_collision`` is False because the
     # recorded hashes differ), which is what leaves ``existing_by_key``
     # stale for iteration two.
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Iteration 1 replaced the phantom with the first staged row.
     # Iteration 2 hit the intra-staged branch with a stale ``collision``
@@ -12258,7 +12260,7 @@ def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
 
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
-        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+        moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     # Iteration 1's pending ``UPDATE photos SET folder_id = base_id`` was
     # rolled back: the staged photo is still on stage_root, NOT on base_id.
@@ -12353,7 +12355,7 @@ def test_merge_staged_tree_new_folder_reparent_rolls_back_on_later_error(
 
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
-        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+        moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     # Poison actually fired on iteration 3 (2nd call) — confirms iteration 2
     # completed BEFORE the raise, so its UPDATE is exactly what should have
@@ -12399,7 +12401,7 @@ def test_merge_staged_tree_restores_missing_archive_base_status(db):
     photo_ingest.add_photo(db, folder_id=stage_root, filename="new.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (base_id,)
@@ -12434,7 +12436,7 @@ def test_merge_staged_tree_restores_missing_target_folder_status(
     photo_ingest.add_photo(db, folder_id=stage_leaf, filename="fresh.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (date_id,)
@@ -12458,7 +12460,7 @@ def test_merge_staged_tree_partial_archive_base_status_preserved(db):
     photo_ingest.add_photo(db, folder_id=stage_root, filename="new.raf",
                  extension=".raf", file_size=100, file_mtime=1.0)
 
-    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, "/arch/USA")
 
     assert db.conn.execute(
         "SELECT status FROM folders WHERE id = ?", (base_id,)
@@ -12502,7 +12504,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_collisions(
                            extension=".raf", file_size=8, file_mtime=2.0,
                            file_hash="DUPHASH")
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert counts["already_present"] == 1
     assert dup_pid in counts["dropped_photo_ids"]
@@ -12538,7 +12540,7 @@ def test_merge_staged_tree_reports_dropped_photo_ids_for_phantom_target(
     photo_ingest.add_photo(db, folder_id=stage_leaf, filename="dup.raf",
                  extension=".raf", file_size=8, file_mtime=2.0)
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # No ``already_present`` this time (the collision was a phantom, and the
     # staged bytes represent the surviving row).
@@ -12595,7 +12597,7 @@ def test_merge_staged_tree_preserves_pending_edits_on_real_collision(
     )
     db.conn.commit()
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert counts["already_present"] == 1
     assert counts["preserved_edit_count"] == 1
@@ -12658,7 +12660,7 @@ def test_merge_staged_tree_preserves_pending_edits_on_phantom_target(
     )
     db.conn.commit()
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert counts["preserved_edit_count"] == 1
 
@@ -12714,7 +12716,7 @@ def test_merge_staged_tree_preserved_off_staging_only_on_real_collision(
     )
     db.conn.commit()
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert counts["preserved_edit_count"] == 1
     # The survivor here is the archive-side row (``survivor_pid``), which
@@ -12778,7 +12780,7 @@ def test_merge_staged_tree_preserves_location_on_real_collision(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The survivor now carries the staged photo's location keyword, so
     # ``get_assigned_photo_location`` on the remapped queue row will
@@ -12849,7 +12851,7 @@ def test_merge_staged_tree_preserves_location_on_phantom_target(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # After the merge the staged survivor carries the phantom's location
     # tag, so ``get_assigned_photo_location`` on the remapped queue row
@@ -12935,7 +12937,7 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_real_collision(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13015,7 +13017,7 @@ def test_merge_staged_tree_keeps_newer_survivor_location_on_phantom_target(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13089,7 +13091,7 @@ def test_merge_staged_tree_location_same_second_prefers_later_queue_row(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13162,7 +13164,7 @@ def test_merge_staged_tree_takes_newer_staged_location_over_survivor_change(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13231,7 +13233,7 @@ def test_merge_staged_tree_takes_newer_phantom_location_over_staged_change(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13302,7 +13304,7 @@ def test_merge_staged_tree_location_same_second_prefers_deleted_row_if_later(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     linked = [
         r["keyword_id"] for r in db.conn.execute(
@@ -13365,7 +13367,7 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_add(db, tmp_path):
                           "2026-01-02 00:00:00", "tok-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert _queued_keyword_changes(db, survivor_pid) == {
         ("keyword_remove", "Birds")}
@@ -13402,7 +13404,7 @@ def test_merge_staged_tree_newer_staged_keyword_add_beats_older_remove(db, tmp_p
                           "2026-01-02 00:00:00", "tok-add", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert _queued_keyword_changes(db, survivor_pid) == {
         ("keyword_add", "Birds")}
@@ -13442,7 +13444,7 @@ def test_merge_staged_tree_keeps_existing_keyword_rename_pair(db, tmp_path):
                           "2026-01-02 00:00:00", "tok-staged-add", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert _queued_keyword_changes(db, survivor_pid) == {
         ("keyword_remove", "‘Birds"),
@@ -13498,7 +13500,7 @@ def test_merge_staged_tree_keyword_rename_pair_exemption_is_workspace_scoped(
                           "2026-01-02 00:00:00", "tok-new-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The older add in ws is gone; the newer remove in ws survives, and
     # neither ws's queue on the survivor carries both directions for
@@ -13555,7 +13557,7 @@ def test_merge_staged_tree_rename_pair_reconciles_against_newer_remove_on_other_
                           "2026-01-02 00:00:00", "tok-newer-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Only the newer remove survives on the merged photo -- the older
     # rename pair is dropped as a unit, so the sync planner does not read
@@ -13607,7 +13609,7 @@ def test_merge_staged_tree_rename_pair_wins_over_older_opposing_remove(
                           "2026-01-02 00:00:01", "tok-pair-add", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     tokens = {r["change_token"] for r in db.conn.execute(
         "SELECT change_token FROM pending_changes "
@@ -13654,7 +13656,7 @@ def test_merge_staged_tree_keyword_conflict_spans_workspaces(db, tmp_path):
                           "2026-01-02 00:00:00", "tok-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert _queued_keyword_changes(db, survivor_pid) == {
         ("keyword_remove", "Birds")}
@@ -13711,7 +13713,7 @@ def test_merge_staged_tree_drops_older_opposing_row_on_winning_photo(
                           "2026-01-02 00:00:00", "tok-mid-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     tokens = {r["change_token"] for r in db.conn.execute(
         "SELECT change_token FROM pending_changes "
@@ -13760,7 +13762,7 @@ def test_merge_staged_tree_flat_only_cleanup_does_not_fight_a_keyword_add(
                           "2026-01-02 00:00:00", "tok-flat", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Both rows survive -- the flat cleanup is not a competing intent.
     assert _queued_keyword_changes(db, survivor_pid) == {
@@ -13803,7 +13805,7 @@ def test_merge_staged_tree_newer_keyword_remove_beats_older_phantom_add(
                           "2026-01-02 00:00:00", "tok-staged-remove", ws)
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert _queued_keyword_changes(db, new_pid) == {
         ("keyword_remove", "Birds")}
@@ -13847,7 +13849,7 @@ def test_merge_staged_tree_carries_queued_rating_onto_survivor(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?",
@@ -13901,7 +13903,7 @@ def test_merge_staged_tree_newest_queued_rating_wins_and_older_row_goes(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?",
@@ -13946,7 +13948,7 @@ def test_merge_staged_tree_carries_queued_flag_onto_survivor(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT flag FROM photos WHERE id = ?",
@@ -13988,7 +13990,7 @@ def test_merge_staged_tree_carries_queued_rating_on_phantom_target(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?",
@@ -14084,7 +14086,7 @@ def test_merge_staged_tree_carries_keyword_add_association(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert "Birds" in _photo_keyword_names(db, survivor_pid)
 
@@ -14124,7 +14126,7 @@ def test_merge_staged_tree_carries_keyword_remove_association(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert "Birds" not in _photo_keyword_names(db, survivor_pid)
 
@@ -14172,7 +14174,7 @@ def test_merge_staged_tree_keyword_association_follows_chronology(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert "Birds" not in _photo_keyword_names(db, survivor_pid)
 
@@ -14217,7 +14219,7 @@ def test_merge_staged_tree_carries_queued_edit_recipe(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     row = db.conn.execute(
         "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
@@ -14264,7 +14266,7 @@ def test_merge_staged_tree_cleared_edit_recipe_clears_survivor_row(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT 1 FROM photo_edit_recipes WHERE photo_id = ?",
@@ -14318,7 +14320,7 @@ def test_merge_staged_tree_flag_conflict_spans_workspaces(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT flag FROM photos WHERE id = ?",
@@ -14384,7 +14386,7 @@ def test_merge_staged_tree_edit_recipe_conflict_spans_workspaces(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     import json as _json
     row = db.conn.execute(
@@ -14442,7 +14444,7 @@ def test_merge_staged_tree_scalar_conflict_spans_workspaces(db, tmp_path):
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?",
@@ -14474,14 +14476,14 @@ def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
     db.set_active_workspace(ws)
     assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is True
     db.conn.commit()
-    assert db.get_sync_only_photo_paths(sibling_ws) == {pid: str(first)}
+    assert moves_merge.get_sync_only_photo_paths(db, sibling_ws) == {pid: str(first)}
 
     # The active workspace moves the survivor afterwards.
     db.conn.execute("UPDATE photos SET folder_id = ? WHERE id = ?",
                     (second_id, pid))
     db.conn.commit()
 
-    assert db.get_sync_only_photo_paths(sibling_ws) == {pid: str(second)}
+    assert moves_merge.get_sync_only_photo_paths(db, sibling_ws) == {pid: str(second)}
     db.set_active_workspace(sibling_ws)
     try:
         assert db._photo_syncable_in_workspace(pid) is True
@@ -14539,7 +14541,7 @@ def test_merge_staged_tree_links_survivor_into_sibling_workspace(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     row = db.conn.execute(
         "SELECT photo_id FROM pending_changes "
@@ -14623,7 +14625,7 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
     )
     db.conn.commit()
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     row = db.conn.execute(
         "SELECT photo_id FROM pending_changes "
@@ -14650,7 +14652,7 @@ def test_merge_staged_tree_links_staged_survivor_into_sibling_workspace(
         "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
         "WHERE workspace_id = ? AND photo_id = ?",
         (sibling_ws, new_pid)).fetchone()["n"] == 1
-    assert db.get_sync_only_photo_paths(sibling_ws) == {new_pid: str(date_dir)}
+    assert moves_merge.get_sync_only_photo_paths(db, sibling_ws) == {new_pid: str(date_dir)}
 
 
 def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
@@ -14746,7 +14748,7 @@ def test_merge_staged_tree_off_staging_identities_skip_sibling_workspace(
     )
     db.conn.commit()
 
-    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+    counts = moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # Both rows were reparented (so the sibling workspace's edit isn't
     # silently lost either), but only the active-workspace identity is
@@ -14801,7 +14803,7 @@ def test_merge_staged_tree_intra_staged_non_ascii_case_alias(
     import move
     monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
 
-    db.merge_staged_tree_into_archive(stage_root, str(arch))
+    moves_merge.merge_staged_tree_into_archive(db, stage_root, str(arch))
 
     # The remap moved the pending edit onto the earlier staged winner,
     # not silently no-op'd -- so the change row survives with a new
@@ -22746,7 +22748,7 @@ def test_delete_photos_chunks_large_resolve_list(tmp_path):
     ]
 
     _cap_sqlite_vars(db)
-    result = db.delete_photos(pids + list(range(1_000_000, 1_001_200)))
+    result = catalog_deletion.delete_photos(db, pids + list(range(1_000_000, 1_001_200)))
     assert result["deleted"] == 3
     assert set(result["ids"]) == set(pids)
 
