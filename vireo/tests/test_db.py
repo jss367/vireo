@@ -13,11 +13,13 @@ from services import (
     dashboard_stats,
     detection_store,
     duplicate_resolution,
+    gps_locations,
     miss_flags,
     missing_originals,
     moves_merge,
     pending_changes,
     photo_ingest,
+    photo_locations,
     stage_counts,
     subject_masks,
     workspace_config,
@@ -5665,7 +5667,7 @@ def test_get_effective_photo_location_prefers_exif(tmp_path):
     )
     db.conn.commit()
 
-    loc = db.get_effective_photo_location(pid)
+    loc = photo_locations.get_effective_photo_location(db, pid)
     assert loc["source"] == "exif"
     assert loc["latitude"] == 37.7749
     assert loc["longitude"] == -122.4194
@@ -5693,7 +5695,7 @@ def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
     )
     db.conn.commit()
 
-    loc = db.get_effective_photo_location(pid)
+    loc = photo_locations.get_effective_photo_location(db, pid)
     assert loc["source"] == "keyword"
     assert loc["latitude"] == 48.8566
     assert loc["longitude"] == 2.3522
@@ -5761,7 +5763,7 @@ def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
     db.set_active_workspace(other_ws)
 
     with pytest.raises(ValueError, match="active workspace"):
-        db.get_effective_photo_location(pid)
+        photo_locations.get_effective_photo_location(db, pid)
 
 
 def test_get_accepted_species(tmp_path):
@@ -5941,7 +5943,7 @@ def test_count_photos_without_gps(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE filename='geo.jpg'")
     db.conn.commit()
 
-    assert db.count_photos_without_gps() == 2
+    assert db.locations.count_photos_without_coordinates() == 2
 
 
 def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
@@ -5988,7 +5990,7 @@ def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
     db.conn.commit()
 
     # Photos 3 and 4 are not plottable (no EXIF, no coord-bearing keyword).
-    assert db.count_photos_without_gps() == 2
+    assert db.locations.count_photos_without_coordinates() == 2
 
     # Sanity: locations.get_geolocated_photos returns the two plottable photos
     # (Photo 1 via EXIF, Photo 2 via keyword fallback). Total of plottable
@@ -14026,9 +14028,9 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
 
     # No membership of any kind: both paths refuse.
     with pytest.raises(ValueError):
-        db.get_assigned_photo_location(pid)
+        photo_locations.get_assigned_photo_location(db, pid)
     with pytest.raises(ValueError):
-        db.get_assigned_photo_location(pid, allow_sync_only=True)
+        photo_locations.get_assigned_photo_location(db, pid, allow_sync_only=True)
 
     db.conn.execute(
         "INSERT INTO workspace_sync_only_photos (workspace_id, photo_id) "
@@ -14036,10 +14038,10 @@ def test_assigned_location_accepts_sync_only_grant(db, tmp_path):
     db.conn.commit()
 
     # The grant authorizes the sync path, and only the sync path.
-    assert db.get_assigned_photo_location(
-        pid, allow_sync_only=True)["latitude"] == 37.865
+    assert photo_locations.get_assigned_photo_location(
+        db, pid, allow_sync_only=True)["latitude"] == 37.865
     with pytest.raises(ValueError):
-        db.get_assigned_photo_location(pid)
+        photo_locations.get_assigned_photo_location(db, pid)
     db.set_active_workspace(ws)
 
 
@@ -18553,10 +18555,10 @@ def test_upsert_one_keyword_homonymous_idempotent(db):
 def test_reverse_geocode_cache_round_trips_put_then_get(db):
     """Putting a value and then getting it back returns matching fields."""
     response_json = '{"place_id": "ChIJN1t_tDeuEmsRUsoyG83frY4", "name": "Sydney"}'
-    db.reverse_geocode_cache_put(
-        -33.8688, 151.2093, "ChIJN1t_tDeuEmsRUsoyG83frY4", response_json,
+    gps_locations.reverse_geocode_cache_put(
+        db, -33.8688, 151.2093, "ChIJN1t_tDeuEmsRUsoyG83frY4", response_json,
     )
-    hit = db.reverse_geocode_cache_get(-33.8688, 151.2093)
+    hit = gps_locations.reverse_geocode_cache_get(db, -33.8688, 151.2093)
     assert hit is not None
     assert hit["place_id"] == "ChIJN1t_tDeuEmsRUsoyG83frY4"
     assert hit["response"] == response_json
@@ -18564,30 +18566,30 @@ def test_reverse_geocode_cache_round_trips_put_then_get(db):
 
 def test_reverse_geocode_cache_returns_none_on_miss(db):
     """Getting a never-put coord returns None (distinct from cached negative)."""
-    assert db.reverse_geocode_cache_get(40.0, -73.0) is None
+    assert gps_locations.reverse_geocode_cache_get(db, 40.0, -73.0) is None
 
 
 def test_reverse_geocode_cache_grid_collapses_nearby_coords(db):
     """Coords that round to the same ~110m grid cell share a cache entry,
     while coords that round to a different cell are kept separate."""
-    db.reverse_geocode_cache_put(
-        40.7820, -73.9650, "ChIJ_central_park", '{"name":"Central Park"}',
+    gps_locations.reverse_geocode_cache_put(
+        db, 40.7820, -73.9650, "ChIJ_central_park", '{"name":"Central Park"}',
     )
     # 40.7821, -73.9648 → both round to the same int(round(x*1000)) cell
-    hit = db.reverse_geocode_cache_get(40.7821, -73.9648)
+    hit = gps_locations.reverse_geocode_cache_get(db, 40.7821, -73.9648)
     assert hit is not None
     assert hit["place_id"] == "ChIJ_central_park"
     assert hit["response"] == '{"name":"Central Park"}'
 
     # 40.7830, -73.9650 → different lat_grid (40783 vs 40782)
-    db.reverse_geocode_cache_put(
-        40.7830, -73.9650, "ChIJ_other", '{"name":"Other"}',
+    gps_locations.reverse_geocode_cache_put(
+        db, 40.7830, -73.9650, "ChIJ_other", '{"name":"Other"}',
     )
-    other_hit = db.reverse_geocode_cache_get(40.7830, -73.9650)
+    other_hit = gps_locations.reverse_geocode_cache_get(db, 40.7830, -73.9650)
     assert other_hit is not None
     assert other_hit["place_id"] == "ChIJ_other"
     # Original cell unchanged.
-    orig_hit = db.reverse_geocode_cache_get(40.7820, -73.9650)
+    orig_hit = gps_locations.reverse_geocode_cache_get(db, 40.7820, -73.9650)
     assert orig_hit["place_id"] == "ChIJ_central_park"
 
 
@@ -18595,8 +18597,8 @@ def test_reverse_geocode_cache_caches_negative_result(db):
     """A null place_id (Google returned no match) is still cached. The
     cache must distinguish 'we asked Google and got no match' from 'we
     never asked' — get returns the row, not None."""
-    db.reverse_geocode_cache_put(0.0, 0.0, None, "{}")
-    hit = db.reverse_geocode_cache_get(0.0, 0.0)
+    gps_locations.reverse_geocode_cache_put(db, 0.0, 0.0, None, "{}")
+    hit = gps_locations.reverse_geocode_cache_get(db, 0.0, 0.0)
     assert hit is not None
     assert hit["place_id"] is None
     assert hit["response"] == "{}"
@@ -18604,13 +18606,13 @@ def test_reverse_geocode_cache_caches_negative_result(db):
 
 def test_reverse_geocode_cache_put_overwrites_existing(db):
     """Re-putting at the same grid cell overwrites the prior value."""
-    db.reverse_geocode_cache_put(
-        12.345, 67.890, "ChIJ_first", '{"v":1}',
+    gps_locations.reverse_geocode_cache_put(
+        db, 12.345, 67.890, "ChIJ_first", '{"v":1}',
     )
-    db.reverse_geocode_cache_put(
-        12.345, 67.890, "ChIJ_second", '{"v":2}',
+    gps_locations.reverse_geocode_cache_put(
+        db, 12.345, 67.890, "ChIJ_second", '{"v":2}',
     )
-    hit = db.reverse_geocode_cache_get(12.345, 67.890)
+    hit = gps_locations.reverse_geocode_cache_get(db, 12.345, 67.890)
     assert hit is not None
     assert hit["place_id"] == "ChIJ_second"
     assert hit["response"] == '{"v":2}'
@@ -27225,10 +27227,10 @@ def test_get_photo_location_paths_returns_the_whole_chain(tmp_path):
     untagged = photo_ingest.add_photo(db, folder_id=folder_id, filename="b.jpg", extension=".jpg",
                             file_size=1, file_mtime=0)
 
-    paths = db.get_photo_location_paths([pid, untagged])
+    paths = photo_locations.get_photo_location_paths(db, [pid, untagged])
 
     assert paths == {pid: ["United States", "California", "Kumeyaay Lake"]}
-    assert db.get_photo_location_paths([]) == {}
+    assert photo_locations.get_photo_location_paths(db, []) == {}
     db.close()
 
 
@@ -27245,7 +27247,7 @@ def test_get_photo_location_paths_stops_at_a_non_location_parent(tmp_path):
     )
     db.conn.commit()
 
-    assert db.get_photo_location_paths([pid]) == {pid: ["Kumeyaay Lake"]}
+    assert photo_locations.get_photo_location_paths(db, [pid]) == {pid: ["Kumeyaay Lake"]}
     db.close()
 
 
@@ -27291,11 +27293,11 @@ def test_get_photo_location_paths_prefers_coordinate_bearing_over_text_only(
 
     # GPS side picks the coord-bearing place; the keyword-path side must
     # match rather than picking the newer text-only row.
-    assigned = db.get_assigned_photo_location(pid)
+    assigned = photo_locations.get_assigned_photo_location(db, pid)
     assert assigned is not None
     assert assigned["keyword_location_name"] == "Paris"
 
-    assert db.get_photo_location_paths([pid]) == {pid: ["France", "Paris"]}
+    assert photo_locations.get_photo_location_paths(db, [pid]) == {pid: ["France", "Paris"]}
     db.close()
 
 
@@ -27320,7 +27322,7 @@ def test_get_photo_location_paths_falls_back_to_text_only_when_no_coordinates(
     )
     db.conn.commit()
 
-    assert db.get_photo_location_paths([pid]) == {pid: ["Backyard"]}
+    assert photo_locations.get_photo_location_paths(db, [pid]) == {pid: ["Backyard"]}
     db.close()
 
 
@@ -27340,7 +27342,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
                  file_size=1, file_mtime=0)
 
     assert db.locations.count_photos_with_location() == 2
-    assert db.queue_location_changes_for_tagged_photos() == {
+    assert photo_locations.queue_location_changes_for_tagged_photos(db) == {
         "photos": 2, "queued": 2, "already_queued": 0,
     }
     queued = {
@@ -27350,7 +27352,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
     assert queued == {first, second}
 
     # Re-running adds nothing: queue_change skips a duplicate.
-    assert db.queue_location_changes_for_tagged_photos() == {
+    assert photo_locations.queue_location_changes_for_tagged_photos(db) == {
         "photos": 2, "queued": 0, "already_queued": 2,
     }
     assert len(db.pending_changes.list_all()) == 2

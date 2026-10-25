@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from PIL import Image
 from repositories.folders import FolderRepository
-from services import pending_changes, photo_ingest, workspace_folders
+from services import pending_changes, photo_ingest, photo_locations, workspace_folders
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
@@ -1061,7 +1061,7 @@ def test_sync_to_xmp_location_lookup_bypasses_workspace_membership(tmp_path, mon
 
     # Sanity check: the default (verified) lookup does reject this shape.
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.get_assigned_photo_location(pid)
+        photo_locations.get_assigned_photo_location(db, pid)
 
     # Pass folder_paths covering the unlinked folder (the pre-transfer
     # sync does the same via ``_all_folders``): without it, path

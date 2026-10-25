@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
 from photo_payload import render_key_for_recipe
-from services import pending_changes
+from services import pending_changes, photo_locations
 from web.location_edits import walk_parent_chain
 from xmp import location_keyword_entries, read_sync_preview_metadata
 
@@ -888,7 +888,7 @@ class _SyncPreviewPage:
         )
         # Read the keyword chain from the same helper ``sync_to_xmp`` writes
         # from, so the review cannot name one place and the sync write another.
-        self.location_paths = db.get_photo_location_paths(location_photo_ids)
+        self.location_paths = photo_locations.get_photo_location_paths(db, location_photo_ids)
         from keyword_identity import keyword_paths, resolve_merge_target
         self.resolve_merge_target = resolve_merge_target
         self.merge_paths = keyword_paths(
@@ -1162,7 +1162,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         the user still reviews the changes and starts the sync themselves.
         """
         db = get_db()
-        result = db.queue_location_changes_for_tagged_photos()
+        result = photo_locations.queue_location_changes_for_tagged_photos(db)
         return jsonify({"ok": True, **result})
 
     @blueprint.route("/api/sync/preview")

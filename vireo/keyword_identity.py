@@ -9,6 +9,7 @@ import json
 from collections import defaultdict
 
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+from services import photo_locations
 from xmp import (
     _parse_location_keywords_owned,
     location_keyword_entries,
@@ -599,7 +600,7 @@ def _exported_location_chain(kid, parent_of, types, names):
 def _is_one_place_chain(ids, parent_of, post_types):
     """Whether every id sits on a single EXPORTED location line.
 
-    Mirrors ``Database.get_photo_location_paths``, which walks up from the
+    Mirrors ``photo_locations.get_photo_location_paths``, which walks up from the
     tagged leaf and stops at the first non-location ancestor. A location
     sitting above a general keyword is therefore a separate exported
     location, not this one's parent, so a walk that crossed the gap would
@@ -1378,7 +1379,7 @@ def _queue_merge_keyword_add(db, photo_id, workspace_id, keyword_id, name, keywo
         if settings[workspace_id]:
             leaves = settings.setdefault('leaves', {})
             if photo_id not in leaves:
-                leaves[photo_id] = db.get_photo_location_keyword_ids([photo_id]).get(photo_id)
+                leaves[photo_id] = photo_locations.get_photo_location_keyword_ids(db, [photo_id]).get(photo_id)
             # Only the effective leaf gets a generated flat term. Directly
             # tagged ancestors still need their own ordinary keyword addition.
             if leaves[photo_id] == keyword_id:

@@ -938,13 +938,13 @@ def test_failed_location_keyword_cleanup_is_shown_after_save(
     """
     import sqlite3
 
-    from db import Database
+    from services import photo_locations
 
-    def _locked(self):
+    def _locked(_db):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(
-        Database, "queue_location_changes_for_tagged_photos", _locked,
+        photo_locations, "queue_location_changes_for_tagged_photos", _locked,
     )
     url = live_server["url"]
     key = "write_location_keywords_to_xmp"

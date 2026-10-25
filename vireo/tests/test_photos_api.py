@@ -13,7 +13,15 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from repositories.masks_features import PipelineFeatures
-from services import catalog_deletion, detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
+from services import (
+    catalog_deletion,
+    detection_store,
+    gps_locations,
+    photo_ingest,
+    stage_counts,
+    subject_masks,
+    workspace_folders,
+)
 from testing.waits import synchronization_timeout
 
 
@@ -10159,8 +10167,8 @@ def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
     cached_details = _central_park_geocode_response()
     cached_details["_vireo_result_language"] = "en"
     cached_details["_vireo_place_resolver"] = "named-place-1"
-    db.reverse_geocode_cache_put(
-        lat, lng,
+    gps_locations.reverse_geocode_cache_put(
+        db, lat, lng,
         place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
         response_json=json.dumps(cached_details),
     )
@@ -10192,8 +10200,8 @@ def test_reverse_geocode_cache_negative_hit_returns_null(app_and_db, monkeypatch
 
     lat, lng = 12.345, 67.890
     # Negative cache entry — Google was previously asked and returned no match.
-    db.reverse_geocode_cache_put(
-        lat,
+    gps_locations.reverse_geocode_cache_put(
+        db, lat,
         lng,
         place_id=None,
         response_json='{"_vireo_result_language": "en"}',
@@ -10262,8 +10270,8 @@ def test_reverse_geocode_setting_change_refreshes_other_language_cache(
     lat, lng = 46.4596, 6.8420
     english_details = _central_park_geocode_response()
     english_details["_vireo_result_language"] = "en"
-    db.reverse_geocode_cache_put(
-        lat,
+    gps_locations.reverse_geocode_cache_put(
+        db, lat,
         lng,
         place_id=english_details["place_id"],
         response_json=json.dumps(english_details),
@@ -10310,8 +10318,8 @@ def test_reverse_geocode_old_resolver_cache_entry_is_looked_up_again(
     cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
 
     lat, lng = 32.7549, -117.2404
-    db.reverse_geocode_cache_put(
-        lat, lng,
+    gps_locations.reverse_geocode_cache_put(
+        db, lat, lng,
         place_id="street",
         response_json=json.dumps({
             "place_id": "street",
@@ -10333,7 +10341,7 @@ def test_reverse_geocode_old_resolver_cache_entry_is_looked_up_again(
     data = resp.get_json()
     assert data["place_id"] == "ocean-beach"
     assert data["summary"] == "Ocean Beach · San Diego"
-    assert db.reverse_geocode_cache_get(lat, lng)["place_id"] == "ocean-beach"
+    assert gps_locations.reverse_geocode_cache_get(db, lat, lng)["place_id"] == "ocean-beach"
 
 
 def test_reverse_geocode_cache_miss_caches_negative_when_google_returns_none(
@@ -10402,7 +10410,7 @@ def test_reverse_geocode_returns_null_when_no_api_key_and_does_not_cache(
 
     # Critically: the cache must be empty for this grid, so once the user
     # eventually adds a key, the next call will actually reach Google.
-    cached = db.reverse_geocode_cache_get(lat, lng)
+    cached = gps_locations.reverse_geocode_cache_get(db, lat, lng)
     assert cached is None
 
 
@@ -10432,7 +10440,7 @@ def test_reverse_geocode_does_not_cache_transient_errors(app_and_db, monkeypatch
 
     # The cache MUST NOT have been written. A subsequent request will
     # retry Google.
-    cached = db.reverse_geocode_cache_get(lat, lng)
+    cached = gps_locations.reverse_geocode_cache_get(db, lat, lng)
     assert cached is None, (
         "transient failures must not be cached — the cache row must "
         "stay absent so the next request retries Google"

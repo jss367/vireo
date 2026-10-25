@@ -2,7 +2,7 @@ import json
 import os
 
 import pytest
-from services import pending_changes, photo_ingest, workspace_folders
+from services import pending_changes, photo_ingest, photo_locations, workspace_folders
 
 
 def test_editor_crop_ratio_persists_in_config(app_and_db):
@@ -2528,13 +2528,11 @@ def _fail_location_cleanup_queue(monkeypatch):
     """Make queueing the location-keyword cleanup fail like a locked catalog."""
     import sqlite3
 
-    from db import Database
-
-    def _raise(self):
+    def _raise(_db):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(
-        Database, "queue_location_changes_for_tagged_photos", _raise,
+        photo_locations, "queue_location_changes_for_tagged_photos", _raise,
     )
 
 

@@ -2163,93 +2163,6 @@ class Database:
         """
         return self._location_repository()
 
-    def get_assigned_photo_location(self, photo_id, verify_workspace=True,
-                                    allow_sync_only=False):
-        """Return linked location-keyword coordinates for one visible photo.
-
-        ``allow_sync_only`` accepts a ``workspace_sync_only_photos`` grant
-        as sufficient authorization. The sync engine passes it because that
-        grant exists precisely to let a workspace write the sidecar of a
-        photo it does not carry in its library: without it a remapped
-        sibling-workspace ``location`` change resolves its path through the
-        grant and then fails this check, staying queued on every retry.
-        Browse and library callers keep the strict membership test.
-        """
-        if verify_workspace:
-            if allow_sync_only:
-                self._verify_photo_syncable_in_workspace(photo_id)
-            else:
-                self._verify_photo_in_workspace(photo_id)
-
-        return self._location_repository().get_assigned(photo_id)
-
-    def get_photo_location_keyword_ids(self, photo_ids):
-        """Return the keyword IDs owning each photo's exported location."""
-        return {pid: row["id"] for pid, row in self.locations.get_photo_leaves(photo_ids).items()}
-
-    def get_photo_location_paths(self, photo_ids):
-        """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
-
-        The leaf is chosen exactly as :meth:`get_assigned_photo_location`
-        chooses it -- coordinate-bearing first, then deepest in the chain,
-        then most recent id as the tie-break -- so the keywords written to
-        a sidecar always describe the same place as the GPS written beside
-        them. When a photo carries both a coordinate-bearing location and
-        a coordinate-less one (the generic keyword-add endpoint attaches
-        another ``type='location'`` keyword without replacing the
-        current), the coord-bearing row wins here just as it does in
-        :meth:`get_assigned_photo_location`. Unlike that method this one
-        does not *require* coordinates: a free-text location the user
-        typed still has a name worth writing when there is no coord-bearing
-        alternative.
-
-        Photos with no linked location are absent from the result, which is
-        how the sync engine tells "write these keywords" from "remove the ones
-        we wrote".
-        """
-        leaves = self.locations.get_photo_leaves(photo_ids)
-        return self._location_repository().get_photo_paths(leaves)
-
-    def queue_location_changes_for_tagged_photos(self):
-        """Queue a ``location`` change for every located photo in the workspace.
-
-        This is the backfill behind "write my existing locations to XMP":
-        assigning a place queues the change at the time of assignment, so
-        photos located before location writes were switched on have nothing
-        queued and would never be written. What the queued change actually
-        does to a sidecar still depends on the two location settings at sync
-        time -- it writes coordinates, keywords, both, or removes what Vireo
-        previously wrote -- and the sync review shows that per photo before
-        anything is written.
-
-        Returns ``{"photos": n, "queued": k, "already_queued": n - k}``.
-        ``queue_change`` skips a duplicate, so re-running this is idempotent.
-        """
-        result = self._location_repository().queue_changes_for_tagged_photos(
-            queue_change=self.queue_change,
-        )
-        log.info(
-            "Queued %d location change(s) for %d located photo(s)",
-            result["queued"], result["photos"],
-        )
-        return result
-
-    def get_effective_photo_location(self, photo_id, verify_workspace=True):
-        """Return the coordinates Vireo should use for a single photo.
-
-        EXIF GPS is source metadata and wins when both axes are present. If
-        EXIF GPS is absent or partial, fall back as a pair to the linked
-        ``type='location'`` keyword coordinates. Returns ``None`` when neither
-        source has a complete coordinate pair.
-        """
-        return self.locations.get_effective(
-            [photo_id], verify_workspace=verify_workspace
-        ).get(photo_id)
-
-    def count_photos_without_gps(self):
-        """Backward-compatible alias for :meth:`locations.count_photos_without_coordinates`."""
-        return self.locations.count_photos_without_coordinates()
-
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
                                        _commit=True):
         """Set whether a photo is excluded from wildlife detection/classification.
@@ -3325,41 +3238,6 @@ class Database:
                 latitude=None,
                 longitude=None,
             )
-
-    @staticmethod
-    def _reverse_geocode_grid(lat, lng):
-        """Round (lat, lng) to a ~110m grid cell.
-
-        Used as the cache key for reverse-geocode lookups so two coords from
-        the same neighborhood share one Google call.
-        """
-        return int(round(lat * 1000)), int(round(lng * 1000))
-
-    def reverse_geocode_cache_get(self, lat, lng):
-        """Look up cached reverse-geocode response for (lat, lng).
-
-        Returns ``{"place_id": <str|None>, "response": <str>}`` on hit
-        (``response`` is the raw JSON string the put-side stashed). A row
-        with ``place_id=None`` is a cached negative result — Google was
-        asked and returned no match — and is still a hit. Returns ``None``
-        only on a true miss (the cell was never populated).
-        """
-        lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
-        return self._location_repository().reverse_geocode_cache_get(
-            lat_grid, lng_grid,
-        )
-
-    def reverse_geocode_cache_put(self, lat, lng, place_id, response_json):
-        """Upsert reverse-geocode result at the (lat, lng) grid cell.
-
-        ``place_id`` may be ``None`` to cache a negative result (Google
-        returned no match). ``response_json`` is already a JSON string —
-        the caller serializes; we don't re-encode.
-        """
-        lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
-        self._location_repository().reverse_geocode_cache_put(
-            lat_grid, lng_grid, place_id, response_json,
-        )
 
     def _merge_duplicate_keywords_pass(self, ws):
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
