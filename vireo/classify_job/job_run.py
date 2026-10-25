@@ -25,7 +25,7 @@ from classify_job.common import (
     taxonomy_step_warning,
     with_taxonomy_notice,
 )
-from classify_job.detection import _detect_subjects
+from classify_job.detection import DetectionHandoff, _detect_subjects
 from classify_job.label_loading import _load_labels, _record_labels_fingerprint, _reuse_saved_label_embeddings
 from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
@@ -63,6 +63,9 @@ class _ClassifyJobRun:
         self.computation_cache_dir = computation_cache_dir
         self.classifier_cache_handle = None
         self.finish_cleared_only = False
+        # The detect phase's photo-id sets for the classify phase. Held here,
+        # never on ``job``: the runner publishes the job dict to /api/jobs.
+        self.detect_handoff = DetectionHandoff()
 
     def _progress(self, current: int, total: int, current_file: str, phase: str, **extra: object) -> None:
         self.runner.push_event(
@@ -752,6 +755,7 @@ class _ClassifyJobRun:
             reclassify=params.reclassify,
             db=self.db,
             vireo_dir=self.vireo_dir,
+            handoff=self.detect_handoff,
         )
         detection_map, detected = self.detection_map, self.detected
         cancelled_after_detect = (
@@ -767,14 +771,14 @@ class _ClassifyJobRun:
         # tail is dropped — its old state was never touched, so dropping
         # it keeps the cached predictions intact.
         #
-        # The processed subset comes from ``job["_detect_processed_ids"]``,
+        # The processed subset comes from ``detect_handoff.processed_ids``,
         # which is the union of (a) photos with at least one detection and
         # (b) empty-scene photos that recorded a detector_runs row but
         # added nothing to ``detection_map``. Using ``detection_map``
         # alone would miss case (b), stranding empty-scene reclassified
-        # photos with cleared predictions and no replacement. Older test
-        # fakes for ``_detect_subjects`` that don't stash this key fall
-        # back to ``detection_map.keys()`` for backwards compatibility.
+        # photos with cleared predictions and no replacement. Test fakes
+        # for ``_detect_subjects`` that don't record it leave it ``None``,
+        # which falls back to ``detection_map.keys()``.
         self.finish_cleared_only = False
         if not cancelled_after_detect:
             runner.update_step(
@@ -786,12 +790,12 @@ class _ClassifyJobRun:
             job["id"], "detect", status="cancelled",
             summary=f"Cancelled ({detected} animals detected so far)",
         )
-        processed_ids = job.get("_detect_processed_ids")
+        processed_ids = self.detect_handoff.processed_ids
         if processed_ids is None:
             processed_ids = set(detection_map.keys())
         else:
             processed_ids = set(processed_ids) | set(detection_map.keys())
-        processed_ids -= set(job.get("_detect_reused_ids") or ())
+        processed_ids -= self.detect_handoff.reused_ids
         if params.reclassify and processed_ids:
             processed = [p for p in self.photos if p["id"] in processed_ids]
             if processed:
@@ -1032,6 +1036,7 @@ class _ClassifyJobRun:
                 vireo_dir=self.vireo_dir,
                 reclassify=self.params.reclassify,
                 finish_cleared_only=self.finish_cleared_only,
+                non_animal_ids=self.detect_handoff.non_animal_ids,
             )
         self.raw_results = raw_results
         self.failed = failed

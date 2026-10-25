@@ -86,7 +86,13 @@ def _shutdown_created_job_runners(monkeypatch):
     test's tmp_path and process-wide monkeypatches. Track JobRunner construction
     centrally and make leaked work fail its owner instead of poisoning a later
     assertion.
+
+    The same tracking holds every job type to a JSON-safe job dict: see
+    ``job_json.py``.
     """
+    import job_json
+    import jobs as jobs_module
+    from job_runner import checkpoints
     from jobs import JobRunner
 
     created = []
@@ -97,6 +103,20 @@ def _shutdown_created_job_runners(monkeypatch):
         created.append(runner)
 
     monkeypatch.setattr(JobRunner, "__init__", tracked_init)
+    # Every snapshot ``get()``, ``list_jobs()`` and the checkpoint timer take
+    # is what /api/jobs and /api/jobs/<id> jsonify: record any value JSON
+    # cannot encode (see ``job_json.py``) and fail the test below.
+    unsafe_snapshots = job_json.VIOLATIONS
+    unsafe_snapshots.clear()
+    original_snapshot = jobs_module.snapshot_job
+
+    def checked_snapshot(job):
+        snap = original_snapshot(job)
+        job_json.record_unsafe_snapshot(snap)
+        return snap
+
+    monkeypatch.setattr(jobs_module, "snapshot_job", checked_snapshot)
+    monkeypatch.setattr(checkpoints, "snapshot_job", checked_snapshot)
     yield
 
     leaked = []
@@ -122,6 +142,18 @@ def _shutdown_created_job_runners(monkeypatch):
                 "workers still alive: " + ", ".join(sorted(leaked))
             )
         pytest.fail("background JobRunner shutdown failed: " + "; ".join(parts))
+    # A finished job stays in memory, and in every /api/jobs poll, until it
+    # is pruned, so its final dict must encode too even if nothing polled.
+    for runner in created:
+        with runner._lock:
+            for job in list(runner._jobs.values()):
+                checked_snapshot(job)
+    if unsafe_snapshots:
+        pytest.fail(
+            "a job dict holds values JSON cannot encode, so /api/jobs would "
+            "answer 500 while the job is in memory: "
+            + "; ".join(dict.fromkeys(unsafe_snapshots))
+        )
 
 
 @pytest.fixture(autouse=True)

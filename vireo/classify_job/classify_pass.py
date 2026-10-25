@@ -21,6 +21,7 @@ from services import detection_store
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from contextlib import AbstractContextManager
     from datetime import datetime
 
@@ -377,7 +378,7 @@ class _ClassifyPhotosPass:
     def __init__(
         self, photos: Sequence[sqlite3.Row], folders: dict[int, str], detection_map: DetectionMap,
         model: ClassifierModel, runner: JobRunner, job: JobDict, db: Database,
-        vireo_dir: str | None, reclassify: bool,
+        vireo_dir: str | None, reclassify: bool, non_animal_ids: AbstractSet[int],
     ) -> None:
         self.folders = folders
         self.detection_map = detection_map
@@ -400,7 +401,7 @@ class _ClassifyPhotosPass:
         self.portable_labels_full = job.get("_labels_fingerprint_full")
         self.portable_model_identity = job.get("_classifier_model_identity")
         self.portable_taxonomy_identity = job.get("_taxonomy_identity", "no-tax")
-        self.non_animal_ids = job.get("_non_animal_photo_ids") or set()
+        self.non_animal_ids = non_animal_ids
         job["_classify_cancelled"] = False
 
         # On a reclassify run every photo has its predictions cleared BEFORE
@@ -802,6 +803,7 @@ def _classify_photos(
     photos: Sequence[sqlite3.Row], folders: dict[int, str], detection_map: DetectionMap,
     model: ClassifierModel, runner: JobRunner, job: JobDict, db: Database, *,
     vireo_dir: str | None = None, reclassify: bool = False, finish_cleared_only: bool = False,
+    non_animal_ids: AbstractSet[int] = frozenset(),
 ) -> tuple[list[RawResult], int, int]:
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -825,8 +827,8 @@ def _classify_photos(
     cancel-break at the top of the loop is suppressed (we're rebuilding
     work detection already changed, not starting new work).
 
-    Photos in ``job["_non_animal_photo_ids"]`` (only confident person or
-    vehicle boxes; see ``_classifier_candidates``) are not classified.
+    Photos in ``non_animal_ids`` (only confident person or vehicle boxes;
+    see ``_classifier_candidates``) are not classified.
 
     Returns:
         (raw_results, failed_count, skipped_existing_count)
@@ -836,7 +838,7 @@ def _classify_photos(
 
     run = _ClassifyPhotosPass(
         photos, folders, detection_map, model, runner, job, db,
-        vireo_dir, reclassify,
+        vireo_dir, reclassify, non_animal_ids,
     )
 
     for i, photo in enumerate(photos):

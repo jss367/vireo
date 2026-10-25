@@ -11,6 +11,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from classify_job.detection import DetectionHandoff
 from resource_ledger import ResourceWaitCancelled
 from services import detection_store, photo_ingest
 
@@ -250,11 +251,14 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
     }
     folders = {db.folder_id: str(tmp_path)}
     job = _job()
+    handoff = DetectionHandoff()
     detection_map, detected = _run_patched(
         _detector_patches(
             lambda path: [dict(b) for b in boxes[os.path.basename(path)]]
         ),
-        lambda: _detect_subjects(photos, folders, _Runner(), job, False, db),
+        lambda: _detect_subjects(
+            photos, folders, _Runner(), job, False, db, handoff=handoff,
+        ),
     )
 
     assert detected == 1
@@ -262,7 +266,7 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
         (d["confidence"], d["category"]) for d in detection_map[animal_photo["id"]]
     ] == [(0.9, "animal")]
     assert person_photo["id"] not in detection_map
-    assert job["_non_animal_photo_ids"] == {person_photo["id"]}
+    assert handoff.non_animal_ids == {person_photo["id"]}
 
     clf = _sparrow_clf()
     with patch("classify_job.classify_pass._prepare_image",
@@ -280,6 +284,7 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
             _Runner(),
             job,
             db,
+            non_animal_ids=handoff.non_animal_ids,
         )
     # The person-only photo is not classified as a full frame either.
     assert [r["photo"]["id"] for r in raw] == [animal_photo["id"]]
@@ -315,9 +320,12 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
     runner = _Runner(lambda job_id: state["cancel"])
     folders = {db.folder_id: str(tmp_path)}
     job = _job()
+    handoff = DetectionHandoff()
     detection_map, detected = _run_patched(
         _detector_patches(detect),
-        lambda: _detect_subjects(photos, folders, runner, job, True, db),
+        lambda: _detect_subjects(
+            photos, folders, runner, job, True, db, handoff=handoff,
+        ),
     )
 
     first = photos[0]["id"]
@@ -326,7 +334,7 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
     assert job["errors"] == []
     assert job["_detect_cancelled"] is True
 
-    processed = set(job["_detect_processed_ids"]) | set(detection_map)
+    processed = set(handoff.processed_ids) | set(detection_map)
     todo = [p for p in photos if p["id"] in processed]
     with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
@@ -382,17 +390,19 @@ def test_stop_during_subject_analysis_keeps_in_flight_photo(db, tmp_path):
     patches[-1] = patch("subjects.analyze_photo", analyze)
     runner = _Runner(lambda job_id: state["cancel"])
     job = _job()
+    handoff = DetectionHandoff()
     detection_map, detected = _run_patched(
         patches,
         lambda: _detect_subjects(
             photos, {db.folder_id: str(tmp_path)}, runner, job, True, db,
+            handoff=handoff,
         ),
     )
 
     first = photos[0]["id"]
     assert job["_detect_cancelled"] is True
     assert job["errors"] == []
-    assert set(job["_detect_processed_ids"]) == {first}
+    assert handoff.processed_ids == {first}
     assert list(detection_map) == [first]
     assert detected == 1
 
@@ -454,16 +464,19 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
 
     folders = {db.folder_id: str(tmp_path)}
     job = _job()
+    handoff = DetectionHandoff()
     detection_map, _ = _run_patched(
         _detector_patches(detect),
-        lambda: _detect_subjects(photos, folders, _Runner(), job, True, db),
+        lambda: _detect_subjects(
+            photos, folders, _Runner(), job, True, db, handoff=handoff,
+        ),
     )
 
     assert {pid: [d["id"] for d in dets] for pid, dets in detection_map.items()} == {
         pid: [det] for pid, det in stored.items()
     }
-    assert job["_detect_processed_ids"] == set()
-    assert job["_detect_reused_ids"] == set(stored)
+    assert handoff.processed_ids == set()
+    assert handoff.reused_ids == set(stored)
 
     with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
@@ -598,17 +611,20 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
 
     folders = {db.folder_id: str(tmp_path)}
     job = _job()
+    handoff = DetectionHandoff()
     detection_map, detected = _run_patched(
         _detector_patches(
             lambda path: [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
                            "confidence": 0.85, "category": "person"}]
         ),
-        lambda: _detect_subjects(photos, folders, _Runner(), job, False, db),
+        lambda: _detect_subjects(
+            photos, folders, _Runner(), job, False, db, handoff=handoff,
+        ),
     )
 
     assert detected == 0
     assert photo["id"] not in detection_map
-    assert job["_non_animal_photo_ids"] == {photo["id"]}
+    assert handoff.non_animal_ids == {photo["id"]}
     # Sanity: the stale full-image prediction is still on disk pre-classify.
     assert _prediction_count(db, photo["id"], "BioCLIP") == 1
 
@@ -629,6 +645,7 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
             job,
             db,
             reclassify=False,
+            non_animal_ids=handoff.non_animal_ids,
         )
 
     # No classification ran for the skipped photo.

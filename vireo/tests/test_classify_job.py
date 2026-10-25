@@ -5152,7 +5152,7 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
 
     captured_photos = []
 
-    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def _fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         captured_photos.extend([p["id"] for p in photos])
         return ({}, 0)
 
@@ -5735,7 +5735,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job.detection import _detect_subjects
+    from classify_job.detection import DetectionHandoff, _detect_subjects
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
@@ -5759,6 +5759,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
 
     runner = FakeRunner()
     job = _make_job()
+    handoff = DetectionHandoff()
     photos = [{"id": pid, "filename": "a.jpg", "folder_id": folder_id}]
 
     # detect_animals returns None → _detect_batch hits its early-continue
@@ -5773,9 +5774,10 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
             job=job,
             reclassify=True,
             db=db,
+            handoff=handoff,
         )
 
-    assert pid not in job.get("_detect_processed_ids", set())
+    assert pid not in handoff.processed_ids
     assert [d["id"] for d in detection_store.get_detections(db, pid, min_conf=0)] == [det]
     assert db.conn.execute(
         "SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (det,),
@@ -6676,7 +6678,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # detection. Flip cancel on as it returns.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         detect_called["n"] += 1
         assert reclassify is True
         runner.flipped = True
@@ -6820,7 +6822,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
 
     mock_clf = ProbeCheckingClassifier()
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         assert reclassify is True
         runner.flipped = True
         return ({1: [{"id": 101, "box_x": 0, "box_y": 0,
@@ -7131,7 +7133,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     Regression for the Codex P1 review on commit faa47a43ad
     (vireo/classify_job.py line 1861 — "Track re-detected empty photos
-    before returning"). The gate uses ``job["_detect_processed_ids"]``
+    before returning"). The gate uses ``DetectionHandoff.processed_ids``
     rather than ``detection_map.keys()`` so empty-scene photos are
     included in the rebuild subset.
     """
@@ -7200,17 +7202,17 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     # Stub _detect_subjects: photo 1 was processed but found empty
     # (recorded a detector_runs row, no detection_map entry). Photo 2 was
-    # never reached. The processed set is stashed on the job so
+    # never reached. The processed set is recorded on the handoff so
     # run_classify_job's rebuild gate can include the empty-scene photo
     # — using detection_map.keys() alone would miss it.
     detect_called = {"n": 0}
 
-    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
+    def fake_detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None, handoff=None):
         detect_called["n"] += 1
         assert reclassify is True
-        # Mirror what production _detect_subjects does: stash the processed
-        # set on job for run_classify_job to consume on cancel.
-        job["_detect_processed_ids"] = {1}
+        # Mirror what production _detect_subjects does: record the processed
+        # set on the handoff for run_classify_job to consume on cancel.
+        handoff.processed_ids = {1}
         runner.flipped = True
         return ({}, 0)
 
@@ -7247,7 +7249,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     assert mock_db_instance.predictions.add.call_count >= 1, (
         "Post-detect cancel on reclassify with an empty-scene processed "
         "photo must classify it via the full-image fallback. Without the "
-        "_detect_processed_ids tracking, the photo is stranded with "
+        "processed_ids tracking, the photo is stranded with "
         "cleared predictions and no replacement."
     )
     # All add_prediction calls must be for the empty-scene photo's
