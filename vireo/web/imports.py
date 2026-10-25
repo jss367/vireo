@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
     from import_dedup import CatalogIndex, DuplicateChecker
     from jobs import JobRunner
+    from scanner import SidecarFailures
     from services.service_types import JobDict, JsonDict, JsonError
     from web.background_jobs import JobLaunch
     from web.web_types import (
@@ -996,7 +997,7 @@ class _ImportFullRun:
                 )
         self._finish_scan_step(sidecar_failures)
 
-    def _finish_scan_step(self, sidecar_failures):
+    def _finish_scan_step(self, sidecar_failures: SidecarFailures) -> None:
         """Close the scan step; it fails on a sidecar whose keywords were not imported."""
         job = self.job
         scan_summary = f"{job['progress'].get('total', 0)} photos"

@@ -725,7 +725,7 @@ def create_job_launchers_blueprint(
         body = request.get_json(silent=True) or {}
         incremental = bool(body.get("incremental", True))
         db = get_db()
-        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ctx.workspace_id)]
+        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, db.require_workspace_id())]
         existing = [r for r in roots if os.path.isdir(r)]
         skipped = [r for r in roots if not os.path.isdir(r)]
         if not existing:
@@ -776,7 +776,7 @@ def create_job_launchers_blueprint(
             }), 409
 
         db = get_db()
-        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, ctx.workspace_id)]
+        roots = [r["path"] for r in workspace_folders.get_workspace_folder_roots(db, db.require_workspace_id())]
         # See api_import_readiness for why excluded bundles must be filtered
         # before os.path.isdir here (macOS TCC prompt on Photos Library).
         existing = [

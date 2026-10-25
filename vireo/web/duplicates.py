@@ -65,7 +65,7 @@ def create_duplicates_blueprint(
     loser_cleanup_lock = threading.Lock()
 
     @blueprint.route("/api/duplicates/same-shot/review", methods=["POST"])
-    def api_same_shot_review():
+    def api_same_shot_review() -> ResponseReturnValue:
         """Record or reopen a library-wide review note; never modify photos."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
