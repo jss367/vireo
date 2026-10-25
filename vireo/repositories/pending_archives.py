@@ -19,8 +19,10 @@ scoped to the active workspace.
 
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
+
+from sql_chunks import chunked
 
 
 class PendingArchiveRepository:
@@ -72,6 +74,26 @@ class PendingArchiveRepository:
             (archive_id, self.workspace_id_fn()),
         )
         self.conn.commit()
+
+    def cataloged_photo_totals(self, folder_ids: Iterable[int]) -> tuple[int, int | None]:
+        """Count main photo files in a transfer tree, regardless of workspace visibility.
+
+        Catalog sizes are estimates, not a measurement of disk allocation or
+        a recursive inventory. Sidecars, companions and unindexed files can
+        add bytes. Rejected photos still transfer and must be counted.
+        """
+        count = size = unknown = 0
+        for ids in chunked(sorted(set(folder_ids))):
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(MAX(COALESCE(file_size, 0), 0)), 0) AS bytes, "
+                "COALESCE(SUM(CASE WHEN file_size IS NULL OR file_size < 0 THEN 1 ELSE 0 END), 0) AS unknown "
+                f"FROM photos WHERE folder_id IN ({','.join('?' * len(ids))})",
+                ids,
+            ).fetchone()
+            count += row["n"]
+            size += row["bytes"]
+            unknown += row["unknown"]
+        return count, None if unknown else size
 
     def set_state(self, archive_id: str, state: str, error: str = "") -> None:
         """Set a transfer's ``state`` and ``error`` by id, in any workspace, and commit."""

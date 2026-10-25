@@ -6,6 +6,10 @@ module entry and after the shared `vireo-release-originals.js`, with
 `boot.js` last. They share page globals, as the inline script and the older
 `storage-*.js` files did.
 
+The shared pending-transfer panel above the storage totals shows local
+originals awaiting NAS transfer in the active workspace. Its catalog size
+estimates are separate from measured storage totals and safe-cache cleanup.
+
 | File | Responsibility |
 | --- | --- |
 | `format.js` | `storageEscapeHtml`, `storageEscapeAttr`, `storageFormatBytes` |
