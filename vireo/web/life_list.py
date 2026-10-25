@@ -11,17 +11,26 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, make_response, request
 from highlights_payload import build_life_list_payload
+
+if TYPE_CHECKING:
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb
 
 _EXPLORER_RANKS = ["order", "family", "genus", "species"]
 _EXPLORER_CHILD_RANK = {"class": "order", "order": "family",
                         "family": "genus", "genus": "species"}
 
 
-def _explorer_unavailable(taxonomy_ready):
+def _explorer_unavailable(taxonomy_ready: bool) -> JsonDict:
     """The explorer payload when there is no valid class root to show."""
     return {"taxonomy_ready": taxonomy_ready, "valid_root": False, "root": None,
             "summary": {}, "nodes": [],
@@ -33,7 +42,7 @@ def _explorer_unavailable(taxonomy_ready):
             "classes": []}
 
 
-def _explorer_tree(rows, class_id, found):
+def _explorer_tree(rows: list[JsonDict], class_id: int, found: set[int]) -> tuple[dict[str, dict[str, int]], list[JsonDict]]:
     """``(summary, top)``: per-rank counts and the class's order nodes."""
     # Build node index + children lists.
     nodes = {r["id"]: {**r, "children": [], "found_species": 0,
@@ -44,7 +53,7 @@ def _explorer_tree(rows, class_id, found):
             nodes[pid]["children"].append(n)
 
     # Post-order rollup of species totals/found.
-    def rollup(node):
+    def rollup(node: JsonDict) -> None:
         if node["rank"] == "species":
             node["total_species"] = 1
             node["found_species"] = 1 if node["id"] in found else 0
@@ -63,7 +72,7 @@ def _explorer_tree(rows, class_id, found):
             if n["found_species"] > 0:
                 summary[n["rank"]]["found"] += 1
 
-    def to_out(node):
+    def to_out(node: JsonDict) -> JsonDict:
         child_rank = _EXPLORER_CHILD_RANK.get(node["rank"])
         kids = list(node["children"])
         found_children = sum(1 for c in kids if c["found_species"] > 0)
@@ -92,7 +101,9 @@ def _explorer_tree(rows, class_id, found):
     return summary, top
 
 
-def _explorer_classes(db, root, root_id, found, uncounted):
+def _explorer_classes(
+    db: Database, root: JsonDict, root_id: int | None, found: set[int], uncounted: list[JsonDict],
+) -> list[JsonDict]:
     """The class selector's options for the explorer."""
     # A class represented only by a broad identification still belongs in the
     # selector. Otherwise (for example) a workspace containing only the genus
@@ -118,7 +129,7 @@ def _explorer_classes(db, root, root_id, found, uncounted):
     return classes
 
 
-def _build_explorer_payload(db, root_id=None):
+def _build_explorer_payload(db: Database, root_id: int | None = None) -> JsonDict:
     """Completeness tree (down to genus) for one class. Species leaves load
     separately via _build_explorer_species. Honest about the two failure
     states: taxonomy-not-downloaded and unmatched species."""
@@ -176,7 +187,7 @@ def _build_explorer_payload(db, root_id=None):
     }
 
 
-def _build_explorer_species(db, genus_id):
+def _build_explorer_species(db: Database, genus_id: int) -> JsonDict:
     """Found+missing species directly under a genus, found ones with a
     representative photo. Found sorted first, then missing; each alphabetical."""
     rows = [r for r in db.species_curation.get_taxon_subtree(genus_id, max_depth=1)
@@ -197,7 +208,7 @@ def _build_explorer_species(db, genus_id):
     return {"genus_id": genus_id, "species": species}
 
 
-def _build_explorer_rank(db, rank, root_id=None):
+def _build_explorer_rank(db: Database, rank: str, root_id: int | None = None) -> JsonDict:
     """Flat list of all taxa at `rank` under the class root, each flagged
     found/unfound. Server-authoritative so it agrees with the summary chips."""
     if rank not in _EXPLORER_RANKS:
@@ -222,7 +233,7 @@ def _build_explorer_rank(db, rank, root_id=None):
         if pid in nodes and pid != n["id"]:
             nodes[pid]["children"].append(n)
 
-    def rollup(node):
+    def rollup(node: JsonDict) -> None:
         if node["rank"] == "species":
             node["total_species"] = 1
             node["found_species"] = 1 if node["id"] in found else 0
@@ -233,7 +244,7 @@ def _build_explorer_rank(db, rank, root_id=None):
                 node["found_species"] += c["found_species"]
     rollup(nodes[root["id"]])
 
-    def order_label(node):
+    def order_label(node: JsonDict) -> str | None:
         cur = node["parent_id"]
         while cur in nodes and nodes[cur]["rank"] != "order":
             cur = nodes[cur]["parent_id"]
@@ -271,7 +282,7 @@ def _build_explorer_rank(db, rank, root_id=None):
     }
 
 
-def create_life_list_blueprint(get_db, json_error):
+def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the life-list blueprint.
 
     ``highlights_payload.build_life_list_payload`` assembles the numbered
@@ -281,7 +292,7 @@ def create_life_list_blueprint(get_db, json_error):
     blueprint = Blueprint("life_list", __name__)
 
     @blueprint.route("/api/life-list")
-    def api_life_list():
+    def api_life_list() -> ResponseReturnValue:
         db = get_db()
         payload = build_life_list_payload(
             db,
@@ -290,7 +301,7 @@ def create_life_list_blueprint(get_db, json_error):
         return jsonify(payload)
 
     @blueprint.route("/api/life-list/species")
-    def api_life_list_species():
+    def api_life_list_species() -> ResponseReturnValue:
         db = get_db()
         species = (request.args.get("species") or "").strip()
         if not species:
@@ -315,13 +326,13 @@ def create_life_list_blueprint(get_db, json_error):
         })
 
     @blueprint.route("/api/life-list/explorer")
-    def api_life_list_explorer():
+    def api_life_list_explorer() -> ResponseReturnValue:
         db = get_db()
         root_id = request.args.get("root", type=int)  # None -> default Aves
         return jsonify(_build_explorer_payload(db, root_id=root_id))
 
     @blueprint.route("/api/life-list/explorer/species")
-    def api_life_list_explorer_species():
+    def api_life_list_explorer_species() -> ResponseReturnValue:
         db = get_db()
         genus_id = request.args.get("genus", type=int)
         if not genus_id:
@@ -329,7 +340,7 @@ def create_life_list_blueprint(get_db, json_error):
         return jsonify(_build_explorer_species(db, genus_id))
 
     @blueprint.route("/api/life-list/explorer/rank")
-    def api_life_list_explorer_rank():
+    def api_life_list_explorer_rank() -> ResponseReturnValue:
         db = get_db()
         rank = request.args.get("rank", "family")
         root_id = request.args.get("root", type=int)
@@ -346,17 +357,17 @@ def create_life_list_blueprint(get_db, json_error):
         "file-list": "files",
     }
 
-    def _life_list_export_bool_arg(name, default=False):
+    def _life_list_export_bool_arg(name: str, default: bool = False) -> bool:
         raw = request.args.get(name)
         if raw is None:
             return default
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    def _strip_life_list_locations(payload):
+    def _strip_life_list_locations(payload: JsonDict) -> None:
         for entry in payload.get("species", []):
             entry["locations"] = []
 
-    def _life_list_export_photos(entry, mode):
+    def _life_list_export_photos(entry: JsonDict, mode: str) -> list[JsonDict]:
         if mode == "all":
             return entry.get("photos") or []
         best = entry.get("best")
@@ -387,7 +398,7 @@ def create_life_list_blueprint(get_db, json_error):
         "locations",
     )
 
-    def _life_list_export_response(body, mimetype, extension):
+    def _life_list_export_response(body: str, mimetype: str, extension: str) -> Response:
         today = datetime.now(UTC).date().isoformat()
         resp = make_response(body)
         resp.headers["Content-Type"] = mimetype
@@ -396,7 +407,7 @@ def create_life_list_blueprint(get_db, json_error):
         )
         return resp
 
-    def _life_list_csv_cell(value):
+    def _life_list_csv_cell(value: str | None) -> str:
         if value is None:
             return ""
         text = str(value)
@@ -405,7 +416,7 @@ def create_life_list_blueprint(get_db, json_error):
             return "'" + text
         return text
 
-    def _life_list_species_csv(payload, fieldnames=None):
+    def _life_list_species_csv(payload: JsonDict, fieldnames: Sequence[str] | None = None) -> str:
         out = io.StringIO()
         fieldnames = fieldnames or _LIFE_LIST_SPECIES_CSV_COLUMNS
         writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
@@ -428,7 +439,7 @@ def create_life_list_blueprint(get_db, json_error):
             })
         return out.getvalue()
 
-    def _life_list_photos_csv(payload, photo_mode, fieldnames=None):
+    def _life_list_photos_csv(payload: JsonDict, photo_mode: str, fieldnames: Sequence[str] | None = None) -> str:
         out = io.StringIO()
         fieldnames = fieldnames or _LIFE_LIST_PHOTO_CSV_COLUMNS
         writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
@@ -452,7 +463,7 @@ def create_life_list_blueprint(get_db, json_error):
                 })
         return out.getvalue()
 
-    def _life_list_text(payload):
+    def _life_list_text(payload: JsonDict) -> str:
         lines = []
         for entry in payload.get("species", []):
             name = entry.get("species") or ""
@@ -473,7 +484,7 @@ def create_life_list_blueprint(get_db, json_error):
             lines.append(" - ".join(parts))
         return "\n".join(lines) + ("\n" if lines else "")
 
-    def _life_list_file_list(payload, photo_mode):
+    def _life_list_file_list(payload: JsonDict, photo_mode: str) -> str:
         seen = set()
         lines = []
         for entry in payload.get("species", []):
@@ -489,7 +500,7 @@ def create_life_list_blueprint(get_db, json_error):
         return "\n".join(lines) + ("\n" if lines else "")
 
     @blueprint.route("/api/life-list/export")
-    def api_life_list_export():
+    def api_life_list_export() -> ResponseReturnValue:
         fmt = (request.args.get("format") or "json").strip().lower()
         fmt = _LIFE_LIST_EXPORT_FORMATS.get(fmt)
         if not fmt:

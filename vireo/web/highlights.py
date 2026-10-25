@@ -12,6 +12,8 @@ for the legacy ``purpose=highlights``, an ordered highlight).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 from highlights_payload import (
@@ -34,6 +36,15 @@ from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from species_memberships import photo_species_memberships
 from web.request_args import request_bool_arg
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask import Response
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import GetDb
+
 
 class _HighlightsRelabel:
     """One ``/api/highlights/relabel`` decision, run under the
@@ -44,7 +55,10 @@ class _HighlightsRelabel:
     then write inside the caller's transaction.
     """
 
-    def __init__(self, db, photo_ids, species, top_predictions, from_species=None):
+    def __init__(
+        self, db: Database, photo_ids: list[int], species: str, top_predictions: dict[int, Row],
+        from_species: str | None = None,
+    ) -> None:
         self.db = db
         self.photo_ids = photo_ids
         self.species = species
@@ -79,7 +93,7 @@ class _HighlightsRelabel:
         self.rejected_prediction_ids = []
         self.has_old_species = False
 
-    def snapshot_curation(self):
+    def snapshot_curation(self) -> None:
         self._snapshot_predicted_species()
         self.ws_id = self.db.require_workspace_id()
         # The per-photo snapshot reads chunk their IN lists: photo_ids has
@@ -92,7 +106,7 @@ class _HighlightsRelabel:
         self._snapshot_preferences()
         self._snapshot_representatives()
 
-    def _snapshot_predicted_species(self):
+    def _snapshot_predicted_species(self) -> None:
         """Snapshot the top-prediction species per photo, keyed by
         keyword_match_key (SQLite's ASCII-only NOCASE fold). Used in
         ``_accept_curation_source``'s current_species-empty filter branch
@@ -129,7 +143,7 @@ class _HighlightsRelabel:
                 if canonical_key:
                     predicted_species_by_pid.setdefault(pid_pred, set()).add(canonical_key)
 
-    def _snapshot_current_species(self):
+    def _snapshot_current_species(self) -> None:
         """Snapshot each photo's current species-rank taxonomy keywords
         before the relabel touches them. Used to skip stale curation rows
         for species the photo no longer carries across all three curation
@@ -167,14 +181,14 @@ class _HighlightsRelabel:
                 if key:
                     current_species_by_pid.setdefault(pid, set()).add(key)
 
-    def _is_source_species(self, name):
+    def _is_source_species(self, name: str) -> bool:
         """Whether the relabel replaces ``name``: always for a whole-photo
         relabel, and only the bucket's own species for a scoped one."""
         if self._from_key is None:
             return True
         return _species_key(self._canonicalize, name) == self._from_key
 
-    def _accept_curation_source(self, pid, old_species_name):
+    def _accept_curation_source(self, pid: int, old_species_name: str) -> bool:
         """Shared filter for the highlight, preference, and rep passes.
 
         With any current taxonomy keywords, only migrate curation for
@@ -202,7 +216,7 @@ class _HighlightsRelabel:
         predicted = self.predicted_species_by_pid.get(pid) or set()
         return old_key in predicted
 
-    def _snapshot_highlights(self):
+    def _snapshot_highlights(self) -> None:
         species = self.species
         for row in self.db.species_curation.highlight_rows_for_photos(self.photo_ids):
             old_species_name = row["species"]
@@ -230,7 +244,7 @@ class _HighlightsRelabel:
             for entry in entries:
                 entry["dst_existed"] = dst
 
-    def _snapshot_destination_slots(self):
+    def _snapshot_destination_slots(self) -> None:
         db = self.db
         species = self.species
         # Purposes that already have a row at (new_species, purpose) — for
@@ -264,7 +278,7 @@ class _HighlightsRelabel:
                 (row["photo_id"], row["species"])
             ] = row["selected_order"]
 
-    def _snapshot_preferences(self):
+    def _snapshot_preferences(self) -> None:
         species = self.species
         for row in self.db.species_curation.preference_rows_for_photos(self.photo_ids):
             old_species_name = row["species"]
@@ -290,7 +304,7 @@ class _HighlightsRelabel:
                 (row["photo_id"], old_species_name)
             )
 
-    def _snapshot_representatives(self):
+    def _snapshot_representatives(self) -> None:
         """Global species_representatives moves. Representatives are global
         (no workspace column), so a photo can carry a
         (species, photo_id) row picked from a different workspace with
@@ -325,7 +339,7 @@ class _HighlightsRelabel:
                 ),
             })
 
-    def adopt_stored_spelling(self, kid):
+    def adopt_stored_spelling(self, kid: int) -> None:
         """Use the stored spelling from here on: add_keyword applies the
         species casing convention, so it can differ from the request
         value, and the queued sidecar changes / curation renames /
@@ -335,11 +349,11 @@ class _HighlightsRelabel:
         if stored:
             self.species = stored
 
-    def retag_photos(self, kid):
+    def retag_photos(self, kid: int) -> None:
         for pid in self.photo_ids:
             self._retag_photo(pid, kid)
 
-    def _retag_photo(self, pid, kid):
+    def _retag_photo(self, pid: int, kid: int) -> None:
         db = self.db
         pred = self.top_predictions.get(pid)
         if pred is not None:
@@ -379,7 +393,7 @@ class _HighlightsRelabel:
             "new_value": str(kid),
         })
 
-    def _history_old_value(self, pid, pred, old_primary, old_rows):
+    def _history_old_value(self, pid: int, pred: Row | None, old_primary: Row | None, old_rows: list[Row]) -> str:
         old_value = str(old_primary["id"]) if old_primary else ""
         old_keyword_ids = [old["id"] for old in old_rows]
         hl_prev = self.hl_prev_by_pid.get(pid) or []
@@ -413,7 +427,7 @@ class _HighlightsRelabel:
             old_value = json.dumps(old_payload, sort_keys=True)
         return old_value
 
-    def rename_curation(self):
+    def rename_curation(self) -> None:
         db = self.db
         species = self.species
         ws_id = self.ws_id
@@ -439,7 +453,7 @@ class _HighlightsRelabel:
                 _commit=False,
             )
 
-    def record_relabel_edit(self, kid):
+    def record_relabel_edit(self, kid: int) -> None:
         species = self.species
         action_type = (
             "species_replace"
@@ -465,13 +479,13 @@ class _HighlightsRelabel:
         )
 
 
-def _species_key(canonicalize, name):
+def _species_key(canonicalize: Callable[[str], str | None], name: str) -> str:
     """The match key of ``name``'s canonical spelling, the identity Highlights
     buckets key on."""
     return keyword_match_key(canonicalize(name) or name)
 
 
-def _parse_optional_species(body, field):
+def _parse_optional_species(body: JsonDict, field: str) -> tuple[str | None, str | None]:
     """``(name, error)`` for an optional species string in ``body[field]``."""
     value = body.get(field)
     if value is None:
@@ -481,7 +495,7 @@ def _parse_optional_species(body, field):
     return normalize_keyword_display(value.strip()), None
 
 
-def _subject_prediction(row):
+def _subject_prediction(row: Row) -> JsonDict:
     return {
         "detection_id": row["detection_id"],
         "prediction_id": row["id"],
@@ -490,12 +504,13 @@ def _subject_prediction(row):
     }
 
 
-def _top_prediction_confirm_targets(db, photo_ids):
+def _top_prediction_confirm_targets(db: Database, photo_ids: list[int]) -> tuple[dict[int, Row], dict[int, str]]:
     """Whole-photo confirm: each photo's top prediction, unless the photo
     already carries any species."""
     top_predictions = db.predictions.top_unrejected_by_photo(photo_ids)
     accepted_photo_ids = db.photo_species.photo_ids_with_species_rank_keyword(photo_ids)
-    targets, skips = {}, {}
+    targets: dict[int, Row] = {}
+    skips: dict[int, str] = {}
     for pid in photo_ids:
         if pid in accepted_photo_ids:
             skips[pid] = "already_confirmed"
@@ -506,7 +521,7 @@ def _top_prediction_confirm_targets(db, photo_ids):
     return targets, skips
 
 
-def _species_confirm_targets(db, photo_ids, species):
+def _species_confirm_targets(db: Database, photo_ids: list[int], species: str) -> tuple[dict[int, Row], dict[int, str]]:
     """Confirm from one species bucket: the subject prediction that put each
     photo in ``species``'s bucket, so a photo with another species already
     tagged still gets this one, and a photo already tagged with it is
@@ -537,7 +552,7 @@ def _species_confirm_targets(db, photo_ids, species):
     return targets, skips
 
 
-def _relabel_source_predictions(db, photo_ids, from_species):
+def _relabel_source_predictions(db: Database, photo_ids: list[int], from_species: str | None) -> dict[int, Row]:
     """``{photo_id: row}``: the prediction a relabel rejects on each photo.
 
     A whole-photo relabel rejects the photo's top prediction. A relabel from
@@ -548,7 +563,7 @@ def _relabel_source_predictions(db, photo_ids, from_species):
         return db.predictions.top_unrejected_by_photo(photo_ids)
     canonicalize = species_canonicalizer(db)
     from_key = _species_key(canonicalize, from_species)
-    result = {}
+    result: dict[int, Row] = {}
     for pid, rows in db.predictions.top_unrejected_by_detection(photo_ids).items():
         match = next((
             r for r in rows
@@ -559,13 +574,13 @@ def _relabel_source_predictions(db, photo_ids, from_species):
     return result
 
 
-def _confirm_group_key(pred):
+def _confirm_group_key(pred: Row) -> tuple[str, str, str] | tuple[str, int]:
     if pred["group_id"]:
         return ("group", pred["classifier_model"], pred["group_id"])
     return ("prediction", pred["id"])
 
 
-def _confirm_edit_items(pred, result):
+def _confirm_edit_items(pred: Row, result: JsonDict) -> list[JsonDict]:
     """Edit-history items for one confirm accept.
 
     Mirror api_accept_prediction: encode ``no_tag`` for entries where the
@@ -577,9 +592,9 @@ def _confirm_edit_items(pred, result):
     undo puts the row back to ``reviewed`` rather than ``pending``, a status
     it no longer had.
     """
-    items = []
+    items: list[JsonDict] = []
     for a in result["affected"]:
-        meta = {}
+        meta: JsonDict = {}
         if not a.get("changed_tag", True):
             meta["no_tag"] = True
         if (a["prediction_id"] == pred["id"]
@@ -599,7 +614,9 @@ def _confirm_edit_items(pred, result):
     return items
 
 
-def _accept_confirm_targets(db, photo_ids, targets, skips, exact_rows):
+def _accept_confirm_targets(
+    db: Database, photo_ids: list[int], targets: dict[int, Row], skips: dict[int, str], exact_rows: bool,
+) -> tuple[list[JsonDict], list[JsonDict]]:
     """Accept each target prediction once per burst group and record the
     edits; ``exact_rows`` limits a grouped accept to the target rows
     themselves, not every row of the group on those photos."""
@@ -649,7 +666,7 @@ def _accept_confirm_targets(db, photo_ids, targets, skips, exact_rows):
     return affected, skipped
 
 
-def create_highlights_blueprint(get_db, json_error):
+def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the highlights / photo-preferences blueprint.
 
     The payload builder and highlight-bucket helpers come from
@@ -661,21 +678,23 @@ def create_highlights_blueprint(get_db, json_error):
     """
     blueprint = Blueprint("highlights", __name__)
 
-    def _parse_highlight_photo_ids(body):
+    def _parse_highlight_photo_ids(body: JsonDict) -> tuple[list[int], str | None]:
+        """``(photo_ids, None)``, or ``([], message)``."""
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
-            return None, "photo_ids required"
-        photo_ids = []
-        seen = set()
+            return [], "photo_ids required"
+        photo_ids: list[int] = []
+        seen: set[int] = set()
         for raw in raw_ids:
             if isinstance(raw, bool) or not isinstance(raw, int):
-                return None, "photo_ids must be integers"
+                return [], "photo_ids must be integers"
             if raw not in seen:
                 photo_ids.append(raw)
                 seen.add(raw)
         return photo_ids, None
 
-    def _validate_highlight_photo_ids(db, photo_ids):
+    def _validate_highlight_photo_ids(db: Database, photo_ids: list[int]) -> tuple[str, int] | None:
+        """``(message, status)`` when a photo is unknown or outside the workspace."""
         found_ids = db.photos.existing_ids(photo_ids)
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
@@ -686,26 +705,27 @@ def create_highlights_blueprint(get_db, json_error):
                 f"Photo IDs do not belong to the active workspace: {outside}",
                 403,
             )
-        return None, None
+        return None
 
-    def _parse_photo_preference_body(body, require_photo=True):
+    def _parse_photo_preference_body(body: JsonDict, require_photo: bool = True) -> tuple[JsonDict, str | None]:
+        """``(parsed, None)``, or ``({}, message)``."""
         purpose = body.get("purpose", "")
         species = body.get("species", "")
         purpose = purpose.strip() if isinstance(purpose, str) else ""
         species = species.strip() if isinstance(species, str) else ""
         if purpose not in {"species_representative", "life_list", "highlights"}:
-            return None, (
+            return {}, (
                 "purpose must be one of species_representative, "
                 "life_list, or highlights"
             )
         if not species:
-            return None, "species required"
+            return {}, "species required"
         # Canonicalize to the spelling add_keyword would store (see
         # _parse_species_highlight_body) so the eligibility prechecks and
         # the DB setters all key on one string.
         species = get_db().resolve_species_display_name(species)
         if not species:
-            return None, "species required"
+            return {}, "species required"
 
         photo_id = body.get("photo_id")
         # Ordered highlights are per-photo (multiple photos per species),
@@ -715,7 +735,7 @@ def create_highlights_blueprint(get_db, json_error):
         needs_photo = require_photo or purpose == "highlights"
         if needs_photo:
             if isinstance(photo_id, bool) or not isinstance(photo_id, int):
-                return None, "photo_id must be an integer"
+                return {}, "photo_id must be an integer"
         else:
             photo_id = None
 
@@ -729,7 +749,7 @@ def create_highlights_blueprint(get_db, json_error):
             "photo_id": photo_id,
         }, None
 
-    def _photo_can_be_life_list_preference(db, species, photo_id):
+    def _photo_can_be_life_list_preference(db: Database, species: str, photo_id: int) -> bool:
         # Accept a hierarchy leaf whose taxon links back to a root
         # identification with the same curation name. See the matching
         # comment on SpeciesCurationRepository.get_representative_lists: after
@@ -750,7 +770,7 @@ def create_highlights_blueprint(get_db, json_error):
         # and leave a curation row nothing else considers eligible.
         return db.species_curation.photo_is_life_list_preference_eligible(species, photo_id)
 
-    def _photo_can_be_highlights_preference(db, species, photo_id):
+    def _photo_can_be_highlights_preference(db: Database, species: str, photo_id: int) -> bool:
         candidates = db.species_curation.get_highlights_candidates(None, min_quality=0.0)
         buckets, _unidentified = collect_highlight_buckets(
             candidates, confidence_threshold=0.0,
@@ -762,7 +782,7 @@ def create_highlights_blueprint(get_db, json_error):
             return any(p["id"] == photo_id for p in bucket["photos"])
         return False
 
-    def _photo_can_be_preference(db, purpose, species, photo_id):
+    def _photo_can_be_preference(db: Database, purpose: str, species: str, photo_id: int) -> bool:
         # Ordered highlights use their own (stricter) eligibility check —
         # the photo must appear in the workspace's highlight buckets for
         # this species. Representative-style purposes (species_representative,
@@ -772,15 +792,15 @@ def create_highlights_blueprint(get_db, json_error):
         return _photo_can_be_life_list_preference(db, species, photo_id)
 
     @blueprint.route("/api/photo-preferences", methods=["POST"])
-    def api_photo_preferences_set():
+    def api_photo_preferences_set() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_photo_preference_body(body)
         if error:
             return json_error(error)
-        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if invalid:
+            return json_error(*invalid)
         if not _photo_can_be_preference(
             db, parsed["purpose"], parsed["species"], parsed["photo_id"]
         ):
@@ -821,7 +841,7 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
-    def api_photo_preferences_clear():
+    def api_photo_preferences_clear() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
@@ -849,11 +869,12 @@ def create_highlights_blueprint(get_db, json_error):
             "species": parsed["species"],
         })
 
-    def _parse_species_highlight_body(body, require_direction=False):
+    def _parse_species_highlight_body(body: JsonDict, require_direction: bool = False) -> tuple[JsonDict, str | None]:
+        """``(parsed, None)``, or ``({}, message)``."""
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
         if not species:
-            return None, "species required"
+            return {}, "species required"
         # Canonicalize to the spelling add_keyword would store: the client
         # sends bucket labels, which for unconfirmed buckets derive from
         # prediction casing. The eligibility precheck compares against
@@ -861,29 +882,29 @@ def create_highlights_blueprint(get_db, json_error):
         # so parse-time canonicalization keeps all three in agreement.
         species = get_db().resolve_species_display_name(species)
         if not species:
-            return None, "species required"
+            return {}, "species required"
         photo_id = body.get("photo_id")
         if isinstance(photo_id, bool) or not isinstance(photo_id, int):
-            return None, "photo_id must be an integer"
+            return {}, "photo_id must be an integer"
         parsed = {"species": species, "photo_id": photo_id}
         if require_direction:
             direction = body.get("direction", "")
             direction = direction.strip().lower() if isinstance(direction, str) else ""
             if direction not in {"up", "down"}:
-                return None, "direction must be up or down"
+                return {}, "direction must be up or down"
             parsed["direction"] = direction
         return parsed, None
 
     @blueprint.route("/api/species-highlights", methods=["POST"])
-    def api_species_highlights_add():
+    def api_species_highlights_add() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_species_highlight_body(body)
         if error:
             return json_error(error)
-        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if invalid:
+            return json_error(*invalid)
         if not _photo_can_be_highlights_preference(
             db, parsed["species"], parsed["photo_id"]
         ):
@@ -894,28 +915,28 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({"ok": True, **parsed, "rank": rank})
 
     @blueprint.route("/api/species-highlights", methods=["DELETE"])
-    def api_species_highlights_remove():
+    def api_species_highlights_remove() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_species_highlight_body(body)
         if error:
             return json_error(error)
-        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if invalid:
+            return json_error(*invalid)
         removed = db.species_curation.remove_highlight(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed, "removed": removed})
 
     @blueprint.route("/api/species-highlights/order", methods=["PATCH", "POST"])
-    def api_species_highlights_order():
+    def api_species_highlights_order() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_species_highlight_body(body, require_direction=True)
         if error:
             return json_error(error)
-        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if invalid:
+            return json_error(*invalid)
         ok = db.species_curation.move_highlight(
             parsed["species"], parsed["photo_id"], parsed["direction"]
         )
@@ -924,7 +945,7 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({"ok": True, **parsed})
 
     @blueprint.route("/api/highlights")
-    def api_highlights():
+    def api_highlights() -> ResponseReturnValue:
         db = get_db()
         payload = build_highlights_payload(db, HighlightsQuery(
             scope=request.args.get("scope", "folder"),
@@ -953,7 +974,7 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify(payload)
 
     @blueprint.route("/api/highlights/confirm", methods=["POST"])
-    def api_highlights_confirm():
+    def api_highlights_confirm() -> ResponseReturnValue:
         """Confirm highlight photos by accepting a prediction on each.
 
         With ``species`` (the bucket the user confirmed from), each photo's
@@ -974,15 +995,15 @@ def create_highlights_blueprint(get_db, json_error):
         species, error = _parse_optional_species(body, "species")
         if error:
             return json_error(error)
-        error, status = _validate_highlight_photo_ids(db, photo_ids)
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, photo_ids)
+        if invalid:
+            return json_error(*invalid)
         return prediction_decisions.under_prediction_decision_lock(
             db, lambda: _highlights_confirm_under_lock(db, photo_ids, species),
             json_error=json_error,
         )
 
-    def _highlights_confirm_under_lock(db, photo_ids, species):
+    def _highlights_confirm_under_lock(db: Database, photo_ids: list[int], species: str | None) -> Response:
         try:
             if species is None:
                 targets, skips = _top_prediction_confirm_targets(db, photo_ids)
@@ -999,7 +1020,7 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({"ok": True, "affected": affected, "skipped": skipped})
 
     @blueprint.route("/api/highlights/relabel", methods=["POST"])
-    def api_highlights_relabel():
+    def api_highlights_relabel() -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True) or {}
         photo_ids, error = _parse_highlight_photo_ids(body)
@@ -1046,9 +1067,9 @@ def create_highlights_blueprint(get_db, json_error):
         target = db.keywords.top_level_species_keyword(species)
         if target and target["name"]:
             species = target["name"]
-        error, status = _validate_highlight_photo_ids(db, photo_ids)
-        if error:
-            return json_error(error, status)
+        invalid = _validate_highlight_photo_ids(db, photo_ids)
+        if invalid:
+            return json_error(*invalid)
         # Relabelling rejects each photo's top prediction, so it is a
         # prediction-decision route and takes the shared writer lock. Taken
         # here, before ``get_top_unrejected_predictions_by_photo`` — the read
@@ -1061,7 +1082,7 @@ def create_highlights_blueprint(get_db, json_error):
             json_error=json_error,
         )
 
-    def _highlights_relabel_under_lock(db, photo_ids, species, from_species):
+    def _highlights_relabel_under_lock(db: Database, photo_ids: list[int], species: str, from_species: str | None) -> Response:
         relabel = _HighlightsRelabel(
             db, photo_ids, species,
             _relabel_source_predictions(db, photo_ids, from_species),
@@ -1094,7 +1115,7 @@ def create_highlights_blueprint(get_db, json_error):
         })
 
     @blueprint.route("/api/highlights/bucket")
-    def api_highlights_bucket():
+    def api_highlights_bucket() -> ResponseReturnValue:
         db = get_db()
         folders = db.folders.with_quality_data()
         scope = request.args.get("scope", "folder")
@@ -1167,7 +1188,7 @@ def create_highlights_blueprint(get_db, json_error):
         })
 
     @blueprint.route("/api/highlights/save", methods=["POST"])
-    def api_highlights_save():
+    def api_highlights_save() -> ResponseReturnValue:
         db = get_db()
 
         body = request.get_json(silent=True) or {}

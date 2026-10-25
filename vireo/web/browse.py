@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import TYPE_CHECKING
 
 import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
@@ -36,6 +37,17 @@ from web.request_args import (
     request_visual_arg,
 )
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.scan_work import ConfigLoader
+    from services.service_types import JsonDict, JsonError
+    from services.visual_scope import VisualScope
+    from species_identity import SpeciesResolver
+    from web.web_types import GetDb
+
 # Folder-picker photo counts are a hint: stop walking a folder after this
 # long, and stop the whole request after the second budget.
 PHOTO_COUNT_PATH_BUDGET_SECS = 1.5
@@ -47,8 +59,9 @@ class _BadFirstPaintScope(Exception):
 
 
 def _first_paint_photos(
-    db, cfg, *, stacks, folder_id, collection_id, page, per_page, sort,
-):
+    db: Database, cfg: ConfigLoader, *, stacks: bool, folder_id: int | None, collection_id: int | None, page: int,
+    per_page: int, sort: str,
+) -> tuple[list[Row], int, int, int | None]:
     """The first page of photos (or stacks) for Browse's first paint.
 
     Returns ``(photos, total, underlying_total, stack_count)``;
@@ -99,8 +112,9 @@ def _first_paint_photos(
 
 
 def _first_paint_focus(
-    db, photos, focus_photo_id, *, folder_id, collection_id, page, per_page, sort,
-):
+    db: Database, photos: list[Row], focus_photo_id: int | None, *, folder_id: int | None, collection_id: int | None,
+    page: int, per_page: int, sort: str,
+) -> tuple[list[Row], int | None, int]:
     """Place a focused deep link: ``(photos, focus_index, focus_page)``.
 
     ``photos`` is replaced by the page that holds the focus target when that
@@ -164,9 +178,9 @@ def _first_paint_focus(
     return photos, focus_index, focus_page
 
 
-def _first_paint_collection_dicts(db, collections):
+def _first_paint_collection_dicts(db: Database, collections: list[Row]) -> list[JsonDict]:
     """The sidebar's collection rows, flagged degraded or not addable."""
-    collection_dicts = []
+    collection_dicts: list[JsonDict] = []
     for c in collections:
         d = dict(c)
         # Flag degraded rules at first paint so a fast click on the
@@ -206,9 +220,11 @@ def _first_paint_collection_dicts(db, collections):
     return collection_dicts
 
 
-def _pending_predictions_by_species(resolver, pending, ambiguous_row_ids):
+def _pending_predictions_by_species(
+    resolver: SpeciesResolver, pending: list[Row], ambiguous_row_ids: set[int],
+) -> dict[str, JsonDict]:
     """Bucket a selection's pending predictions by consensus species key."""
-    by_key = {}
+    by_key: dict[str, JsonDict] = {}
     for row in pending:
         # Group by the species the accept path will actually apply, not
         # the raw per-frame label: for a burst whose frames disagree,
@@ -269,12 +285,12 @@ def _pending_predictions_by_species(resolver, pending, ambiguous_row_ids):
     return by_key
 
 
-def _species_keyword_ids_by_key(db, resolver):
+def _species_keyword_ids_by_key(db: Database, resolver: SpeciesResolver) -> dict[str, list[int]]:
     """Species keyword ids grouped by resolved species key."""
     # Resolve "already carries this species" against linked taxa, not
     # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
     # Look up existing rows only — asking here must not create keywords.
-    kids_by_key = {}
+    kids_by_key: dict[str, list[int]] = {}
     for row in db.keyword_taxa.species_identity_rows():
         source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
         identity = resolver.resolve(row["name"], row["scientific_name"], source)
@@ -282,7 +298,9 @@ def _species_keyword_ids_by_key(db, resolver):
     return kids_by_key
 
 
-def _prediction_suggestion(db, key, entry, order, kids_by_key):
+def _prediction_suggestion(
+    db: Database, key: str, entry: JsonDict, order: dict[int, int], kids_by_key: dict[str, list[int]],
+) -> JsonDict:
     """One species bucket of the selection's prediction suggestions."""
     predicted_ids = sorted(entry["rows_by_photo"], key=lambda p: order[p])
     # Legacy duplicates can resolve to one species while having
@@ -361,7 +379,7 @@ def _prediction_suggestion(db, key, entry, order, kids_by_key):
     }
 
 
-def _is_visual_collection(db, collection_id):
+def _is_visual_collection(db: Database, collection_id: int | None) -> bool:
     """Whether Browse's first paint must show an empty grid for this scope."""
     # ``db.photos.list_page(collection_id=...)`` / ``count_filtered_photos`` both
     # expand only ``collections.rules`` — the same rules-only path guarded
@@ -384,11 +402,11 @@ def _is_visual_collection(db, collection_id):
 
 
 def create_browse_blueprint(
-    get_db,
-    json_error,
+    get_db: GetDb,
+    json_error: JsonError,
     *,
-    visual_scope,
-):
+    visual_scope: VisualScope,
+) -> Blueprint:
     """Build the browse, filter-bar and selection blueprint.
 
     ``visual_scope`` is the app's one ``VisualScope``: it owns the per-app
@@ -405,7 +423,7 @@ def create_browse_blueprint(
     # -- Browse grid --
 
     @blueprint.route("/api/browse/init")
-    def api_browse_init():
+    def api_browse_init() -> ResponseReturnValue:
         """Combined endpoint for browse page initial load — one request instead of five."""
         import config as cfg
         db = get_db()
@@ -458,7 +476,7 @@ def create_browse_blueprint(
             photos, total, underlying_total, stack_count = [], 0, 0, 0
             focus_index, focus_page = None, page
         else:
-            scope = dict(folder_id=folder_id, collection_id=collection_id, sort=sort)
+            scope: JsonDict = dict(folder_id=folder_id, collection_id=collection_id, sort=sort)
             try:
                 photos, total, underlying_total, stack_count = _first_paint_photos(
                     db, cfg, stacks=stacks, page=page, per_page=per_page, **scope,
@@ -506,7 +524,7 @@ def create_browse_blueprint(
         return response
 
     @blueprint.route("/api/browse/summary")
-    def api_browse_summary():
+    def api_browse_summary() -> ResponseReturnValue:
         db = get_db()
         claim_search_lane(db)
         folder_id = request.args.get("folder_id", None, type=int)
@@ -541,14 +559,14 @@ def create_browse_blueprint(
         return jsonify(summary)
 
     @blueprint.route("/api/filters/fields")
-    def api_filter_fields():
+    def api_filter_fields() -> ResponseReturnValue:
         """The filter field registry: one source of truth for the UI picker
         (labels, categories, types, operators, enum values, suggest flags).
         """
         return jsonify({"fields": fields_for_api()})
 
     @blueprint.route("/api/filters/shortcuts")
-    def api_filter_shortcuts():
+    def api_filter_shortcuts() -> ResponseReturnValue:
         """The configured quick-filter buttons for the filter bar's row.
 
         ``shortcuts`` is the stored list with the behavior the bar needs
@@ -567,7 +585,7 @@ def create_browse_blueprint(
         })
 
     @blueprint.route("/api/filters/values")
-    def api_filter_values():
+    def api_filter_values() -> ResponseReturnValue:
         """Typeahead values with live counts for a suggest-capable field.
 
         ``rules`` (JSON, optional) is the active expression minus the rule
@@ -637,7 +655,7 @@ def create_browse_blueprint(
     # -- Selection panel --
 
     @blueprint.route("/api/selection/keyword-suggestions", methods=["POST"])
-    def api_selection_keyword_suggestions():
+    def api_selection_keyword_suggestions() -> ResponseReturnValue:
         """Return selected keywords and which selected photos carry each one."""
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -694,7 +712,7 @@ def create_browse_blueprint(
         })
 
     @blueprint.route("/api/selection/prediction-suggestions", methods=["POST"])
-    def api_selection_prediction_suggestions():
+    def api_selection_prediction_suggestions() -> ResponseReturnValue:
         """Aggregate pending predictions across a selection, grouped by species.
 
         The keyword panel next to this one answers "what have I already
@@ -783,7 +801,7 @@ def create_browse_blueprint(
         })
 
     @blueprint.route("/api/selection/wildlife-state", methods=["POST"])
-    def api_selection_wildlife_state():
+    def api_selection_wildlife_state() -> ResponseReturnValue:
         """Aggregate wildlife_excluded state across the full selection.
 
         The browse panel may hold IDs that are not yet loaded into the
@@ -839,7 +857,7 @@ def create_browse_blueprint(
     # -- Folder picker --
 
     @blueprint.route("/api/browse", methods=["GET"])
-    def api_browse():
+    def api_browse() -> ResponseReturnValue:
         """List subdirectories at a given path for folder browser."""
         from image_loader import is_excluded_scan_path
         path = request.args.get("path", os.path.expanduser("~"))
@@ -870,7 +888,7 @@ def create_browse_blueprint(
         return jsonify({"path": path, "dirs": dirs})
 
     @blueprint.route("/api/browse/photo-counts", methods=["POST"])
-    def api_browse_photo_counts():
+    def api_browse_photo_counts() -> ResponseReturnValue:
         """Return recursive photo-file counts for a list of folder paths.
 
         Used by the folder browser to show per-folder counts next to each
@@ -923,7 +941,7 @@ def create_browse_blueprint(
             )
             found = [0]
 
-            def on_progress(_checked, found_so_far, found=found):
+            def on_progress(_checked: int, found_so_far: int, found: list[int] = found) -> None:
                 found[0] = found_so_far
 
             try:
@@ -941,7 +959,7 @@ def create_browse_blueprint(
         return jsonify({"counts": counts, "incomplete": incomplete})
 
     @blueprint.route("/api/browse/mkdir", methods=["POST"])
-    def api_browse_mkdir():
+    def api_browse_mkdir() -> ResponseReturnValue:
         """Create a new directory."""
         body = request.get_json(silent=True) or {}
         path = body.get("path", "")

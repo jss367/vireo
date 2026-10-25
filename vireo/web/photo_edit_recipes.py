@@ -7,9 +7,12 @@ edit-recipe history. The local-mask helpers only these routes use are
 module-level here.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
+from typing import TYPE_CHECKING, Any, cast
 
 from app_paths import media_root
 from flask import Blueprint, jsonify, request
@@ -19,12 +22,20 @@ from render_source import (
 from services.render_cache import queue_edit_recipe_sync
 from web.responses import photo_not_found_error
 
+if TYPE_CHECKING:
+    from sqlite3 import Row
+
+    from db import Database
+    from flask.typing import ResponseReturnValue
+    from services.service_types import JsonDict, JsonError
+    from web.web_types import AppConfig, GetDb, InvalidatePhotoRenderCache
+
 log = logging.getLogger(__name__)
 
 
 def _create_current_local_mask_snapshot(
-    db, photo_id, *, vireo_dir, native_size,
-):
+    db: Database, photo_id: int, *, vireo_dir: str, native_size: tuple[int, int] | None,
+) -> dict[str, str]:
     """Snapshot the active immutable mask, retrying cleanup races."""
     import local_masks
 
@@ -54,9 +65,10 @@ def _create_current_local_mask_snapshot(
                 or attempt == 2
             ):
                 raise
+    raise AssertionError("unreachable: the last attempt returns or raises")
 
 
-def _local_mask_stale(db, photo_id, recipe):
+def _local_mask_stale(db: Database, photo_id: int, recipe: JsonDict | None) -> bool:
     if not recipe or not recipe.get("local"):
         return False
     import local_masks
@@ -65,10 +77,10 @@ def _local_mask_stale(db, photo_id, recipe):
     return local_masks.is_stale(recipe, mask_row)
 
 
-def _unique_photo_ids(raw_ids):
+def _unique_photo_ids(raw_ids: list[object]) -> list[int] | None:
     """``raw_ids`` in order without duplicates; ``None`` if any is not an int."""
-    seen = set()
-    ids = []
+    seen: set[int] = set()
+    ids: list[int] = []
     for pid in raw_ids:
         if isinstance(pid, bool) or not isinstance(pid, int):
             return None
@@ -78,7 +90,9 @@ def _unique_photo_ids(raw_ids):
     return ids
 
 
-def _attach_target_local_mask(db, pid, target_recipe, vireo_dir, photo):
+def _attach_target_local_mask(
+    db: Database, pid: int, target_recipe: JsonDict, vireo_dir: str, photo: Row | JsonDict,
+) -> str | None:
     """Freeze ``pid``'s own mask into ``target_recipe``; the error text on failure."""
     try:
         target_mask = _create_current_local_mask_snapshot(
@@ -102,9 +116,9 @@ def _attach_target_local_mask(db, pid, target_recipe, vireo_dir, photo):
 
 
 def _compose_bulk_targets(
-    db, ids, visible_set, photos, old_recipes, recipe, fields, mode,
-    has_local, vireo_dir,
-):
+    db: Database, ids: list[int], visible_set: set[int], photos: dict[int, Row], old_recipes: dict[int, JsonDict],
+    recipe: JsonDict, fields: list[str] | None, mode: str, has_local: bool, vireo_dir: str,
+) -> tuple[list[JsonDict], list[int], list[int], dict[str, str], dict[str, JsonDict | None]]:
     """Compose and normalize the pasted recipe for every requested photo.
 
     Returns ``(items, applied, skipped, local_errors, applied_recipes)``;
@@ -113,18 +127,18 @@ def _compose_bulk_targets(
     from edit_batch import compose_recipe
     from image_edits import RecipeError, normalize_recipe, recipe_to_json
 
-    items = []
-    applied = []
-    skipped = []
-    local_errors = {}
-    applied_recipes = {}
+    items: list[JsonDict] = []
+    applied: list[int] = []
+    skipped: list[int] = []
+    local_errors: dict[str, str] = {}
+    applied_recipes: dict[str, JsonDict | None] = {}
     for pid in ids:
         if pid not in visible_set:
             skipped.append(pid)
             continue
-        photo = photos.get(pid) or {}
+        photo: Row | JsonDict = photos.get(pid) or {}
         old_recipe = old_recipes.get(pid)
-        target_recipe = compose_recipe(
+        target_recipe: JsonDict = compose_recipe(
             old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
         ) or {}
         if has_local and target_recipe.get("local"):
@@ -159,12 +173,12 @@ def _compose_bulk_targets(
 
 
 def create_photo_edit_recipes_blueprint(
-    get_db,
-    json_error,
-    config,
+    get_db: GetDb,
+    json_error: JsonError,
+    config: AppConfig,
     *,
-    invalidate_photo_render_cache,
-):
+    invalidate_photo_render_cache: InvalidatePhotoRenderCache,
+) -> Blueprint:
     """Build the per-photo edit-recipe blueprint.
 
     ``config`` is ``app.config`` (``THUMB_CACHE_DIR`` is read at request
@@ -175,7 +189,7 @@ def create_photo_edit_recipes_blueprint(
     blueprint = Blueprint("photo_edit_recipes", __name__)
 
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
-    def api_get_photo_edit_recipe(photo_id):
+    def api_get_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
@@ -190,7 +204,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route(
         "/api/photos/<int:photo_id>/local-mask/snapshot", methods=["POST"]
     )
-    def api_create_local_mask_snapshot(photo_id):
+    def api_create_local_mask_snapshot(photo_id: int) -> ResponseReturnValue:
         """Freeze the photo's active SAM mask into an edit-mask snapshot.
 
         Returns the recipe ``local.mask`` fields the editor embeds when
@@ -213,7 +227,7 @@ def create_photo_edit_recipes_blueprint(
         return jsonify({"mask": mask, "stale": False})
 
     @blueprint.route("/api/photos/<int:photo_id>/local-mask/correct", methods=["POST"])
-    def api_correct_local_mask(photo_id):
+    def api_correct_local_mask(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         if not db.photos.get(photo_id, verify_workspace=True):
             return photo_not_found_error(legacy_error="not found")
@@ -233,7 +247,7 @@ def create_photo_edit_recipes_blueprint(
         return jsonify({"mask": mask})
 
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
-    def api_set_photo_edit_recipe(photo_id):
+    def api_set_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -252,7 +266,7 @@ def create_photo_edit_recipes_blueprint(
             normalized = normalize_recipe(recipe)
         except RecipeError as e:
             return json_error(str(e))
-        local = (normalized or {}).get("local")
+        local: JsonDict | None = (normalized or {}).get("local")
         if local:
             import local_masks
             snap = local_masks.snapshot_path(
@@ -289,7 +303,7 @@ def create_photo_edit_recipes_blueprint(
         })
 
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["DELETE"])
-    def api_clear_photo_edit_recipe(photo_id):
+    def api_clear_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
@@ -313,7 +327,7 @@ def create_photo_edit_recipes_blueprint(
         return jsonify({"ok": True, "recipe": None})
 
     @blueprint.route("/api/photos/edit-recipe/summary", methods=["POST"])
-    def api_photo_edit_recipe_summary():
+    def api_photo_edit_recipe_summary() -> ResponseReturnValue:
         from edit_batch import FIELDS, get_value
 
         body = request.get_json(silent=True)
@@ -328,12 +342,13 @@ def create_photo_edit_recipes_blueprint(
         for field in FIELDS:
             if "min" not in field:
                 continue
-            amounts = {get_value(recipe, field["path"], field["default"]) for recipe in recipes}
+            # Slider values are numbers (hashable); get_value is untyped.
+            amounts: set[Any] = {get_value(recipe, field["path"], field["default"]) for recipe in recipes}
             values[field["path"]] = amounts.pop() if len(amounts) == 1 else None
         return jsonify({"values": values, "count": len(recipes)})
 
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe/compose", methods=["POST"])
-    def api_compose_photo_edit_recipe(photo_id):
+    def api_compose_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
         from edit_batch import compose_recipe
         from image_edits import normalize_recipe
 
@@ -350,7 +365,7 @@ def create_photo_edit_recipes_blueprint(
             recipe = compose_recipe(
                 current, body.get("recipe"), fields, "merge", native_size=_recipe_source_dimensions(photo),
             ) or {}
-            if "local" in fields and recipe.get("local"):
+            if "local" in (fields or ()) and recipe.get("local"):
                 mask = _create_current_local_mask_snapshot(
                     db, photo_id,
                     vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
@@ -364,7 +379,7 @@ def create_photo_edit_recipes_blueprint(
         return jsonify({"recipe": recipe})
 
     @blueprint.route("/api/photos/edit-recipe/apply", methods=["POST"])
-    def api_apply_photo_edit_recipe_bulk():
+    def api_apply_photo_edit_recipe_bulk() -> ResponseReturnValue:
         """Apply one edit recipe to many photos (copy/paste edit settings).
 
         Replaces or merges selected settings and records a
@@ -385,6 +400,8 @@ def create_photo_edit_recipes_blueprint(
             fields = validate_operation(recipe, fields, mode)
         except ValueError as e:
             return json_error(str(e))
+        # validate_operation raised above unless ``recipe`` is an object.
+        recipe = cast("JsonDict", recipe)
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
@@ -452,7 +469,7 @@ def create_photo_edit_recipes_blueprint(
         return jsonify(payload)
 
     @blueprint.route("/api/photos/<int:photo_id>/edit-history")
-    def api_photo_edit_history(photo_id):
+    def api_photo_edit_history(photo_id: int) -> ResponseReturnValue:
         db = get_db()
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
@@ -462,7 +479,7 @@ def create_photo_edit_recipes_blueprint(
 
         from image_edits import copy_recipe
 
-        def decode_recipe(value):
+        def decode_recipe(value: str) -> dict[str, int] | None:
             if value is None:
                 return None
             try:
