@@ -21,13 +21,13 @@ def page(browser, page):
     return install_page_module_exposure(page, "duplicates", "duplicatesState")
 
 
-def seed_same_shot_review(db, tmp_path):
+def seed_same_shot_review(db, tmp_path, count=2):
     active = db.active_workspace_id
     photos = []
-    for index, date in enumerate(("2023-01-01T01:02:03", "2026-04-03T01:02:03")):
+    for index, date in enumerate(("2023-01-01T01:02:03", "2026-04-03T01:02:03", "2026-04-03T01:02:04")[:count]):
         if index:
-            db.set_active_workspace(db.create_workspace("Corrected dates"))
-        folder = tmp_path / ("Original camera date" if not index else "Corrected capture date")
+            db.set_active_workspace(db.create_workspace("Corrected dates" if index == 1 else "Other version"))
+        folder = tmp_path / ("Original camera date", "Corrected capture date", "Other version")[index]
         folder.mkdir()
         path = folder / "DSC_0386.jpg"
         image = Image.new("RGB", (480, 320), "#657a62")
@@ -116,3 +116,120 @@ def test_scan_discovers_camera_matches_without_an_exact_duplicate(live_server, p
     expect(page.locator("#applyBar")).to_be_hidden()
     page.reload()
     expect(page.locator("#sameShotResults .same-shot-group")).to_have_count(1)
+
+
+def test_compare_save_reload_reopen_and_rescan(live_server, page, tmp_path):
+    db = live_server["db"]
+    a, b = seed_same_shot_review(db, tmp_path)
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.goto(f"{live_server['url']}/duplicates")
+    section = page.locator("#sameShotResults")
+    section.get_by_role("button", name="Compare images").click()
+    dialog = page.get_by_role("dialog", name="Compare possible same-shot copies")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("cached thumbnails")
+    expect(dialog.locator("#sameShotSide0")).to_contain_text("2026-04-03")
+    expect(dialog.locator("#sameShotSide1")).to_contain_text("2023-01-01")
+    expect(dialog.locator(".same-shot-image-status")).to_have_text(["Cached thumbnail", "Cached thumbnail"])
+    dialog.locator('[data-same-shot-side="0"]').select_option("1")
+    expect(dialog.locator("#sameShotSide0")).to_contain_text("2023-01-01")
+    dialog.locator('[data-same-shot-side="0"]').select_option("0")
+    if screenshot := os.environ.get("VIREO_COMPARISON_SCREENSHOT"):
+        Path(screenshot).parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=screenshot)
+    dialog.get_by_role("button", name="Keep all copies").click()
+    expect(dialog).not_to_be_visible()
+    expect(section.locator(".same-shot-group")).to_have_count(0)
+    expect(section).to_contain_text("1 matching group reviewed")
+    expect(section).to_contain_text("All matching groups have saved review decisions")
+    page.reload()
+    expect(section.locator(".same-shot-group")).to_have_count(0)
+    section.get_by_role("button", name="Show reviewed groups").click()
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    expect(section.locator(".same-shot-review-note")).to_contain_text("Keep all copies")
+    section.get_by_role("button", name="Reopen review").click()
+    expect(section.get_by_role("button", name="Mark reviewed")).to_be_visible()
+    section.get_by_role("button", name="Mark reviewed").click()
+    expect(section.locator(".same-shot-review-note")).to_contain_text("Reviewed")
+    # Rescanning preserves the decision when evidence stays the same.
+    page.locator("#scanBtn").click()
+    expect(section.locator(".same-shot-review-note")).to_contain_text("Reviewed")
+    # Capture date changes invalidate the snapshot, even when file hashes remain unchanged.
+    db.conn.execute("UPDATE photos SET timestamp='2026-10-25T01:02:03' WHERE id=?", (b,))
+    db.commit()
+    page.reload()
+    expect(section.locator(".same-shot-group")).to_have_count(1)
+    expect(section.get_by_role("button", name="Mark reviewed")).to_be_visible()
+    assert {row[0] for row in db.conn.execute("SELECT flag FROM photos WHERE id IN (?,?)", (a, b))} != {"rejected"}
+
+
+def test_compare_missing_thumbnail_and_failed_save_are_visible_and_retryable(live_server, page, tmp_path):
+    seed_same_shot_review(live_server["db"], tmp_path)
+    page.goto(f"{live_server['url']}/duplicates")
+    page.route("**/thumbnails/duplicate/*", lambda route: route.fulfill(status=404))
+    page.locator("#sameShotResults").get_by_role("button", name="Compare images").click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog.locator(".same-shot-image-status")).to_have_text([
+        "Thumbnail unavailable. Reveal the original to inspect it.",
+        "Thumbnail unavailable. Reveal the original to inspect it.",
+    ])
+    page.route("**/api/duplicates/same-shot/review", lambda route: route.fulfill(
+        status=409, json={"error": "same-shot group changed", "message": "This group changed. Reload or scan again before reviewing it."}))
+    dialog.get_by_role("button", name="Mark reviewed").click()
+    expect(dialog.locator("#sameShotCompareError")).to_contain_text("Could not save review")
+    expect(dialog.get_by_role("button", name="Mark reviewed")).to_be_enabled()
+    assert live_server["db"].conn.execute("SELECT COUNT(*) FROM same_shot_reviews").fetchone()[0] == 0
+    page.unroute("**/api/duplicates/same-shot/review")
+    dialog.get_by_role("button", name="Mark reviewed").click()
+    expect(dialog).not_to_be_visible()
+    expect(page.locator("#sameShotResults .same-shot-group")).to_have_count(0)
+
+
+def test_saving_review_cannot_resurrect_a_filtered_group(live_server, page, tmp_path):
+    seed_same_shot_review(live_server["db"], tmp_path)
+    page.goto(f"{live_server['url']}/duplicates")
+    delayed = []
+
+    def hold_response(route):
+        response = route.fetch()
+        delayed.append((route, response.json()))
+
+    page.route("**/api/duplicates/same-shot/review", hold_response)
+    section = page.locator("#sameShotResults")
+    section.get_by_role("button", name="Mark reviewed").click()
+    expect(section.get_by_role("button", name="Mark reviewed")).to_be_disabled()
+    expect(section).to_contain_text("Saving review")
+    # Neither a scan nor a catalog reload may replace the snapshot during a save.
+    assert page.evaluate("pageModules.restore.prepareDuplicateScan()") is False
+    page.evaluate("pageModules.restore.tryRestoreLastScan(true)")
+    expect(section.get_by_role("button", name="Mark reviewed")).to_be_disabled()
+    page.evaluate("duplicatesState.filterMatchedIds = new Set(); pageModules.results.renderResults(duplicatesState.lastScanResult)")
+    expect(section.locator(".same-shot-group")).to_have_count(0)
+    assert len(delayed) == 1
+    route, body = delayed[0]
+    route.fulfill(json=body)
+    expect(section.locator(".same-shot-group")).to_have_count(0)
+    expect(section).to_contain_text("No possible same-shot groups match the active photo filters")
+
+
+def test_compare_handles_more_than_two_copies_small_screens_and_escape(live_server, page, tmp_path):
+    _, _, third = seed_same_shot_review(live_server["db"], tmp_path, count=3)
+    page.set_viewport_size({"width": 600, "height": 900})
+    page.goto(f"{live_server['url']}/duplicates")
+    section = page.locator("#sameShotResults")
+    section.get_by_role("button", name="Compare images").click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog).to_be_visible()
+    expect(dialog.locator('[data-same-shot-side="1"] option')).to_have_count(3)
+    dialog.locator('[data-same-shot-side="1"]').select_option(label="DSC_0386.jpg · 2026-04-03T01:02:04 · Other version")
+    expect(dialog.locator("#sameShotSide1 img")).to_have_attribute("src", f"/thumbnails/duplicate/{third}.jpg")
+    assert dialog.evaluate("node => node.getBoundingClientRect().left >= 0 && node.getBoundingClientRect().right <= innerWidth")
+    page.keyboard.press("Escape")
+    expect(dialog).not_to_be_visible()
+    section.get_by_role("button", name="Keep all copies").click()
+    expect(section.locator(".same-shot-group")).to_have_count(0)
+    page.reload()
+    expect(section).to_contain_text("1 matching group reviewed")
+    section.get_by_role("button", name="Show reviewed groups").click()
+    expect(section.locator(".dup-card")).to_have_count(3)
+    expect(section.locator(".badge")).to_have_text(["KEEP ALL"] * 3)

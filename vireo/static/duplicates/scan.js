@@ -6,6 +6,7 @@ import { clearDuplicateTrashProgress } from './cleanup.js';
 import { renderScanWhenFilterReady } from './filter.js';
 import { prepareDuplicateScan } from './restore.js';
 import { safeEventSource, safeFetch, showToast } from './shared.js';
+import { closeSameShotComparison } from './same-shot-review.js';
 
 /** @param {string=} msg */
 export function showProgress(msg) {
@@ -30,6 +31,7 @@ export function hideRestoredBanner() {
 
 export async function startScan() {
   if (!prepareDuplicateScan()) return;
+  closeSameShotComparison();
   clearDuplicateTrashProgress();
   state.excludedDuplicateHashes.clear();
   var scanBtn = /** @type {HTMLButtonElement} */ (document.getElementById('scanBtn'));

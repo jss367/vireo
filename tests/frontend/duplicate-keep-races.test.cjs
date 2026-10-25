@@ -38,6 +38,7 @@ function page() {
     state: {
       proposals: [proposal], lastScanResult: {proposals: [proposal]},
       scanInProgress: false, duplicateKeepPending: new Set(),
+      sameShotReviewPending: new Set(),
       duplicateFileTrashState: new Map(), duplicateTrashActive: false,
       duplicateLoadEpoch: 0, excludedDuplicateHashes: new Set(),
       filterReady: Promise.resolve(), pendingFilterRefresh: null,
@@ -45,6 +46,7 @@ function page() {
     KEPT_ANOTHER_COPY_REASON: 'kept another copy instead',
     window: {location: {search: ''}}, URLSearchParams,
     clearDuplicateTrashProgress() {}, hideRestoredBanner() {}, setEmptyVisible() {},
+    closeSameShotComparison() {},
     showProgress() {}, hideProgress() {}, safeEventSource() {},
     document: {
       getElementById: element,
