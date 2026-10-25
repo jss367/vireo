@@ -336,7 +336,7 @@ which replays almost all of them.
 
 1. **Design and ratchet** (this PR): this document and
    `test_transaction_ownership.py`, capping commit flags (335) and data-layer
-   transaction control (212) per module, both ways.
+   transaction control (234) per module, both ways.
 2. **Foundation**: the `transaction()` semantics above (BEGIN IMMEDIATE,
    savepoint nesting, legacy-commit hold, doomed-on-inner-rollback,
    `after_commit`, `retry_busy`), `_commits_held` callers and the
@@ -379,9 +379,10 @@ counts.
 - `DATA_LAYER_TRANSACTION_CONTROL_LIMITS`: in `vireo/db.py` and
   `vireo/repositories/`, calls to `commit`, `rollback`, `commit_with_retry`,
   `begin`, `begin_immediate`, `transaction` and `_commits_held`, raw
-  `BEGIN`/`COMMIT`/`END`/`ROLLBACK` statements (not `ROLLBACK TO`), and
-  `with conn:` blocks, excluding the bodies of `Database`'s
-  transaction-control methods. Starting total: 212.
+  `BEGIN`/`COMMIT`/`END`/`ROLLBACK`/`SAVEPOINT`/`RELEASE` statements (not
+  `ROLLBACK TO`, which does not end the savepoint), and `with conn:` blocks,
+  excluding the bodies of `Database`'s transaction-control methods. Starting
+  total: 234.
 
 The end state is both dictionaries empty.
 

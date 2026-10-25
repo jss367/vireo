@@ -26,8 +26,11 @@ the data layer itself, ``vireo/db.py`` and ``vireo/repositories/*.py``:
   (``self.conn.commit()``, ``self.commit_with_retry(self.conn)``,
   ``history.commit()``, ``with repo.transaction():``);
 - ``execute``/``executescript``/``execute_with_retry`` of a constant
-  ``BEGIN``, ``COMMIT``, ``END`` or ``ROLLBACK`` statement (a ``ROLLBACK TO``
-  a savepoint does not end a transaction and is not counted);
+  ``BEGIN``, ``COMMIT``, ``END``, ``ROLLBACK``, ``SAVEPOINT`` or ``RELEASE``
+  statement. Releasing an outermost savepoint commits its writes, so an
+  ad-hoc ``SAVEPOINT``/``RELEASE`` block is a callee-owned transaction
+  boundary the migration intends to remove and is counted. A ``ROLLBACK TO``
+  a savepoint undoes work without ending it and is not counted;
 - ``with <expr>.conn:`` or ``with conn:``, sqlite3's committing context.
 
 The bodies of ``Database``'s transaction-control methods are the one place
@@ -56,7 +59,10 @@ CONTROL_CALLS = {
     "begin", "begin_immediate", "transaction", "_commits_held",
 }
 EXECUTE_CALLS = {"execute", "executescript", "execute_with_retry"}
-ENDING_SQL = re.compile(r"\s*(BEGIN|COMMIT|END|ROLLBACK)\b(?!\s+TO\b)", re.IGNORECASE)
+ENDING_SQL = re.compile(
+    r"\s*(BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b(?!\s+TO\b)",
+    re.IGNORECASE,
+)
 EXEMPT_DATA_LAYER_QUALNAMES = {
     "vireo/db.py": {
         "_Connection",
@@ -150,31 +156,33 @@ DATA_LAYER_TRANSACTION_CONTROL_LIMITS: dict[str, int] = {
     "vireo/repositories/collections.py": 7,
     "vireo/repositories/detections.py": 6,
     "vireo/repositories/duplicates.py": 2,
-    "vireo/repositories/edit_history.py": 10,
+    "vireo/repositories/edit_history.py": 15,
     "vireo/repositories/edits.py": 5,
     "vireo/repositories/exif_search.py": 1,
     "vireo/repositories/folders.py": 13,
-    "vireo/repositories/identity_alternatives.py": 3,
+    "vireo/repositories/identity_alternatives.py": 5,
+    "vireo/repositories/imports.py": 2,
     "vireo/repositories/inat.py": 1,
     "vireo/repositories/job_history.py": 1,
     "vireo/repositories/keyword_provenance.py": 4,
     "vireo/repositories/keyword_taxa.py": 1,
     "vireo/repositories/keyword_tree.py": 5,
     "vireo/repositories/keywords.py": 10,
-    "vireo/repositories/locations.py": 7,
+    "vireo/repositories/locations.py": 10,
     "vireo/repositories/masks_features.py": 9,
     "vireo/repositories/meta.py": 1,
     "vireo/repositories/model_runs.py": 4,
-    "vireo/repositories/moves_merge.py": 9,
+    "vireo/repositories/moves_merge.py": 12,
     "vireo/repositories/pending_archives.py": 3,
     "vireo/repositories/photo_keywords.py": 2,
     "vireo/repositories/photo_labels.py": 4,
-    "vireo/repositories/photo_review.py": 10,
-    "vireo/repositories/photos.py": 10,
+    "vireo/repositories/photo_review.py": 13,
+    "vireo/repositories/photos.py": 12,
     "vireo/repositories/pipeline_features.py": 2,
     "vireo/repositories/predictions.py": 13,
     "vireo/repositories/processes.py": 3,
     "vireo/repositories/species_curation.py": 13,
+    "vireo/repositories/stats.py": 2,
     "vireo/repositories/sync.py": 5,
     "vireo/repositories/working_copies.py": 2,
     "vireo/repositories/workspace_folders.py": 9,
@@ -367,7 +375,7 @@ def test_transaction_control_scan_recognizes_each_shape():
         "        execute_with_retry(self.conn, 'COMMIT')\n"
         "        self.conn.execute('SELECT 1')\n"
     )
-    assert transaction_control(tree) == [3, 4, 5, 6, 10, 12, 14]
+    assert transaction_control(tree) == [3, 4, 5, 6, 8, 9, 10, 12, 14]
 
 
 def test_transaction_control_scan_skips_exempt_bodies_only():
