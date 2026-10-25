@@ -804,10 +804,11 @@ class _InPlaceImportRun:
             "source_index": 0,
         }
         self.working_copy_scope: list[_WorkingCopyScopeEntry] = []
-        # Photos the deferred working-copy pass could not make a copy for;
-        # the result's notice names them (a crash of the whole pass is a
-        # job error instead, see ``_extract_deferred_working_copies``).
+        # Photos the deferred working-copy pass could not make a copy for,
+        # and the error that stopped the whole pass if one did; the
+        # result's notice names both (see ``_add_working_copy_notice``).
         self.working_copy_failures: list[str] = []
+        self.working_copy_pass_error: str | None = None
         self.working_copy_scope_baselines: dict[_WorkingCopyScopeEntry, dict[str, bool]] = {}
         self.working_copy_scope_identities: dict[_WorkingCopyScopeEntry, dict[str, object]] = {}
         self.source_mount_baselines: dict[str, dict[str, bool]] = {}
@@ -1556,10 +1557,14 @@ class _InPlaceImportRun:
                     failed_paths_sink=self.working_copy_failures,
                 )
             except Exception as exc:
+                # A notice, not a job error, as in a copy import: the
+                # photos are cataloged in place, and only their derived
+                # working copies are missing. The next scan of their
+                # folders makes the ones this pass never reached.
                 log.exception(
                     "In-place import working-copy generation failed",
                 )
-                self._record_error(f"[working copies] {exc}")
+                self.working_copy_pass_error = str(exc) or type(exc).__name__
 
     def _revalidated_working_copy_scope(self) -> list[_WorkingCopyScopeEntry]:
         # A removable source can disappear after its scan succeeded
@@ -1655,10 +1660,7 @@ class _InPlaceImportRun:
         )
 
     def _cancelled_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
-        summary = f"{indexed} photos (cancelled)"
-        if self.working_copy_failures:
-            n = len(self.working_copy_failures)
-            summary += f", {n:,} without a working copy"
+        summary = f"{indexed} photos (cancelled)" + self._working_copy_summary_suffix()
         self.runner.update_step(
             self.job["id"], "scan", status="cancelled",
             summary=summary,
@@ -1686,26 +1688,34 @@ class _InPlaceImportRun:
     def _add_working_copy_notice(self, result: JsonDict) -> None:
         """Name the photos left without a working copy (a notice, not an error).
 
-        The photos were cataloged either way; failing the import over a
-        derived copy would skip after-import processing.
+        Covers per-photo failures and a crash of the whole pass. The photos
+        were cataloged either way; failing the import over a derived copy
+        would skip after-import processing.
         """
-        if not self.working_copy_failures:
-            return
         from scanner import import_working_copy_notice
 
-        result["working_copy_failures"] = list(self.working_copy_failures)
-        result["working_copy_notice"] = import_working_copy_notice(
-            self.working_copy_failures, None,
+        notice = import_working_copy_notice(
+            self.working_copy_failures, self.working_copy_pass_error,
         )
+        if notice:
+            result["working_copy_notice"] = notice
+        if self.working_copy_failures:
+            result["working_copy_failures"] = list(self.working_copy_failures)
+
+    def _working_copy_summary_suffix(self) -> str:
+        """The scan step's note on working copies the pass could not make."""
+        parts = []
+        if self.working_copy_failures:
+            parts.append(f"{len(self.working_copy_failures):,} without a working copy")
+        if self.working_copy_pass_error:
+            parts.append("working copies stopped early")
+        return "".join(f", {part}" for part in parts)
 
     def _completed_result(self, indexed: int, snapshot_unindexed: list[str]) -> JsonDict:
         snapshot_missing = self.snapshot_missing
         snapshot_unreadable = self.snapshot_unreadable
         metadata_warning = scan_metadata_warning()
-        summary = f"{indexed} photos"
-        if self.working_copy_failures:
-            n = len(self.working_copy_failures)
-            summary += f", {n:,} without a working copy"
+        summary = f"{indexed} photos" + self._working_copy_summary_suffix()
         if metadata_warning:
             summary += f" — {metadata_warning}"
         snapshot_failures = (

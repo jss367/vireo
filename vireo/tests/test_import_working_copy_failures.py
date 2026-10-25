@@ -316,3 +316,87 @@ def test_a_concurrent_publisher_does_not_turn_into_a_false_failure(tmp_path, mon
         "mark_failed matched no rows (another writer installed a working "
         "copy), so the photo must not be reported as without one"
     )
+
+
+def _run_in_place_import(app, card):
+    from wait import wait_for_job_via_client
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [str(card)], "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+def test_in_place_import_treats_a_crashed_pass_as_a_notice(app_and_db, tmp_path, monkeypatch):
+    """A crash of the whole working-copy pass reads the same as a copy import.
+
+    The photos are cataloged in place either way; only their working copies
+    are missing. Failing the job would skip after-import processing for
+    photos that are in the catalog, so the crash is a notice, as it is for a
+    copy import (``test_a_crashed_pass_is_reported``).
+    """
+    import scanner
+    from services import import_in_place
+
+    def crash(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", crash)
+    monkeypatch.setattr(import_in_place, "scan_metadata_warning", lambda: None)
+    app, _db = app_and_db
+    card = _raw_card(tmp_path, ["DSC_0001.NEF"])
+
+    job = _run_in_place_import(app, card)
+
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["errors"] == [] and result["failed"] == 0
+    assert result["indexed"] == 1
+    assert "working_copy_failures" not in result
+    assert result["working_copy_notice"] == (
+        "Vireo stopped creating working copies after an error ([Errno 28] No "
+        "space left on device), so some photos from this import may not have "
+        "one yet. The originals were imported. Vireo creates the missing "
+        "working copies the next time it scans their folders."
+    )
+    scan_step = next(step for step in job["steps"] if step["id"] == "scan")
+    assert scan_step["status"] == "completed"
+    assert scan_step["summary"] == "1 photos, working copies stopped early"
+
+
+def test_in_place_mid_pass_crash_names_the_photos_already_marked(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Per-photo failures committed before an in-place pass crash are kept."""
+    import scanner
+    from services import import_in_place
+
+    app, _db = app_and_db
+    card = _raw_card(tmp_path, ["DSC_0001.NEF"])
+    failed_path = str(card / "DSC_0001.NEF")
+
+    def crashing_extract(*_args, **kwargs):
+        sink = kwargs.get("failed_paths_sink")
+        if sink is not None:
+            sink.append(failed_path)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", crashing_extract)
+    monkeypatch.setattr(import_in_place, "scan_metadata_warning", lambda: None)
+
+    job = _run_in_place_import(app, card)
+
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True and result["errors"] == []
+    assert result["working_copy_failures"] == [failed_path]
+    notice = result["working_copy_notice"]
+    assert "could not create a working copy for 1 photo" in notice
+    assert "stopped creating working copies after an error" in notice
+    scan_step = next(step for step in job["steps"] if step["id"] == "scan")
+    assert scan_step["summary"] == (
+        "1 photos, 1 without a working copy, working copies stopped early"
+    )
