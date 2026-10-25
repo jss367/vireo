@@ -1,10 +1,13 @@
 (function () {
   'use strict';
-  const panel = document.getElementById('pendingArchives');
-  if (!panel) return;
-  const list = document.getElementById('pendingArchiveItems');
-  const error = document.getElementById('pendingArchiveError');
-  if (!list || !error) return;
+  const panelElement = document.getElementById('pendingArchives');
+  if (!panelElement) return;
+  const panel = panelElement;
+  const listElement = document.getElementById('pendingArchiveItems');
+  const errorElement = document.getElementById('pendingArchiveError');
+  if (!listElement || !errorElement) return;
+  const list = listElement;
+  const error = errorElement;
   let signature = '';
   let loading = false;
   let sending = false;
@@ -62,6 +65,158 @@
   }
   }
 
+  /** @param {number | null | undefined} size */
+  function archiveBytes(size) {
+    if (size == null) return 'Size unavailable';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+    return size.toLocaleString(undefined, {maximumFractionDigits: 1}) + ' ' + units[unit] + ' estimated';
+  }
+
+  /** @param {string | undefined} created */
+  function archiveAge(created) {
+    // pending_archives.created_at is SQLite datetime('now'), an instant in UTC.
+    if (!created) return 'Age unavailable';
+    const iso = created.replace(' ', 'T');
+    const date = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + 'Z');
+    if (isNaN(date.getTime())) return 'Age unavailable';
+    const days = Math.max(0, Math.floor((Date.now() - date.getTime()) / 86400000));
+    return days ? 'Kept locally for ' + days + (days === 1 ? ' day' : ' days') : 'Kept locally for less than a day';
+  }
+
+  /** @param {PendingArchive} item @param {HTMLElement} details */
+  function appendArchiveSummary(item, details) {
+    const meta = document.createElement('div');
+    meta.className = 'pending-archive-meta';
+    const status = item.source_available === false ? 'Local originals unavailable'
+      : item.state === 'sending' ? 'Sending to NAS'
+        : item.state === 'waiting' ? 'Waiting for running jobs'
+          : item.error ? 'Transfer needs attention' : 'Awaiting NAS transfer';
+    const count = item.photo_count == null ? 'Photo count unavailable'
+      : item.photo_count.toLocaleString() + (item.photo_count === 1 ? ' cataloged photo' : ' cataloged photos');
+    meta.textContent = [count, archiveBytes(item.cataloged_bytes), archiveAge(item.created_at), status].join(' · ');
+    details.appendChild(meta);
+  }
+
+  /** @param {PendingArchive} item @param {boolean} syncFirst @param {HTMLButtonElement[]} buttons */
+  async function startSend(item, syncFirst, buttons) {
+    if (sending) return;
+    sending = true;
+    buttons.forEach(button => { button.disabled = true; });
+    error.textContent = '';
+    actionError = '';
+    try {
+      const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/send', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sync_first: syncFirst}),
+      });
+      /** @type {{error?: string}} */
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not start the NAS transfer.');
+    } catch (e) {
+      actionError = e instanceof Error ? e.message : String(e);
+      error.textContent = actionError;
+    } finally {
+      sending = false;
+      signature = '';
+      refresh();
+    }
+  }
+
+  /** @param {PendingArchive} item @param {HTMLElement} row */
+  function appendMissingSource(item, row) {
+    if (item.source_available !== false) return;
+    const missing = document.createElement('div');
+    missing.className = 'pending-archive-note';
+    missing.textContent = 'Local originals are unavailable. Reconnect their storage, or remove this transfer record if they are permanently gone.';
+    row.appendChild(missing);
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'btn btn-secondary';
+    discard.textContent = 'Remove missing transfer';
+    discard.disabled = item.state !== 'ready';
+    discard.addEventListener('click', async () => {
+      if (sending || !window.confirm('Remove this missing transfer record? Vireo will stop tracking its NAS transfer. No files or catalog entries will be deleted. If the storage is only disconnected, cancel and reconnect it instead.')) return;
+      sending = true;
+      discard.disabled = true;
+      actionError = '';
+      error.textContent = '';
+      try {
+        const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/discard', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
+        });
+        /** @type {{error?: string}} */
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Could not remove the transfer record.');
+      } catch (e) {
+        actionError = e instanceof Error ? e.message : String(e);
+        error.textContent = actionError;
+      } finally {
+        sending = false;
+        signature = '';
+        refresh();
+      }
+    });
+    row.appendChild(discard);
+  }
+
+  /** @param {PendingArchive} item @param {Set<string | null>} expanded @param {Set<string | null>} existing */
+  function renderArchive(item, expanded, existing) {
+    const row = document.createElement('div');
+    row.className = 'pending-archive-row';
+    const details = document.createElement('details');
+    details.className = 'pending-archive-details';
+    details.dataset.archiveId = String(item.id);
+    details.open = expanded.has(String(item.id)) || (!existing.has(String(item.id)) && panel.dataset.expanded === 'true');
+    const title = document.createElement('summary');
+    title.textContent = item.name;
+    details.appendChild(title);
+    const destination = document.createElement('div');
+    destination.className = 'pending-archive-destination';
+    destination.textContent = 'Destination: ' + item.destination;
+    details.appendChild(destination);
+    row.appendChild(details);
+    appendArchiveSummary(item, row);
+    const actions = document.createElement('div');
+    actions.className = 'pending-archive-actions';
+    row.appendChild(actions);
+    if (item.collection_id) {
+      const review = document.createElement('a');
+      review.href = '/browse?collection_id=' + encodeURIComponent(String(item.collection_id));
+      review.textContent = 'Review photos';
+      actions.appendChild(review);
+    }
+    /** @type {HTMLButtonElement[]} */
+    const buttons = [];
+    if (item.unsynced_photos) {
+      const syncSend = document.createElement('button');
+      syncSend.type = 'button';
+      syncSend.className = 'btn btn-secondary';
+      syncSend.textContent = 'Sync metadata and send to NAS';
+      syncSend.disabled = item.state !== 'ready' || item.source_available === false;
+      syncSend.addEventListener('click', () => startSend(item, true, buttons));
+      buttons.push(syncSend);
+      actions.appendChild(syncSend);
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-secondary';
+    button.textContent = item.state === 'sending' ? 'Sending to NAS…' : 'Send to NAS';
+    button.disabled = item.state !== 'ready' || item.source_available === false;
+    button.addEventListener('click', () => startSend(item, false, buttons));
+    buttons.push(button);
+    actions.appendChild(button);
+    appendUnsyncedNote(item, row);
+    appendMissingSource(item, row);
+    if (item.error || item.state === 'waiting') {
+      const note = document.createElement('div');
+      note.className = 'pending-archive-note';
+      note.textContent = item.error || 'Waiting for running jobs to finish.';
+      row.appendChild(note);
+    }
+    list.appendChild(row);
+  }
+
   const refresh = async function() {
     if (loading || sending || document.hidden) return;
     loading = true;
@@ -70,129 +225,21 @@
       if (!response.ok) throw new Error('Could not check photos waiting for NAS transfer.');
       /** @type {{items: PendingArchive[]}} */
       const data = await response.json();
+      if (!Array.isArray(data.items)) throw new Error('Could not check photos waiting for NAS transfer.');
       error.textContent = actionError;
-      const next = JSON.stringify(data.items || []);
+      panel.hidden = !data.items.length;
+      // Age advances while a dashboard stays open, even if the records do not change.
+      const next = JSON.stringify(data.items) + '|' + Math.floor(Date.now() / 60000);
       if (next === signature) return;
       signature = next;
-      publish(data.items || []);
+      publish(data.items);
       const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), el => el.getAttribute('data-archive-id')));
+      const existing = new Set(Array.from(list.querySelectorAll('details'), el => el.getAttribute('data-archive-id')));
       list.replaceChildren();
-      panel.hidden = !data.items.length;
-      data.items.forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'pending-archive-row';
-        const details = document.createElement('details');
-        details.className = 'pending-archive-details';
-        details.dataset.archiveId = String(item.id);
-        details.open = expanded.has(String(item.id));
-        const title = document.createElement('summary');
-        title.textContent = item.name;
-        details.appendChild(title);
-        const destination = document.createElement('div');
-        destination.className = 'pending-archive-destination';
-        destination.textContent = 'Destination: ' + item.destination;
-        details.appendChild(destination);
-        row.appendChild(details);
-        const actions = document.createElement('div');
-        actions.className = 'pending-archive-actions';
-        row.appendChild(actions);
-        if (item.collection_id) {
-          const review = document.createElement('a');
-          review.href = '/browse?collection_id=' + encodeURIComponent(String(item.collection_id));
-          review.textContent = 'Review photos';
-          actions.appendChild(review);
-        }
-        /** @type {HTMLButtonElement[]} */
-        const sendButtons = [];
-        /** @param {boolean} syncFirst */
-        const startSend = async function(syncFirst) {
-          if (sending) return;
-          sending = true;
-          sendButtons.forEach(b => { b.disabled = true; });
-          error.textContent = '';
-          actionError = '';
-          try {
-            const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/send', {
-              method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sync_first: syncFirst}),
-            });
-            /** @type {{error?: string}} */
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.error || 'Could not start the NAS transfer.');
-          } catch (e) {
-            actionError = e instanceof Error ? e.message : String(e);
-            error.textContent = actionError;
-          } finally {
-            sending = false;
-            signature = '';
-            refresh();
-          }
-        };
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'btn';
-        button.textContent = item.state === 'sending' ? 'Sending to NAS…' : 'Send to NAS';
-        button.disabled = item.state !== 'ready';
-        button.addEventListener('click', () => startSend(false));
-        sendButtons.push(button);
-        if (item.unsynced_photos) {
-          // Offered ahead of the plain send because the cheap moment to write
-          // these sidecars is now, on local disk: a verified transfer deletes
-          // the originals, and every later sync goes over the NAS connection.
-          const syncSend = document.createElement('button');
-          syncSend.type = 'button';
-          syncSend.className = 'btn';
-          syncSend.textContent = 'Sync metadata and send to NAS';
-          syncSend.disabled = item.state !== 'ready';
-          syncSend.addEventListener('click', () => startSend(true));
-          sendButtons.push(syncSend);
-          actions.appendChild(syncSend);
-        }
-        actions.appendChild(button);
-        appendUnsyncedNote(item, row);
-        if (item.source_available === false) {
-          const missing = document.createElement('div');
-          missing.className = 'pending-archive-note';
-          missing.textContent = 'Local originals are unavailable. Reconnect their storage, or remove this transfer record if they are permanently gone.';
-          row.appendChild(missing);
-          const discard = document.createElement('button');
-          discard.type = 'button';
-          discard.className = 'btn';
-          discard.textContent = 'Remove missing transfer';
-          discard.disabled = item.state !== 'ready';
-          discard.addEventListener('click', async () => {
-            if (sending || !window.confirm('Remove this missing transfer record? Vireo will stop tracking its NAS transfer. No files or catalog entries will be deleted. If the storage is only disconnected, cancel and reconnect it instead.')) return;
-            sending = true;
-            discard.disabled = true;
-            actionError = '';
-            error.textContent = '';
-            try {
-              const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/discard', {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
-              });
-              /** @type {{error?: string}} */
-            const result = await response.json();
-              if (!response.ok) throw new Error(result.error || 'Could not remove the transfer record.');
-            } catch (e) {
-              actionError = e instanceof Error ? e.message : String(e);
-              error.textContent = actionError;
-            } finally {
-              sending = false;
-              signature = '';
-              refresh();
-            }
-          });
-          row.appendChild(discard);
-        }
-        if (item.error || item.state === 'waiting') {
-          const note = document.createElement('div');
-          note.className = 'pending-archive-note';
-          note.textContent = item.error || 'Waiting for running jobs to finish.';
-          row.appendChild(note);
-        }
-        list.appendChild(row);
-      });
+      data.items.forEach(item => renderArchive(item, expanded, existing));
     } catch (e) {
-      if (!panel.hidden) error.textContent = e instanceof Error ? e.message : String(e);
+      panel.hidden = false;
+      error.textContent = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }

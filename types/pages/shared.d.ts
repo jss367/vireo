@@ -119,6 +119,7 @@ interface PendingArchive {
   id: string | number; name: string; destination: string; collection_id?: number | null;
   state: string; unsynced_photos?: number; unsynced_photos_other_workspaces?: number;
   unsynced_photos_here_with_sibling_edits?: number; source_available?: boolean; error?: string;
+  created_at?: string; photo_count?: number; cataloged_bytes?: number | null;
 }
 interface Window {vireoPendingArchives?: PendingArchive[];}
 
