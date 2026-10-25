@@ -4,11 +4,11 @@ import pytest
 from services import detection_store, moves_merge, photo_ingest, workspace_folders
 
 
-def _predict(db, photo_id, *, fingerprint="legacy", model="old-model"):
+def _predict(db, photo_id, *, fingerprint="legacy", model="old-model", runtime="legacy"):
     detection = db.detections.save(photo_id, [{
         "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
         "confidence": 0.01, "category": "animal",
-    }], "megadetector-v6")[0]
+    }], "megadetector-v6", runtime_fingerprint=runtime)[0]
     db.predictions.add(detection, "Robin", 0.01, model,
                        labels_fingerprint=fingerprint, status="rejected")
     return detection
@@ -21,7 +21,7 @@ def test_legacy_folders_count_photos_once_without_visibility_filters(app_and_db)
     _predict(db, first["id"])
     _predict(db, first["id"], model="another-model")
     _predict(db, last["id"])
-    _predict(db, modern["id"], fingerprint="current-labels")
+    _predict(db, modern["id"], fingerprint="current-labels", runtime="raw-detector-runtime")
 
     response = app.test_client().get("/api/pipeline/legacy-detections")
     assert response.status_code == 200
@@ -32,7 +32,7 @@ def test_legacy_folders_count_photos_once_without_visibility_filters(app_and_db)
     # Redetection retires old detections and their sentinel predictions.
     for photo in (first, last):
         db.detections.clear(photo["id"])
-        _predict(db, photo["id"], fingerprint="current-labels")
+        _predict(db, photo["id"], fingerprint="current-labels", runtime="raw-detector-runtime")
     assert app.test_client().get("/api/pipeline/legacy-detections").json == {"folders": []}
 
 
@@ -137,3 +137,21 @@ def test_legacy_detector_run_still_needs_raw_detection(db):
     assert db.predictions.legacy_detection_folders() == [{
         "id": folder, "path": "/photos/legacy", "photo_count": 1,
     }]
+
+
+@pytest.mark.parametrize("evidence", ["boxes", "run", "empty-run", "synthetic-only", "none"])
+def test_unclassified_legacy_detector_output_is_found(db, evidence):
+    folder = workspace_folders.add_folder(db, "/photos/legacy")
+    photo = photo_ingest.add_photo(db, folder, "old.jpg", ".jpg", 10, 1.0)
+    if evidence in ("boxes", "synthetic-only"):
+        db.detections.save(photo, [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.01, "category": "animal",
+        }], "megadetector-v6" if evidence == "boxes" else "full-image")
+    elif evidence in ("run", "empty-run"):
+        db.model_runs.record_detector_run(photo, "megadetector-v6", 0 if evidence == "empty-run" else 1)
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+    expected = [] if evidence in ("none", "synthetic-only") else [{
+        "id": folder, "path": "/photos/legacy", "photo_count": 1,
+    }]
+    assert db.predictions.legacy_detection_folders() == expected

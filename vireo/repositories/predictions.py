@@ -141,11 +141,11 @@ class PredictionRepository:
         return self._resolve_workspace_id()
 
     def legacy_detection_folders(self) -> list[dict[str, Any]]:
-        """Visible folders whose legacy predictions still need raw detection.
+        """Visible folders with evidence of pre-raw-storage detector output.
 
-        Count photos once even when several detections/models carry the
-        sentinel. Do not apply confidence or review filters: those can hide
-        precisely the old, pre-filtered outputs this upgrade nudge explains.
+        Legacy detector runs/rows count even if classification never produced
+        predictions. Sentinel predictions cover older catalogs without run
+        metadata. Confidence and review filters must not hide affected photos.
         A successful identified MegaDetector run proves raw boxes were stored,
         including empty scenes. Old classifier rows can survive that run's
         content-addressed detection upsert and must not keep the nudge alive.
@@ -159,10 +159,21 @@ class PredictionRepository:
                 SELECT 1 FROM detector_runs dr
                 WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
                   AND dr.runtime_fingerprint != 'legacy'
-            ) AND EXISTS (
-                SELECT 1 FROM detections d
-                JOIN predictions pr ON pr.detection_id = d.id
-                WHERE d.photo_id = p.id AND pr.labels_fingerprint = 'legacy'
+            ) AND (
+                EXISTS (
+                    SELECT 1 FROM detector_runs dr
+                    WHERE dr.photo_id = p.id AND dr.detector_model = 'megadetector-v6'
+                      AND dr.runtime_fingerprint = 'legacy'
+                ) OR EXISTS (
+                    SELECT 1 FROM detections d
+                    WHERE d.photo_id = p.id AND (
+                        (d.detector_model = 'megadetector-v6' AND d.runtime_fingerprint = 'legacy')
+                        OR EXISTS (
+                            SELECT 1 FROM predictions pr
+                            WHERE pr.detection_id = d.id AND pr.labels_fingerprint = 'legacy'
+                        )
+                    )
+                )
             )
             GROUP BY f.id, f.path
             ORDER BY f.path, f.id

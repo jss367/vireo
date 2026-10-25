@@ -85,6 +85,26 @@ def test_current_library_hides_legacy_nudge(live_server, page):
     expect(page.locator("#legacyDetectionsCard")).to_be_hidden()
 
 
+def test_legacy_nudge_includes_unclassified_detector_outputs(live_server, page):
+    db = live_server["db"]
+    db.conn.execute("DELETE FROM predictions")
+    db.conn.commit()
+    photos = live_server["data"]["photos"]
+    db.detections.save(photos[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+        "confidence": 0.01, "category": "animal",
+    }], "megadetector-v6")
+    db.model_runs.record_detector_run(photos[3], "megadetector-v6", 0)
+    page.goto(f'{live_server["url"]}/pipeline')
+    card = page.locator("#legacyDetectionsCard")
+    expect(card).to_be_visible()
+    expect(card.locator("strong")).to_have_text("2 folders have legacy detections.")
+    card.locator("summary").click()
+    expect(card.locator("li")).to_have_text([
+        "/photos/park — 1 photo", "/photos/yard — 1 photo",
+    ])
+
+
 @pytest.mark.parametrize("refresh", ["empty", "remaining", "error"])
 def test_legacy_retry_waits_for_fresh_folder_state(live_server, page, refresh):
     _legacy_library(live_server)
